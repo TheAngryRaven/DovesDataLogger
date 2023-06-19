@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "author": "Uri Shaked",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "wokwi-arduino-mega", "id": "mega", "top": -1.43, "left": -48.12, "attrs": {} },
+    { "type": "board-ssd1306", "id": "oled1", "top": 31.94, "left": 384.23, "attrs": {} },
+    {
+      "type": "wokwi-pushbutton",
+      "id": "btn1",
+      "top": 63.8,
+      "left": 518.4,
+      "attrs": { "color": "blue" }
+    },
+    {
+      "type": "wokwi-pushbutton",
+      "id": "btn2",
+      "top": 6.2,
+      "left": 518.4,
+      "attrs": { "color": "green" }
+    },
+    {
+      "type": "wokwi-pushbutton",
+      "id": "btn3",
+      "top": 121.4,
+      "left": 518.4,
+      "attrs": { "color": "green" }
+    },
+    { "type": "wokwi-microsd-card", "id": "sd1", "top": 221.03, "left": 249.67, "attrs": {} }
+  ],
+  "connections": [
+    [ "oled1:GND", "mega:GND.2", "black", [ "v-9.6", "h-48", "v163.2", "h-249.6", "v-8.93" ] ],
+    [ "oled1:VCC", "mega:3.3V", "red", [ "v-19.2", "h-67.05", "v182.4", "h-259.2", "v-18.53" ] ],
+    [ "oled1:SCL", "mega:21", "blue", [ "v-48", "h-153.3", "v17.17" ] ],
+    [ "oled1:SDA", "mega:20", "green", [ "v-57.6", "h-172.73", "v26.77" ] ],
+    [ "btn1:1.l", "mega:5", "magenta", [ "h-9.6", "v-124.8", "h-347.42" ] ],
+    [ "btn2:1.l", "mega:4", "purple", [ "v-76.8", "h-347.52" ] ],
+    [ "btn2:2.r", "btn1:2.r", "black", [ "h9.8", "v57.8", "h-9.8" ] ],
+    [ "btn1:2.r", "btn3:2.r", "black", [ "h9.8", "v57.8" ] ],
+    [ "btn3:1.l", "mega:6", "violet", [ "h-19.2", "v-172.8", "h-347.32" ] ],
+    [ "mega:GND.3", "btn3:2.r", "black", [ "v8.93", "h459.57", "v-38.6" ] ],
+    [ "sd1:CS", "mega:53", "blue", [ "h57.6", "v-124.74" ] ],
+    [ "mega:52", "sd1:SCK", "green", [ "v12.73", "h42.32", "v86.4" ] ],
+    [ "mega:50", "sd1:DO", "yellow", [ "v3.03", "h32.72", "v86.4" ] ],
+    [ "mega:51", "sd1:DI", "orange", [ "v3.03", "h70.72", "v67.2" ] ],
+    [ "mega:3.3V", "sd1:VCC", "red", [ "v18.53", "h229.12", "v67.2" ] ],
+    [ "sd1:GND", "mega:GND.3", "black", [ "h19.2", "v-57.49", "h-211.2" ] ]
+  ],
+  "dependencies": {}
+}
