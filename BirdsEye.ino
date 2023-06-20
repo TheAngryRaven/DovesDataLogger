@@ -7,13 +7,13 @@ struct ButtonState {
 
 #define HAS_DEBUG
 #ifdef HAS_DEBUG
-  #define debugln Serial.println
-  #define debug Serial.print
+#define debugln Serial.println
+#define debug Serial.print
 #else
-  void dummy_debug(...) {
-  }
-  #define debug dummy_debug
-  #define debugln dummy_debug
+void dummy_debug(...) {
+}
+#define debug dummy_debug
+#define debugln dummy_debug
 #endif
 
 /////////////////////////////////////////////////
@@ -23,12 +23,18 @@ struct ButtonState {
 #include "sdios.h"
 
 SdFat SD;
-File file;
+File file; //buffer
 File trackDir;
+File trackFile;
+
+bool sdSetupSuccess = false;
+bool sdTrackSuccess = false;
+
 const int chipSelect = 53; // Modify this according to your setup
 const char* trackFolder = "/TRACKS";
 
-// could do better
+// could probably do all of this better
+int selectedLocation = -1;
 char locations[25][13]; // 13 is old dos format for fat16
 int numOfLocations = 0;
 
@@ -102,6 +108,10 @@ bool buildTrackList() {
   return true;
 }
 
+// char tracks[20][20];
+// int numOfTracks = 0;
+// bool buildLayoutArray() {}
+
 //////////////////////////////////////////////////////////////
 
 ButtonState button1;
@@ -126,7 +136,7 @@ const int PAGE_BOOT = 999;
 const int PAGE_TEST = 995;
 const int PAGE_RC_ERROR = 990;
 // boot menu
-const int PAGE_START = 0;
+const int PAGE_SELECT_LOCATION = 0;
 const int PAGE_SELECT_TRACK = 1;
 const int PAGE_SELECT_DIRECTION = 2;
 // running menu
@@ -140,13 +150,16 @@ const int LOGGING_STOP = 9;
 const int GPS_DEBUG = 10;
 // end menu
 const int LOGGING_STOP_CONFIRM = 90;
+const int PAGE_INTERNAL_WARNING = 100;
+const int PAGE_INTERNAL_FAULT = 105;
 
 bool displayInverted = false;
 int currentPage = PAGE_BOOT;
 int lastPage = 0;
 
 const int runningPageStart = GPS_STATS;
-const int runningPageEnd = GPS_DEBUG;//LOGGING_STOP;
+// const int runningPageEnd = GPS_DEBUG;//LOGGING_STOP;
+int runningPageEnd = GPS_DEBUG; // only changes if sd:/tracks not found
 
 int buttonPressIntv = 500;
 int buttonHoldIntv = 1000;
@@ -195,13 +208,11 @@ void resetDisplay() {
   if (currentPage != lastPage) {
     lastPage = currentPage;
     recentlyChanged = true;
-    // for partial refreshes
-    // display.clearDisplay();
     menuSelectionIndex = 0;
   } else {
     recentlyChanged = false;
   }
-  // for full refreshes
+  display.setTextWrap(false);
   display.clearDisplay();
   display.setTextSize(1);
   display.setCursor(0, 0);
@@ -227,19 +238,8 @@ void displayPage_boot() {
 /////////////////////////
 // TESTING SHIT
 
-int selectedLocation = -1;
-// // TODO: READ FROM SDCARD
-// const int numOfLocations = 5;
-// char* locations[numOfLocations] = {
-//   "OKC",
-//   "Piquet",
-//   "Jacksonville",
-//   "Miami",
-//   "Bushnell",
-// };
-
-const int numOfTracks = 5;
 int selectedTrack = -1;
+const int numOfTracks = 5;
 char* tracks[numOfTracks] = {
   "Normal",
   "Short",
@@ -326,12 +326,16 @@ void displayPage_gps_stats() {
   display.println();
   display.println();
 
-  display.print("Track : ");
-  display.println(locations[selectedLocation]);
-  display.print("Layout: ");
-  display.print(selectedDirection == 0 ? "->" : "<-");
-  display.print(" ");
-  display.println(tracks[selectedTrack]);  
+  if (sdSetupSuccess && sdTrackSuccess) {
+    display.print("Track : ");
+    display.println(locations[selectedLocation]);
+    display.print("Layout: ");
+    display.print(selectedDirection == 0 ? "->" : "<-");
+    display.print(" ");
+    display.println(tracks[selectedTrack]);  
+  } else {
+    display.print("Autologging\nShut off to stop");
+  }
   
   display.display();
 }
@@ -340,9 +344,13 @@ void displayPage_gps_speed() {
   resetDisplay();
 
   display.println("SPEED");
-  display.println("\nLAP");
-  display.setTextSize(3);
-  display.print("4");
+  
+  if (sdSetupSuccess && sdTrackSuccess) {
+    display.println("\nLAP");
+    display.setTextSize(3);
+    display.print("4");
+  }
+
   display.setCursor(40, 5);
   display.setTextSize(8);
   display.println("69");
@@ -556,6 +564,34 @@ void displayPage_gps_debug() {
   display.display();
 }
 
+char* internalNotification = "N/A";
+void displayPage_internal_fault() {
+  resetDisplay();
+  display.setTextWrap(true);
+  display.setTextSize(2);
+  display.println("   FAULT");
+  display.setTextSize(1);
+  display.println("  Must Reboot Device");
+  display.println("");
+  // display.println("MSG:");
+  display.println(internalNotification);
+  display.display();
+}
+void displayPage_internal_warning() {
+  resetDisplay();
+  display.setTextWrap(true);
+  display.setTextSize(2);
+  display.println("  WARNING");
+  display.setTextSize(1);
+  display.println("Continue With Caution");
+  display.println("");
+  // display.println("MSG:");
+  display.println(internalNotification);
+  display.display();
+}
+
+///////////////////////////////////////////
+
 bool calculatingFlip = false;
 void displayCrossing() {
   display.clearDisplay();
@@ -573,14 +609,23 @@ void displayCrossing() {
   display.display();
 }
 
+///////////////////////////////////////////
+void forceDisplayRefresh() {
+  displayLastUpdate += 5000;
+}
+void switchToDisplayPage(int newDisplayPage) {
+  currentPage = newDisplayPage;
+  forceDisplayRefresh();
+}
+
 void displaySetup() {
   debugln("SETTING UP DISPLAY");
   delay(250); // wait for the OLED to power up
-  #ifdef USE_1306_DISPLAY
-    display.begin(SSD1306_SWITCHCAPVCC, I2C_DISPLAY_ADDRESS);
-  #else
-    display.begin(I2C_DISPLAY_ADDRESS, true);
-  #endif
+#ifdef USE_1306_DISPLAY
+  display.begin(SSD1306_SWITCHCAPVCC, I2C_DISPLAY_ADDRESS);
+#else
+  display.begin(I2C_DISPLAY_ADDRESS, true);
+#endif
 
   display.setTextColor(DISPLAY_TEXT_WHITE);
   display.setTextWrap(false);
@@ -596,16 +641,62 @@ void displaySetup() {
   display.drawBitmap(0, 0, image_data_bird1, 128, 64, 1);
   display.display();
   delay(750);
-  //
 
   displayPage_boot();
+}
+
+
+void handleMenuPageSelection() {
+  if (currentPage == PAGE_SELECT_LOCATION) {
+    selectedLocation = menuSelectionIndex;
+    switchToDisplayPage(PAGE_SELECT_TRACK);
+    debug("Selected Location: ");
+    debugln(locations[selectedLocation]);
+  } else if (currentPage == PAGE_SELECT_TRACK) {
+    selectedTrack = menuSelectionIndex;
+    switchToDisplayPage(PAGE_SELECT_DIRECTION);
+    debug("Selected Track: ");
+    debugln(tracks[selectedTrack]);
+  } else if (currentPage == PAGE_SELECT_DIRECTION) {
+    selectedDirection = menuSelectionIndex;
+    switchToDisplayPage(GPS_SPEED);
+    debug("Selected Direction: ");
+    debugln(selectedDirection == 0 ? "Forward" : "Reverse");
+  } else if (currentPage == LOGGING_STOP_CONFIRM) {
+    selectedDirection = menuSelectionIndex;
+    if (menuSelectionIndex == 0) {
+      switchToDisplayPage(GPS_SPEED);
+    } else {
+      // switchToDisplayPage(PAGE_SELECT_LOCATION);
+      switchToDisplayPage(PAGE_SELECT_TRACK);
+    }
+    debug("Stop Logging?: ");
+    debugln(selectedDirection == 0 ? "NO" : "YES");
+  }
+}
+
+void handleRunningPageSelection() {
+  if (currentPage == LOGGING_STOP) {
+    switchToDisplayPage(LOGGING_STOP_CONFIRM);
+  } else if (currentPage == GPS_LAP_LIST) {
+    current_lap_list_page = current_lap_list_page == (lap_list_pages-1) ? 0 : current_lap_list_page+1;
+    forceDisplayRefresh();
+  } else {
+    if(displayInverted == true) {
+      displayInverted = false;
+      display.invertDisplay(false);
+    } else {
+      displayInverted = true;
+      display.invertDisplay(true);
+    }
+  }
 }
 
 void displayLoop() {
   // todo: better page handling
   if (millis() - displayLastUpdate > (1000 / displayUpdateRateHz)) {
     displayLastUpdate = millis();
-    if (currentPage == PAGE_START) {
+    if (currentPage == PAGE_SELECT_LOCATION) {
       displayPage_select_location();
     } else if (currentPage == PAGE_SELECT_TRACK) {
       displayPage_select_track();
@@ -630,20 +721,26 @@ void displayLoop() {
     } else if (currentPage == GPS_DEBUG) {
       displayPage_gps_debug();
       // displayCrossing();
+    } else if (currentPage == PAGE_INTERNAL_FAULT) {
+      displayPage_internal_fault();
+    } else if (currentPage == PAGE_INTERNAL_WARNING) {
+      displayPage_internal_warning();
     }
   }
 
-  // how2button
+  // todo: better button handling
   bool insideMenu = false;
+  bool buttonsDisabled = false;
   int menuLimit = 0;
+
   if (
-    currentPage == PAGE_START ||
+    currentPage == PAGE_SELECT_LOCATION ||
     currentPage == PAGE_SELECT_TRACK ||
     currentPage == PAGE_SELECT_DIRECTION ||
     currentPage == LOGGING_STOP_CONFIRM
   ) {
     insideMenu = true;
-    if (currentPage == PAGE_START) {
+    if (currentPage == PAGE_SELECT_LOCATION) {
       menuLimit = numOfLocations;
     } else if (currentPage == PAGE_SELECT_TRACK) {
       menuLimit = numOfTracks;
@@ -654,9 +751,15 @@ void displayLoop() {
       menuLimit = 2;
     }
   }
+
+  if (
+    currentPage == PAGE_INTERNAL_FAULT
+  ) {
+    buttonsDisabled = true;
+  }
     
   // menu operator
-  if (insideMenu) {
+  if (insideMenu && !buttonsDisabled) {
     // we are in a menu do weird menu things
     // BUTTON UP
     if (btn1->pressed) {
@@ -668,40 +771,12 @@ void displayLoop() {
       }
       debug("menu number: ");
       debugln(menuSelectionIndex);
+      forceDisplayRefresh();
     }
     // BUTTON ENTER
     if (btn2->pressed) {
       debugln("Button Enter");
-      if (currentPage == PAGE_START) {
-        selectedLocation = menuSelectionIndex;
-        currentPage = PAGE_SELECT_TRACK;
-        displayLastUpdate += 5000;
-        debug("Selected Location: ");
-        debugln(locations[selectedLocation]);
-      } else if (currentPage == PAGE_SELECT_TRACK) {
-        selectedTrack = menuSelectionIndex;
-        currentPage = PAGE_SELECT_DIRECTION;
-        displayLastUpdate += 5000;
-        debug("Selected Track: ");
-        debugln(tracks[selectedTrack]);
-      } else if (currentPage == PAGE_SELECT_DIRECTION) {
-        selectedDirection = menuSelectionIndex;
-        currentPage = GPS_SPEED;
-        displayLastUpdate += 5000;
-        debug("Selected Direction: ");
-        debugln(selectedDirection == 0 ? "Forward" : "Reverse");
-      } else if (currentPage == LOGGING_STOP_CONFIRM) {
-        selectedDirection = menuSelectionIndex;
-        if (menuSelectionIndex == 0) {
-          currentPage = GPS_SPEED;
-        } else {
-          // currentPage = PAGE_START;
-          currentPage = PAGE_SELECT_TRACK;
-        }
-        displayLastUpdate += 5000;
-        debug("Stop Logging?: ");
-        debugln(selectedDirection == 0 ? "NO" : "YES");
-      }
+      handleMenuPageSelection();
     }
     // BUTTON DOWN
     if (btn3->pressed) {
@@ -713,49 +788,39 @@ void displayLoop() {
       }
       debug("menu number: ");
       debugln(menuSelectionIndex);
+      forceDisplayRefresh();
     }
-  } else {
+  } else if (!buttonsDisabled){
     // page up/down/enter
     // BUTTON UP
 
     if (btn1->pressed) {
       // debugln("Button Up");
-      if (currentPage == runningPageEnd) {
+      if (currentPage >= runningPageEnd) {
         currentPage = runningPageStart;
       } else {
         currentPage++;
       }
       debug("running menu number: ");
       debugln(currentPage);
+      switchToDisplayPage(currentPage);
     }
     // BUTTON ENTER
     if (btn2->pressed) {
       debugln("Button Enter (running)");
-      if (currentPage == LOGGING_STOP) {
-        currentPage = LOGGING_STOP_CONFIRM;
-        displayLastUpdate += 5000;
-      } else if (currentPage == GPS_LAP_LIST) {
-        current_lap_list_page = current_lap_list_page == (lap_list_pages-1) ? 0 : current_lap_list_page+1;
-      } else {
-        if(displayInverted == true) {
-          displayInverted = false;
-          display.invertDisplay(false);
-        } else {
-          displayInverted = true;
-          display.invertDisplay(true);
-        }
-      }
+      handleRunningPageSelection();
     }
     // BUTTON DOWN
     if (btn3->pressed) {
       // debugln("Button Down");
-      if (currentPage == runningPageStart) {
+      if (currentPage <= runningPageStart) {
         currentPage = runningPageEnd;
       } else {
         currentPage--;
       }
       debug("running menu number: ");
       debugln(currentPage);
+      switchToDisplayPage(currentPage);
     }
   }
 }
@@ -763,15 +828,17 @@ void displayLoop() {
 
 void setup() {
   randomSeed(analogRead(0));
-  #ifdef HAS_DEBUG
-      Serial.begin(9600);
-      while (!Serial);
-  #endif
+#ifdef HAS_DEBUG
+  Serial.begin(9600);
+  while (!Serial);
+#endif
 
-  //setupSD();
+  displaySetup();
 
-  bool sdSetupSuccess = SD_SETUP();
-  if(sdSetupSuccess && buildTrackList()) {
+  // setup sd card and confirm we can read track list
+  sdSetupSuccess = SD_SETUP();
+  sdTrackSuccess = buildTrackList();
+  if(sdSetupSuccess && sdTrackSuccess) {
     debugln("Obtained Track List");
     for (int i = 0; i < numOfLocations; i++) {
       char filepath[50];
@@ -780,13 +847,26 @@ void setup() {
     }
   }
 
-  displaySetup();
+  // for debuggin error menus
+  // sdSetupSuccess = true;
+  // sdTrackSuccess = false;
 
-  delay(2000);
-  //setupGPS();
+  delay(2000); //setup GPS
 
-  currentPage = PAGE_START;
-  displayLastUpdate += 5000;
+  if (!sdSetupSuccess) {
+    internalNotification = "SD Init failed!\n\nlogging not possible!";
+    switchToDisplayPage(PAGE_INTERNAL_FAULT);
+  } else if (sdSetupSuccess && !sdTrackSuccess) {
+    // todo: auto logging 
+    // internalNotification = "sd:/TRACKS not found!\nOnly Speed Available!\n\n!!AUTO LOGGING DATA!!";
+    // runningPageEnd = GPS_SPEED;
+    // switchToDisplayPage(PAGE_INTERNAL_WARNING);
+
+    internalNotification = "sd:/TRACKS not found!\n\nlogging not possible!";
+    switchToDisplayPage(PAGE_INTERNAL_FAULT);
+  } else {
+    switchToDisplayPage(PAGE_SELECT_LOCATION);
+  }
 }
 
 void loop() {
