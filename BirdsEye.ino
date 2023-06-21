@@ -1,9 +1,23 @@
+// TODO: setup header for project
+#define MAX_LOCATIONS 10
+#define MAX_LOCATION_LENGTH 13 // 13 is old dos format for fat16
+#define MAX_LAYOUTS 10
+#define MAX_LAYOUT_LENGTH 15
 #include <string.h>
 struct ButtonState {
   int pin = 0;
   bool pressed = false;
   unsigned long lastPressed = 0;
 };
+struct TrackLayout {
+  double start_a_lat = 0.00;
+  double start_a_lng = 0.00;
+  double start_b_lat = 0.00;
+  double start_b_lng = 0.00;
+};
+
+const int RACE_DIRECTION_FORWARD  = 0;
+const int RACE_DIRECTION_REVERSE  = 1;
 
 #define HAS_DEBUG
 #ifdef HAS_DEBUG
@@ -16,7 +30,19 @@ void dummy_debug(...) {
 #define debugln dummy_debug
 #endif
 
-/////////////////////////////////////////////////
+// SD_FAT_TYPE = 0 for SdFat/File as defined in SdFatConfig.h,
+// 1 for FAT16/FAT32, 2 for exFAT, 3 for FAT16/FAT32 and exFAT.
+#define SD_FAT_TYPE 0
+//
+// Set DISABLE_CHIP_SELECT to disable a second SPI device.
+// For example, with the Ethernet shield, set DISABLE_CHIP_SELECT
+// to 10 to disable the Ethernet controller.
+const int8_t DISABLE_CHIP_SELECT = -1;
+//
+// Test with reduced SPI speed for breadboards.  SD_SCK_MHZ(4) will select
+// the highest speed supported by the board that is not over 4 MHz.
+// Change SPI_SPEED to SD_SCK_MHZ(50) for best performance.
+#define SPI_SPEED SD_SCK_MHZ(25)
 
 #include <SPI.h>
 #include "SdFat.h"
@@ -35,12 +61,13 @@ const char* trackFolder = "/TRACKS";
 
 // could probably do all of this better
 int selectedLocation = -1;
-char locations[25][13]; // 13 is old dos format for fat16
+char locations[MAX_LOCATIONS][MAX_LOCATION_LENGTH]; // 13 is old dos format for fat16
 int numOfLocations = 0;
 
 void makeFullTrackPath(char* trackName, char* filepath) {
   char* basePath = "/TRACKS/";
-  char* fileExtension = ".JSON";
+  // char* fileExtension = ".JSON";
+  char* fileExtension = ".json";
 
   // Start with the base path
   strcpy(filepath, basePath);
@@ -53,8 +80,8 @@ void makeFullTrackPath(char* trackName, char* filepath) {
 }
 
 bool SD_SETUP() {
-  if (!SD.begin(chipSelect, SD_SCK_MHZ(50))) {
-    debugln("Card initialization failed.");
+  if (!SD.begin(chipSelect, SPI_SPEED)) {
+    debugln(F("Card initialization failed."));
     return false;
   }
   return true;
@@ -62,7 +89,7 @@ bool SD_SETUP() {
 
 bool buildTrackList() {
   if (!SD.exists(trackFolder)) {
-    debugln("TRACKS folder does not exist.");
+    debugln(F("TRACKS folder does not exist."));
     return false;
   }
 
@@ -108,9 +135,102 @@ bool buildTrackList() {
   return true;
 }
 
-// char tracks[20][20];
-// int numOfTracks = 0;
-// bool buildLayoutArray() {}
+#include <ArduinoJson.h>
+#define JSON_BUFFER_SIZE 1548
+const int PARSE_STATUS_GOOD = 0;
+const int PARSE_STATUS_LOAD_FAILED = 5;
+const int PARSE_STATUS_PARSE_FAILED = 10;
+
+StaticJsonDocument<JSON_BUFFER_SIZE> trackJson;
+char tracks[MAX_LAYOUTS][MAX_LAYOUT_LENGTH];
+TrackLayout trackLayouts[MAX_LAYOUTS];
+
+int numOfTracks = 0;
+
+int parseTrackFile(char* filepath) {
+  debug(F("ParseTrackFile:"));
+  debugln(filepath);
+
+  // double check the SD is active
+  if (!sdSetupSuccess) {
+    debugln(F("ParseTrackFile: failed to initialize SD card"));
+    return PARSE_STATUS_LOAD_FAILED;
+  }
+
+  // load file
+  trackFile.open(filepath, O_READ);
+  if (!trackFile) {
+    debugln(F("ParseTrackFile: failed to LOAD file"));
+    return PARSE_STATUS_LOAD_FAILED;
+  }
+
+  // Create a buffer to store file content
+  char buffer[JSON_BUFFER_SIZE];
+  int bytesRead = trackFile.read(buffer, sizeof(buffer));
+  
+  // Check if read was successful
+  if (bytesRead == -1) {
+    debugln(F("ParseTrackFile: failed to READ file"));
+    return;
+  }
+
+  // Null-terminate the buffer
+  if (bytesRead < sizeof(buffer)) {
+    buffer[bytesRead] = '\0';
+  } else {
+    buffer[sizeof(buffer) - 1] = '\0';
+  }
+
+  // Parse JSON
+  DeserializationError error = deserializeJson(trackJson, buffer);
+  if (error != DeserializationError::Ok) {
+    // todo: add better parsing error handing
+    if (error == DeserializationError::EmptyInput) {
+      debugln(F("DeserializationError::EmptyInput"));
+    } else if (error == DeserializationError::IncompleteInput) {
+      debugln(F("DeserializationError::IncompleteInput"));
+    } else if (error == DeserializationError::InvalidInput) {
+      debugln(F("DeserializationError::InvalidInput"));
+    } else if (error == DeserializationError::NoMemory) {
+      debugln(F("DeserializationError::NoMemory"));
+    } else if (error == DeserializationError::TooDeep) {
+      debugln(F("DeserializationError::TooDeep"));
+    } else {
+      debugln(F("DeserializationError::UNKNOWN"));
+    }
+
+    trackFile.close();
+    return PARSE_STATUS_PARSE_FAILED;
+  }
+
+  // handle parsed data
+  JsonArray array = trackJson.as<JsonArray>();
+  debugln(F("Generating Layout List..."));
+  for(JsonVariant layout : array) {
+    const char* layoutName = layout["name"];
+    debug(F("Layout Name: "));
+    debugln(layoutName);
+
+    if(numOfTracks < MAX_LAYOUTS) {
+      // add name to array of strings to display to the user
+      strncpy(tracks[numOfTracks], layoutName, sizeof(tracks[numOfTracks]) - 1);
+      tracks[numOfTracks][sizeof(tracks[numOfTracks]) - 1] = '\0'; // Ensure null-termination
+
+      // add data to array of layouts for later use
+      trackLayouts[numOfTracks].start_a_lat = layout["start_a_lat"];
+      trackLayouts[numOfTracks].start_a_lng = layout["start_a_lng"];
+      trackLayouts[numOfTracks].start_b_lat = layout["start_b_lat"];
+      trackLayouts[numOfTracks].start_b_lng = layout["start_b_lng"];
+
+      numOfTracks++;
+    }
+  }
+
+  // make sure to close before logging
+  debugln(F("ParseTrackFile: SUCCESS"));
+  trackFile.close();
+  return PARSE_STATUS_GOOD;
+}
 
 //////////////////////////////////////////////////////////////
 
@@ -158,7 +278,7 @@ int currentPage = PAGE_BOOT;
 int lastPage = 0;
 
 const int runningPageStart = GPS_STATS;
-// const int runningPageEnd = GPS_DEBUG;//LOGGING_STOP;
+// const int runningPageEnd = GPS_DEBUG; //LOGGING_STOP;
 int runningPageEnd = GPS_DEBUG; // only changes if sd:/tracks not found
 
 int buttonPressIntv = 500;
@@ -236,18 +356,7 @@ void displayPage_boot() {
 }
 
 /////////////////////////
-// TESTING SHIT
-
 int selectedTrack = -1;
-const int numOfTracks = 5;
-char* tracks[numOfTracks] = {
-  "Normal",
-  "Short",
-  "Super Short",
-  "Long",
-  "Extra Long"
-};
-
 int selectedDirection = -1;
 
 void displayPage_select_location() {
@@ -330,7 +439,7 @@ void displayPage_gps_stats() {
     display.print("Track : ");
     display.println(locations[selectedLocation]);
     display.print("Layout: ");
-    display.print(selectedDirection == 0 ? "->" : "<-");
+    display.print(selectedDirection == RACE_DIRECTION_FORWARD ? "->" : "<-");
     display.print(" ");
     display.println(tracks[selectedTrack]);  
   } else {
@@ -564,12 +673,19 @@ void displayPage_gps_debug() {
   display.display();
 }
 
+bool notificationFlash = false;
 char* internalNotification = "N/A";
 void displayPage_internal_fault() {
   resetDisplay();
-  display.setTextWrap(true);
+  notificationFlash = notificationFlash == true ? false : true;
   display.setTextSize(2);
-  display.println("   FAULT");
+
+  if (notificationFlash) {
+    display.setTextColor(DISPLAY_TEXT_BLACK, DISPLAY_TEXT_WHITE);
+  }
+  display.println("   FAULT   ");
+  display.setTextWrap(true);
+  display.setTextColor(DISPLAY_TEXT_WHITE);
   display.setTextSize(1);
   display.println("  Must Reboot Device");
   display.println("");
@@ -579,9 +695,15 @@ void displayPage_internal_fault() {
 }
 void displayPage_internal_warning() {
   resetDisplay();
-  display.setTextWrap(true);
+  notificationFlash = notificationFlash == true ? false : true;
+
   display.setTextSize(2);
-  display.println("  WARNING");
+  if (notificationFlash) {
+    display.setTextColor(DISPLAY_TEXT_BLACK, DISPLAY_TEXT_WHITE);
+  }
+  display.println("  WARNING  ");
+  display.setTextWrap(true);
+  display.setTextColor(DISPLAY_TEXT_WHITE);
   display.setTextSize(1);
   display.println("Continue With Caution");
   display.println("");
@@ -611,6 +733,7 @@ void displayCrossing() {
 
 ///////////////////////////////////////////
 void forceDisplayRefresh() {
+  // why does adding work but not subtracting?
   displayLastUpdate += 5000;
 }
 void switchToDisplayPage(int newDisplayPage) {
@@ -619,7 +742,7 @@ void switchToDisplayPage(int newDisplayPage) {
 }
 
 void displaySetup() {
-  debugln("SETTING UP DISPLAY");
+  debugln(F("SETTING UP DISPLAY"));
   delay(250); // wait for the OLED to power up
 #ifdef USE_1306_DISPLAY
   display.begin(SSD1306_SWITCHCAPVCC, I2C_DISPLAY_ADDRESS);
@@ -645,33 +768,62 @@ void displaySetup() {
   displayPage_boot();
 }
 
-
 void handleMenuPageSelection() {
   if (currentPage == PAGE_SELECT_LOCATION) {
     selectedLocation = menuSelectionIndex;
-    switchToDisplayPage(PAGE_SELECT_TRACK);
-    debug("Selected Location: ");
+
+    // step1:
+    //load selected json file
+    //build 2d char array of layout names
+    char filepath[13];
+    makeFullTrackPath(locations[selectedLocation], filepath);
+    int parseStatus = parseTrackFile(filepath);
+
+    if (parseStatus == PARSE_STATUS_GOOD) {
+      switchToDisplayPage(PAGE_SELECT_TRACK);
+    } else if (parseStatus == PARSE_STATUS_LOAD_FAILED) {
+      internalNotification = "Could not load file!";
+      switchToDisplayPage(PAGE_INTERNAL_FAULT);
+    } else if (parseStatus == PARSE_STATUS_PARSE_FAILED) {
+      internalNotification = "JSON Parsing Failed!";
+      switchToDisplayPage(PAGE_INTERNAL_FAULT);
+    }
+
+    debug(F("Selected Location: "));
     debugln(locations[selectedLocation]);
   } else if (currentPage == PAGE_SELECT_TRACK) {
     selectedTrack = menuSelectionIndex;
     switchToDisplayPage(PAGE_SELECT_DIRECTION);
-    debug("Selected Track: ");
+    debug(F("Selected Track: "));
     debugln(tracks[selectedTrack]);
+
+    // step2:
+    // using array in json, not object, to initially get names easier
+    // tracjJson[selectedTrack] == layoutName[selectedTrack]
+    // load layout cordinates
+    debug(F("start_a_lat: "));
+    debugln(trackLayouts[selectedTrack].start_a_lat, 8);
+    debug(F("start_a_lng: "));
+    debugln(trackLayouts[selectedTrack].start_a_lng, 8);
+    debug(F("start_b_lat: "));
+    debugln(trackLayouts[selectedTrack].start_b_lat, 8);
+    debug(F("start_b_lng: "));
+    debugln(trackLayouts[selectedTrack].start_b_lng, 8);
+
   } else if (currentPage == PAGE_SELECT_DIRECTION) {
     selectedDirection = menuSelectionIndex;
     switchToDisplayPage(GPS_SPEED);
-    debug("Selected Direction: ");
-    debugln(selectedDirection == 0 ? "Forward" : "Reverse");
+    debug(F("Selected Direction: "));
+    debugln(selectedDirection == RACE_DIRECTION_FORWARD ? "Forward" : "Reverse");
   } else if (currentPage == LOGGING_STOP_CONFIRM) {
-    selectedDirection = menuSelectionIndex;
     if (menuSelectionIndex == 0) {
       switchToDisplayPage(GPS_SPEED);
     } else {
       // switchToDisplayPage(PAGE_SELECT_LOCATION);
       switchToDisplayPage(PAGE_SELECT_TRACK);
     }
-    debug("Stop Logging?: ");
-    debugln(selectedDirection == 0 ? "NO" : "YES");
+    debug(F("Stop Logging?: "));
+    debugln(menuSelectionIndex == 0 ? "NO" : "YES");
   }
 }
 
@@ -763,30 +915,30 @@ void displayLoop() {
     // we are in a menu do weird menu things
     // BUTTON UP
     if (btn1->pressed) {
-      // debugln("Button Up");
+      // debugln(F("Button Up"));
       if (menuSelectionIndex == menuLimit-1) {
         menuSelectionIndex = 0;
       } else {
         menuSelectionIndex++;
       }
-      debug("menu number: ");
+      debug(F("menu number: "));
       debugln(menuSelectionIndex);
       forceDisplayRefresh();
     }
     // BUTTON ENTER
     if (btn2->pressed) {
-      debugln("Button Enter");
+      debugln(F("Button Enter"));
       handleMenuPageSelection();
     }
     // BUTTON DOWN
     if (btn3->pressed) {
-      // debugln("Button Down");
+      // debugln(F("Button Down"));
       if (menuSelectionIndex == 0) {
         menuSelectionIndex = menuLimit-1;
       } else {
         menuSelectionIndex--;
       }
-      debug("menu number: ");
+      debug(F("menu number: "));
       debugln(menuSelectionIndex);
       forceDisplayRefresh();
     }
@@ -795,30 +947,30 @@ void displayLoop() {
     // BUTTON UP
 
     if (btn1->pressed) {
-      // debugln("Button Up");
+      // debugln(F("Button Up"));
       if (currentPage >= runningPageEnd) {
         currentPage = runningPageStart;
       } else {
         currentPage++;
       }
-      debug("running menu number: ");
+      debug(F("running menu number: "));
       debugln(currentPage);
       switchToDisplayPage(currentPage);
     }
     // BUTTON ENTER
     if (btn2->pressed) {
-      debugln("Button Enter (running)");
+      debugln(F("Button Enter (running)"));
       handleRunningPageSelection();
     }
     // BUTTON DOWN
     if (btn3->pressed) {
-      // debugln("Button Down");
+      // debugln(F("Button Down"));
       if (currentPage <= runningPageStart) {
         currentPage = runningPageEnd;
       } else {
         currentPage--;
       }
-      debug("running menu number: ");
+      debug(F("running menu number: "));
       debugln(currentPage);
       switchToDisplayPage(currentPage);
     }
@@ -839,7 +991,7 @@ void setup() {
   sdSetupSuccess = SD_SETUP();
   sdTrackSuccess = buildTrackList();
   if(sdSetupSuccess && sdTrackSuccess) {
-    debugln("Obtained Track List");
+    debugln(F("Obtained Track List"));
     for (int i = 0; i < numOfLocations; i++) {
       char filepath[50];
       makeFullTrackPath(locations[i], filepath);
@@ -877,7 +1029,7 @@ void loop() {
     btn2->pressed ||
     btn3->pressed
   ) {
-    displayLastUpdate += 5000;
+    forceDisplayRefresh();
   }
   displayLoop();
   resetButtons();

@@ -1,0 +1,37 @@
+[
+	{
+		"name": "Normal",
+		"start_a_lat": 28.41270817056385,
+		"start_a_lng": -81.37973266418031,
+		"start_b_lat": 28.41273038679321,
+		"start_b_lng": -81.37957048753776,
+	},
+	{
+		"name": "Pro",
+		"start_a_lat": 28.41270817056385,
+		"start_a_lng": -81.37973266418031,
+		"start_b_lat": 28.41273038679321,
+		"start_b_lng": -81.37957048753776,
+	},
+	{
+		"name": "Short",
+		"start_a_lat": 0.00,
+		"start_a_lng": 0.00,
+		"start_b_lat": 0.00,
+		"start_b_lng": 0.00,
+	},
+	{
+		"name": "xShort",
+		"start_a_lat": 0.00,
+		"start_a_lng": 0.00,
+		"start_b_lat": 0.00,
+		"start_b_lng": 0.00,
+	},
+	{
+		"name": "MissingNo",
+		"start_a_lat": 0.00,
+		"start_a_lng": 0.00,
+		"start_b_lat": 0.00,
+		"start_b_lng": 0.00,
+	}
+]
