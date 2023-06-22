@@ -26,9 +26,14 @@
       "left": 518.4,
       "attrs": { "color": "green" }
     },
-    { "type": "wokwi-microsd-card", "id": "sd1", "top": 221.03, "left": 249.67, "attrs": {} }
+    { "type": "wokwi-microsd-card", "id": "sd1", "top": 221.03, "left": 249.67, "attrs": {} },
+    { "type": "chip-gps-fake", "id": "chip1", "top": -104.14, "left": 198.23, "attrs": {} }
   ],
   "connections": [
+    [ "chip1:GND", "mega:GND.2", "black", [ "h48.38", "v277.96", "h-229.07" ] ],
+    [ "chip1:VCC", "mega:5V", "red", [ "h57.98", "v297.16", "h-248.42" ] ],
+    [ "mega:19", "chip1:TX", "yellow", [ "v-45.97", "h-78.38", "v-19.2" ] ],
+    [ "mega:18", "chip1:RX", "orange", [ "v-36.37", "h-77.98", "v-38.4" ] ],
     [ "oled1:GND", "mega:GND.2", "black", [ "v-9.6", "h-48", "v163.2", "h-249.6", "v-8.93" ] ],
     [ "oled1:VCC", "mega:3.3V", "red", [ "v-19.2", "h-67.05", "v182.4", "h-259.2", "v-18.53" ] ],
     [ "oled1:SCL", "mega:21", "blue", [ "v-48", "h-153.3", "v17.17" ] ],
