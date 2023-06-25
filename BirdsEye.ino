@@ -1,3 +1,6 @@
+// #define WOKWI
+// #define HAS_DEBUG
+
 // designed for seeed NRF52840 which comes with a charge circut
 #define VREF 3.6
 #define ADC_MAX 4096
@@ -13,6 +16,7 @@ unsigned long gpsFrameStartTime;
 unsigned long gpsFrameEndTime;
 unsigned long gpsFrameCounter;
 float gpsFrameRate = 0.0;
+bool trackSelected = false;
 
 // TODO: setup header for project
 #define SD_CARD_LOGGING_ENABLED
@@ -36,7 +40,7 @@ struct TrackLayout {
 const int RACE_DIRECTION_FORWARD  = 0;
 const int RACE_DIRECTION_REVERSE  = 1;
 
-#define HAS_DEBUG
+
 #ifdef HAS_DEBUG
 #define debugln Serial.println
 #define debug Serial.print
@@ -49,10 +53,13 @@ void dummy_debug(...) {
 
 /////////////////////////////////////////////////
 float getBatteryVoltage() {
+  #ifdef WOKWI
   return 3.75;
-  // unsigned int adcCount = analogRead(PIN_VBAT);
-  // float adcVoltage = adcCount * VREF / ADC_MAX;
-  // return adcVoltage * 1510 / 510;
+  #else
+  unsigned int adcCount = analogRead(PIN_VBAT);
+  float adcVoltage = adcCount * VREF / ADC_MAX;
+  return adcVoltage * 1510 / 510;
+  #endif
 }
 
 
@@ -62,7 +69,7 @@ float getBatteryVoltage() {
 Adafruit_GPS* gps = NULL;
 
 
-#define WOKWI
+
 #define GPS_SERIAL Serial1
 #ifndef GPS_CONFIGURATION
   /**
@@ -177,12 +184,18 @@ float gps_speed_mph = 0.0;
 
 // SD_FAT_TYPE = 0 for SdFat/File as defined in SdFatConfig.h,
 // 1 for FAT16/FAT32, 2 for exFAT, 3 for FAT16/FAT32 and exFAT.
+#ifdef WOKWI
 #define SD_FAT_TYPE 0
+#define PIN_SPI_CS 53
+#else
+#define SD_FAT_TYPE 1
+#define PIN_SPI_CS 3
+#endif
 //
 // Set DISABLE_CHIP_SELECT to disable a second SPI device.
 // For example, with the Ethernet shield, set DISABLE_CHIP_SELECT
 // to 10 to disable the Ethernet controller.
-const int8_t DISABLE_CHIP_SELECT = -1;
+// const int8_t DISABLE_CHIP_SELECT = -1;
 //
 // Test with reduced SPI speed for breadboards.  SD_SCK_MHZ(4) will select
 // the highest speed supported by the board that is not over 4 MHz.
@@ -208,7 +221,6 @@ bool enableLogging = false;
 
 unsigned long lastCardFlush = 0;
 
-const int chipSelect = 53; // Modify this according to your setup
 const char* trackFolder = "/TRACKS";
 
 // could probably do all of this better
@@ -233,7 +245,7 @@ void makeFullTrackPath(char* trackName, char* filepath) {
 
 bool SD_SETUP() {
   // TODO: FAT32 CHECK
-  if (!SD.begin(chipSelect, SPI_SPEED)) {
+  if (!SD.begin(PIN_SPI_CS, SPI_SPEED)) {
     debugln(F("Card initialization failed."));
     return false;
   }
@@ -289,7 +301,11 @@ bool buildTrackList() {
 }
 
 #include <ArduinoJson.h>
+#ifdef WOKWI
 #define JSON_BUFFER_SIZE 2048
+#else
+#define JSON_BUFFER_SIZE 4096
+#endif
 
 const int PARSE_STATUS_GOOD = 0;
 const int PARSE_STATUS_LOAD_FAILED = 5;
@@ -400,7 +416,10 @@ float epsilonPrecision = 0.001;
 // uses adafruit display libraries
 #include <Wire.h>
 
+#ifdef WOKWI
 #define USE_1306_DISPLAY // remove to use SH110X oled
+#endif
+
 #include "images.h"
 #include "display_config.h"
 int displayUpdateRateHz = 3;
@@ -442,9 +461,15 @@ int antiBounceIntv = 500;
 bool recentlyChanged = false;
 
 void setupButtons() {
+  #ifndef WOKWI
+  btn1->pin = 1;
+  btn2->pin = 2;
+  btn3->pin = 0;
+  #else
   btn1->pin = 4;
   btn2->pin = 5;
   btn3->pin = 6;
+  #endif
 
   pinMode(btn1->pin, INPUT_PULLUP);
   pinMode(btn2->pin, INPUT_PULLUP);
@@ -1086,6 +1111,7 @@ void handleMenuPageSelection() {
     crossingPointALng = trackLayouts[selectedTrack].start_a_lng;
     crossingPointBLat = trackLayouts[selectedTrack].start_b_lat;
     crossingPointBLng = trackLayouts[selectedTrack].start_b_lng;
+
     // initialize laptimer class
     lapTimer.setStartFinishLine(crossingPointALat, crossingPointALng, crossingPointBLat, crossingPointBLng);
     lapTimer.forceLinearInterpolation();
@@ -1096,6 +1122,7 @@ void handleMenuPageSelection() {
     debug(F("Selected Direction: "));
     debugln(selectedDirection == RACE_DIRECTION_FORWARD ? "Forward" : "Reverse");
     enableLogging = true;
+    trackSelected = true;
   } else if (currentPage == LOGGING_STOP_CONFIRM) {
     if (menuSelectionIndex == 0) {
       switchToDisplayPage(GPS_SPEED);
@@ -1104,8 +1131,10 @@ void handleMenuPageSelection() {
       switchToDisplayPage(PAGE_SELECT_TRACK);
       enableLogging = false;
       sdDataLogInitComplete = false;
+      trackSelected = false;
       dataFile.flush();
       dataFile.close();
+      lapTimer.reset();
     }
     debug(F("Stop Logging?: "));
     debugln(menuSelectionIndex == 0 ? "NO" : "YES");
@@ -1287,7 +1316,7 @@ void GPS_LOOP() {
     // }
 
     // update the timer loop everytime we have fixed data
-    if (gps->fix) {
+    if (trackSelected && gps->fix) {
       lapTimer.updateCurrentTime(getGpsTimeInMilliseconds());
       lapTimer.loop(gps->latitudeDegrees, gps->longitudeDegrees, gps->altitude, gps->speed);
     }
@@ -1295,7 +1324,7 @@ void GPS_LOOP() {
     // todo: copied from racebox, obviously broken
     #ifdef SD_CARD_LOGGING_ENABLED
       // only log actual datapoints?
-      if (gps->fix && sdSetupSuccess && sdDataLogInitComplete && enableLogging) {
+      if (trackSelected && gps->fix && sdSetupSuccess && sdDataLogInitComplete && enableLogging) {
         // debugln(F("Attempting to log SD"));
         dataFile.print(gps->lastNMEA());
         // flush once in a while
@@ -1303,7 +1332,7 @@ void GPS_LOOP() {
           lastCardFlush = millis();
           dataFile.flush();
         }
-      } else if (gps->fix && sdSetupSuccess && !sdDataLogInitComplete && enableLogging && gps->day > 0) {
+      } else if (trackSelected && gps->fix && sdSetupSuccess && !sdDataLogInitComplete && enableLogging && gps->day > 0) {
         debugln(F("Attempt to initialize logfile"));
         
         // all this could be much cleaner.....
@@ -1335,8 +1364,14 @@ void GPS_LOOP() {
         if (!dataFile) {
           debugln(F("Error opening log file"));
           
-          String errorMessage = String("Error saving log:\n") + String(dataFileName);
-          internalNotification = errorMessage.c_str();
+          // String errorMessage = String("Error saving log:\n") + String(dataFileName);
+          // internalNotification = errorMessage.c_str();
+          // int errorMessageLength = errorMessage.length() + 1;
+          // char errorMessageCharArray[errorMessageLength];
+          // errorMessage.toCharArray(errorMessageCharArray, errorMessageLength);
+          // internalNotification = errorMessageCharArray;
+          internalNotification = "Error creating log!";
+
           switchToDisplayPage(PAGE_INTERNAL_FAULT);
 
           enableLogging = false;
@@ -1354,7 +1389,7 @@ void GPS_LOOP() {
 }
 
 void setup() {
-  randomSeed(analogRead(0));
+  // randomSeed(analogRead(0));
 #ifdef HAS_DEBUG
   Serial.begin(9600);
   while (!Serial);

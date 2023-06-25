@@ -4,62 +4,6 @@
 		"start_a_lat": 0.00,
 		"start_a_lng": 0.00,
 		"start_b_lat": 0.00,
-		"start_b_lng": 0.00,
-		"splits": [
-			{
-				"a_lat": 0.00,
-				"a_lng": 0.00,
-				"b_lat": 0.00,
-				"b_lng": 0.00
-			},
-			{
-				"a_lat": 0.00,
-				"a_lng": 0.00,
-				"b_lat": 0.00,
-				"b_lng": 0.00
-			}
-		]
-	},
-	{
-		"name": "Short",
-		"start_a_lat": 0.00,
-		"start_a_lng": 0.00,
-		"start_b_lat": 0.00,
-		"start_b_lng": 0.00,
-		"splits": [
-			{
-				"a_lat": 0.00,
-				"a_lng": 0.00,
-				"b_lat": 0.00,
-				"b_lng": 0.00
-			},
-			{
-				"a_lat": 0.00,
-				"a_lng": 0.00,
-				"b_lat": 0.00,
-				"b_lng": 0.00
-			}
-		]
-	},
-	{
-		"name": "Pro Track",
-		"start_a_lat": 0.00,
-		"start_a_lng": 0.00,
-		"start_b_lat": 0.00,
-		"start_b_lng": 0.00,
-		"splits": [
-			{
-				"a_lat": 0.00,
-				"a_lng": 0.00,
-				"b_lat": 0.00,
-				"b_lng": 0.00
-			},
-			{
-				"a_lat": 0.00,
-				"a_lng": 0.00,
-				"b_lat": 0.00,
-				"b_lng": 0.00
-			}
-		]
+		"start_b_lng": 0.00
 	}
 ]

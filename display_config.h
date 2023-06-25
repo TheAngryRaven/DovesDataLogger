@@ -18,7 +18,7 @@
     #include <Adafruit_SSD1306.h>
     #define DISPLAY_TEXT_WHITE SSD1306_WHITE
     #define DISPLAY_TEXT_BLACK SSD1306_BLACK
-    #define OLED_RESET 2 // reccomended to use reset pin, not required
+    #define OLED_RESET -1 // reccomended to use reset pin, not required
     Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
   #else
     #include <Adafruit_SH110X.h>
