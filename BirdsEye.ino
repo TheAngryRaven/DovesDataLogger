@@ -1,6 +1,18 @@
-// #include <DovesLapTimer.h>
-// double crossingThresholdMeters = 7.0;
-// DovesLapTimer lapTimer(crossingThresholdMeters);
+// designed for seeed NRF52840 which comes with a charge circut
+#define VREF 3.6
+#define ADC_MAX 4096
+// #define PIN_VBAT 0
+unsigned long lastBatteryCheck;
+int batteryUpdateInterval = 5000;
+float lastBatteryVoltage;
+
+#include <DovesLapTimer.h>
+double crossingThresholdMeters = 7.0;
+DovesLapTimer lapTimer(crossingThresholdMeters);
+unsigned long gpsFrameStartTime;
+unsigned long gpsFrameEndTime;
+unsigned long gpsFrameCounter;
+float gpsFrameRate = 0.0;
 
 // TODO: setup header for project
 #define SD_CARD_LOGGING_ENABLED
@@ -34,6 +46,15 @@ void dummy_debug(...) {
 #define debug dummy_debug
 #define debugln dummy_debug
 #endif
+
+/////////////////////////////////////////////////
+float getBatteryVoltage() {
+  return 3.75;
+  // unsigned int adcCount = analogRead(PIN_VBAT);
+  // float adcVoltage = adcCount * VREF / ADC_MAX;
+  // return adcVoltage * 1510 / 510;
+}
+
 
 /////////////////////////////////////////////////
 #include <Adafruit_GPS.h>
@@ -100,6 +121,7 @@ Adafruit_GPS* gps = NULL;
 
   void GPS_SETUP() {
     #ifndef WOKWI
+      debugln(F("ACTUAL GPS SETUP"));
       // first try serial at 9600 baud
       GPS_SERIAL.begin(9600);
       // wait for the GPS to boot
@@ -136,9 +158,12 @@ Adafruit_GPS* gps = NULL;
         debugln("No GPS????");
       }
     #else
+      debugln(F("WOKWI GPS SETUP"));
       // reconnect at proper baud
       gps = new Adafruit_GPS(&GPS_SERIAL);
       GPS_SERIAL.begin(19200);
+      // GPS_SERIAL.begin(14400);
+      // GPS_SERIAL.begin(9600);
     #endif
   }
 #endif
@@ -207,6 +232,7 @@ void makeFullTrackPath(char* trackName, char* filepath) {
 }
 
 bool SD_SETUP() {
+  // TODO: FAT32 CHECK
   if (!SD.begin(chipSelect, SPI_SPEED)) {
     debugln(F("Card initialization failed."));
     return false;
@@ -264,7 +290,6 @@ bool buildTrackList() {
 
 #include <ArduinoJson.h>
 #define JSON_BUFFER_SIZE 2048
-// StaticJsonDocument<JSON_BUFFER_SIZE> trackJson;
 
 const int PARSE_STATUS_GOOD = 0;
 const int PARSE_STATUS_LOAD_FAILED = 5;
@@ -389,14 +414,15 @@ const int PAGE_SELECT_LOCATION = 0;
 const int PAGE_SELECT_TRACK = 1;
 const int PAGE_SELECT_DIRECTION = 2;
 // running menu (these must be in order)
-const int GPS_STATS = 3;
-const int GPS_SPEED = 4;
-const int GPS_LAP_TIME = 5;
-const int GPS_LAP_PACE = 6;
-const int GPS_LAP_BEST = 7;
-const int GPS_LAP_LIST = 8; // probably remove for now, this will destroy memory
+const int GPS_DEBUG = 3;
+const int GPS_STATS = 4;
+const int GPS_SPEED = 5;
+const int GPS_LAP_TIME = 6;
+const int GPS_LAP_PACE = 7;
+const int GPS_LAP_BEST = 8;
+const int GPS_LAP_LIST = 900; // probably remove for now, this will destroy memory
 const int LOGGING_STOP = 9;
-const int GPS_DEBUG = 10;
+
 // end menu
 const int LOGGING_STOP_CONFIRM = 90;
 const int PAGE_INTERNAL_WARNING = 100;
@@ -406,9 +432,8 @@ bool displayInverted = false;
 int currentPage = PAGE_BOOT;
 int lastPage = 0;
 
-const int runningPageStart = GPS_STATS;
-// const int runningPageEnd = GPS_DEBUG; //LOGGING_STOP;
-int runningPageEnd = GPS_DEBUG; // only changes if sd:/tracks not found
+const int runningPageStart = GPS_DEBUG; //GPS_STATS;
+int runningPageEnd = LOGGING_STOP; // only changes if sd:/tracks not found
 
 int buttonPressIntv = 500;
 int buttonHoldIntv = 1000;
@@ -523,6 +548,7 @@ void displayPage_select_track() {
   display.println(locations[selectedLocation]);
   display.setTextSize(2);
 
+  // todo: what if less then three?
   display.print(F("  "));
   display.println(tracks[menuSelectionIndex == numOfTracks - 1 ? 0 : menuSelectionIndex + 1]);
   display.print(F("->"));
@@ -556,12 +582,71 @@ void displayPage_gps_stats() {
   resetDisplay();
 
   // display.println(F("   Doves Magic Box\n"));
-  display.println(F("Battery  : [#####]"));
-  display.println(F("Sats/Rate: 10  24.7hz"));
-  display.println(F("HDOP     : 0.75"));
-  display.println(F("SDCard   : Logging..."));
 
-  display.println();
+  if (millis() - lastBatteryCheck > batteryUpdateInterval) {
+    lastBatteryCheck = millis();
+    lastBatteryVoltage = getBatteryVoltage();
+  }
+  // display.println(F("Battery  : [#####]"));
+  display.print(F("Battery  : "));
+  display.print("[");
+  if (lastBatteryVoltage > 3.7) {
+    display.print("#");
+  } else {
+    display.print(" ");
+  }
+  if (lastBatteryVoltage >= 3.8) {
+    display.print("#");
+  } else {
+    display.print(" ");
+  }
+  if (lastBatteryVoltage >= 3.9) {
+    display.print("#");
+  } else {
+    display.print(" ");
+  }
+  if (lastBatteryVoltage >= 4.0) {
+    display.print("#");
+  } else {
+    display.print(" ");
+  }
+  if (lastBatteryVoltage >= 4.1) {
+    display.print("#");
+  } else {
+    display.print(" ");
+  }
+  display.println("]");
+
+
+  display.print(F("Sats     : "));
+  display.println(gps->satellites);
+  
+  display.print(F("Rate     : "));
+  if (gps->fix) {
+    display.print(gpsFrameRate, 1);
+    display.println(F("Hz"));
+  } else {
+    display.println(F("NO FIX"));
+  }
+
+  display.print(F("HDOP     : "));
+  if (gps->fix) {
+    display.println(gps->HDOP, 1);
+  } else {
+    display.println(F("NO FIX"));
+  }
+
+  display.print(F("SDCard   : "));
+  if (!sdSetupSuccess) {
+    display.println(F("Bad Init"));
+  } else if (enableLogging == false && sdDataLogInitComplete == false) {
+    display.println(F("Waiting..."));
+  } else if (enableLogging == true && sdDataLogInitComplete == true) {
+    display.println(F("Logging"));
+  } else if (enableLogging == false && sdDataLogInitComplete == true) {
+    display.println(F("Bad File"));
+  }
+
   display.println();
 
   if (sdSetupSuccess && sdTrackSuccess) {
@@ -584,14 +669,23 @@ void displayPage_gps_speed() {
   display.println(F("SPEED"));
   
   if (sdSetupSuccess && sdTrackSuccess) {
-    display.println(F("\nLAP"));
-    display.setTextSize(3);
-    display.print(F("4"));
+    int currentLap = lapTimer.getLaps() + (lapTimer.getRaceStarted() ? 1 : 0);
+    if (currentLap > 0) {
+      display.println(F("\nLAP"));
+      display.setTextSize(3);
+      display.print(currentLap);
+      // display.print(F("22")); //dbg
+    }
   }
 
   display.setCursor(40, 5);
   display.setTextSize(8);
-  display.println(F("69"));
+  // display.println(F("69"));
+  if (gps->fix) {
+    display.println(round(gps_speed_mph));
+  } else {
+    display.println(F("--"));
+  }
   
   display.display();
 }
@@ -603,10 +697,10 @@ void displayPage_gps_lap_time() {
   // display.println();
 
   /////////////////
+  // fancy layout..
+  /*
   const int lineHeight = 21;
-  //tmp obviously
   int leftMargin = 0;//29;//0;//29;
-
   if (leftMargin == 29) {
     display.setCursor(0, lineHeight);
     display.setTextSize(4);
@@ -627,7 +721,35 @@ void displayPage_gps_lap_time() {
   // display.setCursor(leftMargin + 55 + 5, lineHeight);
   display.setTextSize(4);
   display.print(F("173"));
+  */
 
+  unsigned long minutes = lapTimer.getCurrentLapTime() / 60000;
+  unsigned long seconds = (lapTimer.getCurrentLapTime() % 60000) / 1000;
+  unsigned long milliseconds = lapTimer.getCurrentLapTime() % 1000;
+  display.print(F("\n\n"));
+  display.setTextSize(3);
+  if (lapTimer.getRaceStarted()) {
+    if (minutes > 0) {
+      display.print(minutes);
+      display.print(":");
+    } else {
+      display.print(" ");
+    }
+
+    if (seconds < 10) {
+      display.print(" ");
+    }
+    display.print(seconds);
+    display.print(".");
+    display.print(milliseconds);
+    if (milliseconds < 10) {
+      display.print("00");
+    } else if (milliseconds < 100) {
+      display.print("0");
+    }
+  } else {
+    display.print("  N/A");
+  }
   
   display.display();
 }
@@ -637,24 +759,23 @@ void displayPage_gps_pace() {
   resetDisplay();
 
   display.println(F("Current Lap Pace"));
-  // display.println();
-  // display.println();
-  // display.setTextSize(4);
-  // display.println(F("+1.308"));
 
   // animation
-  if (paceFlashStatus) {
-    paceFlashStatus = false;
-    display.setTextColor(DISPLAY_TEXT_BLACK, DISPLAY_TEXT_WHITE);
-    display.print(F("           "));
-    display.setTextColor(DISPLAY_TEXT_WHITE);
-    display.println(F("           "));
-  } else {
-    paceFlashStatus = true;
-    display.setTextColor(DISPLAY_TEXT_WHITE);
-    display.print(F("           "));
-    display.setTextColor(DISPLAY_TEXT_BLACK, DISPLAY_TEXT_WHITE);
-    display.println(F("           "));
+
+  if (lapTimer.getLaps() >= 1 && lapTimer.getPaceDifference() < (-1)) {
+    if (paceFlashStatus) {
+      paceFlashStatus = false;
+      display.setTextColor(DISPLAY_TEXT_BLACK, DISPLAY_TEXT_WHITE);
+      display.print(F("           "));
+      display.setTextColor(DISPLAY_TEXT_WHITE);
+      display.println(F("           "));
+    } else {
+      paceFlashStatus = true;
+      display.setTextColor(DISPLAY_TEXT_WHITE);
+      display.print(F("           "));
+      display.setTextColor(DISPLAY_TEXT_BLACK, DISPLAY_TEXT_WHITE);
+      display.println(F("           "));
+    }
   }
   // display.println(F("                      "));
 
@@ -663,33 +784,34 @@ void displayPage_gps_pace() {
   const int lineHeight = 21;
   display.setCursor(0, lineHeight);
   display.setTextSize(4);
-  display.print(F("- 1"));
-  display.setCursor(63, lineHeight + 7);
-  display.setTextSize(3);
-  display.print(F("."));
-  display.setCursor(80, lineHeight);
-  display.setTextSize(4);
-  display.print(F("27"));
+  if (lapTimer.getRaceStarted() && lapTimer.getLaps() >= 1) {
+    if (lapTimer.getPaceDifference() > 0) {
+      display.print(F("+"));
+    }
+    display.print(lapTimer.getPaceDifference());
+  } else {
+    display.print(F(" N/A"));
+  }
 
   // animation
   display.println();
   display.setTextSize(1);
   
-  if (paceFlashStatus) {
-    // paceFlashStatus = false;
-    display.setTextColor(DISPLAY_TEXT_BLACK, DISPLAY_TEXT_WHITE);
-    display.print(F("           "));
-    display.setTextColor(DISPLAY_TEXT_WHITE);
-    display.println(F("           "));
-  } else {
-    // paceFlashStatus = true;
-    display.setTextColor(DISPLAY_TEXT_WHITE);
-    display.print(F("           "));
-    display.setTextColor(DISPLAY_TEXT_BLACK, DISPLAY_TEXT_WHITE);
-    display.println(F("           "));
+  if (lapTimer.getLaps() >= 1 && lapTimer.getPaceDifference() < (-1)) {
+    if (paceFlashStatus) {
+      // paceFlashStatus = false;
+      display.setTextColor(DISPLAY_TEXT_BLACK, DISPLAY_TEXT_WHITE);
+      display.print(F("           "));
+      display.setTextColor(DISPLAY_TEXT_WHITE);
+      display.println(F("           "));
+    } else {
+      // paceFlashStatus = true;
+      display.setTextColor(DISPLAY_TEXT_WHITE);
+      display.print(F("           "));
+      display.setTextColor(DISPLAY_TEXT_BLACK, DISPLAY_TEXT_WHITE);
+      display.println(F("           "));
+    }
   }
-  // display.println(F("   !!! GO GO GO !!!   "));
-  // display.println(F("                      "));
   
   
   display.display();
@@ -699,13 +821,43 @@ void displayPage_gps_best_lap() {
   resetDisplay();
 
   display.println(F("Best Lap"));
-  display.println();
-  // display.println();
-  display.setTextSize(3);
-  display.println(F("0:54:275"));
-  display.setTextSize(1);
-  display.println();
-  display.println(F("Lap: 4 : 0:54:275"));
+  display.print(F("\n"));
+  unsigned long minutes = lapTimer.getBestLapTime() / 60000;
+  unsigned long seconds = (lapTimer.getBestLapTime() % 60000) / 1000;
+  unsigned long milliseconds = lapTimer.getBestLapTime() % 1000;
+  if (
+    lapTimer.getRaceStarted() &&
+    lapTimer.getLaps() > 0
+  ) {
+    display.setTextSize(3);
+    if (minutes > 0) {
+      display.print(minutes);
+      display.print(":");
+    } else {
+      display.print(" ");
+    }
+
+    if (seconds < 10) {
+      display.print(" ");
+    }
+    display.print(seconds);
+    display.print(".");
+    display.print(milliseconds);
+    if (milliseconds < 10) {
+      display.print("00");
+    } else if (milliseconds < 100) {
+      display.print("0");
+    }
+
+    display.setTextSize(2);
+    display.print(F("\n\n"));
+    display.print(F("Lap: "));
+    display.print(lapTimer.getBestLapNumber());
+  } else {
+    display.print(F("\n"));
+    display.setTextSize(3);
+    display.print("  N/A");
+  }
   
   display.display();
 }
@@ -773,31 +925,30 @@ void displayPage_stop_logging_confirm() {
 void displayPage_gps_debug() {
   resetDisplay();
   display.println(F("GPS LapTimer Debug"));
-  
-  // double dist2Line = lapTimer.pointLineSegmentDistance(gps->latitudeDegrees, gps->longitudeDegrees, crossingPointALat, crossingPointALng, crossingPointBLat, crossingPointBLng);
-  double dist2Line = 420.69;
+
+  double dist2Line = lapTimer.pointLineSegmentDistance(gps->latitudeDegrees, gps->longitudeDegrees, crossingPointALat, crossingPointALng, crossingPointBLat, crossingPointBLng);
   display.print(F("DistToLine: "));
   display.println(dist2Line, 2);
 
   display.print(F("Laps: "));
-  display.print(5);
+  display.print(lapTimer.getLaps());
   display.print(F(" | od:"));
-  display.println(69.2);
+  display.println(lapTimer.getTotalDistanceTraveled());
   display.print(F("Strt: "));
-  display.print(true ? "T" : "F");
+  display.print(lapTimer.getRaceStarted() ? F("T") : F("F"));
   display.print(F(" | Xing: "));
-  display.println(false ? "T" : "F");
+  display.println(lapTimer.getCrossing() ? F("T") : F("F"));
 
   display.print(F("Current: "));
-  display.println(42069);
+  display.println(lapTimer.getCurrentLapTime());
   display.print(F("Last   : "));
-  display.println(42069);
+  display.println(lapTimer.getLastLapTime());
   display.print(F("Best: "));
-  display.print(4);
+  display.print(lapTimer.getBestLapNumber());
   display.print(F(": "));
-  display.println(42069);
+  display.println(lapTimer.getBestLapTime());
   display.print(F("Pace   : "));
-  display.println(278);
+  display.println(lapTimer.getPaceDifference());
 
   display.display();
 }
@@ -935,12 +1086,10 @@ void handleMenuPageSelection() {
     crossingPointALng = trackLayouts[selectedTrack].start_a_lng;
     crossingPointBLat = trackLayouts[selectedTrack].start_b_lat;
     crossingPointBLng = trackLayouts[selectedTrack].start_b_lng;
-    // // initialize laptimer class
-    // lapTimer.setStartFinishLine(crossingPointALat, crossingPointALng, crossingPointBLat, crossingPointBLng);
-    // lapTimer.forceLinearInterpolation();
-    // // lapTimer.forceCatmullRomInterpolation();
-    // // reset everything back to zero
-    // lapTimer.reset();
+    // initialize laptimer class
+    lapTimer.setStartFinishLine(crossingPointALat, crossingPointALng, crossingPointBLat, crossingPointBLng);
+    lapTimer.forceLinearInterpolation();
+    lapTimer.reset();
   } else if (currentPage == PAGE_SELECT_DIRECTION) {
     selectedDirection = menuSelectionIndex;
     switchToDisplayPage(GPS_SPEED);
@@ -952,9 +1101,7 @@ void handleMenuPageSelection() {
       switchToDisplayPage(GPS_SPEED);
     } else {
       // LOGGING STOP
-      // switchToDisplayPage(PAGE_SELECT_LOCATION);
       switchToDisplayPage(PAGE_SELECT_TRACK);
-      // lapTimer.reset();
       enableLogging = false;
       sdDataLogInitComplete = false;
       dataFile.flush();
@@ -986,7 +1133,19 @@ void displayLoop() {
   // todo: better page handling
   if (millis() - displayLastUpdate > (1000 / displayUpdateRateHz)) {
     displayLastUpdate = millis();
-    if (currentPage == PAGE_SELECT_LOCATION) {
+
+    if (
+      currentPage != GPS_STATS &&
+      currentPage != GPS_DEBUG &&
+      currentPage != LOGGING_STOP &&
+      currentPage != LOGGING_STOP_CONFIRM &&
+      currentPage != PAGE_INTERNAL_FAULT &&
+      currentPage != PAGE_INTERNAL_WARNING &&
+      lapTimer.getCrossing()
+    ) {
+      displayCrossing();
+      lastPage = 999;
+    } else if (currentPage == PAGE_SELECT_LOCATION) {
       displayPage_select_location();
     } else if (currentPage == PAGE_SELECT_TRACK) {
       displayPage_select_track();
@@ -1116,25 +1275,21 @@ void displayLoop() {
 }
 //////////////
 
-unsigned long gpsFrameStartTime;
-unsigned long gpsFrameEndTime;
-unsigned long gpsFrameCounter;
-float gpsFrameRate = 0.0;
 void GPS_LOOP() {
   char c = gps->read();
 
   if (gps->newNMEAreceived() && gps->parse(gps->lastNMEA())) {
-    char *lastNMEA = gps->lastNMEA();
-    char *nmeaSearch = "$GPRMC";
-    bool isRMCPacket = strstr(lastNMEA, nmeaSearch) != NULL;
-    if (isRMCPacket) {
+    // char *lastNMEA = gps->lastNMEA();
+    // char *nmeaSearch = "$GPRMC";
+    // bool isRMCPacket = strstr(lastNMEA, nmeaSearch) != NULL;
+    // if (isRMCPacket) {
       gpsFrameCounter++;
-    }
+    // }
 
     // update the timer loop everytime we have fixed data
     if (gps->fix) {
-      // lapTimer.updateCurrentTime(getGpsTimeInMilliseconds());
-      // lapTimer.loop(gps->latitudeDegrees, gps->longitudeDegrees, gps->altitude, gps->speed);
+      lapTimer.updateCurrentTime(getGpsTimeInMilliseconds());
+      lapTimer.loop(gps->latitudeDegrees, gps->longitudeDegrees, gps->altitude, gps->speed);
     }
 
     // todo: copied from racebox, obviously broken
@@ -1142,14 +1297,14 @@ void GPS_LOOP() {
       // only log actual datapoints?
       if (gps->fix && sdSetupSuccess && sdDataLogInitComplete && enableLogging) {
         // debugln(F("Attempting to log SD"));
-        dataFile.print(lastNMEA);
+        dataFile.print(gps->lastNMEA());
         // flush once in a while
         if (millis() - lastCardFlush > 10000) {
           lastCardFlush = millis();
           dataFile.flush();
         }
       } else if (gps->fix && sdSetupSuccess && !sdDataLogInitComplete && enableLogging && gps->day > 0) {
-        debugln(F("Attempt to initialize SDCard"));
+        debugln(F("Attempt to initialize logfile"));
         
         // all this could be much cleaner.....
         // todo: timezones?
@@ -1178,7 +1333,7 @@ void GPS_LOOP() {
         dataFile.open(dataFileName, O_CREAT | O_WRITE);
 
         if (!dataFile) {
-          debugln(F("Error opening file"));
+          debugln(F("Error opening log file"));
           
           String errorMessage = String("Error saving log:\n") + String(dataFileName);
           internalNotification = errorMessage.c_str();
