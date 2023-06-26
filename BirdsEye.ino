@@ -3,6 +3,7 @@
 
 // TODO: weird memory problems? maybe gps loop lockups from running so fast?
 // TODO: only update when new data on speed/lap/bestLap maybe split?
+// TODO: assign date to file being saved
 
 // designed for seeed NRF52840 which comes with a charge circut
 #define VREF 3.6
@@ -189,20 +190,12 @@ float gps_speed_mph = 0.0;
 // 1 for FAT16/FAT32, 2 for exFAT, 3 for FAT16/FAT32 and exFAT.
 #ifdef WOKWI
 #define SD_FAT_TYPE 0
-#define PIN_SPI_CS 53
+#define PIN_SPI_CS -1 //53
 #else
 #define SD_FAT_TYPE 1
-#define PIN_SPI_CS 3
+#define PIN_SPI_CS 3 // todo: ground out for A0/battery voltage...
 #endif
-//
-// Set DISABLE_CHIP_SELECT to disable a second SPI device.
-// For example, with the Ethernet shield, set DISABLE_CHIP_SELECT
-// to 10 to disable the Ethernet controller.
-// const int8_t DISABLE_CHIP_SELECT = -1;
-//
-// Test with reduced SPI speed for breadboards.  SD_SCK_MHZ(4) will select
-// the highest speed supported by the board that is not over 4 MHz.
-// Change SPI_SPEED to SD_SCK_MHZ(50) for best performance.
+
 #define SPI_SPEED SD_SCK_MHZ(25)
 
 #include <SPI.h>
@@ -224,7 +217,7 @@ bool enableLogging = false;
 
 unsigned long lastCardFlush = 0;
 
-const char* trackFolder = "/TRACKS";
+const char trackFolder[8] = "/TRACKS";
 
 // could probably do all of this better
 int selectedLocation = -1;
@@ -232,9 +225,8 @@ char locations[MAX_LOCATIONS][MAX_LOCATION_LENGTH]; // 13 is old dos format for 
 int numOfLocations = 0;
 
 void makeFullTrackPath(char* trackName, char* filepath) {
-  char* basePath = "/TRACKS/";
-  // char* fileExtension = ".JSON";
-  char* fileExtension = ".json";
+  char basePath[9] = "/TRACKS/";
+  char fileExtension[6] = ".json";
 
   // Start with the base path
   strcpy(filepath, basePath);
@@ -307,7 +299,8 @@ bool buildTrackList() {
 #ifdef WOKWI
 #define JSON_BUFFER_SIZE 1024
 #else
-#define JSON_BUFFER_SIZE 4096
+// might need to make bigger for more layouts, test and expiriment
+#define JSON_BUFFER_SIZE 1024
 #endif
 
 const int PARSE_STATUS_GOOD = 0;
@@ -380,13 +373,16 @@ int parseTrackFile(char* filepath) {
   JsonArray array = trackJson.as<JsonArray>();
   debugln(F("Generating Layout List..."));
   for(JsonVariant layout : array) {
+    // debug is bugged lol
+    #ifdef HAS_DEBUG
     const char* layoutName = layout["name"];
     debug(F("Layout Name: "));
     debugln(layoutName);
+    #endif
 
     if(numOfTracks < MAX_LAYOUTS) {
       // add name to array of strings to display to the user
-      strncpy(tracks[numOfTracks], layoutName, sizeof(tracks[numOfTracks]) - 1);
+      strncpy(tracks[numOfTracks], layout["name"], sizeof(tracks[numOfTracks]) - 1);
       tracks[numOfTracks][sizeof(tracks[numOfTracks]) - 1] = '\0'; // Ensure null-termination
 
       // add data to array of layouts for later use
@@ -1031,7 +1027,8 @@ void displayPage_gps_debug() {
 }
 
 bool notificationFlash = false;
-char* internalNotification = "N/A";
+String internalNotification = "N/A";
+
 void displayPage_internal_fault() {
   resetDisplay();
   notificationFlash = notificationFlash == true ? false : true;
@@ -1375,9 +1372,7 @@ void GPS_LOOP() {
 
     // todo: copied from racebox, obviously broken
     #ifdef SD_CARD_LOGGING_ENABLED
-      // only log actual datapoints?
       if (trackSelected && gps->fix && sdSetupSuccess && sdDataLogInitComplete && enableLogging) {
-        // debugln(F("Attempting to log SD"));
         dataFile.print(gps->lastNMEA());
         // flush once in a while
         if (millis() - lastCardFlush > 10000) {
@@ -1401,28 +1396,30 @@ void GPS_LOOP() {
 
         String dataFileNameS = trackLocation + "_" + trackLayout + "_" + layoutDirection + "_" + gpsYear + "_" + gpsMonth + gpsDay + "_" + gpsHour + gpsMinute + ".nmea";
 
-        const char* dataFileName = dataFileNameS.c_str();
+        // const char* dataFileName = dataFileNameS.c_str();
 
         debug(F("dataFileNameS: ["));
         debug(dataFileNameS.c_str());
         debugln(F("]"));
 
-        // sdInitialize(dataFileName);
-        // const char* dataFileName = "test.nmea";
-
-        // dataFile.open(dataFileName, O_CREAT | O_WRITE | O_NONBLOCK); // not declared on mega? or maybe cause fat16?
-        dataFile.open(dataFileName, O_CREAT | O_WRITE);
+        #ifdef WOKWI
+        dataFile.open(dataFileNameS.c_str(), O_CREAT | O_WRITE);
+        #else
+        dataFile.open(dataFileNameS.c_str(), O_CREAT | O_WRITE | O_NONBLOCK);
+        #endif
 
         if (!dataFile) {
           debugln(F("Error opening log file"));
           
-          // String errorMessage = String("Error saving log:\n") + String(dataFileName);
+          // hmmm
+          String errorMessage = String("Error saving log:\n") + dataFileNameS;
+          internalNotification = errorMessage;
           // internalNotification = errorMessage.c_str();
           // int errorMessageLength = errorMessage.length() + 1;
           // char errorMessageCharArray[errorMessageLength];
           // errorMessage.toCharArray(errorMessageCharArray, errorMessageLength);
           // internalNotification = errorMessageCharArray;
-          internalNotification = "Error creating log!";
+          // internalNotification = "Error creating log!";
 
           switchToDisplayPage(PAGE_INTERNAL_FAULT);
 
