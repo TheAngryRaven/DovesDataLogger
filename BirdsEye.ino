@@ -478,6 +478,15 @@ void readButtons() {
   checkButton(btn1);
   checkButton(btn2);
   checkButton(btn3);
+
+  //force update when button pressed
+  if (
+    btn1->pressed ||
+    btn2->pressed ||
+    btn3->pressed
+  ) {
+    forceDisplayRefresh();
+  }
 }
 void resetButtons() {
   resetButton(btn1);
@@ -489,10 +498,7 @@ void resetButton(ButtonState* button) {
 }
 void checkButton(ButtonState* button) {
   bool btnPressed = digitalRead(button->pin) == LOW;
-  bool btnReady =
-    millis() - button->lastPressed >= antiBounceIntv
-    // millis() - button->lastReleased >= buttonPressIntv
-  ;
+  bool btnReady = millis() - button->lastPressed >= antiBounceIntv;
   if (btnReady && btnPressed) {
     button->lastPressed = millis();
     button->pressed = true;
@@ -528,8 +534,6 @@ void displayPage_boot() {
   display.println(F("  GPS SDCard Logger"));
   display.println(F("\n    Initializing..."));
 
-  // resetDisplay();
-  // display.drawBitmap(0, 0, image_data_bird1, 128, 64, 1);
   display.display();
 }
 
@@ -1438,7 +1442,6 @@ void GPS_LOOP() {
 }
 
 void setup() {
-  // randomSeed(analogRead(0));
 #ifdef HAS_DEBUG
   Serial.begin(9600);
   while (!Serial);
@@ -1462,8 +1465,6 @@ void setup() {
   // sdSetupSuccess = true;
   // sdTrackSuccess = false;
 
-  //setup GPS
-  // delay(3000*2); //debug
   GPS_SETUP();
 
   if (!sdSetupSuccess) {
@@ -1497,14 +1498,6 @@ void loop() {
   }
 
   readButtons();
-  //force update when button pressed
-  if (
-    btn1->pressed ||
-    btn2->pressed ||
-    btn3->pressed
-  ) {
-    forceDisplayRefresh();
-  }
   displayLoop();
   resetButtons();
 }
