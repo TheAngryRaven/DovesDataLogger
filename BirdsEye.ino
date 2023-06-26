@@ -1,5 +1,8 @@
-// #define WOKWI
-// #define HAS_DEBUG
+#define WOKWI
+#define HAS_DEBUG
+
+// TODO: weird memory problems? maybe gps loop lockups from running so fast?
+// TODO: only update when new data on speed/lap/bestLap maybe split?
 
 // designed for seeed NRF52840 which comes with a charge circut
 #define VREF 3.6
@@ -302,7 +305,7 @@ bool buildTrackList() {
 
 #include <ArduinoJson.h>
 #ifdef WOKWI
-#define JSON_BUFFER_SIZE 2048
+#define JSON_BUFFER_SIZE 1024
 #else
 #define JSON_BUFFER_SIZE 4096
 #endif
@@ -551,13 +554,38 @@ void displayPage_select_location() {
   display.println();
   display.setTextSize(2);
 
-  display.print(F("  "));
-  display.println(locations[menuSelectionIndex == numOfLocations - 1 ? 0 : menuSelectionIndex + 1]);
-  display.print(F("->"));
-  display.println(locations[menuSelectionIndex]);
-  display.print(F("  "));
-  display.println(locations[menuSelectionIndex == 0 ? numOfLocations - 1 : menuSelectionIndex - 1]);  
-  
+  if (numOfLocations < 3) {
+    display.println();
+    // small menu
+    if (numOfLocations >= 1) {
+      if (menuSelectionIndex == 0) {
+        display.print(F("->"));
+      } else {
+        display.print(F("  "));
+      }
+      display.println(locations[0]);
+    }
+    if (numOfLocations >= 2) {
+      if (menuSelectionIndex == 1) {
+        display.print(F("->"));
+      } else {
+        display.print(F("  "));
+      }
+      display.println(locations[1]);
+    }
+  } else {
+    // scrolling menu
+    int indexA = menuSelectionIndex == numOfLocations - 1 ? 0 : menuSelectionIndex + 1;
+    int indexB = menuSelectionIndex;
+    int indexC = menuSelectionIndex == 0 ? numOfLocations - 1 : menuSelectionIndex - 1;
+    display.print(F("  "));
+    display.println(locations[indexA]);
+    display.print(F("->"));
+    display.println(locations[indexB]);
+    display.print(F("  "));
+    display.println(locations[indexC]);
+  }
+
   display.display();
 }
 
@@ -573,13 +601,37 @@ void displayPage_select_track() {
   display.println(locations[selectedLocation]);
   display.setTextSize(2);
 
-  // todo: what if less then three?
-  display.print(F("  "));
-  display.println(tracks[menuSelectionIndex == numOfTracks - 1 ? 0 : menuSelectionIndex + 1]);
-  display.print(F("->"));
-  display.println(tracks[menuSelectionIndex]);
-  display.print(F("  "));
-  display.println(tracks[menuSelectionIndex == 0 ? numOfTracks - 1 : menuSelectionIndex - 1]);
+  if (numOfTracks < 3) {
+    display.println();
+    // small menu
+    if (numOfTracks >= 1) {
+      if (menuSelectionIndex == 0) {
+        display.print(F("->"));
+      } else {
+        display.print(F("  "));
+      }
+      display.println(tracks[0]);
+    }
+    if (numOfTracks >= 2) {
+      if (menuSelectionIndex == 1) {
+        display.print(F("->"));
+      } else {
+        display.print(F("  "));
+      }
+      display.println(tracks[1]);
+    }
+  } else {
+    // scrolling menu
+    int indexA = menuSelectionIndex == numOfTracks - 1 ? 0 : menuSelectionIndex + 1;
+    int indexB = menuSelectionIndex;
+    int indexC = menuSelectionIndex == 0 ? numOfTracks - 1 : menuSelectionIndex - 1;
+    display.print(F("  "));
+    display.println(tracks[indexA]);
+    display.print(F("->"));
+    display.println(tracks[indexB]);
+    display.print(F("  "));
+    display.println(tracks[indexC]);
+  }
   
   display.display();
 }
