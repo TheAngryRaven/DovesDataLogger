@@ -1,8 +1,7 @@
-#define WOKWI
-#define HAS_DEBUG
+//#define WOKWI
+//#define HAS_DEBUG
 
 // TODO: weird memory problems? maybe gps loop lockups from running so fast?
-// TODO: only update when new data on speed/lap/bestLap maybe split?
 // TODO: assign date to file being saved
 
 // designed for seeed NRF52840 which comes with a charge circut
@@ -184,6 +183,22 @@ double crossingPointALng = 0.00;
 double crossingPointBLat = 0.00;
 double crossingPointBLng = 0.00;
 float gps_speed_mph = 0.0;
+/////////////////////////////////////////////////
+
+const int lapHistoryMaxLaps = 100;
+unsigned long lastLap = 0;
+unsigned long lapHistory[lapHistoryMaxLaps];
+int lapHistoryCount = 0;
+void checkForNewLapData() {
+  if (lapHistoryCount < lapHistoryMaxLaps && lapTimer.getLastLapTime() != lastLap) {
+    lastLap = lapTimer.getLastLapTime();
+    lapHistory[lapHistoryCount] = lastLap;
+    // lapHistoryCount = (lapHistoryCount + 1) % lapHistoryMaxLaps;
+    lapHistoryCount++;
+    debugln("New lap added to history...");
+  }
+}
+
 /////////////////////////////////////////////////
 
 // SD_FAT_TYPE = 0 for SdFat/File as defined in SdFatConfig.h,
@@ -438,8 +453,8 @@ const int GPS_SPEED = 5;
 const int GPS_LAP_TIME = 6;
 const int GPS_LAP_PACE = 7;
 const int GPS_LAP_BEST = 8;
-const int GPS_LAP_LIST = 900; // probably remove for now, this will destroy memory
-const int LOGGING_STOP = 9;
+const int GPS_LAP_LIST = 9; // probably remove for now, this will destroy memory
+const int LOGGING_STOP = 10;
 
 // end menu
 const int LOGGING_STOP_CONFIRM = 90;
@@ -716,7 +731,7 @@ void displayPage_gps_stats() {
   display.print(F("SDCard   : "));
   if (!sdSetupSuccess) {
     display.println(F("Bad Init"));
-  } else if (enableLogging == false && sdDataLogInitComplete == false) {
+  } else if (enableLogging == true && sdDataLogInitComplete == false) {
     display.println(F("Waiting..."));
   } else if (enableLogging == true && sdDataLogInitComplete == true) {
     display.println(F("Logging"));
@@ -770,12 +785,12 @@ void displayPage_gps_speed() {
 void displayPage_gps_lap_time() {
   resetDisplay();
 
-  display.println(F("Current Lap Time"));
-  // display.println();
+  display.println(F("  Current Lap Time"));
 
-  /////////////////
-  // fancy layout..
+  ///////////////////////////////////////////////////
+  // todo: fancier layout.
   /*
+  display.println();
   const int lineHeight = 21;
   int leftMargin = 0;//29;//0;//29;
   if (leftMargin == 29) {
@@ -799,13 +814,14 @@ void displayPage_gps_lap_time() {
   display.setTextSize(4);
   display.print(F("173"));
   */
+  ///////////////////////////////////////////////////
 
-  unsigned long minutes = lapTimer.getCurrentLapTime() / 60000;
-  unsigned long seconds = (lapTimer.getCurrentLapTime() % 60000) / 1000;
-  unsigned long milliseconds = lapTimer.getCurrentLapTime() % 1000;
   display.print(F("\n\n"));
   display.setTextSize(3);
   if (lapTimer.getRaceStarted()) {
+    unsigned long minutes = lapTimer.getCurrentLapTime() / 60000;
+    unsigned long seconds = (lapTimer.getCurrentLapTime() % 60000) / 1000;
+    unsigned long milliseconds = lapTimer.getCurrentLapTime() % 1000;
     if (minutes > 0) {
       display.print(minutes);
       display.print(":");
@@ -835,10 +851,9 @@ bool paceFlashStatus = false;
 void displayPage_gps_pace() {
   resetDisplay();
 
-  display.println(F("Current Lap Pace"));
+  display.println(F("  Current Lap Pace"));
 
   // animation
-
   if (lapTimer.getLaps() >= 1 && lapTimer.getPaceDifference() < (-1)) {
     if (paceFlashStatus) {
       paceFlashStatus = false;
@@ -854,20 +869,22 @@ void displayPage_gps_pace() {
       display.println(F("           "));
     }
   }
-  // display.println(F("                      "));
 
   // main page into
   display.setTextColor(DISPLAY_TEXT_WHITE);
   const int lineHeight = 21;
-  display.setCursor(0, lineHeight);
-  display.setTextSize(4);
   if (lapTimer.getRaceStarted() && lapTimer.getLaps() >= 1) {
+    display.setCursor(0, lineHeight);
+    display.setTextSize(4);
     if (lapTimer.getPaceDifference() > 0) {
       display.print(F("+"));
     }
     display.print(lapTimer.getPaceDifference());
   } else {
-    display.print(F(" N/A"));
+    display.setTextSize(2);
+    display.println();
+    display.setTextSize(3);
+    display.print(F("  N/A"));
   }
 
   // animation
@@ -897,15 +914,15 @@ void displayPage_gps_pace() {
 void displayPage_gps_best_lap() {
   resetDisplay();
 
-  display.println(F("Best Lap"));
+  display.println(F("      Best Lap"));
   display.print(F("\n"));
-  unsigned long minutes = lapTimer.getBestLapTime() / 60000;
-  unsigned long seconds = (lapTimer.getBestLapTime() % 60000) / 1000;
-  unsigned long milliseconds = lapTimer.getBestLapTime() % 1000;
   if (
     lapTimer.getRaceStarted() &&
     lapTimer.getLaps() > 0
   ) {
+    unsigned long minutes = lapTimer.getBestLapTime() / 60000;
+    unsigned long seconds = (lapTimer.getBestLapTime() % 60000) / 1000;
+    unsigned long milliseconds = lapTimer.getBestLapTime() % 1000;
     display.setTextSize(3);
     if (minutes > 0) {
       display.print(minutes);
@@ -939,32 +956,55 @@ void displayPage_gps_best_lap() {
   display.display();
 }
 
+// TODO: this page probably needs some kind of delayed rendering?
+const int lapsPerPage = 3;
 int current_lap_list_page = 0;
-int lap_list_pages = 2;
+int lap_list_pages = 1;
 void displayPage_gps_lap_list() {
   resetDisplay();
   if (recentlyChanged) {
     current_lap_list_page = 0;
   }
+  lap_list_pages = ceil((double)lapHistoryCount / (double)lapsPerPage);
 
-  if (current_lap_list_page == 0) {
-    display.println(F(" 1 0:54:27  9 0:54:27"));
-    display.println(F(" 2 0:54:27 10 0:54:27"));
-    display.println(F(" 3 0:54:27 11 0:54:27"));
-    display.println(F(" 4 0:54:27<12 0:54:27"));
-    display.println(F(" 5 0:54:27 13 0:54:27"));
-    display.println(F(" 6 0:54:27 14 0:54:27"));
-    display.println(F(" 7 0:54:27 15 0:54:27"));
-    display.println(F(" 8 0:54:27 16 0:54:27"));
-  } else if (current_lap_list_page == 1) {
-    display.println(F("17 0:54:27 25 0:54:27"));
-    display.println(F("18 0:54:27 26 0:54:27"));
-    display.println(F("19 0:54:27 27 0:54:27"));
-    display.println(F("20 0:54:27 28 0:54:27"));
-    display.println(F("21 0:54:27"));
-    display.println(F("21 0:54:27"));
-    display.println(F("23 0:54:27"));
-    display.println(F("24 0:54:27"));
+  if (lapHistoryCount >= 1) {
+    display.print(F("   Lap History   "));
+    display.print(current_lap_list_page + 1);
+    display.print(F("/"));
+    display.print(lap_list_pages);
+    display.println(F("\n"));
+    display.setTextSize(2);
+
+    int pageStart = current_lap_list_page * lapsPerPage;
+    int pageEnd = pageStart + lapsPerPage;
+    for (int lap = pageStart; lap < pageEnd; ++lap) {
+      if (lap < lapHistoryCount) {
+        unsigned long minutes = lapHistory[lap] / 60000;
+        unsigned long seconds = (lapHistory[lap] % 60000) / 1000;
+        unsigned long milliseconds = lapHistory[lap] % 1000;
+
+        int actualLap = lap + 1;
+        if (actualLap < 10) {
+          display.print(F(" "));
+        }
+        display.print(actualLap);
+        display.setTextSize(1);
+        display.print(F(" "));
+        display.setTextSize(2);
+        display.print(minutes);
+        display.print(F(":"));
+        display.print(seconds);
+        display.print(F("."));
+        display.print(milliseconds);
+        display.println();
+      }
+    }
+  } else {
+    display.println(F("     Lap History     "));
+    display.setTextSize(2);
+    display.println();
+    display.setTextSize(3);
+    display.print(F("  N/A"));
   }
   
   display.display();
@@ -1188,6 +1228,10 @@ void handleMenuPageSelection() {
       dataFile.flush();
       dataFile.close();
       lapTimer.reset();
+
+      // reset lap history
+      lapHistoryCount = 0;
+      memset(lapHistory, 0, sizeof(lapHistory));
     }
     debug(F("Stop Logging?: "));
     debugln(menuSelectionIndex == 0 ? "NO" : "YES");
@@ -1198,7 +1242,7 @@ void handleRunningPageSelection() {
   if (currentPage == LOGGING_STOP) {
     switchToDisplayPage(LOGGING_STOP_CONFIRM);
   } else if (currentPage == GPS_LAP_LIST) {
-    current_lap_list_page = current_lap_list_page == (lap_list_pages-1) ? 0 : current_lap_list_page+1;
+    current_lap_list_page = current_lap_list_page == (lap_list_pages-1) ? 0 : current_lap_list_page + 1;
     forceDisplayRefresh();
   } else {
     if(displayInverted == true) {
@@ -1441,6 +1485,19 @@ void GPS_LOOP() {
   gps_speed_mph = gps->speed * 1.15078;
 }
 
+void calculateGPSFrameRate() {
+  // calculate actual GPS fix frequency
+  gpsFrameEndTime = millis();
+  // Check if the update interval has passed
+  if (gpsFrameEndTime - gpsFrameStartTime >= 1000) {
+    // Calculate the frame rate (loops per second)
+    gpsFrameRate = (float)gpsFrameCounter / ((gpsFrameEndTime - gpsFrameStartTime) / 1000.0);
+    // Reset the loop counter and start time for the next interval
+    gpsFrameCounter = 0;
+    gpsFrameStartTime = millis();
+  }
+}
+
 void setup() {
 #ifdef HAS_DEBUG
   Serial.begin(9600);
@@ -1485,17 +1542,8 @@ void setup() {
 
 void loop() {
   GPS_LOOP();
-
-  // calculate actual GPS fix frequency
-  gpsFrameEndTime = millis();
-  // Check if the update interval has passed
-  if (gpsFrameEndTime - gpsFrameStartTime >= 1000) {
-    // Calculate the frame rate (loops per second)
-    gpsFrameRate = (float)gpsFrameCounter / ((gpsFrameEndTime - gpsFrameStartTime) / 1000.0);
-    // Reset the loop counter and start time for the next interval
-    gpsFrameCounter = 0;
-    gpsFrameStartTime = millis();
-  }
+  checkForNewLapData();
+  calculateGPSFrameRate();
 
   readButtons();
   displayLoop();
