@@ -1,13 +1,12 @@
 //#define WOKWI
 //#define HAS_DEBUG
 
-// TODO: weird memory problems? maybe gps loop lockups from running so fast?
 // TODO: assign date to file being saved
 
 // designed for seeed NRF52840 which comes with a charge circut
 #define VREF 3.6
 #define ADC_MAX 4096
-// #define PIN_VBAT 0
+// #define PIN_VBAT 0 // ground out SD card to free up pin
 unsigned long lastBatteryCheck;
 int batteryUpdateInterval = 5000;
 float lastBatteryVoltage;
@@ -43,7 +42,6 @@ struct TrackLayout {
 const int RACE_DIRECTION_FORWARD  = 0;
 const int RACE_DIRECTION_REVERSE  = 1;
 
-
 #ifdef HAS_DEBUG
 #define debugln Serial.println
 #define debug Serial.print
@@ -54,7 +52,7 @@ void dummy_debug(...) {
 #define debugln dummy_debug
 #endif
 
-/////////////////////////////////////////////////
+///////////////////////////////////////////
 float getBatteryVoltage() {
   #ifdef WOKWI
   return 3.75;
@@ -64,14 +62,10 @@ float getBatteryVoltage() {
   return adcVoltage * 1510 / 510;
   #endif
 }
-
-
-/////////////////////////////////////////////////
+///////////////////////////////////////////
 #include <Adafruit_GPS.h>
 #include "gps_config.h"
 Adafruit_GPS* gps = NULL;
-
-
 
 #define GPS_SERIAL Serial1
 #ifndef GPS_CONFIGURATION
@@ -183,7 +177,7 @@ double crossingPointALng = 0.00;
 double crossingPointBLat = 0.00;
 double crossingPointBLng = 0.00;
 float gps_speed_mph = 0.0;
-/////////////////////////////////////////////////
+///////////////////////////////////////////
 
 const int lapHistoryMaxLaps = 100;
 unsigned long lastLap = 0;
@@ -195,11 +189,11 @@ void checkForNewLapData() {
     lapHistory[lapHistoryCount] = lastLap;
     // lapHistoryCount = (lapHistoryCount + 1) % lapHistoryMaxLaps;
     lapHistoryCount++;
-    debugln("New lap added to history...");
+    debugln(F("New lap added to history..."));
   }
 }
 
-/////////////////////////////////////////////////
+///////////////////////////////////////////
 
 // SD_FAT_TYPE = 0 for SdFat/File as defined in SdFatConfig.h,
 // 1 for FAT16/FAT32, 2 for exFAT, 3 for FAT16/FAT32 and exFAT.
@@ -223,7 +217,6 @@ File trackDir;
 File trackFile;
 File dataFile;
 
-
 // do we really need all of these flags
 bool sdSetupSuccess = false;
 bool sdTrackSuccess = false;
@@ -231,7 +224,6 @@ bool sdDataLogInitComplete = false;
 bool enableLogging = false;
 
 unsigned long lastCardFlush = 0;
-
 const char trackFolder[8] = "/TRACKS";
 
 // could probably do all of this better
@@ -416,7 +408,7 @@ int parseTrackFile(char* filepath) {
   return PARSE_STATUS_GOOD;
 }
 
-//////////////////////////////////////////////////////////////
+///////////////////////////////////////////
 
 ButtonState button1;
 ButtonState *btn1 = &button1;
@@ -520,8 +512,8 @@ void checkButton(ButtonState* button) {
   }
 }
 
-//////////////
-// TODO: mode display into own class??
+//////////////////////////////////////////
+// TODO: make display into own class??
 int menuSelectionIndex = 0;
 void resetDisplay() {
   if (currentPage != lastPage) {
@@ -552,7 +544,7 @@ void displayPage_boot() {
   display.display();
 }
 
-/////////////////////////
+///////////////////////////////////////////
 int selectedTrack = -1;
 int selectedDirection = -1;
 
@@ -1111,7 +1103,6 @@ void displayPage_internal_warning() {
 }
 
 ///////////////////////////////////////////
-
 bool calculatingFlip = false;
 void displayCrossing() {
   display.clearDisplay();
@@ -1128,8 +1119,6 @@ void displayCrossing() {
 
   display.display();
 }
-
-///////////////////////////////////////////
 void forceDisplayRefresh() {
   // why does adding work but not subtracting?
   displayLastUpdate += 5000;
@@ -1138,6 +1127,7 @@ void switchToDisplayPage(int newDisplayPage) {
   currentPage = newDisplayPage;
   forceDisplayRefresh();
 }
+///////////////////////////////////////////
 
 void displaySetup() {
   debugln(F("SETTING UP DISPLAY"));
@@ -1399,7 +1389,8 @@ void displayLoop() {
     }
   }
 }
-//////////////
+
+///////////////////////////////////////////
 
 void GPS_LOOP() {
   char c = gps->read();
