@@ -1409,7 +1409,6 @@ void GPS_LOOP() {
       lapTimer.loop(gps->latitudeDegrees, gps->longitudeDegrees, gps->altitude, gps->speed);
     }
 
-    // todo: copied from racebox, obviously broken
     #ifdef SD_CARD_LOGGING_ENABLED
       if (trackSelected && gps->fix && sdSetupSuccess && sdDataLogInitComplete && enableLogging) {
         dataFile.print(gps->lastNMEA());
