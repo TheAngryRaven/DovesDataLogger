@@ -177,8 +177,8 @@ double crossingPointALng = 0.00;
 double crossingPointBLat = 0.00;
 double crossingPointBLng = 0.00;
 float gps_speed_mph = 0.0;
-///////////////////////////////////////////
 
+///////////////////////////////////////////
 const int lapHistoryMaxLaps = 100;
 unsigned long lastLap = 0;
 unsigned long lapHistory[lapHistoryMaxLaps];
@@ -187,12 +187,12 @@ void checkForNewLapData() {
   if (lapHistoryCount < lapHistoryMaxLaps && lapTimer.getLastLapTime() != lastLap) {
     lastLap = lapTimer.getLastLapTime();
     lapHistory[lapHistoryCount] = lastLap;
+    // todo: watdo when too many?
     // lapHistoryCount = (lapHistoryCount + 1) % lapHistoryMaxLaps;
     lapHistoryCount++;
     debugln(F("New lap added to history..."));
   }
 }
-
 ///////////////////////////////////////////
 
 // SD_FAT_TYPE = 0 for SdFat/File as defined in SdFatConfig.h,
