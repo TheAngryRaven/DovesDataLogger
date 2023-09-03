@@ -3,7 +3,7 @@
 
 // Hides a couple pages and changes some behavior
 // todo: make dynamic in next UI version
-#define ENDURANCE_MODE
+// #define ENDURANCE_MODE
 
 // designed for seeed NRF52840 which comes with a charge circut
 #define VREF 3.6
@@ -456,7 +456,6 @@ const int GPS_STATS = 4;
 
   const int GPS_LAP_LIST = 1002;
 #else
-  const int GPS_STATS = 4;
   const int GPS_SPEED = 5;
   const int GPS_LAP_TIME = 6;
   const int GPS_LAP_PACE = 7;
