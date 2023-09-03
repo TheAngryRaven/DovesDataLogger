@@ -1,12 +1,14 @@
-//#define WOKWI
+// #define WOKWI
 //#define HAS_DEBUG
 
-// TODO: assign date to file being saved
+// Hides a couple pages and changes some behavior
+// todo: make dynamic in next UI version
+#define ENDURANCE_MODE
 
 // designed for seeed NRF52840 which comes with a charge circut
 #define VREF 3.6
 #define ADC_MAX 4096
-// #define PIN_VBAT 0 // ground out SD card to free up pin
+
 unsigned long lastBatteryCheck;
 int batteryUpdateInterval = 5000;
 float lastBatteryVoltage;
@@ -22,9 +24,9 @@ bool trackSelected = false;
 
 // TODO: setup header for project
 #define SD_CARD_LOGGING_ENABLED
-#define MAX_LOCATIONS 10
+#define MAX_LOCATIONS 100
 #define MAX_LOCATION_LENGTH 13 // 13 is old dos format for fat16
-#define MAX_LAYOUTS 5
+#define MAX_LAYOUTS 10
 #define MAX_LAYOUT_LENGTH 15
 #include <string.h>
 struct ButtonState {
@@ -179,7 +181,7 @@ double crossingPointBLng = 0.00;
 float gps_speed_mph = 0.0;
 
 ///////////////////////////////////////////
-const int lapHistoryMaxLaps = 100;
+const int lapHistoryMaxLaps = 1000;
 unsigned long lastLap = 0;
 unsigned long lapHistory[lapHistoryMaxLaps];
 int lapHistoryCount = 0;
@@ -202,7 +204,8 @@ void checkForNewLapData() {
 #define PIN_SPI_CS -1 //53
 #else
 #define SD_FAT_TYPE 1
-#define PIN_SPI_CS 3 // todo: ground out for A0/battery voltage...
+#define PIN_SPI_CS -1 // grounded on gry box
+// #define PIN_SPI_CS 3 // todo: ground out for A0/battery voltage...
 #endif
 
 #define SPI_SPEED SD_SCK_MHZ(25)
@@ -425,6 +428,7 @@ float epsilonPrecision = 0.001;
 #ifdef WOKWI
 #define USE_1306_DISPLAY // remove to use SH110X oled
 #endif
+#define USE_1306_DISPLAY // remove to use SH110X oled
 
 #include "images.h"
 #include "display_config.h"
@@ -438,15 +442,28 @@ const int PAGE_RC_ERROR = 990;
 const int PAGE_SELECT_LOCATION = 0;
 const int PAGE_SELECT_TRACK = 1;
 const int PAGE_SELECT_DIRECTION = 2;
+
 // running menu (these must be in order)
 const int GPS_DEBUG = 3;
 const int GPS_STATS = 4;
-const int GPS_SPEED = 5;
-const int GPS_LAP_TIME = 6;
-const int GPS_LAP_PACE = 7;
-const int GPS_LAP_BEST = 8;
-const int GPS_LAP_LIST = 9; // probably remove for now, this will destroy memory
-const int LOGGING_STOP = 10;
+
+#ifdef ENDURANCE_MODE
+  const int GPS_SPEED = 5;
+  const int GPS_LAP_TIME = 6;
+  const int GPS_LAP_PACE = 7;
+  const int GPS_LAP_BEST = 8;
+  const int LOGGING_STOP = 9;
+
+  const int GPS_LAP_LIST = 1002;
+#else
+  const int GPS_STATS = 4;
+  const int GPS_SPEED = 5;
+  const int GPS_LAP_TIME = 6;
+  const int GPS_LAP_PACE = 7;
+  const int GPS_LAP_BEST = 8;
+  const int GPS_LAP_LIST = 9;
+  const int LOGGING_STOP = 10;
+#endif
 
 // end menu
 const int LOGGING_STOP_CONFIRM = 90;
@@ -457,7 +474,13 @@ bool displayInverted = false;
 int currentPage = PAGE_BOOT;
 int lastPage = 0;
 
-const int runningPageStart = GPS_DEBUG; //GPS_STATS;
+// "pageStart" defines where the UI starts, you cannot backup beyond this
+#ifdef ENDURANCE_MODE
+  const int runningPageStart = GPS_SPEED;
+#else
+  const int runningPageStart = GPS_STATS; //GPS_DEBUG;
+#endif
+
 int runningPageEnd = LOGGING_STOP; // only changes if sd:/tracks not found
 
 int buttonPressIntv = 500;
@@ -468,9 +491,15 @@ bool recentlyChanged = false;
 
 void setupButtons() {
   #ifndef WOKWI
-  btn1->pin = 1;
+  // blackbox
+  // btn1->pin = 1;
+  // btn2->pin = 2;
+  // btn3->pin = 0;
+  // greybox
+  btn1->pin = 3;
   btn2->pin = 2;
-  btn3->pin = 0;
+  btn3->pin = 1;
+
   #else
   btn1->pin = 4;
   btn2->pin = 5;
@@ -756,9 +785,12 @@ void displayPage_gps_speed() {
     int currentLap = lapTimer.getLaps() + (lapTimer.getRaceStarted() ? 1 : 0);
     if (currentLap > 0) {
       display.println(F("\nLAP"));
-      display.setTextSize(3);
+      if (currentLap < 100) {
+        display.setTextSize(3);
+      } else {
+        display.setTextSize(2);
+      }
       display.print(currentLap);
-      // display.print(F("22")); //dbg
     }
   }
 
@@ -1221,6 +1253,7 @@ void handleMenuPageSelection() {
 
       // reset lap history
       lapHistoryCount = 0;
+      lastLap = 0;
       memset(lapHistory, 0, sizeof(lapHistory));
     }
     debug(F("Stop Logging?: "));
@@ -1235,13 +1268,24 @@ void handleRunningPageSelection() {
     current_lap_list_page = current_lap_list_page == (lap_list_pages-1) ? 0 : current_lap_list_page + 1;
     forceDisplayRefresh();
   } else {
-    if(displayInverted == true) {
-      displayInverted = false;
-      display.invertDisplay(false);
-    } else {
-      displayInverted = true;
-      display.invertDisplay(true);
-    }
+    // wokwi doesnt like fancy page switcher
+    // inverted eats too much power
+    #ifdef WOKWI
+      if(displayInverted == true) {
+        displayInverted = false;
+        display.invertDisplay(false);
+      } else {
+        displayInverted = true;
+        display.invertDisplay(true);
+      }
+    #else
+      if (gps_speed_mph <= 5.0) {
+        currentPage = GPS_LAP_BEST;
+      } else {
+        currentPage = GPS_LAP_PACE;
+      }
+      switchToDisplayPage(currentPage);
+    #endif
   }
 }
 
@@ -1276,16 +1320,39 @@ void displayLoop() {
     } else if (currentPage == GPS_LAP_PACE) {
       displayPage_gps_pace();
     } else if (currentPage == GPS_LAP_BEST) {
-      displayPage_gps_best_lap();
+      #ifndef ENDURANCE_MODE
+        displayPage_gps_best_lap();
+      #else
+        if (gps_speed_mph <= 10.0) {
+          displayPage_gps_best_lap();
+        } else {
+          if (lastPage == (GPS_LAP_BEST - 1)) {
+            currentPage = GPS_SPEED;
+          } else {
+            currentPage = (GPS_LAP_BEST - 1);
+          }
+          switchToDisplayPage(currentPage);
+        }
+      #endif
     } else if (currentPage == GPS_LAP_LIST) {
       displayPage_gps_lap_list();
     } else if (currentPage == LOGGING_STOP) {
-      displayPage_stop_logging();
+      // dont let us stop logging while were moving, duh
+      if (gps_speed_mph <= 2.0) {
+        displayPage_stop_logging();
+      } else {
+        // todo: not super friendly when expanding pages, assuming "logging stop" is always the "last" page
+        if (lastPage == (LOGGING_STOP - 1)) {
+          currentPage = runningPageStart;
+        } else {
+          currentPage = LOGGING_STOP - 1;
+        }
+        switchToDisplayPage(currentPage);
+      }
     } else if (currentPage == LOGGING_STOP_CONFIRM) {
       displayPage_stop_logging_confirm();
     } else if (currentPage == GPS_DEBUG) {
       displayPage_gps_debug();
-      // displayCrossing();
     } else if (currentPage == PAGE_INTERNAL_FAULT) {
       displayPage_internal_fault();
     } else if (currentPage == PAGE_INTERNAL_WARNING) {
@@ -1357,15 +1424,14 @@ void displayLoop() {
     }
   } else if (!buttonsDisabled){
     // page up/down/enter
-    // BUTTON UP
-
+    // BUTTON LEFT
     if (btn1->pressed) {
-      // debugln(F("Button Up"));
-      if (currentPage >= runningPageEnd) {
-        currentPage = runningPageStart;
+      // debugln(F("Button Left"));
+      if (currentPage <= runningPageStart) {
+        currentPage = runningPageEnd;
       } else {
-        currentPage++;
-      }
+        currentPage--;
+      }      
       debug(F("running menu number: "));
       debugln(currentPage);
       switchToDisplayPage(currentPage);
@@ -1378,11 +1444,11 @@ void displayLoop() {
     // BUTTON DOWN
     if (btn3->pressed) {
       // debugln(F("Button Down"));
-      if (currentPage <= runningPageStart) {
-        currentPage = runningPageEnd;
+      if (currentPage >= runningPageEnd) {
+        currentPage = runningPageStart;
       } else {
-        currentPage--;
-      }
+        currentPage++;
+      }      
       debug(F("running menu number: "));
       debugln(currentPage);
       switchToDisplayPage(currentPage);
@@ -1494,6 +1560,15 @@ void setup() {
   while (!Serial);
 #endif
 
+  #ifndef WOKWI
+    analogReadResolution(ADC_RESOLUTION);
+    pinMode(PIN_VBAT, INPUT);
+    pinMode(VBAT_ENABLE, OUTPUT);
+    digitalWrite(VBAT_ENABLE, LOW);
+    lastBatteryCheck = millis();
+    lastBatteryVoltage = getBatteryVoltage();
+  #endif
+
   displaySetup();
 
   // setup sd card and confirm we can read track list
@@ -1532,7 +1607,9 @@ void setup() {
 
 void loop() {
   GPS_LOOP();
-  checkForNewLapData();
+  #ifndef ENDURANCE_MODE
+    checkForNewLapData();
+  #endif
   calculateGPSFrameRate();
 
   readButtons();
