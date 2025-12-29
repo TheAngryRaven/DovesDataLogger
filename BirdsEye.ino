@@ -1,3 +1,5 @@
+#include <SPI.h>
+
 // #define WOKWI
 //#define HAS_DEBUG
 
@@ -64,6 +66,76 @@ float getBatteryVoltage() {
   return adcVoltage * 1510 / 510;
   #endif
 }
+///////////////////////////////////////////
+// NEW TACHOMETER settings
+
+const int tachInputPin = D0;
+unsigned long tachLastUpdate = 0;
+int tachLastReported = 0;
+
+static const uint32_t tachMinPulseGapUs = 2000; // ignore bounces/noise faster than this
+volatile uint32_t tachLastPulseUs = 0;
+
+// capture last pulse period so loop can compute RPM
+volatile uint32_t tachLastPeriodUs = 0;
+volatile bool tachHavePeriod = false;
+
+// filtered RPM state (updated in loop, not ISR)
+float tachRpmFiltered = 0.0f;
+
+// tunable settings
+const int tachUpdateRateHz = 3;
+static const float tachRevsPerPulse = 1.0f;     // magneto 4T single is usually wasted spark (1 pulse / rev)
+static const float tachFilterAlpha = 0.20f;     // 0..1, higher = snappier, lower = smoother
+static const uint32_t tachStopTimeoutUs = 500000; // if no pulses for this long, force RPM to 0
+
+// interrupt
+void TACH_COUNT_PULSE() {
+  uint32_t now = micros();
+  uint32_t dt = now - tachLastPulseUs;
+
+  if (dt < tachMinPulseGapUs) return;
+
+  tachLastPulseUs = now;
+  tachLastPeriodUs = dt;
+  tachHavePeriod = true;
+}
+
+void TACH_LOOP() {
+  // Update filtered RPM (highest “real” update rate)
+  uint32_t periodUs = 0;
+  bool havePeriod = false;
+
+  noInterrupts();
+  havePeriod = tachHavePeriod;
+  if (havePeriod) {
+    periodUs = tachLastPeriodUs;
+    tachHavePeriod = false;
+  }
+  interrupts();
+
+  if (havePeriod && periodUs > 0) {
+    float rpmInst = (60.0e6f * tachRevsPerPulse) / (float)periodUs;
+    tachRpmFiltered += tachFilterAlpha * (rpmInst - tachRpmFiltered);
+  }
+
+  // Timeout to zero if signal disappears
+  uint32_t lastPulseUs;
+  noInterrupts();
+  lastPulseUs = tachLastPulseUs;
+  interrupts();
+
+  if ((uint32_t)(micros() - lastPulseUs) > tachStopTimeoutUs) {
+    tachRpmFiltered = 0.0f;
+  }
+
+  // Snapshot for display/log at any chosen rate (can be high; value stays “latest filtered RPM”)
+  if (millis() - tachLastUpdate > (1000 / tachUpdateRateHz)) {
+    tachLastUpdate = millis();
+    tachLastReported = (int)(tachRpmFiltered + 0.5f);
+  }
+}
+
 ///////////////////////////////////////////
 #include <Adafruit_GPS.h>
 #include "gps_config.h"
@@ -210,7 +282,7 @@ void checkForNewLapData() {
 
 #define SPI_SPEED SD_SCK_MHZ(25)
 
-#include <SPI.h>
+
 #include "SdFat.h"
 #include "sdios.h"
 
@@ -426,9 +498,9 @@ float epsilonPrecision = 0.001;
 #include <Wire.h>
 
 #ifdef WOKWI
-#define USE_1306_DISPLAY // remove to use SH110X oled
+// #define USE_1306_DISPLAY // remove to use SH110X oled
 #endif
-#define USE_1306_DISPLAY // remove to use SH110X oled
+// #define USE_1306_DISPLAY // remove to use SH110X oled
 
 #include "images.h"
 #include "display_config.h"
@@ -457,11 +529,12 @@ const int GPS_STATS = 4;
   const int GPS_LAP_LIST = 1002;
 #else
   const int GPS_SPEED = 5;
-  const int GPS_LAP_TIME = 6;
-  const int GPS_LAP_PACE = 7;
-  const int GPS_LAP_BEST = 8;
-  const int GPS_LAP_LIST = 9;
-  const int LOGGING_STOP = 10;
+  const int TACHOMETER = 6;
+  const int GPS_LAP_TIME = 7;
+  const int GPS_LAP_PACE = 8;
+  const int GPS_LAP_BEST = 9;
+  const int GPS_LAP_LIST = 10;
+  const int LOGGING_STOP = 11;
 #endif
 
 // end menu
@@ -495,9 +568,9 @@ void setupButtons() {
   // btn2->pin = 2;
   // btn3->pin = 0;
   // greybox
-  btn1->pin = 3;
+  btn1->pin = 1;
   btn2->pin = 2;
-  btn3->pin = 1;
+  btn3->pin = 3;
 
   #else
   btn1->pin = 4;
@@ -794,7 +867,7 @@ void displayPage_gps_speed() {
   }
 
   display.setCursor(40, 5);
-  display.setTextSize(8);
+  display.setTextSize(7);
   // display.println(F("69"));
   if (gps->fix) {
     display.println(round(gps_speed_mph));
@@ -979,6 +1052,22 @@ void displayPage_gps_best_lap() {
   display.display();
 }
 
+void displayPage_tachometer() {
+  resetDisplay();
+
+  if (tachLastReported > 9999) {
+    display.println(F("Engine RPM *OVER REV*"));
+  } else {
+    display.println(F("Engine RPM"));
+  }
+
+  display.setCursor(5, 20);
+  display.setTextSize(5);
+  display.println(tachLastReported);
+  
+  display.display();
+}
+
 // TODO: this page probably needs some kind of delayed rendering?
 const int lapsPerPage = 3;
 int current_lap_list_page = 0;
@@ -1140,13 +1229,16 @@ void displayCrossing() {
   display.setTextSize(1);
   display.setCursor(0, 0);
 
-  // Draw bitmap on the screen
-  calculatingFlip = calculatingFlip == true ? false : true;
-  if (calculatingFlip) {
-    display.drawBitmap(0, 0, image_data_calculating1, 128, 64, 1);
-  } else {
-    display.drawBitmap(0, 0, image_data_calculating2, 128, 64, 1);
-  }
+  #ifndef ENDURANCE_MODE
+    // Draw bitmap on the screen
+    calculatingFlip = calculatingFlip == true ? false : true;
+    if (calculatingFlip) {
+      display.drawBitmap(0, 0, image_data_calculating1, 128, 64, 1);
+    } else {
+      display.drawBitmap(0, 0, image_data_calculating2, 128, 64, 1);
+    }
+  #else
+  #endif
 
   display.display();
 }
@@ -1293,6 +1385,12 @@ void displayLoop() {
   if (millis() - displayLastUpdate > (1000 / displayUpdateRateHz)) {
     displayLastUpdate = millis();
 
+    #ifdef ENDURANCE_MODE
+      bool inEndurance = true;
+    #else
+      bool inEndurance = false;
+    #endif
+
     if (
       currentPage != GPS_STATS &&
       currentPage != GPS_DEBUG &&
@@ -1300,7 +1398,8 @@ void displayLoop() {
       currentPage != LOGGING_STOP_CONFIRM &&
       currentPage != PAGE_INTERNAL_FAULT &&
       currentPage != PAGE_INTERNAL_WARNING &&
-      lapTimer.getCrossing()
+      lapTimer.getCrossing() &&
+      inEndurance == false
     ) {
       displayCrossing();
       lastPage = 999;
@@ -1314,6 +1413,8 @@ void displayLoop() {
       displayPage_gps_stats();
     } else if (currentPage == GPS_SPEED) {
       displayPage_gps_speed();
+    } else if (currentPage == TACHOMETER) {
+      displayPage_tachometer();
     } else if (currentPage == GPS_LAP_TIME) {
       displayPage_gps_lap_time();
     } else if (currentPage == GPS_LAP_PACE) {
@@ -1425,7 +1526,7 @@ void displayLoop() {
     // page up/down/enter
     // BUTTON LEFT
     if (btn1->pressed) {
-      // debugln(F("Button Left"));
+      debugln(F("Button Left"));
       if (currentPage <= runningPageStart) {
         currentPage = runningPageEnd;
       } else {
@@ -1437,12 +1538,12 @@ void displayLoop() {
     }
     // BUTTON ENTER
     if (btn2->pressed) {
-      debugln(F("Button Enter (running)"));
+      debugln(F("Button Middle (running)"));
       handleRunningPageSelection();
     }
     // BUTTON DOWN
     if (btn3->pressed) {
-      // debugln(F("Button Down"));
+      debugln(F("Button Right"));
       if (currentPage >= runningPageEnd) {
         currentPage = runningPageStart;
       } else {
@@ -1476,7 +1577,28 @@ void GPS_LOOP() {
 
     #ifdef SD_CARD_LOGGING_ENABLED
       if (trackSelected && gps->fix && sdSetupSuccess && sdDataLogInitComplete && enableLogging) {
-        dataFile.print(gps->lastNMEA());
+
+        /////////////////////////////////////////////////////////////////
+        // dataFile.print(gps->lastNMEA());
+
+        // print tab deliminated csv
+        const char* nmea = gps->lastNMEA();
+
+        char line[256];
+        strncpy(line, nmea, sizeof(line));
+        line[sizeof(line) - 1] = '\0';
+
+        // strip trailing \r and \n
+        size_t len = strlen(line);
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+          line[--len] = '\0';
+        }
+
+        dataFile.print(line);
+        dataFile.print('\t');
+        dataFile.println(tachLastReported);
+        /////////////////////////////////////////////////////////////////
+
         // flush once in a while
         if (millis() - lastCardFlush > 10000) {
           lastCardFlush = millis();
@@ -1602,10 +1724,15 @@ void setup() {
   } else {
     switchToDisplayPage(PAGE_SELECT_LOCATION);
   }
+
+  // tachometer
+  pinMode(tachInputPin, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(tachInputPin), TACH_COUNT_PULSE, FALLING);
 }
 
 void loop() {
   GPS_LOOP();
+  TACH_LOOP();
   #ifndef ENDURANCE_MODE
     checkForNewLapData();
   #endif
