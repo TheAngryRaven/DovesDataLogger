@@ -1645,10 +1645,7 @@ void GPS_LOOP() {
         // Flush more frequently to avoid data loss - every 2 seconds
         if (millis() - lastCardFlush > 2000) {
           lastCardFlush = millis();
-          if (!dataFile.flush()) {
-            debugln(F("SD flush failed"));
-            // Don't kill logging on flush failure, just note it
-          }
+          dataFile.flush();
         }
       } else if (trackSelected && gps->fix && sdSetupSuccess && !sdDataLogInitComplete && enableLogging && gps->day > 0) {
         debugln(F("Attempt to initialize logfile"));
