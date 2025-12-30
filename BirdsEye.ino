@@ -112,6 +112,7 @@ void TACH_COUNT_PULSE() {
   // Disable interrupt processing until TACH_LOOP re-enables it
   // This blocks the interrupt storm that follows each ignition event
   tachInterruptShouldProcess = false;
+  noInterrupts();  // Disable interrupts at hardware level
 }
 
 void TACH_LOOP() {
