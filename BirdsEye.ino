@@ -116,16 +116,14 @@ void TACH_COUNT_PULSE() {
 
 void TACH_LOOP() {
   // Re-enable interrupt processing after the dead-time window
-  // This allows the next ignition event to be captured
+  // Keep interrupts disabled until we're ready for the next pulse
   if (!tachInterruptShouldProcess) {
-    uint32_t elapsed;
-    noInterrupts();
-    elapsed = micros() - tachLastPulseUs;
+    uint32_t elapsed = micros() - tachLastPulseUs;
 
     if (elapsed >= tachMinPulseGapUs) {
       tachInterruptShouldProcess = true;
+      interrupts();  // Only re-enable when ready for next pulse
     }
-    interrupts();  // Re-enable AFTER setting flag to avoid race condition
   }
 
   // Update filtered RPM (highest "real" update rate)
