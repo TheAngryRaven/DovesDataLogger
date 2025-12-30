@@ -80,6 +80,11 @@ volatile uint32_t tachLastPulseUs = 0;
 volatile uint32_t tachLastPeriodUs = 0;
 volatile bool tachHavePeriod = false;
 
+// Gate to reduce interrupt storm from noisy inductive pickup
+// After accepting a pulse, we ignore ALL interrupts for tachMinPulseGapUs
+// This prevents the ISR from running hundreds of times per ignition event
+volatile bool tachInterruptShouldProcess = true;
+
 // filtered RPM state (updated in loop, not ISR)
 float tachRpmFiltered = 0.0f;
 
@@ -91,6 +96,10 @@ static const uint32_t tachStopTimeoutUs = 500000; // if no pulses for this long,
 
 // interrupt
 void TACH_COUNT_PULSE() {
+  // CRITICAL: Exit immediately if we're in the dead-time window
+  // This prevents interrupt storm from noisy inductive pickup
+  if (!tachInterruptShouldProcess) return;
+
   uint32_t now = micros();
   uint32_t dt = now - tachLastPulseUs;
 
@@ -99,10 +108,27 @@ void TACH_COUNT_PULSE() {
   tachLastPulseUs = now;
   tachLastPeriodUs = dt;
   tachHavePeriod = true;
+
+  // Disable interrupt processing until TACH_LOOP re-enables it
+  // This blocks the interrupt storm that follows each ignition event
+  tachInterruptShouldProcess = false;
 }
 
 void TACH_LOOP() {
-  // Update filtered RPM (highest “real” update rate)
+  // Re-enable interrupt processing after the dead-time window
+  // This allows the next ignition event to be captured
+  if (!tachInterruptShouldProcess) {
+    uint32_t elapsed;
+    noInterrupts();
+    elapsed = micros() - tachLastPulseUs;
+    interrupts();
+
+    if (elapsed >= tachMinPulseGapUs) {
+      tachInterruptShouldProcess = true;
+    }
+  }
+
+  // Update filtered RPM (highest "real" update rate)
   uint32_t periodUs = 0;
   bool havePeriod = false;
 
@@ -129,7 +155,7 @@ void TACH_LOOP() {
     tachRpmFiltered = 0.0f;
   }
 
-  // Snapshot for display/log at any chosen rate (can be high; value stays “latest filtered RPM”)
+  // Snapshot for display/log at any chosen rate (can be high; value stays "latest filtered RPM")
   if (millis() - tachLastUpdate > (1000 / tachUpdateRateHz)) {
     tachLastUpdate = millis();
     tachLastReported = (int)(tachRpmFiltered + 0.5f);
