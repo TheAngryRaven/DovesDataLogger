@@ -71,7 +71,7 @@ float getBatteryVoltage() {
 
 const int tachInputPin = D0;
 unsigned long tachLastUpdate = 0;
-int tachLastReported = 0;
+volatile int tachLastReported = 0;  // FIXED: Made volatile for thread safety
 
 static const uint32_t tachMinPulseGapUs = 2000; // ignore bounces/noise faster than this
 volatile uint32_t tachLastPulseUs = 0;
@@ -280,7 +280,9 @@ void checkForNewLapData() {
 // #define PIN_SPI_CS 3 // todo: ground out for A0/battery voltage...
 #endif
 
-#define SPI_SPEED SD_SCK_MHZ(25)
+// Reduced from 25MHz to 4MHz for better EMI resistance
+// Slower speed = more robust against ignition noise
+#define SPI_SPEED SD_SCK_MHZ(4)
 
 
 #include "SdFat.h"
@@ -322,11 +324,17 @@ void makeFullTrackPath(char* trackName, char* filepath) {
 
 bool SD_SETUP() {
   // TODO: FAT32 CHECK
-  if (!SD.begin(PIN_SPI_CS, SPI_SPEED)) {
-    debugln(F("Card initialization failed."));
-    return false;
+  // Try multiple times - EMI from ignition can cause init failures
+  for (int attempt = 0; attempt < 3; attempt++) {
+    if (SD.begin(PIN_SPI_CS, SPI_SPEED)) {
+      debugln(F("SD Card initialized successfully"));
+      return true;
+    }
+    debugln(F("SD init attempt failed, retrying..."));
+    delay(100);  // Brief delay between attempts
   }
-  return true;
+  debugln(F("Card initialization failed after 3 attempts."));
+  return false;
 }
 
 bool buildTrackList() {
@@ -1594,15 +1602,28 @@ void GPS_LOOP() {
           line[--len] = '\0';
         }
 
-        dataFile.print(line);
-        dataFile.print('\t');
-        dataFile.println(tachLastReported);
+        // Write with error checking - EMI can corrupt writes
+        size_t written = dataFile.print(line);
+        if (written == 0) {
+          debugln(F("SD write failed - disabling logging"));
+          enableLogging = false;
+          sdDataLogInitComplete = false;
+          dataFile.close();
+          internalNotification = "SD Write Failed!\nCheck card/connections";
+          switchToDisplayPage(PAGE_INTERNAL_FAULT);
+        } else {
+          dataFile.print('\t');
+          dataFile.println(tachLastReported);
+        }
         /////////////////////////////////////////////////////////////////
 
-        // flush once in a while
-        if (millis() - lastCardFlush > 10000) {
+        // Flush more frequently to avoid data loss - every 2 seconds
+        if (millis() - lastCardFlush > 2000) {
           lastCardFlush = millis();
-          dataFile.flush();
+          if (!dataFile.flush()) {
+            debugln(F("SD flush failed"));
+            // Don't kill logging on flush failure, just note it
+          }
         }
       } else if (trackSelected && gps->fix && sdSetupSuccess && !sdDataLogInitComplete && enableLogging && gps->day > 0) {
         debugln(F("Attempt to initialize logfile"));
@@ -1627,11 +1648,8 @@ void GPS_LOOP() {
         debug(dataFileNameS.c_str());
         debugln(F("]"));
 
-        #ifdef WOKWI
+        // Open for writing - removed O_NONBLOCK as it doesn't work on SD
         dataFile.open(dataFileNameS.c_str(), O_CREAT | O_WRITE);
-        #else
-        dataFile.open(dataFileNameS.c_str(), O_CREAT | O_WRITE | O_NONBLOCK);
-        #endif
 
         if (!dataFile) {
           debugln(F("Error opening log file"));
