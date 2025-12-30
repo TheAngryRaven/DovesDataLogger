@@ -121,11 +121,11 @@ void TACH_LOOP() {
     uint32_t elapsed;
     noInterrupts();
     elapsed = micros() - tachLastPulseUs;
-    interrupts();
 
     if (elapsed >= tachMinPulseGapUs) {
       tachInterruptShouldProcess = true;
     }
+    interrupts();  // Re-enable AFTER setting flag to avoid race condition
   }
 
   // Update filtered RPM (highest "real" update rate)
