@@ -184,6 +184,52 @@ Adafruit_GPS* gps = NULL;
   }
 
   /**
+   * @brief Converts GPS date/time to Unix timestamp (seconds since Jan 1, 1970)
+   *
+   * @return unsigned long Unix timestamp in seconds
+   */
+  unsigned long getGpsUnixTimestamp() {
+    // Days in each month (non-leap year)
+    const uint8_t daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+
+    uint16_t year = 2000 + gps->year;
+    uint8_t month = gps->month;
+    uint8_t day = gps->day;
+
+    // Calculate days since Unix epoch (Jan 1, 1970)
+    unsigned long days = 0;
+
+    // Add days for complete years since 1970
+    for (uint16_t y = 1970; y < year; y++) {
+      if ((y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)) {
+        days += 366; // Leap year
+      } else {
+        days += 365;
+      }
+    }
+
+    // Add days for complete months this year
+    for (uint8_t m = 1; m < month; m++) {
+      days += daysInMonth[m - 1];
+      // Add leap day if February and leap year
+      if (m == 2 && ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0))) {
+        days++;
+      }
+    }
+
+    // Add remaining days
+    days += day - 1;
+
+    // Convert to seconds and add time of day
+    unsigned long timestamp = days * 86400UL;
+    timestamp += gps->hour * 3600UL;
+    timestamp += gps->minute * 60UL;
+    timestamp += gps->seconds;
+
+    return timestamp;
+  }
+
+  /**
    * @brief Sends a GPS configuration command stored in program memory to the GPS module via [GPS_SERIAL].
    *
    * This function reads a configuration command from PROGMEM (program memory) and sends it byte by byte to the GPS module using the [GPS_SERIAL] interface.
@@ -1612,33 +1658,52 @@ void GPS_LOOP() {
       if (trackSelected && gps->fix && sdSetupSuccess && sdDataLogInitComplete && enableLogging) {
 
         /////////////////////////////////////////////////////////////////
-        // dataFile.print(gps->lastNMEA());
-
-        // print tab deliminated csv
+        // Only log GPGGA packets (contains all the data we need, ~25Hz at our GPS settings)
         const char* nmea = gps->lastNMEA();
 
-        char line[256];
-        strncpy(line, nmea, sizeof(line));
-        line[sizeof(line) - 1] = '\0';
+        // Check if this is a GPGGA or GNGGA packet
+        if (strstr(nmea, "$GPGGA") != NULL || strstr(nmea, "$GNGGA") != NULL) {
 
-        // strip trailing \r and \n
-        size_t len = strlen(line);
-        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
-          line[--len] = '\0';
-        }
+          // Build CSV line: timestamp,sats,hdop,lat,lng,speed_mph,alt_m,rpm,egt,water_temp,reserved1,reserved2
+          char csvLine[256];
 
-        // Write with error checking - EMI can corrupt writes
-        size_t written = dataFile.print(line);
-        if (written == 0) {
-          debugln(F("SD write failed - disabling logging"));
-          enableLogging = false;
-          sdDataLogInitComplete = false;
-          dataFile.close();
-          internalNotification = "SD Write Failed!\nCheck card/connections";
-          switchToDisplayPage(PAGE_INTERNAL_FAULT);
-        } else {
-          dataFile.print('\t');
-          dataFile.println(tachLastReported);
+          // Convert floats to strings with proper precision
+          char latStr[16], lngStr[16], hdopStr[8], speedStr[12], altStr[12];
+
+          // 8 decimals for lat/lng (racing precision)
+          dtostrf(gps->latitudeDegrees, 1, 8, latStr);
+          dtostrf(gps->longitudeDegrees, 1, 8, lngStr);
+
+          // 1 decimal for HDOP
+          dtostrf(gps->HDOP, 1, 1, hdopStr);
+
+          // 2 decimals for speed and altitude
+          dtostrf(gps_speed_mph, 1, 2, speedStr);
+          dtostrf(gps->altitude, 1, 2, altStr);
+
+          // Build the complete CSV line
+          snprintf(csvLine, sizeof(csvLine), "%lu,%d,%s,%s,%s,%s,%s,%d,0,0,0,0",
+                   getGpsUnixTimestamp(),      // timestamp (Unix seconds)
+                   (int)gps->satellites,       // sats
+                   hdopStr,                    // hdop
+                   latStr,                     // lat
+                   lngStr,                     // lng
+                   speedStr,                   // speed_mph
+                   altStr,                     // alt_m
+                   tachLastReported            // rpm
+                   // egt, water_temp, reserved1, reserved2 are all 0
+          );
+
+          // Write with error checking - EMI can corrupt writes
+          size_t written = dataFile.println(csvLine);
+          if (written == 0) {
+            debugln(F("SD write failed - disabling logging"));
+            enableLogging = false;
+            sdDataLogInitComplete = false;
+            dataFile.close();
+            internalNotification = "SD Write Failed!\nCheck card/connections";
+            switchToDisplayPage(PAGE_INTERNAL_FAULT);
+          }
         }
         /////////////////////////////////////////////////////////////////
 
@@ -1665,7 +1730,7 @@ void GPS_LOOP() {
         String trackLayout= tracks[selectedTrack];
         String layoutDirection = selectedDirection == RACE_DIRECTION_FORWARD ? "fwd" : "rev";
 
-        String dataFileNameS = trackLocation + "_" + trackLayout + "_" + layoutDirection + "_" + gpsYear + "_" + gpsMonth + gpsDay + "_" + gpsHour + gpsMinute + ".nmea";
+        String dataFileNameS = trackLocation + "_" + trackLayout + "_" + layoutDirection + "_" + gpsYear + "_" + gpsMonth + gpsDay + "_" + gpsHour + gpsMinute + ".dove";
 
         // const char* dataFileName = dataFileNameS.c_str();
 
@@ -1678,7 +1743,7 @@ void GPS_LOOP() {
 
         if (!dataFile) {
           debugln(F("Error opening log file"));
-          
+
           // hmmm
           String errorMessage = String("Error saving log:\n") + dataFileNameS;
           internalNotification = errorMessage;
@@ -1686,12 +1751,15 @@ void GPS_LOOP() {
           // int errorMessageLength = errorMessage.length() + 1;
           // char errorMessageCharArray[errorMessageLength];
           // errorMessage.toCharArray(errorMessageCharArray, errorMessageLength);
-          // internalNotification = errorMessageCharArray;
           // internalNotification = "Error creating log!";
 
           switchToDisplayPage(PAGE_INTERNAL_FAULT);
 
           enableLogging = false;
+        } else {
+          // Write CSV header as first line
+          dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,alt_m,rpm,egt,water_temp,reserved1,reserved2"));
+          debugln(F("CSV header written"));
         }
         sdDataLogInitComplete = true;
       }
