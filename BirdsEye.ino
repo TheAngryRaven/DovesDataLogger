@@ -1766,8 +1766,10 @@ void setup() {
   }
 
   // tachometer
-  pinMode(tachInputPin, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(tachInputPin), TACH_COUNT_PULSE, FALLING);
+  // pinMode(tachInputPin, INPUT_PULLUP);
+  // attachInterrupt(digitalPinToInterrupt(tachInputPin), TACH_COUNT_PULSE, FALLING);
+  pinMode(tachInputPin, INPUT_PULLDOWN);
+  attachInterrupt(digitalPinToInterrupt(tachInputPin), TACH_COUNT_PULSE, RISING);
 }
 
 void loop() {
