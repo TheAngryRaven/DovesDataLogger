@@ -42,6 +42,20 @@ struct TrackLayout {
   double start_a_lng = 0.00;
   double start_b_lat = 0.00;
   double start_b_lng = 0.00;
+
+  // Sector 2 line data (optional)
+  double sector_2_a_lat = 0.00;
+  double sector_2_a_lng = 0.00;
+  double sector_2_b_lat = 0.00;
+  double sector_2_b_lng = 0.00;
+  bool hasSector2 = false;
+
+  // Sector 3 line data (optional)
+  double sector_3_a_lat = 0.00;
+  double sector_3_a_lng = 0.00;
+  double sector_3_b_lat = 0.00;
+  double sector_3_b_lng = 0.00;
+  bool hasSector3 = false;
 };
 
 const int RACE_DIRECTION_FORWARD  = 0;
@@ -553,6 +567,36 @@ int parseTrackFile(char* filepath) {
       trackLayouts[numOfTracks].start_a_lng = layout["start_a_lng"];
       trackLayouts[numOfTracks].start_b_lat = layout["start_b_lat"];
       trackLayouts[numOfTracks].start_b_lng = layout["start_b_lng"];
+
+      // Check if sector 2 data is present (optional)
+      if (layout.containsKey("sector_2_a_lat") && layout.containsKey("sector_2_a_lng") &&
+          layout.containsKey("sector_2_b_lat") && layout.containsKey("sector_2_b_lng")) {
+        trackLayouts[numOfTracks].sector_2_a_lat = layout["sector_2_a_lat"];
+        trackLayouts[numOfTracks].sector_2_a_lng = layout["sector_2_a_lng"];
+        trackLayouts[numOfTracks].sector_2_b_lat = layout["sector_2_b_lat"];
+        trackLayouts[numOfTracks].sector_2_b_lng = layout["sector_2_b_lng"];
+        trackLayouts[numOfTracks].hasSector2 = true;
+        #ifdef HAS_DEBUG
+        debugln(F("  Sector 2 data loaded"));
+        #endif
+      } else {
+        trackLayouts[numOfTracks].hasSector2 = false;
+      }
+
+      // Check if sector 3 data is present (optional)
+      if (layout.containsKey("sector_3_a_lat") && layout.containsKey("sector_3_a_lng") &&
+          layout.containsKey("sector_3_b_lat") && layout.containsKey("sector_3_b_lng")) {
+        trackLayouts[numOfTracks].sector_3_a_lat = layout["sector_3_a_lat"];
+        trackLayouts[numOfTracks].sector_3_a_lng = layout["sector_3_a_lng"];
+        trackLayouts[numOfTracks].sector_3_b_lat = layout["sector_3_b_lat"];
+        trackLayouts[numOfTracks].sector_3_b_lng = layout["sector_3_b_lng"];
+        trackLayouts[numOfTracks].hasSector3 = true;
+        #ifdef HAS_DEBUG
+        debugln(F("  Sector 3 data loaded"));
+        #endif
+      } else {
+        trackLayouts[numOfTracks].hasSector3 = false;
+      }
 
       numOfTracks++;
     }
@@ -1476,6 +1520,32 @@ void handleMenuPageSelection() {
 
     // initialize laptimer class
     lapTimer.setStartFinishLine(crossingPointALat, crossingPointALng, crossingPointBLat, crossingPointBLng);
+
+    // Set sector lines if available
+    if (trackLayouts[selectedTrack].hasSector2) {
+      lapTimer.setSector2Line(
+        trackLayouts[selectedTrack].sector_2_a_lat,
+        trackLayouts[selectedTrack].sector_2_a_lng,
+        trackLayouts[selectedTrack].sector_2_b_lat,
+        trackLayouts[selectedTrack].sector_2_b_lng
+      );
+      #ifdef HAS_DEBUG
+      debugln(F("Sector 2 line configured"));
+      #endif
+    }
+
+    if (trackLayouts[selectedTrack].hasSector3) {
+      lapTimer.setSector3Line(
+        trackLayouts[selectedTrack].sector_3_a_lat,
+        trackLayouts[selectedTrack].sector_3_a_lng,
+        trackLayouts[selectedTrack].sector_3_b_lat,
+        trackLayouts[selectedTrack].sector_3_b_lng
+      );
+      #ifdef HAS_DEBUG
+      debugln(F("Sector 3 line configured"));
+      #endif
+    }
+
     lapTimer.forceLinearInterpolation();
     lapTimer.reset();
   } else if (currentPage == PAGE_SELECT_DIRECTION) {
