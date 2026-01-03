@@ -477,7 +477,7 @@ bool buildTrackList() {
 #define JSON_BUFFER_SIZE 1024
 #else
 // might need to make bigger for more layouts, test and expiriment
-#define JSON_BUFFER_SIZE 1024
+#define JSON_BUFFER_SIZE 2048
 #endif
 
 const int PARSE_STATUS_GOOD = 0;
