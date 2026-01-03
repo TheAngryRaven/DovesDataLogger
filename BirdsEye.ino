@@ -246,6 +246,21 @@ Adafruit_GPS* gps = NULL;
   }
 
   /**
+   * @brief Converts GPS date/time to Unix timestamp with millisecond precision
+   *
+   * @return unsigned long long Unix timestamp in milliseconds since Jan 1, 1970
+   */
+  unsigned long long getGpsUnixTimestampMillis() {
+    // Get the Unix timestamp in seconds
+    unsigned long long timestampMillis = (unsigned long long)getGpsUnixTimestamp() * 1000ULL;
+
+    // Add the milliseconds from GPS
+    timestampMillis += gps->milliseconds;
+
+    return timestampMillis;
+  }
+
+  /**
    * @brief Sends a GPS configuration command stored in program memory to the GPS module via [GPS_SERIAL].
    *
    * This function reads a configuration command from PROGMEM (program memory) and sends it byte by byte to the GPS module using the [GPS_SERIAL] interface.
@@ -1831,15 +1846,15 @@ void GPS_LOOP() {
           dtostrf(gps->altitude, 1, 2, altStr);
 
           // Build the complete CSV line
-          snprintf(csvLine, sizeof(csvLine), "%lu,%d,%s,%s,%s,%s,%s,%d,0,0",
-                   getGpsUnixTimestamp(),      // timestamp (Unix seconds)
-                   (int)gps->satellites,       // sats
-                   hdopStr,                    // hdop
-                   latStr,                     // lat
-                   lngStr,                     // lng
-                   speedStr,                   // speed_mph
-                   altStr,                     // alt_m
-                   tachLastReported            // rpm
+          snprintf(csvLine, sizeof(csvLine), "%llu,%d,%s,%s,%s,%s,%s,%d,0,0",
+                   getGpsUnixTimestampMillis(), // timestamp (Unix milliseconds)
+                   (int)gps->satellites,        // sats
+                   hdopStr,                     // hdop
+                   latStr,                      // lat
+                   lngStr,                      // lng
+                   speedStr,                    // speed_mph
+                   altStr,                      // alt_m
+                   tachLastReported             // rpm
                    // egt, water_temp, reserved1, reserved2 are all 0
           );
 
