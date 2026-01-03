@@ -8,6 +8,7 @@ No longer top sekret, but I have not written a readme yet, good luck
 - speed
 - current lap
 - best lap
+- Optimal lap + laps best sectors happened
 - pace off best lap (current session)
 - lap history (current session)
 
@@ -23,16 +24,13 @@ No longer top sekret, but I have not written a readme yet, good luck
 - datalogger: readme coming
 	- It's kind of easy to add custom pages if you just look at the others
 - tachometer readme coming soon
+  - I gave you the schematic, just try
 - 3dp Box: readme coming soon
 	- It's a rough fit if you just wing it, go slow
 	- Yes, glue required, and a couple jewelers screws
 
-#### Bonus
-I think this broke, but its a circuit sim thingy, that was working at some point
-[https://wokwi.com/projects/367285364247620609](https://wokwi.com/projects/367285364247620609)
-
 ---
 
-DataViewer: [https://github.com/TheAngryRaven/DovesDataViewer](DovesDataViewer)
-  -- Preview: [HackTheTrack.net](HackTheTrack.net)
-Core GPS Timing library: [https://github.com/TheAngryRaven/DovesLapTimer](DovesLapTimer)
+- DataViewer: [https://github.com/TheAngryRaven/DovesDataViewer](DovesDataViewer)
+  - Preview: [HackTheTrack.net](HackTheTrack.net)
+- Core GPS Timing library: [https://github.com/TheAngryRaven/DovesLapTimer](DovesLapTimer)

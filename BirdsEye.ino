@@ -1,3 +1,4 @@
+#include <avr/dtostrf.h>
 #include <SPI.h>
 
 // #define WOKWI
@@ -72,6 +73,7 @@ float getBatteryVoltage() {
 const int tachInputPin = D0;
 unsigned long tachLastUpdate = 0;
 volatile int tachLastReported = 0;  // FIXED: Made volatile for thread safety
+int topTachReported = 0;
 
 static const uint32_t tachMinPulseGapUs = 2000; // ignore bounces/noise faster than this
 volatile uint32_t tachLastPulseUs = 0;
@@ -612,8 +614,9 @@ const int GPS_STATS = 4;
   const int GPS_LAP_TIME = 7;
   const int GPS_LAP_PACE = 8;
   const int GPS_LAP_BEST = 9;
-  const int GPS_LAP_LIST = 10;
-  const int LOGGING_STOP = 11;
+  const int OPTIMAL_LAP = 10;
+  const int GPS_LAP_LIST = 11;
+  const int LOGGING_STOP = 12;
 #endif
 
 // end menu
@@ -718,7 +721,7 @@ void displayPage_boot() {
   display.println(F("   Doves\n MagicBox"));
   display.setTextSize(1);
   display.println(F(""));
-  display.println(F("  GPS SDCard Logger"));
+  display.println(F(" Timer + Data Logger"));
   display.println(F("\n    Initializing..."));
 
   display.display();
@@ -1137,12 +1140,85 @@ void displayPage_tachometer() {
   if (tachLastReported > 9999) {
     display.println(F("Engine RPM *OVER REV*"));
   } else {
-    display.println(F("Engine RPM"));
+    display.println(F("     Engine RPM"));
   }
 
   display.setCursor(5, 20);
-  display.setTextSize(5);
+  display.setTextSize(4);
+  if (tachLastReported < 10000) {
+    display.print(F(" "));
+  }
+  if (tachLastReported < 1000) {
+    display.print(F(" "));
+  }
+  if (tachLastReported < 100) {
+    display.print(F(" "));
+  }
+  if (tachLastReported < 10) {
+    display.print(F(" "));
+  }
   display.println(tachLastReported);
+
+
+  display.setTextSize(1);
+  display.setCursor(0, 55);
+  display.print(F("     max: "));
+  display.print(topTachReported);
+
+  display.display();
+}
+
+void displayPage_optimal_lap() {
+  resetDisplay();
+
+  display.println(F("     Optimal Lap"));
+  if (
+    lapTimer.getRaceStarted() &&
+    lapTimer.getLaps() > 0
+  ) {
+    const int lineHeight = 15;
+    display.setCursor(0, lineHeight);
+    display.setTextSize(2);
+
+    unsigned long minutes = lapTimer.getOptimalLapTime() / 60000;
+    unsigned long seconds = (lapTimer.getOptimalLapTime() % 60000) / 1000;
+    unsigned long milliseconds = lapTimer.getOptimalLapTime() % 1000;
+
+    if (minutes > 0) {
+      display.print(minutes);
+      display.print(":");
+    } else {
+      display.print(" ");
+    }
+
+    if (seconds < 10) {
+      display.print(" ");
+    }
+    display.print(seconds);
+    display.print(".");
+    display.print(milliseconds);
+    if (milliseconds < 10) {
+      display.print("00");
+    } else if (milliseconds < 100) {
+      display.print("0");
+    }
+
+    display.setCursor(0, lineHeight+20);
+    display.setTextSize(1);
+    display.println(F("     Lap Numbers"));
+    display.setCursor(0, lineHeight+35);
+    display.setTextSize(2);
+    display.print(F("  "));
+    display.print(lapTimer.getBestSector1LapNumber());
+    display.print(F("  "));
+    display.print(lapTimer.getBestSector2LapNumber());
+    display.print(F("  "));
+    display.print(lapTimer.getBestSector3LapNumber());
+  } else {
+    display.print(F("\n\n"));
+    display.setTextSize(3);
+    display.print("  N/A");
+  }
   
   display.display();
 }
@@ -1266,17 +1342,18 @@ String internalNotification = "N/A";
 
 void displayPage_internal_fault() {
   resetDisplay();
+  display.setCursor(0, 0);
   notificationFlash = notificationFlash == true ? false : true;
   display.setTextSize(2);
 
   if (notificationFlash) {
     display.setTextColor(DISPLAY_TEXT_BLACK, DISPLAY_TEXT_WHITE);
   }
-  display.println(F("   FAULT   "));
+  display.println(F("   FAULT  "));
   display.setTextWrap(true);
   display.setTextColor(DISPLAY_TEXT_WHITE);
   display.setTextSize(1);
-  display.println(F("  Must Reboot Device"));
+  display.println(F(" Please Reboot Device"));
   display.println(F(""));
   // display.println(F("MSG:"));
   display.println(internalNotification);
@@ -1513,6 +1590,8 @@ void displayLoop() {
           switchToDisplayPage(currentPage);
         }
       #endif
+    } else if (currentPage == OPTIMAL_LAP) {
+      displayPage_optimal_lap();
     } else if (currentPage == GPS_LAP_LIST) {
       displayPage_gps_lap_list();
     } else if (currentPage == LOGGING_STOP) {
@@ -1682,7 +1761,7 @@ void GPS_LOOP() {
           dtostrf(gps->altitude, 1, 2, altStr);
 
           // Build the complete CSV line
-          snprintf(csvLine, sizeof(csvLine), "%lu,%d,%s,%s,%s,%s,%s,%d,0,0,0,0",
+          snprintf(csvLine, sizeof(csvLine), "%lu,%d,%s,%s,%s,%s,%s,%d,0,0",
                    getGpsUnixTimestamp(),      // timestamp (Unix seconds)
                    (int)gps->satellites,       // sats
                    hdopStr,                    // hdop
@@ -1755,7 +1834,7 @@ void GPS_LOOP() {
           enableLogging = false;
         } else {
           // Write CSV header as first line
-          dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,alt_m,rpm,egt,water_temp,reserved1,reserved2"));
+          dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,rpm,exhaust_temp_c,water_temp_c"));
           debugln(F("CSV header written"));
         }
         sdDataLogInitComplete = true;
@@ -1834,8 +1913,6 @@ void setup() {
   }
 
   // tachometer
-  // pinMode(tachInputPin, INPUT_PULLUP);
-  // attachInterrupt(digitalPinToInterrupt(tachInputPin), TACH_COUNT_PULSE, FALLING);
   pinMode(tachInputPin, INPUT_PULLDOWN);
   attachInterrupt(digitalPinToInterrupt(tachInputPin), TACH_COUNT_PULSE, RISING);
 }
@@ -1851,4 +1928,8 @@ void loop() {
   readButtons();
   displayLoop();
   resetButtons();
+
+  if (tachLastReported > topTachReported) {
+    topTachReported = tachLastReported;
+  }
 }
