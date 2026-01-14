@@ -178,175 +178,113 @@ void TACH_LOOP() {
 }
 
 ///////////////////////////////////////////
-#include <Adafruit_GPS.h>
-#include "gps_config.h"
-Adafruit_GPS* gps = NULL;
+// GPS LIBRARIES REMOVED FOR SD CARD TEST MODE
+// #include <Adafruit_GPS.h>
+// #include "gps_config.h"
+// Adafruit_GPS* gps = NULL;
 
-#define GPS_SERIAL Serial1
-#ifndef GPS_CONFIGURATION
-  /**
-   * @brief Returns the GPS time since midnight in milliseconds
-   *
-   * @return unsigned long The time since midnight in milliseconds
-   */
-  unsigned long getGpsTimeInMilliseconds() {
-    unsigned long timeInMillis = 0;
-    timeInMillis += gps->hour * 3600000ULL;   // Convert hours to milliseconds
-    timeInMillis += gps->minute * 60000ULL;   // Convert minutes to milliseconds
-    timeInMillis += gps->seconds * 1000ULL;   // Convert seconds to milliseconds
-    timeInMillis += gps->milliseconds;        // Add the milliseconds part
+// Dummy GPS data structure for testing
+struct DummyGPS {
+  bool fix = true;
+  uint8_t satellites = 12;
+  float HDOP = 0.9;
+  double latitudeDegrees = 40.12345678;
+  double longitudeDegrees = -83.87654321;
+  float speed = 30.0; // knots
+  float altitude = 250.5;
+  uint8_t hour = 12;
+  uint8_t minute = 30;
+  uint8_t seconds = 45;
+  uint16_t milliseconds = 123;
+  uint8_t year = 26;
+  uint8_t month = 1;
+  uint8_t day = 14;
+} dummyGPS;
 
-    return timeInMillis;
-  }
+DummyGPS* gps = &dummyGPS;
 
-  /**
-   * @brief Converts GPS date/time to Unix timestamp (seconds since Jan 1, 1970)
-   *
-   * @return unsigned long Unix timestamp in seconds
-   */
-  unsigned long getGpsUnixTimestamp() {
-    // Days in each month (non-leap year)
-    const uint8_t daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+// GPS SETUP REMOVED FOR SD CARD TEST MODE
 
-    uint16_t year = 2000 + gps->year;
-    uint8_t month = gps->month;
-    uint8_t day = gps->day;
+/**
+ * @brief Returns the GPS time since midnight in milliseconds
+ *
+ * @return unsigned long The time since midnight in milliseconds
+ */
+unsigned long getGpsTimeInMilliseconds() {
+  unsigned long timeInMillis = 0;
+  timeInMillis += gps->hour * 3600000ULL;   // Convert hours to milliseconds
+  timeInMillis += gps->minute * 60000ULL;   // Convert minutes to milliseconds
+  timeInMillis += gps->seconds * 1000ULL;   // Convert seconds to milliseconds
+  timeInMillis += gps->milliseconds;        // Add the milliseconds part
 
-    // Calculate days since Unix epoch (Jan 1, 1970)
-    unsigned long days = 0;
+  return timeInMillis;
+}
 
-    // Add days for complete years since 1970
-    for (uint16_t y = 1970; y < year; y++) {
-      if ((y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)) {
-        days += 366; // Leap year
-      } else {
-        days += 365;
-      }
+/**
+ * @brief Converts GPS date/time to Unix timestamp (seconds since Jan 1, 1970)
+ *
+ * @return unsigned long Unix timestamp in seconds
+ */
+unsigned long getGpsUnixTimestamp() {
+  // Days in each month (non-leap year)
+  const uint8_t daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+
+  uint16_t year = 2000 + gps->year;
+  uint8_t month = gps->month;
+  uint8_t day = gps->day;
+
+  // Calculate days since Unix epoch (Jan 1, 1970)
+  unsigned long days = 0;
+
+  // Add days for complete years since 1970
+  for (uint16_t y = 1970; y < year; y++) {
+    if ((y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)) {
+      days += 366; // Leap year
+    } else {
+      days += 365;
     }
+  }
 
-    // Add days for complete months this year
-    for (uint8_t m = 1; m < month; m++) {
-      days += daysInMonth[m - 1];
-      // Add leap day if February and leap year
-      if (m == 2 && ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0))) {
-        days++;
-      }
+  // Add days for complete months this year
+  for (uint8_t m = 1; m < month; m++) {
+    days += daysInMonth[m - 1];
+    // Add leap day if February and leap year
+    if (m == 2 && ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0))) {
+      days++;
     }
-
-    // Add remaining days
-    days += day - 1;
-
-    // Convert to seconds and add time of day
-    unsigned long timestamp = days * 86400UL;
-    timestamp += gps->hour * 3600UL;
-    timestamp += gps->minute * 60UL;
-    timestamp += gps->seconds;
-
-    return timestamp;
   }
 
-  /**
-   * @brief Converts GPS date/time to Unix timestamp with millisecond precision
-   *
-   * @return unsigned long long Unix timestamp in milliseconds since Jan 1, 1970
-   */
-  unsigned long long getGpsUnixTimestampMillis() {
-    // Get the Unix timestamp in seconds
-    unsigned long long timestampMillis = (unsigned long long)getGpsUnixTimestamp() * 1000ULL;
+  // Add remaining days
+  days += day - 1;
 
-    // Add the milliseconds from GPS
-    timestampMillis += gps->milliseconds;
+  // Convert to seconds and add time of day
+  unsigned long timestamp = days * 86400UL;
+  timestamp += gps->hour * 3600UL;
+  timestamp += gps->minute * 60UL;
+  timestamp += gps->seconds;
 
-    return timestampMillis;
-  }
+  return timestamp;
+}
 
-  /**
-   * @brief Sends a GPS configuration command stored in program memory to the GPS module via [GPS_SERIAL].
-   *
-   * This function reads a configuration command from PROGMEM (program memory) and sends it byte by byte to the GPS module using the [GPS_SERIAL] interface.
-   * The function also prints the configuration command in hexadecimal format for debugging purposes.
-   *
-   * @note This function contains blocking code and should be used during setup only.
-   *
-   * @param Progmem_ptr Pointer to the PROGMEM (program memory) containing the GPS configuration command.
-   * @param arraysize Size of the configuration command stored in PROGMEM.
-   */
-  void GPS_SendConfig(const uint8_t *Progmem_ptr, uint8_t arraysize) {
-    uint8_t byteread, index;
+/**
+ * @brief Converts GPS date/time to Unix timestamp with millisecond precision
+ *
+ * @return unsigned long long Unix timestamp in milliseconds since Jan 1, 1970
+ */
+unsigned long long getGpsUnixTimestampMillis() {
+  // Get the Unix timestamp in seconds
+  unsigned long long timestampMillis = (unsigned long long)getGpsUnixTimestamp() * 1000ULL;
 
-    debug(F("GPSSend  "));
+  // Add the milliseconds from GPS
+  timestampMillis += gps->milliseconds;
 
-    for (index = 0; index < arraysize; index++)
-    {
-      byteread = pgm_read_byte_near(Progmem_ptr++);
-      if (byteread < 0x10)
-      {
-        debug(F("0"));
-      }
-      debug(byteread, HEX);
-      debug(F(" "));
-    }
+  return timestampMillis;
+}
 
-    debugln();
-    //set Progmem_ptr back to start
-    Progmem_ptr = Progmem_ptr - arraysize;
-
-    for (index = 0; index < arraysize; index++)
-    {
-      byteread = pgm_read_byte_near(Progmem_ptr++);
-      GPS_SERIAL.write(byteread);
-    }
-    delay(200);
-  }
-
-  void GPS_SETUP() {
-    #ifndef WOKWI
-      debugln(F("ACTUAL GPS SETUP"));
-      // first try serial at 9600 baud
-      GPS_SERIAL.begin(9600);
-      // wait for the GPS to boot
-      delay(2250);
-      if (GPS_SERIAL) {
-        GPS_SendConfig(uart115200NmeaOnly, 28);
-        GPS_SERIAL.end();
-      }
-
-      // reconnect at proper baud
-      gps = new Adafruit_GPS(&GPS_SERIAL);
-      GPS_SERIAL.begin(115200);
-      // wait for the GPS to boot
-      delay(2250);
-      // Send GPS Configurations
-      if (GPS_SERIAL) {
-        GPS_SendConfig(NMEAVersion23, 28);
-        GPS_SendConfig(FullPower, 16);
-
-        GPS_SendConfig(GPGLLOff, 16);
-        GPS_SendConfig(GPVTGOff, 16);
-        GPS_SendConfig(GPGSVOff, 16);
-        GPS_SendConfig(GPGSAOff, 16);
-        // GPS_SendConfig(GPGGAOn5, 16); // for 10hz
-        GPS_SendConfig(GPGGAOn10, 16); // for 18hz
-        GPS_SendConfig(NavTypeAutomobile, 44);
-        // GPS_SendConfig(ENABLE_GPS_ONLY, 68);
-        GPS_SendConfig(ENABLE_GPS_ONLY_M10, 60);
-        // GPS_SendConfig(Navrate10hz, 14);
-        // GPS_SendConfig(Navrate18hz, 14);
-        // GPS_SendConfig(Navrate20hz, 14);
-        GPS_SendConfig(Navrate25hz, 14);
-      } else {
-        debugln("No GPS????");
-      }
-    #else
-      debugln(F("WOKWI GPS SETUP"));
-      // reconnect at proper baud
-      gps = new Adafruit_GPS(&GPS_SERIAL);
-      GPS_SERIAL.begin(19200);
-      // GPS_SERIAL.begin(14400);
-      // GPS_SERIAL.begin(9600);
-    #endif
-  }
-#endif
+void GPS_SETUP() {
+  debugln(F("SD CARD TEST MODE - NO GPS INIT"));
+  // No GPS initialization needed for test mode
+}
 
 double crossingPointALat = 0.00;
 double crossingPointALng = 0.00;
@@ -757,6 +695,12 @@ void checkButton(ButtonState* button) {
 //////////////////////////////////////////
 // TODO: make display into own class??
 int menuSelectionIndex = 0;
+
+// SD CARD TEST MODE - Auto-selection variables
+bool autoSelectEnabled = true;
+unsigned long autoSelectTimer = 0;
+const unsigned long autoSelectDelay = 1000; // 1 second delay
+bool autoSelectTriggered = false;
 void resetDisplay() {
   if (currentPage != lastPage) {
     lastPage = currentPage;
@@ -792,8 +736,17 @@ int selectedDirection = -1;
 
 void displayPage_select_location() {
   resetDisplay();
-  if (recentlyChanged && selectedLocation >= 0) {
-    menuSelectionIndex = selectedLocation;
+
+  // SD CARD TEST MODE - Auto-select random track
+  if (recentlyChanged) {
+    if (selectedLocation >= 0) {
+      menuSelectionIndex = selectedLocation;
+    } else {
+      randomSeed(millis());
+      menuSelectionIndex = random(0, numOfLocations);
+    }
+    autoSelectTimer = millis();
+    autoSelectTriggered = false;
   }
 
   display.print(F("Select Track: "));
@@ -840,9 +793,19 @@ void displayPage_select_location() {
 
 void displayPage_select_track() {
   resetDisplay();
-  if (recentlyChanged && selectedTrack >= 0) {
-    menuSelectionIndex = selectedTrack;
+
+  // SD CARD TEST MODE - Auto-select random course
+  if (recentlyChanged) {
+    if (selectedTrack >= 0) {
+      menuSelectionIndex = selectedTrack;
+    } else {
+      randomSeed(millis());
+      menuSelectionIndex = random(0, numOfTracks);
+    }
+    autoSelectTimer = millis();
+    autoSelectTriggered = false;
   }
+
   display.print(F("Select Layout: "));
   display.print(menuSelectionIndex+1);
   display.print(F("/"));
@@ -881,14 +844,23 @@ void displayPage_select_track() {
     display.print(F("  "));
     display.println(tracks[indexC]);
   }
-  
+
   display.display();
 }
 
 void displayPage_select_direction() {
   resetDisplay();
-  if (recentlyChanged && selectedDirection >= 0) {
-    menuSelectionIndex = selectedDirection;
+
+  // SD CARD TEST MODE - Auto-select random direction (no delay for direction)
+  if (recentlyChanged) {
+    if (selectedDirection >= 0) {
+      menuSelectionIndex = selectedDirection;
+    } else {
+      randomSeed(millis());
+      menuSelectionIndex = random(0, 2);
+    }
+    autoSelectTimer = millis();
+    autoSelectTriggered = false;
   }
 
   display.print(F("Select Direction"));
@@ -900,7 +872,7 @@ void displayPage_select_direction() {
   display.println(F("Forward"));
   display.print(menuSelectionIndex == 1 ? "->" : "  ");
   display.println(F("Reverse"));
-  
+
   display.display();
 }
 
@@ -1565,7 +1537,8 @@ void handleMenuPageSelection() {
     lapTimer.reset();
   } else if (currentPage == PAGE_SELECT_DIRECTION) {
     selectedDirection = menuSelectionIndex;
-    switchToDisplayPage(GPS_SPEED);
+    // SD CARD TEST MODE - Start on Engine RPM page
+    switchToDisplayPage(TACHOMETER);
     debug(F("Selected Direction: "));
     debugln(selectedDirection == RACE_DIRECTION_FORWARD ? "Forward" : "Reverse");
     enableLogging = true;
@@ -1733,6 +1706,21 @@ void displayLoop() {
     buttonsDisabled = true;
   }
     
+  // SD CARD TEST MODE - Auto-select menu items after delay
+  if (insideMenu && autoSelectEnabled && !autoSelectTriggered) {
+    // Check different delay times for different pages
+    unsigned long requiredDelay = autoSelectDelay;
+    if (currentPage == PAGE_SELECT_DIRECTION) {
+      requiredDelay = 0; // No delay for direction selection
+    }
+
+    if (millis() - autoSelectTimer >= requiredDelay) {
+      autoSelectTriggered = true;
+      debugln(F("Auto-selecting menu item"));
+      handleMenuPageSelection();
+    }
+  }
+
   // menu operator
   if (insideMenu && !buttonsDisabled) {
     // we are in a menu do weird menu things
@@ -1801,18 +1789,42 @@ void displayLoop() {
 
 ///////////////////////////////////////////
 
+// Dummy data generation variables for ~30Hz logging
+unsigned long lastDummyDataUpdate = 0;
+const unsigned long dummyDataInterval = 33; // ~30Hz (1000ms / 30 = 33ms)
+unsigned long dummyDataCounter = 0;
+
 void GPS_LOOP() {
-  char c = gps->read();
+  // SD CARD TEST MODE - Generate dummy data at ~30Hz
+  if (millis() - lastDummyDataUpdate >= dummyDataInterval) {
+    lastDummyDataUpdate = millis();
+    dummyDataCounter++;
+    gpsFrameCounter++;
 
-  if (gps->newNMEAreceived() && gps->parse(gps->lastNMEA())) {
-    // char *lastNMEA = gps->lastNMEA();
-    // char *nmeaSearch = "$GPRMC";
-    // bool isRMCPacket = strstr(lastNMEA, nmeaSearch) != NULL;
-    // if (isRMCPacket) {
-      gpsFrameCounter++;
-    // }
+    // Update dummy GPS time to current time
+    gps->milliseconds = (gps->milliseconds + dummyDataInterval) % 1000;
+    if (gps->milliseconds < dummyDataInterval) {
+      gps->seconds++;
+      if (gps->seconds >= 60) {
+        gps->seconds = 0;
+        gps->minute++;
+        if (gps->minute >= 60) {
+          gps->minute = 0;
+          gps->hour++;
+          if (gps->hour >= 24) {
+            gps->hour = 0;
+          }
+        }
+      }
+    }
 
-    // update the timer loop everytime we have fixed data
+    // Vary dummy data slightly to simulate movement
+    gps->latitudeDegrees += 0.00001 * (sin(dummyDataCounter * 0.1));
+    gps->longitudeDegrees += 0.00001 * (cos(dummyDataCounter * 0.1));
+    gps->speed = 30.0 + 5.0 * sin(dummyDataCounter * 0.05); // Vary speed 25-35 knots
+    gps->altitude = 250.5 + 2.0 * sin(dummyDataCounter * 0.02);
+
+    // update the timer loop
     if (trackSelected && gps->fix) {
       lapTimer.updateCurrentTime(getGpsTimeInMilliseconds());
       lapTimer.loop(gps->latitudeDegrees, gps->longitudeDegrees, gps->altitude, gps->speed);
@@ -1820,99 +1832,72 @@ void GPS_LOOP() {
 
     #ifdef SD_CARD_LOGGING_ENABLED
       if (trackSelected && gps->fix && sdSetupSuccess && sdDataLogInitComplete && enableLogging) {
+        // Build CSV line with dummy data
+        char csvLine[256];
 
-        /////////////////////////////////////////////////////////////////
-        // Only log GPGGA packets (contains all the data we need, ~25Hz at our GPS settings)
-        const char* nmea = gps->lastNMEA();
+        // Convert floats to strings with proper precision
+        char latStr[16], lngStr[16], hdopStr[8], speedStr[12], altStr[12];
 
-        // Check if this is a GPGGA or GNGGA packet
-        if (strstr(nmea, "$GPGGA") != NULL || strstr(nmea, "$GNGGA") != NULL) {
+        // 8 decimals for lat/lng (racing precision)
+        dtostrf(gps->latitudeDegrees, 1, 8, latStr);
+        dtostrf(gps->longitudeDegrees, 1, 8, lngStr);
 
-          // Build CSV line: timestamp,sats,hdop,lat,lng,speed_mph,alt_m,rpm,egt,water_temp,reserved1,reserved2
-          char csvLine[256];
+        // 1 decimal for HDOP
+        dtostrf(gps->HDOP, 1, 1, hdopStr);
 
-          // Convert floats to strings with proper precision
-          char latStr[16], lngStr[16], hdopStr[8], speedStr[12], altStr[12];
+        // 2 decimals for speed and altitude
+        dtostrf(gps_speed_mph, 1, 2, speedStr);
+        dtostrf(gps->altitude, 1, 2, altStr);
 
-          // 8 decimals for lat/lng (racing precision)
-          dtostrf(gps->latitudeDegrees, 1, 8, latStr);
-          dtostrf(gps->longitudeDegrees, 1, 8, lngStr);
+        // Build the complete CSV line
+        snprintf(csvLine, sizeof(csvLine), "%llu,%d,%s,%s,%s,%s,%s,%d,0,0",
+                 getGpsUnixTimestampMillis(), // timestamp (Unix milliseconds)
+                 (int)gps->satellites,        // sats
+                 hdopStr,                     // hdop
+                 latStr,                      // lat
+                 lngStr,                      // lng
+                 speedStr,                    // speed_mph
+                 altStr,                      // alt_m
+                 tachLastReported             // rpm
+                 // egt, water_temp, reserved1, reserved2 are all 0
+        );
 
-          // 1 decimal for HDOP
-          dtostrf(gps->HDOP, 1, 1, hdopStr);
-
-          // 2 decimals for speed and altitude
-          dtostrf(gps_speed_mph, 1, 2, speedStr);
-          dtostrf(gps->altitude, 1, 2, altStr);
-
-          // Build the complete CSV line
-          snprintf(csvLine, sizeof(csvLine), "%llu,%d,%s,%s,%s,%s,%s,%d,0,0",
-                   getGpsUnixTimestampMillis(), // timestamp (Unix milliseconds)
-                   (int)gps->satellites,        // sats
-                   hdopStr,                     // hdop
-                   latStr,                      // lat
-                   lngStr,                      // lng
-                   speedStr,                    // speed_mph
-                   altStr,                      // alt_m
-                   tachLastReported             // rpm
-                   // egt, water_temp, reserved1, reserved2 are all 0
-          );
-
-          // Write with error checking - EMI can corrupt writes
-          size_t written = dataFile.println(csvLine);
-          if (written == 0) {
-            debugln(F("SD write failed - disabling logging"));
-            enableLogging = false;
-            sdDataLogInitComplete = false;
-            dataFile.close();
-            internalNotification = "SD Write Failed!\nCheck card/connections";
-            switchToDisplayPage(PAGE_INTERNAL_FAULT);
-          }
+        // Write with error checking - EMI can corrupt writes
+        size_t written = dataFile.println(csvLine);
+        if (written == 0) {
+          debugln(F("SD write failed - disabling logging"));
+          enableLogging = false;
+          sdDataLogInitComplete = false;
+          dataFile.close();
+          internalNotification = "SD Write Failed!\nCheck card/connections";
+          switchToDisplayPage(PAGE_INTERNAL_FAULT);
         }
-        /////////////////////////////////////////////////////////////////
 
         // Flush more frequently to avoid data loss - every 2 seconds
         if (millis() - lastCardFlush > 2000) {
           lastCardFlush = millis();
           dataFile.flush();
         }
-      } else if (trackSelected && gps->fix && sdSetupSuccess && !sdDataLogInitComplete && enableLogging && gps->day > 0) {
-        debugln(F("Attempt to initialize logfile"));
-        
-        // all this could be much cleaner.....
-        // todo: timezones?
-        String gpsYear = "20" + String(gps->year);
-        String gpsMonth = gps->month < 10 ? "0" + String(gps->month) : String(gps->month);
-        String gpsDay = gps->day < 10 ? "0" + String(gps->day) : String(gps->day);
-        String gpsHour = gps->hour < 10 ? "0" + String(gps->hour) : String(gps->hour);
-        String gpsMinute = gps->minute < 10 ? "0" + String(gps->minute) : String(gps->minute);
+      } else if (trackSelected && gps->fix && sdSetupSuccess && !sdDataLogInitComplete && enableLogging) {
+        debugln(F("Attempt to initialize logfile - TEST MODE"));
 
-        String trackLocation = locations[selectedLocation];
-        String trackLayout= tracks[selectedTrack];
-        String layoutDirection = selectedDirection == RACE_DIRECTION_FORWARD ? "fwd" : "rev";
+        // Generate random test file name: TEST-{1000-9999}.txt
+        randomSeed(millis());
+        int randomNum = random(1000, 10000);
+        String dataFileNameS = "TEST-" + String(randomNum) + ".txt";
 
-        String dataFileNameS = trackLocation + "_" + trackLayout + "_" + layoutDirection + "_" + gpsYear + "_" + gpsMonth + gpsDay + "_" + gpsHour + gpsMinute + ".dove";
-
-        // const char* dataFileName = dataFileNameS.c_str();
-
-        debug(F("dataFileNameS: ["));
+        debug(F("Test File: ["));
         debug(dataFileNameS.c_str());
         debugln(F("]"));
 
-        // Open for writing - removed O_NONBLOCK as it doesn't work on SD
+        // Open for writing
         dataFile.open(dataFileNameS.c_str(), O_CREAT | O_WRITE);
 
         if (!dataFile) {
           debugln(F("Error opening log file"));
 
-          // hmmm
           String errorMessage = String("Error saving log:\n") + dataFileNameS;
           internalNotification = errorMessage;
-          // internalNotification = errorMessage.c_str();
-          // int errorMessageLength = errorMessage.length() + 1;
-          // char errorMessageCharArray[errorMessageLength];
-          // errorMessage.toCharArray(errorMessageCharArray, errorMessageLength);
-          // internalNotification = "Error creating log!";
 
           switchToDisplayPage(PAGE_INTERNAL_FAULT);
 
@@ -1920,12 +1905,9 @@ void GPS_LOOP() {
         } else {
           // Write CSV header as first line
           dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,rpm,exhaust_temp_c,water_temp_c"));
-          debugln(F("CSV header written"));
+          debugln(F("CSV header written - TEST MODE"));
         }
         sdDataLogInitComplete = true;
-      }
-      if (gps->fix) {
-        // debug(lastNMEA);
       }
     #endif
   }
