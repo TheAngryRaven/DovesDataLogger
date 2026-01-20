@@ -91,7 +91,7 @@ bool bleTransferInProgress = false;
 uint32_t bleFileSize = 0;
 uint32_t bleBytesTransferred = 0;
 uint16_t bleNegotiatedMtu = 23;
-File32 bleCurrentFile;
+// Note: bleCurrentFile is declared after SdFat include
 
 ///////////////////////////////////////////
 float getBatteryVoltage() {
@@ -196,303 +196,6 @@ void TACH_LOOP() {
   if (millis() - tachLastUpdate > (1000 / tachUpdateRateHz)) {
     tachLastUpdate = millis();
     tachLastReported = (int)(tachRpmFiltered + 0.5f);
-  }
-}
-
-///////////////////////////////////////////
-// BLUETOOTH FUNCTIONS
-///////////////////////////////////////////
-
-void bleConnectCallback(uint16_t conn_handle) {
-  debugln(F("BLE: Device connected!"));
-  bleConnected = true;
-
-  BLEConnection* connection = Bluefruit.Connection(conn_handle);
-
-  debug(F("BLE: Initial MTU: "));
-  debugln(connection->getMtu());
-
-  // Request MTU exchange
-  debugln(F("BLE: Requesting MTU exchange to 247..."));
-  if (connection->requestMtuExchange(247)) {
-    debugln(F("BLE: MTU exchange requested successfully"));
-  } else {
-    debugln(F("BLE: MTU exchange request failed!"));
-  }
-
-  // Wait for MTU negotiation
-  delay(500);
-
-  bleNegotiatedMtu = connection->getMtu();
-  debug(F("BLE: Negotiated MTU: "));
-  debugln(bleNegotiatedMtu);
-
-  debug(F("BLE: Connection interval: "));
-  debug(connection->getConnectionInterval() * 1.25);
-  debugln(F("ms"));
-}
-
-void bleDisconnectCallback(uint16_t conn_handle, uint8_t reason) {
-  debugln(F("BLE: Disconnected!"));
-  bleConnected = false;
-  bleNegotiatedMtu = 23; // Reset to default
-  if (bleCurrentFile) {
-    bleCurrentFile.close();
-  }
-  bleTransferInProgress = false;
-}
-
-void bleSetupFileService() {
-  fileService.begin();
-
-  // File List Characteristic
-  fileListChar.setProperties(CHR_PROPS_READ | CHR_PROPS_NOTIFY);
-  fileListChar.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
-  fileListChar.setMaxLen(244);
-  fileListChar.begin();
-
-  // File Request Characteristic
-  fileRequestChar.setProperties(CHR_PROPS_WRITE | CHR_PROPS_WRITE_WO_RESP);
-  fileRequestChar.setPermission(SECMODE_NO_ACCESS, SECMODE_OPEN);
-  fileRequestChar.setMaxLen(64);
-  fileRequestChar.setWriteCallback(bleFileRequestCallback);
-  fileRequestChar.begin();
-
-  // File Data Characteristic
-  fileDataChar.setProperties(CHR_PROPS_NOTIFY);
-  fileDataChar.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
-  fileDataChar.setMaxLen(244);
-  fileDataChar.begin();
-
-  // File Status Characteristic
-  fileStatusChar.setProperties(CHR_PROPS_READ | CHR_PROPS_NOTIFY);
-  fileStatusChar.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
-  fileStatusChar.setMaxLen(64);
-  fileStatusChar.begin();
-}
-
-void bleStartAdvertising() {
-  Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
-  Bluefruit.Advertising.addTxPower();
-  Bluefruit.Advertising.addService(fileService);
-  Bluefruit.Advertising.addName();
-
-  Bluefruit.Advertising.restartOnDisconnect(true);
-  Bluefruit.Advertising.setInterval(32, 244);
-  Bluefruit.Advertising.setFastTimeout(30);
-  Bluefruit.Advertising.start(0);
-}
-
-void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, uint16_t len) {
-  char buffer[65];
-  memset(buffer, 0, sizeof(buffer));
-  memcpy(buffer, data, min(len, (uint16_t)64));
-
-  String command = String(buffer);
-  command.trim();
-
-  debug(F("BLE: Received command: ["));
-  debug(command);
-  debugln(F("]"));
-
-  if (command.startsWith("LIST")) {
-    bleSendFileList();
-  } else if (command.startsWith("GET:")) {
-    String filename = command.substring(4);
-    filename.trim();
-    bleStartFileTransfer(filename);
-  } else if (command.startsWith("DELETE:")) {
-    String filename = command.substring(7);
-    filename.trim();
-    bleDeleteFile(filename);
-  }
-}
-
-void bleSendFileList() {
-  String fileList = "";
-  File32 root = SD.open("/");
-
-  while (true) {
-    File32 entry = root.openNextFile();
-    if (!entry) break;
-
-    if (!entry.isDirectory()) {
-      char name[256];
-      entry.getName(name, sizeof(name));
-
-      if (fileList.length() > 0) fileList += "|";
-      fileList += String(name) + ":" + String(entry.size());
-    }
-    entry.close();
-  }
-  root.close();
-
-  debug(F("BLE: Sending file list ("));
-  debug(fileList.length());
-  debugln(F(" bytes)"));
-
-  uint16_t maxChunk = bleNegotiatedMtu - 3;
-  uint16_t offset = 0;
-
-  while (offset < fileList.length()) {
-    uint16_t chunkSize = min(maxChunk, (uint16_t)(fileList.length() - offset));
-
-    char chunkBuf[600];
-    fileList.substring(offset, offset + chunkSize).toCharArray(chunkBuf, chunkSize + 1);
-
-    fileListChar.notify((uint8_t*)chunkBuf, chunkSize);
-
-    offset += chunkSize;
-    delay(10);
-  }
-
-  fileListChar.notify((uint8_t*)"END", 3);
-  debugln(F("BLE: File list sent!"));
-}
-
-void bleStartFileTransfer(String filename) {
-  if (bleCurrentFile) bleCurrentFile.close();
-
-  debug(F("BLE: Opening file: ["));
-  debug(filename);
-  debugln(F("]"));
-
-  bleCurrentFile = SD.open(filename.c_str(), FILE_READ);
-
-  if (!bleCurrentFile) {
-    debugln(F("BLE: Failed to open file!"));
-    fileStatusChar.notify((uint8_t*)"ERROR", 5);
-    return;
-  }
-
-  bleFileSize = bleCurrentFile.size();
-  bleBytesTransferred = 0;
-  bleTransferInProgress = true;
-
-  debug(F("BLE: File size: "));
-  debug(bleFileSize);
-  debug(F(" bytes, MTU: "));
-  debugln(bleNegotiatedMtu);
-
-  char sizeMsg[32];
-  snprintf(sizeMsg, sizeof(sizeMsg), "SIZE:%lu", bleFileSize);
-  fileStatusChar.notify((uint8_t*)sizeMsg, strlen(sizeMsg));
-
-  delay(50);
-}
-
-void bleDeleteFile(String filename) {
-  debug(F("BLE: Deleting file: ["));
-  debug(filename);
-  debugln(F("]"));
-
-  if (SD.exists(filename.c_str())) {
-    if (SD.remove(filename.c_str())) {
-      debugln(F("BLE: File deleted successfully"));
-      fileStatusChar.notify((uint8_t*)"DELETED", 7);
-    } else {
-      debugln(F("BLE: Failed to delete file"));
-      fileStatusChar.notify((uint8_t*)"DEL_ERR", 7);
-    }
-  } else {
-    debugln(F("BLE: File not found"));
-    fileStatusChar.notify((uint8_t*)"NOT_FOUND", 9);
-  }
-}
-
-void BLE_SETUP() {
-  if (bleInitialized) {
-    // Already initialized, just start advertising
-    debugln(F("BLE: Restarting advertising..."));
-    Bluefruit.Advertising.start(0);
-    bleActive = true;
-    return;
-  }
-
-  debugln(F("BLE: Initializing Bluetooth..."));
-
-  Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
-  Bluefruit.begin();
-  Bluefruit.setTxPower(4);
-  Bluefruit.setName("DovesLapTimer");
-
-  Bluefruit.Periph.setConnectCallback(bleConnectCallback);
-  Bluefruit.Periph.setDisconnectCallback(bleDisconnectCallback);
-
-  // Set connection interval (7.5-15ms)
-  Bluefruit.Periph.setConnInterval(6, 12);
-
-  bleSetupFileService();
-  bleStartAdvertising();
-
-  bleInitialized = true;
-  bleActive = true;
-
-  debugln(F("BLE: Ready for connection!"));
-}
-
-void BLE_STOP() {
-  if (!bleActive) return;
-
-  debugln(F("BLE: Stopping Bluetooth..."));
-
-  // Close any open file
-  if (bleCurrentFile) {
-    bleCurrentFile.close();
-  }
-  bleTransferInProgress = false;
-
-  // Disconnect any connected device
-  if (Bluefruit.connected()) {
-    Bluefruit.disconnect(Bluefruit.connHandle());
-    delay(100);
-  }
-
-  // Stop advertising
-  Bluefruit.Advertising.stop();
-
-  bleConnected = false;
-  bleActive = false;
-
-  debugln(F("BLE: Bluetooth stopped"));
-}
-
-void BLUETOOTH_LOOP() {
-  if (!bleActive) return;
-
-  if (bleTransferInProgress && bleCurrentFile && Bluefruit.connected()) {
-    // Use actual negotiated MTU
-    uint16_t maxChunk = bleNegotiatedMtu - 3;
-
-    uint8_t buffer[524];
-
-    size_t chunkSize = min(maxChunk, (uint16_t)244);
-    size_t bytesRead = bleCurrentFile.read(buffer, chunkSize);
-
-    if (bytesRead > 0) {
-      if (fileDataChar.notify(buffer, bytesRead)) {
-        bleBytesTransferred += bytesRead;
-
-        // Progress update every 10KB
-        if (bleBytesTransferred % 10000 == 0) {
-          debug(F("BLE: Progress: "));
-          debug(bleBytesTransferred);
-          debug(F(" / "));
-          debug(bleFileSize);
-          debug(F(" ("));
-          debug((bleBytesTransferred * 100) / bleFileSize);
-          debugln(F("%)"));
-        }
-      }
-    } else {
-      // Transfer complete
-      bleCurrentFile.close();
-      bleTransferInProgress = false;
-
-      debugln(F("BLE: Transfer complete!"));
-
-      fileStatusChar.notify((uint8_t*)"DONE", 4);
-    }
   }
 }
 
@@ -940,6 +643,308 @@ int parseTrackFile(char* filepath) {
   debugln(F("ParseTrackFile: SUCCESS"));
   trackFile.close();
   return PARSE_STATUS_GOOD;
+}
+
+///////////////////////////////////////////
+// BLUETOOTH FUNCTIONS (after SdFat include)
+///////////////////////////////////////////
+
+File32 bleCurrentFile;
+
+void bleConnectCallback(uint16_t conn_handle) {
+  debugln(F("BLE: Device connected!"));
+  bleConnected = true;
+
+  BLEConnection* connection = Bluefruit.Connection(conn_handle);
+
+  debug(F("BLE: Initial MTU: "));
+  debugln(connection->getMtu());
+
+  // Request MTU exchange
+  debugln(F("BLE: Requesting MTU exchange to 247..."));
+  if (connection->requestMtuExchange(247)) {
+    debugln(F("BLE: MTU exchange requested successfully"));
+  } else {
+    debugln(F("BLE: MTU exchange request failed!"));
+  }
+
+  // Wait for MTU negotiation
+  delay(500);
+
+  bleNegotiatedMtu = connection->getMtu();
+  debug(F("BLE: Negotiated MTU: "));
+  debugln(bleNegotiatedMtu);
+
+  debug(F("BLE: Connection interval: "));
+  debug(connection->getConnectionInterval() * 1.25);
+  debugln(F("ms"));
+}
+
+void bleDisconnectCallback(uint16_t conn_handle, uint8_t reason) {
+  debugln(F("BLE: Disconnected!"));
+  bleConnected = false;
+  bleNegotiatedMtu = 23; // Reset to default
+  if (bleCurrentFile) {
+    bleCurrentFile.close();
+  }
+  bleTransferInProgress = false;
+}
+
+// Forward declaration for callback
+void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, uint16_t len);
+
+void bleSetupFileService() {
+  fileService.begin();
+
+  // File List Characteristic
+  fileListChar.setProperties(CHR_PROPS_READ | CHR_PROPS_NOTIFY);
+  fileListChar.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
+  fileListChar.setMaxLen(244);
+  fileListChar.begin();
+
+  // File Request Characteristic
+  fileRequestChar.setProperties(CHR_PROPS_WRITE | CHR_PROPS_WRITE_WO_RESP);
+  fileRequestChar.setPermission(SECMODE_NO_ACCESS, SECMODE_OPEN);
+  fileRequestChar.setMaxLen(64);
+  fileRequestChar.setWriteCallback(bleFileRequestCallback);
+  fileRequestChar.begin();
+
+  // File Data Characteristic
+  fileDataChar.setProperties(CHR_PROPS_NOTIFY);
+  fileDataChar.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
+  fileDataChar.setMaxLen(244);
+  fileDataChar.begin();
+
+  // File Status Characteristic
+  fileStatusChar.setProperties(CHR_PROPS_READ | CHR_PROPS_NOTIFY);
+  fileStatusChar.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
+  fileStatusChar.setMaxLen(64);
+  fileStatusChar.begin();
+}
+
+void bleStartAdvertising() {
+  Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
+  Bluefruit.Advertising.addTxPower();
+  Bluefruit.Advertising.addService(fileService);
+  Bluefruit.Advertising.addName();
+
+  Bluefruit.Advertising.restartOnDisconnect(true);
+  Bluefruit.Advertising.setInterval(32, 244);
+  Bluefruit.Advertising.setFastTimeout(30);
+  Bluefruit.Advertising.start(0);
+}
+
+void bleSendFileList() {
+  String fileList = "";
+  File32 root = SD.open("/");
+
+  while (true) {
+    File32 entry = root.openNextFile();
+    if (!entry) break;
+
+    if (!entry.isDirectory()) {
+      char name[256];
+      entry.getName(name, sizeof(name));
+
+      if (fileList.length() > 0) fileList += "|";
+      fileList += String(name) + ":" + String(entry.size());
+    }
+    entry.close();
+  }
+  root.close();
+
+  debug(F("BLE: Sending file list ("));
+  debug(fileList.length());
+  debugln(F(" bytes)"));
+
+  uint16_t maxChunk = bleNegotiatedMtu - 3;
+  uint16_t offset = 0;
+
+  while (offset < fileList.length()) {
+    uint16_t chunkSize = min(maxChunk, (uint16_t)(fileList.length() - offset));
+
+    char chunkBuf[600];
+    fileList.substring(offset, offset + chunkSize).toCharArray(chunkBuf, chunkSize + 1);
+
+    fileListChar.notify((uint8_t*)chunkBuf, chunkSize);
+
+    offset += chunkSize;
+    delay(10);
+  }
+
+  fileListChar.notify((uint8_t*)"END", 3);
+  debugln(F("BLE: File list sent!"));
+}
+
+void bleStartFileTransfer(String filename) {
+  if (bleCurrentFile) bleCurrentFile.close();
+
+  debug(F("BLE: Opening file: ["));
+  debug(filename);
+  debugln(F("]"));
+
+  bleCurrentFile = SD.open(filename.c_str(), FILE_READ);
+
+  if (!bleCurrentFile) {
+    debugln(F("BLE: Failed to open file!"));
+    fileStatusChar.notify((uint8_t*)"ERROR", 5);
+    return;
+  }
+
+  bleFileSize = bleCurrentFile.size();
+  bleBytesTransferred = 0;
+  bleTransferInProgress = true;
+
+  debug(F("BLE: File size: "));
+  debug(bleFileSize);
+  debug(F(" bytes, MTU: "));
+  debugln(bleNegotiatedMtu);
+
+  char sizeMsg[32];
+  snprintf(sizeMsg, sizeof(sizeMsg), "SIZE:%lu", bleFileSize);
+  fileStatusChar.notify((uint8_t*)sizeMsg, strlen(sizeMsg));
+
+  delay(50);
+}
+
+void bleDeleteFile(String filename) {
+  debug(F("BLE: Deleting file: ["));
+  debug(filename);
+  debugln(F("]"));
+
+  if (SD.exists(filename.c_str())) {
+    if (SD.remove(filename.c_str())) {
+      debugln(F("BLE: File deleted successfully"));
+      fileStatusChar.notify((uint8_t*)"DELETED", 7);
+    } else {
+      debugln(F("BLE: Failed to delete file"));
+      fileStatusChar.notify((uint8_t*)"DEL_ERR", 7);
+    }
+  } else {
+    debugln(F("BLE: File not found"));
+    fileStatusChar.notify((uint8_t*)"NOT_FOUND", 9);
+  }
+}
+
+void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, uint16_t len) {
+  char buffer[65];
+  memset(buffer, 0, sizeof(buffer));
+  memcpy(buffer, data, min(len, (uint16_t)64));
+
+  String command = String(buffer);
+  command.trim();
+
+  debug(F("BLE: Received command: ["));
+  debug(command);
+  debugln(F("]"));
+
+  if (command.startsWith("LIST")) {
+    bleSendFileList();
+  } else if (command.startsWith("GET:")) {
+    String filename = command.substring(4);
+    filename.trim();
+    bleStartFileTransfer(filename);
+  } else if (command.startsWith("DELETE:")) {
+    String filename = command.substring(7);
+    filename.trim();
+    bleDeleteFile(filename);
+  }
+}
+
+void BLE_SETUP() {
+  if (bleInitialized) {
+    // Already initialized, just start advertising
+    debugln(F("BLE: Restarting advertising..."));
+    Bluefruit.Advertising.start(0);
+    bleActive = true;
+    return;
+  }
+
+  debugln(F("BLE: Initializing Bluetooth..."));
+
+  Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
+  Bluefruit.begin();
+  Bluefruit.setTxPower(4);
+  Bluefruit.setName("DovesLapTimer");
+
+  Bluefruit.Periph.setConnectCallback(bleConnectCallback);
+  Bluefruit.Periph.setDisconnectCallback(bleDisconnectCallback);
+
+  // Set connection interval (7.5-15ms)
+  Bluefruit.Periph.setConnInterval(6, 12);
+
+  bleSetupFileService();
+  bleStartAdvertising();
+
+  bleInitialized = true;
+  bleActive = true;
+
+  debugln(F("BLE: Ready for connection!"));
+}
+
+void BLE_STOP() {
+  if (!bleActive) return;
+
+  debugln(F("BLE: Stopping Bluetooth..."));
+
+  // Close any open file
+  if (bleCurrentFile) {
+    bleCurrentFile.close();
+  }
+  bleTransferInProgress = false;
+
+  // Disconnect any connected device
+  if (Bluefruit.connected()) {
+    Bluefruit.disconnect(Bluefruit.connHandle());
+    delay(100);
+  }
+
+  // Stop advertising
+  Bluefruit.Advertising.stop();
+
+  bleConnected = false;
+  bleActive = false;
+
+  debugln(F("BLE: Bluetooth stopped"));
+}
+
+void BLUETOOTH_LOOP() {
+  if (!bleActive) return;
+
+  if (bleTransferInProgress && bleCurrentFile && Bluefruit.connected()) {
+    // Use actual negotiated MTU
+    uint16_t maxChunk = bleNegotiatedMtu - 3;
+
+    uint8_t buffer[524];
+
+    size_t chunkSize = min(maxChunk, (uint16_t)244);
+    size_t bytesRead = bleCurrentFile.read(buffer, chunkSize);
+
+    if (bytesRead > 0) {
+      if (fileDataChar.notify(buffer, bytesRead)) {
+        bleBytesTransferred += bytesRead;
+
+        // Progress update every 10KB
+        if (bleBytesTransferred % 10000 == 0) {
+          debug(F("BLE: Progress: "));
+          debug(bleBytesTransferred);
+          debug(F(" / "));
+          debug(bleFileSize);
+          debug(F(" ("));
+          debug((bleBytesTransferred * 100) / bleFileSize);
+          debugln(F("%)"));
+        }
+      }
+    } else {
+      // Transfer complete
+      bleCurrentFile.close();
+      bleTransferInProgress = false;
+
+      debugln(F("BLE: Transfer complete!"));
+
+      fileStatusChar.notify((uint8_t*)"DONE", 4);
+    }
+  }
 }
 
 ///////////////////////////////////////////
