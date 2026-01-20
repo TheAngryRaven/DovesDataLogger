@@ -1236,8 +1236,8 @@ void displayPage_select_direction() {
 void displayPage_main_menu() {
   resetDisplay();
 
-  display.setTextSize(2);
-  display.println(F("   Doves\n MagicBox"));
+  display.setTextSize(1);
+  display.println(F("   Doves MagicBox"));
   display.setTextSize(1);
   display.println();
   display.setTextSize(2);
@@ -1245,7 +1245,7 @@ void displayPage_main_menu() {
   display.print(menuSelectionIndex == 0 ? "->" : "  ");
   display.println(F("Race"));
   display.print(menuSelectionIndex == 1 ? "->" : "  ");
-  display.println(F("Bluetooth"));
+  display.println(F("Download"));
 
   display.display();
 }
@@ -1276,7 +1276,7 @@ void displayPage_bluetooth() {
   }
 
   display.println();
-  display.setTextSize(2);
+  display.setTextSize(1);
   display.println(F("->Exit"));
 
   display.display();
