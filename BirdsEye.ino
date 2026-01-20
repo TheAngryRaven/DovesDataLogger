@@ -2413,14 +2413,6 @@ void loop() {
   if (bleTransferInProgress) {
     BLUETOOTH_LOOP();
 
-    // Still check tach for RPM auto-exit, but less frequently
-    TACH_LOOP();
-    if (currentPage == PAGE_BLUETOOTH && tachLastReported > 500) {
-      debugln(F("RPM detected in Bluetooth mode - switching to Race"));
-      BLE_STOP();
-      switchToDisplayPage(PAGE_SELECT_LOCATION);
-    }
-
     // Minimal button check for exit
     readButtons();
     if (btn2->pressed) {
@@ -2448,10 +2440,9 @@ void loop() {
   #endif
   calculateGPSFrameRate();
 
-  // Auto-select Race mode if RPM detected while in Bluetooth menu
-  if (currentPage == PAGE_BLUETOOTH && tachLastReported > 500) {
-    debugln(F("RPM detected in Bluetooth mode - switching to Race"));
-    BLE_STOP();
+  // Auto-select Race mode if RPM detected on main menu
+  if (currentPage == PAGE_MAIN_MENU && tachLastReported > 500) {
+    debugln(F("RPM detected on main menu - auto-selecting Race"));
     switchToDisplayPage(PAGE_SELECT_LOCATION);
   }
 
