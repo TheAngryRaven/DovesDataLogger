@@ -2,6 +2,10 @@
 
 A high-precision GPS-based lap timer and data logger designed for motorsports and track day enthusiasts. Features 25Hz logging, sector timing, RPM monitoring via tachometer, and multiple customizable display pages.
 
+<p align="center">
+  <img src="sample.gif" />
+</p>
+
 ## Features
 
 ### Core Functionality
@@ -369,3 +373,4 @@ See LICENSE file for details.
 
 For issues, questions, or contributions, please visit:
 - GitHub Issues: [https://github.com/TheAngryRaven/DovesDataLogger/issues](https://github.com/TheAngryRaven/DovesDataLogger/issues)
+
