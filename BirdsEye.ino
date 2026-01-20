@@ -855,6 +855,8 @@ void BLE_SETUP() {
   if (bleInitialized) {
     // Already initialized, just start advertising
     debugln(F("BLE: Restarting advertising..."));
+    Bluefruit.autoConnLed(true);
+    Bluefruit.setConnLedInterval(250); // Blink every 250ms when connected
     Bluefruit.Advertising.start(0);
     bleActive = true;
     return;
@@ -866,6 +868,10 @@ void BLE_SETUP() {
   Bluefruit.begin();
   Bluefruit.setTxPower(4);
   Bluefruit.setName("DovesLapTimer");
+
+  // Enable connection LED
+  Bluefruit.autoConnLed(true);
+  Bluefruit.setConnLedInterval(250);
 
   Bluefruit.Periph.setConnectCallback(bleConnectCallback);
   Bluefruit.Periph.setDisconnectCallback(bleDisconnectCallback);
@@ -901,6 +907,10 @@ void BLE_STOP() {
 
   // Stop advertising
   Bluefruit.Advertising.stop();
+
+  // Turn off the BLE LED
+  Bluefruit.autoConnLed(false);
+  Bluefruit.setConnLedInterval(0);
 
   bleConnected = false;
   bleActive = false;
