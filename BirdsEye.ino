@@ -2409,6 +2409,29 @@ void setup() {
 }
 
 void loop() {
+  // When BLE transfer is active, run tight loop for maximum throughput
+  if (bleTransferInProgress) {
+    BLUETOOTH_LOOP();
+
+    // Still check tach for RPM auto-exit, but less frequently
+    TACH_LOOP();
+    if (currentPage == PAGE_BLUETOOTH && tachLastReported > 500) {
+      debugln(F("RPM detected in Bluetooth mode - switching to Race"));
+      BLE_STOP();
+      switchToDisplayPage(PAGE_SELECT_LOCATION);
+    }
+
+    // Minimal button check for exit
+    readButtons();
+    if (btn2->pressed) {
+      // Exit button during transfer
+      BLE_STOP();
+      switchToDisplayPage(PAGE_MAIN_MENU);
+    }
+    resetButtons();
+    return; // Skip everything else during transfer
+  }
+
   GPS_LOOP();
   TACH_LOOP();
   BLUETOOTH_LOOP();
