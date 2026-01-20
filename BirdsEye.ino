@@ -911,6 +911,7 @@ void BLE_STOP() {
   // Turn off the BLE LED
   Bluefruit.autoConnLed(false);
   Bluefruit.setConnLedInterval(0);
+  digitalWrite(LED_BLUE, HIGH);
 
   bleConnected = false;
   bleActive = false;
