@@ -9,6 +9,7 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
 ## Features
 
 ### Core Functionality
+- **Bluetooth Downloads** - Can now download files directly to [HackTheTrack.net](http://HackTheTrack.net)
 - **25Hz GPS Logging** - High-frequency data capture straight to SD card
 - **Track & Layout Selection** - Multiple tracks and configurations loaded from SD card
 - **Sector Timing** - Optional 2 and 3-sector support for detailed performance analysis
