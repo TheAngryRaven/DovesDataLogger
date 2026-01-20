@@ -2429,6 +2429,13 @@ void loop() {
       switchToDisplayPage(PAGE_MAIN_MENU);
     }
     resetButtons();
+
+    // Update display periodically during transfer (every 333ms)
+    if (millis() - displayLastUpdate > (1000 / displayUpdateRateHz)) {
+      displayLastUpdate = millis();
+      displayPage_bluetooth();
+    }
+
     return; // Skip everything else during transfer
   }
 
