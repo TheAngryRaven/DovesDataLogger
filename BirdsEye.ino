@@ -89,7 +89,7 @@ unsigned long tachLastUpdate = 0;
 volatile int tachLastReported = 0;  // FIXED: Made volatile for thread safety
 int topTachReported = 0;
 
-static const uint32_t tachMinPulseGapUs = 2000; // ignore bounces/noise faster than this
+static const uint32_t tachMinPulseGapUs = 3000; // ignore bounces/noise faster than this
 volatile uint32_t tachLastPulseUs = 0;
 
 // capture last pulse period so loop can compute RPM
@@ -1983,8 +1983,10 @@ void setup() {
   }
 
   // tachometer
-  pinMode(tachInputPin, INPUT_PULLDOWN);
-  attachInterrupt(digitalPinToInterrupt(tachInputPin), TACH_COUNT_PULSE, RISING);
+  // pinMode(tachInputPin, INPUT_PULLDOWN);
+  // attachInterrupt(digitalPinToInterrupt(tachInputPin), TACH_COUNT_PULSE, RISING);
+  pinMode(tachInputPin, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(tachInputPin), TACH_COUNT_PULSE, FALLING);
 }
 
 void loop() {
