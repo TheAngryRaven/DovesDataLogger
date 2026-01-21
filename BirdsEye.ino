@@ -420,7 +420,12 @@ unsigned long replayProcessedSamples = 0;
 // Line buffer for streaming file reads (bounded memory)
 #define REPLAY_LINE_BUFFER_SIZE 256
 char replayLineBuffer[REPLAY_LINE_BUFFER_SIZE];
-int replayLineBufferPos = 0;
+
+// Block read buffer for faster SD reads (one sector = 512 bytes)
+#define REPLAY_BLOCK_BUFFER_SIZE 512
+char replayBlockBuffer[REPLAY_BLOCK_BUFFER_SIZE];
+int replayBlockPos = 0;      // Current position in block buffer
+int replayBlockLen = 0;      // Valid bytes in block buffer
 
 // Common sample struct for both DOVE and NMEA parsing
 struct ReplaySample {
@@ -1033,7 +1038,10 @@ void resetReplayState() {
   replayMaxRpm = 0;
   replayTotalSamples = 0;
   replayProcessedSamples = 0;
-  replayLineBufferPos = 0;
+
+  // Reset block buffer state
+  replayBlockPos = 0;
+  replayBlockLen = 0;
 
   // Reset lap timer and history for replay
   lapTimer.reset();
@@ -1100,7 +1108,7 @@ bool buildReplayFileList() {
 }
 
 /**
- * @brief Read a single line from file into buffer (streaming, bounded memory)
+ * @brief Read a single line from file into buffer using block reads for speed
  * @param file File handle
  * @param buffer Output buffer
  * @param bufferSize Size of output buffer
@@ -1110,16 +1118,22 @@ bool readReplayLine(File& file, char* buffer, int bufferSize) {
   int pos = 0;
 
   while (pos < bufferSize - 1) {
-    int c = file.read();
-
-    if (c < 0) {
-      // EOF
-      if (pos > 0) {
-        buffer[pos] = '\0';
-        return true;
+    // Refill block buffer if empty
+    if (replayBlockPos >= replayBlockLen) {
+      replayBlockLen = file.read(replayBlockBuffer, REPLAY_BLOCK_BUFFER_SIZE);
+      replayBlockPos = 0;
+      if (replayBlockLen <= 0) {
+        // EOF
+        if (pos > 0) {
+          buffer[pos] = '\0';
+          return true;
+        }
+        return false;
       }
-      return false;
     }
+
+    // Get next character from block buffer
+    char c = replayBlockBuffer[replayBlockPos++];
 
     if (c == '\n') {
       buffer[pos] = '\0';
@@ -1131,16 +1145,19 @@ bool readReplayLine(File& file, char* buffer, int bufferSize) {
       continue;
     }
 
-    buffer[pos++] = (char)c;
+    buffer[pos++] = c;
   }
 
-  // Line too long, truncate
+  // Line too long, truncate and skip rest of line
   buffer[bufferSize - 1] = '\0';
 
-  // Skip rest of line
   while (true) {
-    int c = file.read();
-    if (c < 0 || c == '\n') break;
+    if (replayBlockPos >= replayBlockLen) {
+      replayBlockLen = file.read(replayBlockBuffer, REPLAY_BLOCK_BUFFER_SIZE);
+      replayBlockPos = 0;
+      if (replayBlockLen <= 0) break;
+    }
+    if (replayBlockBuffer[replayBlockPos++] == '\n') break;
   }
 
   return true;
@@ -1535,7 +1552,8 @@ void processReplayFile() {
   }
 
   // Process multiple lines per call to speed things up
-  const int linesPerCall = 50;
+  // Increased from 50 to 200 since we now use block reads
+  const int linesPerCall = 200;
 
   for (int i = 0; i < linesPerCall; i++) {
     if (!readReplayLine(replayFile, replayLineBuffer, sizeof(replayLineBuffer))) {
@@ -2839,6 +2857,9 @@ void handleMenuPageSelection() {
     debugln(selectedDirection == RACE_DIRECTION_FORWARD ? "Forward" : "Reverse");
 
     // Open the replay file and start processing
+    // Reset block buffer first (may have stale data from track detection)
+    replayBlockPos = 0;
+    replayBlockLen = 0;
     if (replayFile.open(replayFiles[selectedReplayFile], O_READ)) {
       replayModeActive = true;
       replayProcessingComplete = false;
@@ -3474,8 +3495,8 @@ void loop() {
     // Process replay file
     processReplayFile();
 
-    // Update display less frequently during processing
-    if (millis() - displayLastUpdate > 200) {
+    // Update display less frequently during processing (500ms)
+    if (millis() - displayLastUpdate > 500) {
       displayLastUpdate = millis();
       displayPage_replay_processing();
     }
