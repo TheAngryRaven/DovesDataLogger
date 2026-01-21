@@ -3236,13 +3236,26 @@ void displayLoop() {
   // menu operator
   if (insideMenu && !buttonsDisabled) {
     // we are in a menu do weird menu things
-    // BUTTON UP
+    // Main menu has static display (items top-to-bottom = index 0,1,2)
+    // so button direction needs to be reversed compared to scrolling menus
+    bool reverseDirection = (currentPage == PAGE_MAIN_MENU);
+
+    // BUTTON UP (or DOWN for reversed menus)
     if (btn1->pressed) {
       // debugln(F("Button Up"));
-      if (menuSelectionIndex == menuLimit-1) {
-        menuSelectionIndex = 0;
+      if (reverseDirection) {
+        // Move UP visually = decrease index
+        if (menuSelectionIndex == 0) {
+          menuSelectionIndex = menuLimit-1;
+        } else {
+          menuSelectionIndex--;
+        }
       } else {
-        menuSelectionIndex++;
+        if (menuSelectionIndex == menuLimit-1) {
+          menuSelectionIndex = 0;
+        } else {
+          menuSelectionIndex++;
+        }
       }
       debug(F("menu number: "));
       debugln(menuSelectionIndex);
@@ -3253,13 +3266,22 @@ void displayLoop() {
       debugln(F("Button Enter"));
       handleMenuPageSelection();
     }
-    // BUTTON DOWN
+    // BUTTON DOWN (or UP for reversed menus)
     if (btn3->pressed) {
       // debugln(F("Button Down"));
-      if (menuSelectionIndex == 0) {
-        menuSelectionIndex = menuLimit-1;
+      if (reverseDirection) {
+        // Move DOWN visually = increase index
+        if (menuSelectionIndex == menuLimit-1) {
+          menuSelectionIndex = 0;
+        } else {
+          menuSelectionIndex++;
+        }
       } else {
-        menuSelectionIndex--;
+        if (menuSelectionIndex == 0) {
+          menuSelectionIndex = menuLimit-1;
+        } else {
+          menuSelectionIndex--;
+        }
       }
       debug(F("menu number: "));
       debugln(menuSelectionIndex);
