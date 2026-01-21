@@ -1937,9 +1937,9 @@ void displayPage_main_menu() {
   display.print(menuSelectionIndex == 0 ? "->" : "  ");
   display.println(F("Race"));
   display.print(menuSelectionIndex == 1 ? "->" : "  ");
-  display.println(F("Replay"));
+  display.println(F("Review"));
   display.print(menuSelectionIndex == 2 ? "->" : "  ");
-  display.println(F("Download"));
+  display.println(F("Transfer"));
 
   display.display();
 }
@@ -1948,7 +1948,7 @@ void displayPage_bluetooth() {
   resetDisplay();
 
   display.setTextSize(1);
-  display.println(F(" Bluetooth Download"));
+  display.println(F(" Bluetooth Connection"));
   display.println();
 
   display.setTextSize(2);
@@ -2207,10 +2207,12 @@ void displayPage_replay_results() {
   if (replayMaxRpm > 0) {
     display.print(F("Max RPM: "));
     display.println(replayMaxRpm);
+  } else {
+    display.println();
   }
 
   display.println();
-  display.println(F("<- Laps    Exit ->"));
+  display.println(F("<- Laps       Exit ->"));
 
   display.display();
 }
