@@ -417,9 +417,6 @@ int replayMaxRpm = 0;
 unsigned long replayTotalSamples = 0;
 unsigned long replayProcessedSamples = 0;
 
-// Replay file handle
-File replayFile;
-
 // Line buffer for streaming file reads (bounded memory)
 #define REPLAY_LINE_BUFFER_SIZE 256
 char replayLineBuffer[REPLAY_LINE_BUFFER_SIZE];
@@ -436,17 +433,8 @@ struct ReplaySample {
   bool valid;
 };
 
-// Function prototypes for replay
-bool buildReplayFileList();
-bool readReplayLine(File& file, char* buffer, int bufferSize);
-bool parseDoveLine(const char* line, ReplaySample& sample);
-bool parseNmeaSentence(const char* line, ReplaySample& sample);
-bool extractGpsPointFromReplayFile(const char* filename, double& lat, double& lng);
-bool extractGpsPointFromTrackFile(int trackIndex, double& lat, double& lng);
-double haversineDistanceMiles(double lat1, double lng1, double lat2, double lng2);
-int detectTrackForReplayFile(const char* filename);
-void processReplayFile();
-void resetReplayState();
+// Note: File-dependent replay variables and function prototypes
+// are declared after SdFat.h include below
 
 ///////////////////////////////////////////
 
@@ -474,6 +462,21 @@ File file; //buffer
 File trackDir;
 File trackFile;
 File dataFile;
+
+// Replay file handle (must be after SdFat include)
+File replayFile;
+
+// Replay function prototypes (must be after SdFat include for File type)
+bool buildReplayFileList();
+bool readReplayLine(File& file, char* buffer, int bufferSize);
+bool parseDoveLine(const char* line, ReplaySample& sample);
+bool parseNmeaSentence(const char* line, ReplaySample& sample);
+bool extractGpsPointFromReplayFile(const char* filename, double& lat, double& lng);
+bool extractGpsPointFromTrackFile(int trackIndex, double& lat, double& lng);
+double haversineDistanceMiles(double lat1, double lng1, double lat2, double lng2);
+int detectTrackForReplayFile(const char* filename);
+void processReplayFile();
+void resetReplayState();
 
 // do we really need all of these flags
 bool sdSetupSuccess = false;
@@ -1359,7 +1362,7 @@ bool parseNmeaSentence(const char* line, ReplaySample& sample) {
  */
 double haversineDistanceMiles(double lat1, double lng1, double lat2, double lng2) {
   const double R = 3958.8; // Earth radius in miles
-  const double DEG_TO_RAD = PI / 180.0;
+  // Note: DEG_TO_RAD is already defined by Arduino
 
   double dLat = (lat2 - lat1) * DEG_TO_RAD;
   double dLng = (lng2 - lng1) * DEG_TO_RAD;
