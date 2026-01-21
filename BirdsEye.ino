@@ -1040,8 +1040,10 @@ void resetReplayState() {
   lastLap = 0;
   memset(lapHistory, 0, sizeof(lapHistory));
 
+  // Close replay file if open
   if (replayFile.isOpen()) {
     replayFile.close();
+    debugln(F("Replay: Closed replay file"));
   }
 }
 
@@ -1056,6 +1058,24 @@ bool buildReplayFileList() {
     debugln(F("Replay: SD not initialized"));
     return false;
   }
+
+  // Defensive cleanup - ensure no stale file handles interfere with SD operations
+  if (replayFile.isOpen()) {
+    debugln(F("Replay: Closing stale replay file handle"));
+    replayFile.close();
+  }
+  if (file.isOpen()) {
+    debugln(F("Replay: Closing stale file handle"));
+    file.close();
+  }
+
+  // Warn if data logging is active (potential conflict)
+  if (dataFile.isOpen()) {
+    debugln(F("Replay: WARNING - dataFile is open, may cause SD conflicts"));
+  }
+
+  // Small delay to let SD card settle after any previous operations
+  delay(10);
 
   File32 root = SD.open("/");
   if (!root) {
