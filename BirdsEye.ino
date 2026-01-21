@@ -2,7 +2,7 @@
 #include <SPI.h>
 
 // #define WOKWI
-//#define HAS_DEBUG
+#define HAS_DEBUG
 
 // Hides a couple pages and changes some behavior
 // todo: make dynamic in next UI version
@@ -1103,6 +1103,9 @@ bool buildReplayFileList() {
           replayFiles[numReplayFiles][MAX_REPLAY_FILENAME_LENGTH - 1] = '\0';
           numReplayFiles++;
           debug(F("Replay: Found file: "));
+          debugln(name);
+        } else {
+          debug(F("not replay file: "));
           debugln(name);
         }
       }
