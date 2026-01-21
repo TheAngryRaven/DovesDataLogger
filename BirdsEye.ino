@@ -1380,8 +1380,8 @@ double haversineDistanceMiles(double lat1, double lng1, double lat2, double lng2
  * @brief Extract a single GPS point from a replay file (first valid point)
  */
 bool extractGpsPointFromReplayFile(const char* filename, double& lat, double& lng) {
-  File file = SD.open(filename, O_READ);
-  if (!file) {
+  File file;
+  if (!file.open(filename, O_READ)) {
     debug(F("Replay: Cannot open file: "));
     debugln(filename);
     return false;
@@ -2839,8 +2839,7 @@ void handleMenuPageSelection() {
     debugln(selectedDirection == RACE_DIRECTION_FORWARD ? "Forward" : "Reverse");
 
     // Open the replay file and start processing
-    replayFile = SD.open(replayFiles[selectedReplayFile], O_READ);
-    if (replayFile) {
+    if (replayFile.open(replayFiles[selectedReplayFile], O_READ)) {
       replayModeActive = true;
       replayProcessingComplete = false;
       switchToDisplayPage(PAGE_REPLAY_PROCESSING);
