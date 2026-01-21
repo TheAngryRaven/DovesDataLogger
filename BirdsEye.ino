@@ -391,6 +391,63 @@ void checkForNewLapData() {
     debugln(F("New lap added to history..."));
   }
 }
+
+///////////////////////////////////////////
+// REPLAY SYSTEM
+///////////////////////////////////////////
+
+// Track detection threshold in miles (configurable)
+const float REPLAY_TRACK_DETECTION_THRESHOLD_MILES = 20.0;
+
+// Replay file list
+#define MAX_REPLAY_FILES 50
+#define MAX_REPLAY_FILENAME_LENGTH 64
+char replayFiles[MAX_REPLAY_FILES][MAX_REPLAY_FILENAME_LENGTH];
+int numReplayFiles = 0;
+int selectedReplayFile = -1;
+
+// Replay state
+bool replayModeActive = false;
+bool replayProcessingComplete = false;
+int replayDetectedTrackIndex = -1;
+
+// Replay statistics
+float replayMaxSpeed = 0.0;
+int replayMaxRpm = 0;
+unsigned long replayTotalSamples = 0;
+unsigned long replayProcessedSamples = 0;
+
+// Replay file handle
+File replayFile;
+
+// Line buffer for streaming file reads (bounded memory)
+#define REPLAY_LINE_BUFFER_SIZE 256
+char replayLineBuffer[REPLAY_LINE_BUFFER_SIZE];
+int replayLineBufferPos = 0;
+
+// Common sample struct for both DOVE and NMEA parsing
+struct ReplaySample {
+  unsigned long timestamp;  // milliseconds
+  double lat;
+  double lng;
+  float speed_mph;
+  float altitude;
+  int rpm;  // -1 if not available
+  bool valid;
+};
+
+// Function prototypes for replay
+bool buildReplayFileList();
+bool readReplayLine(File& file, char* buffer, int bufferSize);
+bool parseDoveLine(const char* line, ReplaySample& sample);
+bool parseNmeaSentence(const char* line, ReplaySample& sample);
+bool extractGpsPointFromReplayFile(const char* filename, double& lat, double& lng);
+bool extractGpsPointFromTrackFile(int trackIndex, double& lat, double& lng);
+double haversineDistanceMiles(double lat1, double lng1, double lat2, double lng2);
+int detectTrackForReplayFile(const char* filename);
+void processReplayFile();
+void resetReplayState();
+
 ///////////////////////////////////////////
 
 // SD_FAT_TYPE = 0 for SdFat/File as defined in SdFatConfig.h,
@@ -959,6 +1016,578 @@ void BLUETOOTH_LOOP() {
 }
 
 ///////////////////////////////////////////
+// REPLAY FUNCTIONS IMPLEMENTATION
+///////////////////////////////////////////
+
+/**
+ * @brief Reset replay state to initial values
+ */
+void resetReplayState() {
+  replayModeActive = false;
+  replayProcessingComplete = false;
+  replayDetectedTrackIndex = -1;
+  replayMaxSpeed = 0.0;
+  replayMaxRpm = 0;
+  replayTotalSamples = 0;
+  replayProcessedSamples = 0;
+  replayLineBufferPos = 0;
+
+  // Reset lap timer and history for replay
+  lapTimer.reset();
+  lapHistoryCount = 0;
+  lastLap = 0;
+  memset(lapHistory, 0, sizeof(lapHistory));
+
+  if (replayFile) {
+    replayFile.close();
+  }
+}
+
+/**
+ * @brief Build list of .dove and .nmea files from SD card root
+ * @return true if files found, false otherwise
+ */
+bool buildReplayFileList() {
+  numReplayFiles = 0;
+
+  if (!sdSetupSuccess) {
+    debugln(F("Replay: SD not initialized"));
+    return false;
+  }
+
+  File32 root = SD.open("/");
+  if (!root) {
+    debugln(F("Replay: Failed to open root"));
+    return false;
+  }
+
+  while (numReplayFiles < MAX_REPLAY_FILES) {
+    File32 entry = root.openNextFile();
+    if (!entry) break;
+
+    if (!entry.isDirectory()) {
+      char name[MAX_REPLAY_FILENAME_LENGTH];
+      entry.getName(name, sizeof(name));
+
+      // Check for .dove or .nmea extension (case insensitive)
+      int len = strlen(name);
+      if (len > 5) {
+        char* ext = name + len - 5;
+        bool isDove = (strcasecmp(ext, ".dove") == 0);
+        bool isNmea = (strcasecmp(ext, ".nmea") == 0);
+
+        if (isDove || isNmea) {
+          strncpy(replayFiles[numReplayFiles], name, MAX_REPLAY_FILENAME_LENGTH - 1);
+          replayFiles[numReplayFiles][MAX_REPLAY_FILENAME_LENGTH - 1] = '\0';
+          numReplayFiles++;
+          debug(F("Replay: Found file: "));
+          debugln(name);
+        }
+      }
+    }
+    entry.close();
+  }
+
+  root.close();
+
+  debug(F("Replay: Total files found: "));
+  debugln(numReplayFiles);
+
+  return numReplayFiles > 0;
+}
+
+/**
+ * @brief Read a single line from file into buffer (streaming, bounded memory)
+ * @param file File handle
+ * @param buffer Output buffer
+ * @param bufferSize Size of output buffer
+ * @return true if line read successfully, false on EOF or error
+ */
+bool readReplayLine(File& file, char* buffer, int bufferSize) {
+  int pos = 0;
+
+  while (pos < bufferSize - 1) {
+    int c = file.read();
+
+    if (c < 0) {
+      // EOF
+      if (pos > 0) {
+        buffer[pos] = '\0';
+        return true;
+      }
+      return false;
+    }
+
+    if (c == '\n') {
+      buffer[pos] = '\0';
+      return true;
+    }
+
+    if (c == '\r') {
+      // Skip carriage return
+      continue;
+    }
+
+    buffer[pos++] = (char)c;
+  }
+
+  // Line too long, truncate
+  buffer[bufferSize - 1] = '\0';
+
+  // Skip rest of line
+  while (true) {
+    int c = file.read();
+    if (c < 0 || c == '\n') break;
+  }
+
+  return true;
+}
+
+/**
+ * @brief Parse a DOVE CSV line into a ReplaySample
+ * Format: timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,rpm,exhaust_temp_c,water_temp_c
+ * @param line Input CSV line
+ * @param sample Output sample struct
+ * @return true if parsed successfully
+ */
+bool parseDoveLine(const char* line, ReplaySample& sample) {
+  sample.valid = false;
+  sample.rpm = -1;
+
+  // Skip header line
+  if (strstr(line, "timestamp") != NULL) {
+    return false;
+  }
+
+  // Skip empty lines
+  if (strlen(line) < 10) {
+    return false;
+  }
+
+  // Parse CSV fields
+  char lineCopy[REPLAY_LINE_BUFFER_SIZE];
+  strncpy(lineCopy, line, sizeof(lineCopy) - 1);
+  lineCopy[sizeof(lineCopy) - 1] = '\0';
+
+  char* token;
+  int fieldIndex = 0;
+
+  token = strtok(lineCopy, ",");
+  while (token != NULL && fieldIndex < 10) {
+    switch (fieldIndex) {
+      case 0: // timestamp
+        sample.timestamp = strtoul(token, NULL, 10);
+        break;
+      case 1: // sats - skip
+        break;
+      case 2: // hdop - skip
+        break;
+      case 3: // lat
+        sample.lat = atof(token);
+        break;
+      case 4: // lng
+        sample.lng = atof(token);
+        break;
+      case 5: // speed_mph
+        sample.speed_mph = atof(token);
+        break;
+      case 6: // altitude_m
+        sample.altitude = atof(token);
+        break;
+      case 7: // rpm
+        sample.rpm = atoi(token);
+        break;
+      // 8, 9: exhaust_temp_c, water_temp_c - skip
+    }
+    fieldIndex++;
+    token = strtok(NULL, ",");
+  }
+
+  // Validate we got minimum required fields
+  if (fieldIndex >= 6 && sample.lat != 0.0 && sample.lng != 0.0) {
+    sample.valid = true;
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * @brief Parse an NMEA sentence into a ReplaySample
+ * Supports GPGGA, GNGGA, GPRMC, GNRMC
+ * @param line Input NMEA sentence
+ * @param sample Output sample struct
+ * @return true if parsed successfully
+ */
+bool parseNmeaSentence(const char* line, ReplaySample& sample) {
+  sample.valid = false;
+  sample.rpm = -1;  // NMEA has no RPM
+  sample.altitude = 0.0;
+
+  // Check for valid NMEA sentence
+  if (line[0] != '$') {
+    return false;
+  }
+
+  // Check sentence type
+  bool isGGA = (strstr(line, "GGA") != NULL);
+  bool isRMC = (strstr(line, "RMC") != NULL);
+
+  if (!isGGA && !isRMC) {
+    return false;
+  }
+
+  // Parse NMEA sentence
+  char lineCopy[REPLAY_LINE_BUFFER_SIZE];
+  strncpy(lineCopy, line, sizeof(lineCopy) - 1);
+  lineCopy[sizeof(lineCopy) - 1] = '\0';
+
+  char* token;
+  int fieldIndex = 0;
+
+  double latDeg = 0, latMin = 0;
+  double lngDeg = 0, lngMin = 0;
+  char latDir = 'N', lngDir = 'W';
+  float speedKnots = 0;
+
+  token = strtok(lineCopy, ",");
+  while (token != NULL) {
+    if (isGGA) {
+      switch (fieldIndex) {
+        case 1: // Time - can be used for timestamp
+          {
+            // Parse HHMMSS.sss format
+            if (strlen(token) >= 6) {
+              int hour = (token[0] - '0') * 10 + (token[1] - '0');
+              int min = (token[2] - '0') * 10 + (token[3] - '0');
+              int sec = (token[4] - '0') * 10 + (token[5] - '0');
+              int ms = 0;
+              if (strlen(token) > 7) {
+                ms = atoi(token + 7);
+              }
+              sample.timestamp = hour * 3600000UL + min * 60000UL + sec * 1000UL + ms;
+            }
+          }
+          break;
+        case 2: // Latitude DDMM.MMMM
+          if (strlen(token) >= 4) {
+            latDeg = (token[0] - '0') * 10 + (token[1] - '0');
+            latMin = atof(token + 2);
+          }
+          break;
+        case 3: // N/S
+          latDir = token[0];
+          break;
+        case 4: // Longitude DDDMM.MMMM
+          if (strlen(token) >= 5) {
+            lngDeg = (token[0] - '0') * 100 + (token[1] - '0') * 10 + (token[2] - '0');
+            lngMin = atof(token + 3);
+          }
+          break;
+        case 5: // E/W
+          lngDir = token[0];
+          break;
+        case 9: // Altitude
+          sample.altitude = atof(token);
+          break;
+      }
+    } else if (isRMC) {
+      switch (fieldIndex) {
+        case 1: // Time
+          {
+            if (strlen(token) >= 6) {
+              int hour = (token[0] - '0') * 10 + (token[1] - '0');
+              int min = (token[2] - '0') * 10 + (token[3] - '0');
+              int sec = (token[4] - '0') * 10 + (token[5] - '0');
+              int ms = 0;
+              if (strlen(token) > 7) {
+                ms = atoi(token + 7);
+              }
+              sample.timestamp = hour * 3600000UL + min * 60000UL + sec * 1000UL + ms;
+            }
+          }
+          break;
+        case 3: // Latitude
+          if (strlen(token) >= 4) {
+            latDeg = (token[0] - '0') * 10 + (token[1] - '0');
+            latMin = atof(token + 2);
+          }
+          break;
+        case 4: // N/S
+          latDir = token[0];
+          break;
+        case 5: // Longitude
+          if (strlen(token) >= 5) {
+            lngDeg = (token[0] - '0') * 100 + (token[1] - '0') * 10 + (token[2] - '0');
+            lngMin = atof(token + 3);
+          }
+          break;
+        case 6: // E/W
+          lngDir = token[0];
+          break;
+        case 7: // Speed in knots
+          speedKnots = atof(token);
+          break;
+      }
+    }
+
+    fieldIndex++;
+    token = strtok(NULL, ",*");
+  }
+
+  // Convert to decimal degrees
+  sample.lat = latDeg + (latMin / 60.0);
+  if (latDir == 'S') sample.lat = -sample.lat;
+
+  sample.lng = lngDeg + (lngMin / 60.0);
+  if (lngDir == 'W') sample.lng = -sample.lng;
+
+  // Convert knots to mph (1 knot = 1.15078 mph)
+  sample.speed_mph = speedKnots * 1.15078;
+
+  // Validate
+  if (sample.lat != 0.0 && sample.lng != 0.0) {
+    sample.valid = true;
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * @brief Calculate haversine distance between two GPS points in miles
+ */
+double haversineDistanceMiles(double lat1, double lng1, double lat2, double lng2) {
+  const double R = 3958.8; // Earth radius in miles
+  const double DEG_TO_RAD = PI / 180.0;
+
+  double dLat = (lat2 - lat1) * DEG_TO_RAD;
+  double dLng = (lng2 - lng1) * DEG_TO_RAD;
+
+  double a = sin(dLat / 2) * sin(dLat / 2) +
+             cos(lat1 * DEG_TO_RAD) * cos(lat2 * DEG_TO_RAD) *
+             sin(dLng / 2) * sin(dLng / 2);
+
+  double c = 2 * atan2(sqrt(a), sqrt(1 - a));
+
+  return R * c;
+}
+
+/**
+ * @brief Extract a single GPS point from a replay file (first valid point)
+ */
+bool extractGpsPointFromReplayFile(const char* filename, double& lat, double& lng) {
+  File file = SD.open(filename, O_READ);
+  if (!file) {
+    debug(F("Replay: Cannot open file: "));
+    debugln(filename);
+    return false;
+  }
+
+  // Determine file type
+  int len = strlen(filename);
+  bool isDove = (len > 5 && strcasecmp(filename + len - 5, ".dove") == 0);
+
+  char lineBuffer[REPLAY_LINE_BUFFER_SIZE];
+  int linesChecked = 0;
+  const int maxLinesToCheck = 100; // Don't scan too much
+
+  while (linesChecked < maxLinesToCheck && readReplayLine(file, lineBuffer, sizeof(lineBuffer))) {
+    linesChecked++;
+
+    ReplaySample sample;
+    bool parsed = false;
+
+    if (isDove) {
+      parsed = parseDoveLine(lineBuffer, sample);
+    } else {
+      parsed = parseNmeaSentence(lineBuffer, sample);
+    }
+
+    if (parsed && sample.valid) {
+      lat = sample.lat;
+      lng = sample.lng;
+      file.close();
+      debug(F("Replay: Extracted point: "));
+      debug(lat, 6);
+      debug(F(", "));
+      debugln(lng, 6);
+      return true;
+    }
+  }
+
+  file.close();
+  debugln(F("Replay: No valid GPS point found in file"));
+  return false;
+}
+
+/**
+ * @brief Extract a single GPS point from a track file (start line midpoint)
+ */
+bool extractGpsPointFromTrackFile(int trackIndex, double& lat, double& lng) {
+  if (trackIndex < 0 || trackIndex >= numOfLocations) {
+    return false;
+  }
+
+  // Parse the track file to get coordinates
+  char filepath[50];
+  makeFullTrackPath(locations[trackIndex], filepath);
+
+  File trackFileTemp;
+  trackFileTemp.open(filepath, O_READ);
+  if (!trackFileTemp) {
+    debug(F("Replay: Cannot open track: "));
+    debugln(filepath);
+    return false;
+  }
+
+  // Read JSON content
+  char buffer[JSON_BUFFER_SIZE];
+  int bytesRead = trackFileTemp.read(buffer, sizeof(buffer) - 1);
+  trackFileTemp.close();
+
+  if (bytesRead <= 0) {
+    return false;
+  }
+  buffer[bytesRead] = '\0';
+
+  // Parse JSON
+  StaticJsonDocument<JSON_BUFFER_SIZE> trackJson;
+  DeserializationError error = deserializeJson(trackJson, buffer);
+  if (error != DeserializationError::Ok) {
+    return false;
+  }
+
+  // Get first layout's start line midpoint
+  JsonArray array = trackJson.as<JsonArray>();
+  if (array.size() == 0) {
+    return false;
+  }
+
+  JsonVariant firstLayout = array[0];
+  double a_lat = firstLayout["start_a_lat"];
+  double a_lng = firstLayout["start_a_lng"];
+  double b_lat = firstLayout["start_b_lat"];
+  double b_lng = firstLayout["start_b_lng"];
+
+  // Calculate midpoint
+  lat = (a_lat + b_lat) / 2.0;
+  lng = (a_lng + b_lng) / 2.0;
+
+  debug(F("Replay: Track "));
+  debug(locations[trackIndex]);
+  debug(F(" point: "));
+  debug(lat, 6);
+  debug(F(", "));
+  debugln(lng, 6);
+
+  return true;
+}
+
+/**
+ * @brief Detect which track a replay file belongs to
+ * @param filename The replay file name
+ * @return Track index if found, -1 otherwise
+ */
+int detectTrackForReplayFile(const char* filename) {
+  double fileLat, fileLng;
+
+  if (!extractGpsPointFromReplayFile(filename, fileLat, fileLng)) {
+    debugln(F("Replay: Failed to extract GPS point from file"));
+    return -1;
+  }
+
+  // Compare against each track
+  for (int i = 0; i < numOfLocations; i++) {
+    double trackLat, trackLng;
+
+    if (extractGpsPointFromTrackFile(i, trackLat, trackLng)) {
+      double distance = haversineDistanceMiles(fileLat, fileLng, trackLat, trackLng);
+
+      debug(F("Replay: Distance to "));
+      debug(locations[i]);
+      debug(F(": "));
+      debug(distance, 2);
+      debugln(F(" miles"));
+
+      if (distance <= REPLAY_TRACK_DETECTION_THRESHOLD_MILES) {
+        debug(F("Replay: Matched track: "));
+        debugln(locations[i]);
+        return i;
+      }
+    }
+  }
+
+  debugln(F("Replay: No matching track found"));
+  return -1;
+}
+
+/**
+ * @brief Process the selected replay file through the lap timer
+ * Call this from loop() when in replay processing state
+ */
+void processReplayFile() {
+  if (!replayFile) {
+    return;
+  }
+
+  // Process multiple lines per call to speed things up
+  const int linesPerCall = 50;
+
+  for (int i = 0; i < linesPerCall; i++) {
+    if (!readReplayLine(replayFile, replayLineBuffer, sizeof(replayLineBuffer))) {
+      // EOF - processing complete
+      replayFile.close();
+      replayProcessingComplete = true;
+      debugln(F("Replay: Processing complete"));
+      debug(F("Replay: Total samples: "));
+      debugln(replayProcessedSamples);
+      debug(F("Replay: Max speed: "));
+      debugln(replayMaxSpeed, 2);
+      debug(F("Replay: Max RPM: "));
+      debugln(replayMaxRpm);
+      debug(F("Replay: Laps: "));
+      debugln(lapTimer.getLaps());
+      return;
+    }
+
+    replayTotalSamples++;
+
+    // Determine file type from selected file
+    int len = strlen(replayFiles[selectedReplayFile]);
+    bool isDove = (len > 5 && strcasecmp(replayFiles[selectedReplayFile] + len - 5, ".dove") == 0);
+
+    ReplaySample sample;
+    bool parsed = false;
+
+    if (isDove) {
+      parsed = parseDoveLine(replayLineBuffer, sample);
+    } else {
+      parsed = parseNmeaSentence(replayLineBuffer, sample);
+    }
+
+    if (parsed && sample.valid) {
+      replayProcessedSamples++;
+
+      // Update lap timer with this sample
+      lapTimer.updateCurrentTime(sample.timestamp);
+      lapTimer.loop(sample.lat, sample.lng, sample.altitude, sample.speed_mph / 1.15078); // Convert mph to knots for lapTimer
+
+      // Track max values
+      if (sample.speed_mph > replayMaxSpeed) {
+        replayMaxSpeed = sample.speed_mph;
+      }
+      if (sample.rpm > replayMaxRpm) {
+        replayMaxRpm = sample.rpm;
+      }
+
+      // Check for new lap
+      checkForNewLapData();
+    }
+  }
+}
+
+///////////////////////////////////////////
 
 ButtonState button1;
 ButtonState *btn1 = &button1;
@@ -989,6 +1618,12 @@ const int PAGE_RC_ERROR = 990;
 // main menu (shown after boot)
 const int PAGE_MAIN_MENU = -1;
 const int PAGE_BLUETOOTH = -2;
+const int PAGE_REPLAY_FILE_SELECT = -3;
+const int PAGE_REPLAY_DETECTING = -4;
+const int PAGE_REPLAY_SELECT_TRACK = -5;
+const int PAGE_REPLAY_SELECT_DIRECTION = -6;
+const int PAGE_REPLAY_PROCESSING = -7;
+const int PAGE_REPLAY_RESULTS = -8;
 
 // boot menu
 const int PAGE_SELECT_LOCATION = 0;
@@ -1256,6 +1891,8 @@ void displayPage_main_menu() {
   display.print(menuSelectionIndex == 0 ? "->" : "  ");
   display.println(F("Race"));
   display.print(menuSelectionIndex == 1 ? "->" : "  ");
+  display.println(F("Replay"));
+  display.print(menuSelectionIndex == 2 ? "->" : "  ");
   display.println(F("Download"));
 
   display.display();
@@ -1289,6 +1926,221 @@ void displayPage_bluetooth() {
   display.println();
   display.setTextSize(1);
   display.println(F("->Exit"));
+
+  display.display();
+}
+
+void displayPage_replay_file_select() {
+  resetDisplay();
+
+  display.print(F("Select Session: "));
+  display.print(menuSelectionIndex + 1);
+  display.print(F("/"));
+  display.println(numReplayFiles);
+  display.println();
+  display.setTextSize(1);
+
+  if (numReplayFiles == 0) {
+    display.println();
+    display.println(F("No .dove or .nmea"));
+    display.println(F("files found!"));
+    display.println();
+    display.println(F("Press any key"));
+    display.println(F("to go back"));
+  } else if (numReplayFiles < 3) {
+    // Small menu - show all files
+    for (int i = 0; i < numReplayFiles; i++) {
+      if (menuSelectionIndex == i) {
+        display.print(F("->"));
+      } else {
+        display.print(F("  "));
+      }
+      // Truncate long filenames for display
+      char displayName[20];
+      strncpy(displayName, replayFiles[i], 19);
+      displayName[19] = '\0';
+      display.println(displayName);
+    }
+  } else {
+    // Scrolling menu
+    int indexA = menuSelectionIndex == numReplayFiles - 1 ? 0 : menuSelectionIndex + 1;
+    int indexB = menuSelectionIndex;
+    int indexC = menuSelectionIndex == 0 ? numReplayFiles - 1 : menuSelectionIndex - 1;
+
+    char displayName[20];
+
+    display.print(F("  "));
+    strncpy(displayName, replayFiles[indexA], 19);
+    displayName[19] = '\0';
+    display.println(displayName);
+
+    display.print(F("->"));
+    strncpy(displayName, replayFiles[indexB], 19);
+    displayName[19] = '\0';
+    display.println(displayName);
+
+    display.print(F("  "));
+    strncpy(displayName, replayFiles[indexC], 19);
+    displayName[19] = '\0';
+    display.println(displayName);
+  }
+
+  display.display();
+}
+
+void displayPage_replay_detecting() {
+  resetDisplay();
+
+  display.setTextSize(1);
+  display.println(F("  Detecting Track"));
+  display.println();
+
+  display.setTextSize(2);
+  display.println(F(" Please"));
+  display.println(F("   Wait..."));
+
+  display.display();
+}
+
+void displayPage_replay_select_track() {
+  resetDisplay();
+
+  if (recentlyChanged && selectedTrack >= 0) {
+    menuSelectionIndex = selectedTrack;
+  }
+
+  display.print(F("Replay Layout: "));
+  display.print(menuSelectionIndex + 1);
+  display.print(F("/"));
+  display.println(numOfTracks);
+  display.println(locations[selectedLocation]);
+  display.setTextSize(2);
+
+  if (numOfTracks < 3) {
+    display.println();
+    if (numOfTracks >= 1) {
+      display.print(menuSelectionIndex == 0 ? "->" : "  ");
+      display.println(tracks[0]);
+    }
+    if (numOfTracks >= 2) {
+      display.print(menuSelectionIndex == 1 ? "->" : "  ");
+      display.println(tracks[1]);
+    }
+  } else {
+    int indexA = menuSelectionIndex == numOfTracks - 1 ? 0 : menuSelectionIndex + 1;
+    int indexB = menuSelectionIndex;
+    int indexC = menuSelectionIndex == 0 ? numOfTracks - 1 : menuSelectionIndex - 1;
+    display.print(F("  "));
+    display.println(tracks[indexA]);
+    display.print(F("->"));
+    display.println(tracks[indexB]);
+    display.print(F("  "));
+    display.println(tracks[indexC]);
+  }
+
+  display.display();
+}
+
+void displayPage_replay_select_direction() {
+  resetDisplay();
+
+  if (recentlyChanged && selectedDirection >= 0) {
+    menuSelectionIndex = selectedDirection;
+  }
+
+  display.println(F("Replay Direction"));
+  display.println();
+  display.setTextSize(2);
+
+  display.println(F(""));
+  display.print(menuSelectionIndex == 0 ? "->" : "  ");
+  display.println(F("Forward"));
+  display.print(menuSelectionIndex == 1 ? "->" : "  ");
+  display.println(F("Reverse"));
+
+  display.display();
+}
+
+void displayPage_replay_processing() {
+  resetDisplay();
+
+  display.setTextSize(1);
+  display.println(F("  Processing Replay"));
+  display.println();
+
+  // Show file name (truncated)
+  char displayName[22];
+  strncpy(displayName, replayFiles[selectedReplayFile], 21);
+  displayName[21] = '\0';
+  display.println(displayName);
+  display.println();
+
+  // Show progress
+  display.setTextSize(2);
+  if (replayTotalSamples > 0) {
+    display.print(F(" "));
+    display.print(replayProcessedSamples);
+    display.println();
+    display.setTextSize(1);
+    display.println(F(" samples processed"));
+  } else {
+    display.println(F(" Starting..."));
+  }
+
+  display.setTextSize(1);
+  display.println();
+  if (lapTimer.getLaps() > 0) {
+    display.print(F("Laps found: "));
+    display.println(lapTimer.getLaps());
+  }
+
+  display.display();
+}
+
+void displayPage_replay_results() {
+  resetDisplay();
+
+  display.setTextSize(1);
+  display.println(F("   Replay Results"));
+  display.println();
+
+  display.setTextSize(1);
+  display.print(F("Laps: "));
+  display.println(lapTimer.getLaps());
+  display.println();
+
+  if (lapTimer.getLaps() > 0) {
+    display.print(F("Best: "));
+    unsigned long bestTime = lapTimer.getBestLapTime();
+    unsigned long minutes = bestTime / 60000;
+    unsigned long seconds = (bestTime % 60000) / 1000;
+    unsigned long milliseconds = bestTime % 1000;
+    if (minutes > 0) {
+      display.print(minutes);
+      display.print(F(":"));
+    }
+    if (seconds < 10 && minutes > 0) display.print(F("0"));
+    display.print(seconds);
+    display.print(F("."));
+    if (milliseconds < 100) display.print(F("0"));
+    if (milliseconds < 10) display.print(F("0"));
+    display.println(milliseconds);
+    display.println();
+  }
+
+  display.print(F("Max Speed: "));
+  display.print(replayMaxSpeed, 1);
+  display.println(F(" mph"));
+
+  if (replayMaxRpm > 0) {
+    display.print(F("Max RPM: "));
+    display.println(replayMaxRpm);
+  }
+
+  display.println();
+  display.setTextSize(1);
+  display.println(F("Press Enter for laps"));
+  display.println(F("or Back to exit"));
 
   display.display();
 }
@@ -1889,11 +2741,115 @@ void handleMenuPageSelection() {
       // Race selected
       debugln(F("Main Menu: Race selected"));
       switchToDisplayPage(PAGE_SELECT_LOCATION);
+    } else if (menuSelectionIndex == 1) {
+      // Replay selected
+      debugln(F("Main Menu: Replay selected"));
+      resetReplayState();
+      if (buildReplayFileList()) {
+        switchToDisplayPage(PAGE_REPLAY_FILE_SELECT);
+      } else {
+        internalNotification = "No .dove or .nmea\nfiles found on SD!";
+        switchToDisplayPage(PAGE_INTERNAL_WARNING);
+      }
     } else {
       // Bluetooth selected
       debugln(F("Main Menu: Bluetooth selected"));
       BLE_SETUP();
       switchToDisplayPage(PAGE_BLUETOOTH);
+    }
+  } else if (currentPage == PAGE_REPLAY_FILE_SELECT) {
+    if (numReplayFiles == 0) {
+      // No files - go back
+      switchToDisplayPage(PAGE_MAIN_MENU);
+    } else {
+      selectedReplayFile = menuSelectionIndex;
+      debug(F("Replay: Selected file: "));
+      debugln(replayFiles[selectedReplayFile]);
+
+      // Show detecting page
+      switchToDisplayPage(PAGE_REPLAY_DETECTING);
+      forceDisplayRefresh();
+      displayPage_replay_detecting();
+
+      // Detect track
+      replayDetectedTrackIndex = detectTrackForReplayFile(replayFiles[selectedReplayFile]);
+
+      if (replayDetectedTrackIndex >= 0) {
+        // Track found - parse it and go to layout selection
+        selectedLocation = replayDetectedTrackIndex;
+        char filepath[50];
+        makeFullTrackPath(locations[selectedLocation], filepath);
+        numOfTracks = 0; // Reset before parsing
+        int parseStatus = parseTrackFile(filepath);
+
+        if (parseStatus == PARSE_STATUS_GOOD) {
+          switchToDisplayPage(PAGE_REPLAY_SELECT_TRACK);
+        } else {
+          internalNotification = "Failed to parse\ntrack file!";
+          switchToDisplayPage(PAGE_INTERNAL_FAULT);
+        }
+      } else {
+        // No track detected - let user select manually
+        internalNotification = "Track not detected!\nSelect manually.";
+        // Go to normal track selection
+        switchToDisplayPage(PAGE_SELECT_LOCATION);
+        replayModeActive = true; // Set flag so we know we're in replay mode
+      }
+    }
+  } else if (currentPage == PAGE_REPLAY_SELECT_TRACK) {
+    selectedTrack = menuSelectionIndex;
+    switchToDisplayPage(PAGE_REPLAY_SELECT_DIRECTION);
+    debug(F("Replay: Selected layout: "));
+    debugln(tracks[selectedTrack]);
+
+    // Configure lap timer with selected track
+    crossingPointALat = trackLayouts[selectedTrack].start_a_lat;
+    crossingPointALng = trackLayouts[selectedTrack].start_a_lng;
+    crossingPointBLat = trackLayouts[selectedTrack].start_b_lat;
+    crossingPointBLng = trackLayouts[selectedTrack].start_b_lng;
+
+    lapTimer.setStartFinishLine(crossingPointALat, crossingPointALng, crossingPointBLat, crossingPointBLng);
+
+    if (trackLayouts[selectedTrack].hasSector2) {
+      lapTimer.setSector2Line(
+        trackLayouts[selectedTrack].sector_2_a_lat,
+        trackLayouts[selectedTrack].sector_2_a_lng,
+        trackLayouts[selectedTrack].sector_2_b_lat,
+        trackLayouts[selectedTrack].sector_2_b_lng
+      );
+    }
+
+    if (trackLayouts[selectedTrack].hasSector3) {
+      lapTimer.setSector3Line(
+        trackLayouts[selectedTrack].sector_3_a_lat,
+        trackLayouts[selectedTrack].sector_3_a_lng,
+        trackLayouts[selectedTrack].sector_3_b_lat,
+        trackLayouts[selectedTrack].sector_3_b_lng
+      );
+    }
+
+    lapTimer.forceLinearInterpolation();
+    lapTimer.reset();
+  } else if (currentPage == PAGE_REPLAY_SELECT_DIRECTION) {
+    selectedDirection = menuSelectionIndex;
+    debug(F("Replay: Selected direction: "));
+    debugln(selectedDirection == RACE_DIRECTION_FORWARD ? "Forward" : "Reverse");
+
+    // Open the replay file and start processing
+    replayFile = SD.open(replayFiles[selectedReplayFile], O_READ);
+    if (replayFile) {
+      replayModeActive = true;
+      replayProcessingComplete = false;
+      switchToDisplayPage(PAGE_REPLAY_PROCESSING);
+    } else {
+      internalNotification = "Failed to open\nreplay file!";
+      switchToDisplayPage(PAGE_INTERNAL_FAULT);
+    }
+  } else if (currentPage == PAGE_REPLAY_RESULTS) {
+    // Enter on results shows lap list if we have laps
+    if (lapTimer.getLaps() > 0) {
+      current_lap_list_page = 0;
+      switchToDisplayPage(GPS_LAP_LIST);
     }
   } else if (currentPage == PAGE_BLUETOOTH) {
     // Exit button pressed - go back to main menu and disable bluetooth
@@ -1921,7 +2877,14 @@ void handleMenuPageSelection() {
     debugln(locations[selectedLocation]);
   } else if (currentPage == PAGE_SELECT_TRACK) {
     selectedTrack = menuSelectionIndex;
-    switchToDisplayPage(PAGE_SELECT_DIRECTION);
+
+    // Check if we're in replay mode (manual track selection after auto-detect failed)
+    if (replayModeActive) {
+      switchToDisplayPage(PAGE_REPLAY_SELECT_DIRECTION);
+    } else {
+      switchToDisplayPage(PAGE_SELECT_DIRECTION);
+    }
+
     debug(F("Selected Track: "));
     debugln(tracks[selectedTrack]);
     debug(F("start_a_lat: "));
@@ -2002,8 +2965,14 @@ void handleRunningPageSelection() {
   if (currentPage == LOGGING_STOP) {
     switchToDisplayPage(LOGGING_STOP_CONFIRM);
   } else if (currentPage == GPS_LAP_LIST) {
-    current_lap_list_page = current_lap_list_page == (lap_list_pages-1) ? 0 : current_lap_list_page + 1;
-    forceDisplayRefresh();
+    // Check if we're viewing lap list from replay results
+    if (replayProcessingComplete) {
+      // In replay mode, enter goes back to results
+      switchToDisplayPage(PAGE_REPLAY_RESULTS);
+    } else {
+      current_lap_list_page = current_lap_list_page == (lap_list_pages-1) ? 0 : current_lap_list_page + 1;
+      forceDisplayRefresh();
+    }
   } else {
     // wokwi doesnt like fancy page switcher
     // inverted eats too much power
@@ -2053,6 +3022,18 @@ void displayLoop() {
       displayPage_main_menu();
     } else if (currentPage == PAGE_BLUETOOTH) {
       displayPage_bluetooth();
+    } else if (currentPage == PAGE_REPLAY_FILE_SELECT) {
+      displayPage_replay_file_select();
+    } else if (currentPage == PAGE_REPLAY_DETECTING) {
+      displayPage_replay_detecting();
+    } else if (currentPage == PAGE_REPLAY_SELECT_TRACK) {
+      displayPage_replay_select_track();
+    } else if (currentPage == PAGE_REPLAY_SELECT_DIRECTION) {
+      displayPage_replay_select_direction();
+    } else if (currentPage == PAGE_REPLAY_PROCESSING) {
+      displayPage_replay_processing();
+    } else if (currentPage == PAGE_REPLAY_RESULTS) {
+      displayPage_replay_results();
     } else if (currentPage == PAGE_SELECT_LOCATION) {
       displayPage_select_location();
     } else if (currentPage == PAGE_SELECT_TRACK) {
@@ -2123,11 +3104,15 @@ void displayLoop() {
     currentPage == PAGE_SELECT_LOCATION ||
     currentPage == PAGE_SELECT_TRACK ||
     currentPage == PAGE_SELECT_DIRECTION ||
-    currentPage == LOGGING_STOP_CONFIRM
+    currentPage == LOGGING_STOP_CONFIRM ||
+    currentPage == PAGE_REPLAY_FILE_SELECT ||
+    currentPage == PAGE_REPLAY_SELECT_TRACK ||
+    currentPage == PAGE_REPLAY_SELECT_DIRECTION ||
+    currentPage == PAGE_REPLAY_RESULTS
   ) {
     insideMenu = true;
     if (currentPage == PAGE_MAIN_MENU) {
-      menuLimit = 2;
+      menuLimit = 3; // Race, Replay, Download
     } else if (currentPage == PAGE_BLUETOOTH) {
       menuLimit = 1; // Only "Exit" option
     } else if (currentPage == PAGE_SELECT_LOCATION) {
@@ -2139,11 +3124,21 @@ void displayLoop() {
       currentPage == LOGGING_STOP_CONFIRM
     ) {
       menuLimit = 2;
+    } else if (currentPage == PAGE_REPLAY_FILE_SELECT) {
+      menuLimit = numReplayFiles > 0 ? numReplayFiles : 1;
+    } else if (currentPage == PAGE_REPLAY_SELECT_TRACK) {
+      menuLimit = numOfTracks;
+    } else if (currentPage == PAGE_REPLAY_SELECT_DIRECTION) {
+      menuLimit = 2;
+    } else if (currentPage == PAGE_REPLAY_RESULTS) {
+      menuLimit = 1; // Just enter to see laps or back button
     }
   }
 
   if (
-    currentPage == PAGE_INTERNAL_FAULT
+    currentPage == PAGE_INTERNAL_FAULT ||
+    currentPage == PAGE_REPLAY_PROCESSING ||
+    currentPage == PAGE_REPLAY_DETECTING
   ) {
     buttonsDisabled = true;
   }
@@ -2153,15 +3148,22 @@ void displayLoop() {
     // we are in a menu do weird menu things
     // BUTTON UP
     if (btn1->pressed) {
-      // debugln(F("Button Up"));
-      if (menuSelectionIndex == menuLimit-1) {
-        menuSelectionIndex = 0;
+      // Replay results page - any button except enter goes back
+      if (currentPage == PAGE_REPLAY_RESULTS) {
+        resetReplayState();
+        switchToDisplayPage(PAGE_MAIN_MENU);
       } else {
-        menuSelectionIndex++;
+        // Normal menu navigation
+        // debugln(F("Button Up"));
+        if (menuSelectionIndex == menuLimit-1) {
+          menuSelectionIndex = 0;
+        } else {
+          menuSelectionIndex++;
+        }
+        debug(F("menu number: "));
+        debugln(menuSelectionIndex);
+        forceDisplayRefresh();
       }
-      debug(F("menu number: "));
-      debugln(menuSelectionIndex);
-      forceDisplayRefresh();
     }
     // BUTTON ENTER
     if (btn2->pressed) {
@@ -2170,29 +3172,41 @@ void displayLoop() {
     }
     // BUTTON DOWN
     if (btn3->pressed) {
-      // debugln(F("Button Down"));
-      if (menuSelectionIndex == 0) {
-        menuSelectionIndex = menuLimit-1;
+      // Replay results page - any button except enter goes back
+      if (currentPage == PAGE_REPLAY_RESULTS) {
+        resetReplayState();
+        switchToDisplayPage(PAGE_MAIN_MENU);
       } else {
-        menuSelectionIndex--;
+        // Normal menu navigation
+        // debugln(F("Button Down"));
+        if (menuSelectionIndex == 0) {
+          menuSelectionIndex = menuLimit-1;
+        } else {
+          menuSelectionIndex--;
+        }
+        debug(F("menu number: "));
+        debugln(menuSelectionIndex);
+        forceDisplayRefresh();
       }
-      debug(F("menu number: "));
-      debugln(menuSelectionIndex);
-      forceDisplayRefresh();
     }
   } else if (!buttonsDisabled){
     // page up/down/enter
     // BUTTON LEFT
     if (btn1->pressed) {
       debugln(F("Button Left"));
-      if (currentPage <= runningPageStart) {
-        currentPage = runningPageEnd;
+      // Special handling for lap list during replay
+      if (currentPage == GPS_LAP_LIST && replayProcessingComplete) {
+        switchToDisplayPage(PAGE_REPLAY_RESULTS);
       } else {
-        currentPage--;
-      }      
-      debug(F("running menu number: "));
-      debugln(currentPage);
-      switchToDisplayPage(currentPage);
+        if (currentPage <= runningPageStart) {
+          currentPage = runningPageEnd;
+        } else {
+          currentPage--;
+        }
+        debug(F("running menu number: "));
+        debugln(currentPage);
+        switchToDisplayPage(currentPage);
+      }
     }
     // BUTTON ENTER
     if (btn2->pressed) {
@@ -2202,14 +3216,25 @@ void displayLoop() {
     // BUTTON DOWN
     if (btn3->pressed) {
       debugln(F("Button Right"));
-      if (currentPage >= runningPageEnd) {
-        currentPage = runningPageStart;
+      // Special handling for lap list during replay
+      if (currentPage == GPS_LAP_LIST && replayProcessingComplete) {
+        // Cycle through pages in lap list, or next page if on last page goes back to results
+        if (lap_list_pages > 1) {
+          current_lap_list_page = current_lap_list_page == (lap_list_pages-1) ? 0 : current_lap_list_page + 1;
+          forceDisplayRefresh();
+        } else {
+          switchToDisplayPage(PAGE_REPLAY_RESULTS);
+        }
       } else {
-        currentPage++;
-      }      
-      debug(F("running menu number: "));
-      debugln(currentPage);
-      switchToDisplayPage(currentPage);
+        if (currentPage >= runningPageEnd) {
+          currentPage = runningPageStart;
+        } else {
+          currentPage++;
+        }
+        debug(F("running menu number: "));
+        debugln(currentPage);
+        switchToDisplayPage(currentPage);
+      }
     }
   }
 }
@@ -2440,6 +3465,26 @@ void loop() {
     }
 
     return; // Skip everything else during transfer
+  }
+
+  // Replay processing mode - tight loop for fast file processing
+  if (currentPage == PAGE_REPLAY_PROCESSING && replayModeActive && !replayProcessingComplete) {
+    // Process replay file
+    processReplayFile();
+
+    // Update display less frequently during processing
+    if (millis() - displayLastUpdate > 200) {
+      displayLastUpdate = millis();
+      displayPage_replay_processing();
+    }
+
+    // Check if processing complete
+    if (replayProcessingComplete) {
+      replayModeActive = false;
+      switchToDisplayPage(PAGE_REPLAY_RESULTS);
+    }
+
+    return; // Skip everything else during replay processing
   }
 
   GPS_LOOP();
