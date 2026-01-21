@@ -2006,6 +2006,7 @@ void displayPage_replay_file_select() {
       strncpy(displayName, replayFiles[i], 19);
       displayName[19] = '\0';
       display.println(displayName);
+      display.println();  // Add blank line after each filename
     }
   } else {
     // Scrolling menu
@@ -2019,11 +2020,13 @@ void displayPage_replay_file_select() {
     strncpy(displayName, replayFiles[indexA], 19);
     displayName[19] = '\0';
     display.println(displayName);
+    display.println();  // Add blank line after filename
 
     display.print(F("->"));
     strncpy(displayName, replayFiles[indexB], 19);
     displayName[19] = '\0';
     display.println(displayName);
+    display.println();  // Add blank line after filename
 
     display.print(F("  "));
     strncpy(displayName, replayFiles[indexC], 19);
