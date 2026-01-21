@@ -421,12 +421,6 @@ unsigned long replayProcessedSamples = 0;
 #define REPLAY_LINE_BUFFER_SIZE 256
 char replayLineBuffer[REPLAY_LINE_BUFFER_SIZE];
 
-// Block read buffer for faster SD reads (one sector = 512 bytes)
-#define REPLAY_BLOCK_BUFFER_SIZE 512
-char replayBlockBuffer[REPLAY_BLOCK_BUFFER_SIZE];
-int replayBlockPos = 0;      // Current position in block buffer
-int replayBlockLen = 0;      // Valid bytes in block buffer
-
 // Common sample struct for both DOVE and NMEA parsing
 struct ReplaySample {
   unsigned long timestamp;  // milliseconds
@@ -1039,10 +1033,6 @@ void resetReplayState() {
   replayTotalSamples = 0;
   replayProcessedSamples = 0;
 
-  // Reset block buffer state
-  replayBlockPos = 0;
-  replayBlockLen = 0;
-
   // Reset lap timer and history for replay
   lapTimer.reset();
   lapHistoryCount = 0;
@@ -1118,22 +1108,16 @@ bool readReplayLine(File& file, char* buffer, int bufferSize) {
   int pos = 0;
 
   while (pos < bufferSize - 1) {
-    // Refill block buffer if empty
-    if (replayBlockPos >= replayBlockLen) {
-      replayBlockLen = file.read(replayBlockBuffer, REPLAY_BLOCK_BUFFER_SIZE);
-      replayBlockPos = 0;
-      if (replayBlockLen <= 0) {
-        // EOF
-        if (pos > 0) {
-          buffer[pos] = '\0';
-          return true;
-        }
-        return false;
-      }
-    }
+    int c = file.read();
 
-    // Get next character from block buffer
-    char c = replayBlockBuffer[replayBlockPos++];
+    if (c < 0) {
+      // EOF
+      if (pos > 0) {
+        buffer[pos] = '\0';
+        return true;
+      }
+      return false;
+    }
 
     if (c == '\n') {
       buffer[pos] = '\0';
@@ -1145,19 +1129,16 @@ bool readReplayLine(File& file, char* buffer, int bufferSize) {
       continue;
     }
 
-    buffer[pos++] = c;
+    buffer[pos++] = (char)c;
   }
 
-  // Line too long, truncate and skip rest of line
+  // Line too long, truncate
   buffer[bufferSize - 1] = '\0';
 
+  // Skip rest of line
   while (true) {
-    if (replayBlockPos >= replayBlockLen) {
-      replayBlockLen = file.read(replayBlockBuffer, REPLAY_BLOCK_BUFFER_SIZE);
-      replayBlockPos = 0;
-      if (replayBlockLen <= 0) break;
-    }
-    if (replayBlockBuffer[replayBlockPos++] == '\n') break;
+    int c = file.read();
+    if (c < 0 || c == '\n') break;
   }
 
   return true;
@@ -1552,8 +1533,7 @@ void processReplayFile() {
   }
 
   // Process multiple lines per call to speed things up
-  // Increased from 50 to 200 since we now use block reads
-  const int linesPerCall = 200;
+  const int linesPerCall = 50;
 
   for (int i = 0; i < linesPerCall; i++) {
     if (!readReplayLine(replayFile, replayLineBuffer, sizeof(replayLineBuffer))) {
@@ -1645,6 +1625,7 @@ const int PAGE_REPLAY_SELECT_TRACK = -5;
 const int PAGE_REPLAY_SELECT_DIRECTION = -6;
 const int PAGE_REPLAY_PROCESSING = -7;
 const int PAGE_REPLAY_RESULTS = -8;
+const int PAGE_REPLAY_EXIT = -9;
 
 // boot menu
 const int PAGE_SELECT_LOCATION = 0;
@@ -2123,14 +2104,12 @@ void displayPage_replay_results() {
 
   display.setTextSize(1);
   display.println(F("   Replay Results"));
-  display.println();
 
-  display.setTextSize(1);
   display.print(F("Laps: "));
   display.println(lapTimer.getLaps());
-  display.println();
 
   if (lapTimer.getLaps() > 0) {
+    // Best lap with lap number
     display.print(F("Best: "));
     unsigned long bestTime = lapTimer.getBestLapTime();
     unsigned long minutes = bestTime / 60000;
@@ -2145,11 +2124,39 @@ void displayPage_replay_results() {
     display.print(F("."));
     if (milliseconds < 100) display.print(F("0"));
     if (milliseconds < 10) display.print(F("0"));
-    display.println(milliseconds);
-    display.println();
+    display.print(milliseconds);
+    display.print(F(" (L"));
+    display.print(lapTimer.getBestLapNumber());
+    display.println(F(")"));
+
+    // Optimal lap with sector numbers (only if track has sectors)
+    if (trackLayouts[selectedTrack].hasSector2 || trackLayouts[selectedTrack].hasSector3) {
+      display.print(F("Opt: "));
+      unsigned long optTime = lapTimer.getOptimalLapTime();
+      minutes = optTime / 60000;
+      seconds = (optTime % 60000) / 1000;
+      milliseconds = optTime % 1000;
+      if (minutes > 0) {
+        display.print(minutes);
+        display.print(F(":"));
+      }
+      if (seconds < 10 && minutes > 0) display.print(F("0"));
+      display.print(seconds);
+      display.print(F("."));
+      if (milliseconds < 100) display.print(F("0"));
+      if (milliseconds < 10) display.print(F("0"));
+      display.print(milliseconds);
+      display.print(F(" ("));
+      display.print(lapTimer.getBestSector1LapNumber());
+      display.print(F(","));
+      display.print(lapTimer.getBestSector2LapNumber());
+      display.print(F(","));
+      display.print(lapTimer.getBestSector3LapNumber());
+      display.println(F(")"));
+    }
   }
 
-  display.print(F("Max Speed: "));
+  display.print(F("Max Spd: "));
   display.print(replayMaxSpeed, 1);
   display.println(F(" mph"));
 
@@ -2159,9 +2166,24 @@ void displayPage_replay_results() {
   }
 
   display.println();
+  display.println(F("<- Laps    Exit ->"));
+
+  display.display();
+}
+
+void displayPage_replay_exit() {
+  resetDisplay();
+
   display.setTextSize(1);
-  display.println(F("Press Enter for laps"));
-  display.println(F("or Back to exit"));
+  display.println(F("   Exit Replay?"));
+  display.println();
+
+  display.setTextSize(2);
+  display.println(F(""));
+  display.print(menuSelectionIndex == 0 ? "->" : "  ");
+  display.println(F("Back"));
+  display.print(menuSelectionIndex == 1 ? "->" : "  ");
+  display.println(F("Exit"));
 
   display.display();
 }
@@ -2857,9 +2879,6 @@ void handleMenuPageSelection() {
     debugln(selectedDirection == RACE_DIRECTION_FORWARD ? "Forward" : "Reverse");
 
     // Open the replay file and start processing
-    // Reset block buffer first (may have stale data from track detection)
-    replayBlockPos = 0;
-    replayBlockLen = 0;
     if (replayFile.open(replayFiles[selectedReplayFile], O_READ)) {
       replayModeActive = true;
       replayProcessingComplete = false;
@@ -2868,11 +2887,14 @@ void handleMenuPageSelection() {
       internalNotification = "Failed to open\nreplay file!";
       switchToDisplayPage(PAGE_INTERNAL_FAULT);
     }
-  } else if (currentPage == PAGE_REPLAY_RESULTS) {
-    // Enter on results shows lap list if we have laps
-    if (lapTimer.getLaps() > 0) {
-      current_lap_list_page = 0;
-      switchToDisplayPage(GPS_LAP_LIST);
+  } else if (currentPage == PAGE_REPLAY_EXIT) {
+    if (menuSelectionIndex == 0) {
+      // Back - return to results
+      switchToDisplayPage(PAGE_REPLAY_RESULTS);
+    } else {
+      // Exit - return to main menu
+      resetReplayState();
+      switchToDisplayPage(PAGE_MAIN_MENU);
     }
   } else if (currentPage == PAGE_BLUETOOTH) {
     // Exit button pressed - go back to main menu and disable bluetooth
@@ -2988,14 +3010,12 @@ void handleRunningPageSelection() {
   if (currentPage == LOGGING_STOP) {
     switchToDisplayPage(LOGGING_STOP_CONFIRM);
   } else if (currentPage == GPS_LAP_LIST) {
-    // Check if we're viewing lap list from replay results
-    if (replayProcessingComplete) {
-      // In replay mode, enter goes back to results
-      switchToDisplayPage(PAGE_REPLAY_RESULTS);
-    } else {
-      current_lap_list_page = current_lap_list_page == (lap_list_pages-1) ? 0 : current_lap_list_page + 1;
-      forceDisplayRefresh();
-    }
+    // Middle button cycles lap list pages (both live and replay mode)
+    current_lap_list_page = current_lap_list_page == (lap_list_pages-1) ? 0 : current_lap_list_page + 1;
+    forceDisplayRefresh();
+  } else if (currentPage == PAGE_REPLAY_RESULTS) {
+    // Middle button on results does nothing (use left/right for navigation)
+    // Could optionally go to lap list here
   } else {
     // wokwi doesnt like fancy page switcher
     // inverted eats too much power
@@ -3057,6 +3077,8 @@ void displayLoop() {
       displayPage_replay_processing();
     } else if (currentPage == PAGE_REPLAY_RESULTS) {
       displayPage_replay_results();
+    } else if (currentPage == PAGE_REPLAY_EXIT) {
+      displayPage_replay_exit();
     } else if (currentPage == PAGE_SELECT_LOCATION) {
       displayPage_select_location();
     } else if (currentPage == PAGE_SELECT_TRACK) {
@@ -3131,7 +3153,7 @@ void displayLoop() {
     currentPage == PAGE_REPLAY_FILE_SELECT ||
     currentPage == PAGE_REPLAY_SELECT_TRACK ||
     currentPage == PAGE_REPLAY_SELECT_DIRECTION ||
-    currentPage == PAGE_REPLAY_RESULTS
+    currentPage == PAGE_REPLAY_EXIT
   ) {
     insideMenu = true;
     if (currentPage == PAGE_MAIN_MENU) {
@@ -3144,7 +3166,8 @@ void displayLoop() {
       menuLimit = numOfTracks;
     } else if (
       currentPage == PAGE_SELECT_DIRECTION ||
-      currentPage == LOGGING_STOP_CONFIRM
+      currentPage == LOGGING_STOP_CONFIRM ||
+      currentPage == PAGE_REPLAY_EXIT
     ) {
       menuLimit = 2;
     } else if (currentPage == PAGE_REPLAY_FILE_SELECT) {
@@ -3153,8 +3176,6 @@ void displayLoop() {
       menuLimit = numOfTracks;
     } else if (currentPage == PAGE_REPLAY_SELECT_DIRECTION) {
       menuLimit = 2;
-    } else if (currentPage == PAGE_REPLAY_RESULTS) {
-      menuLimit = 1; // Just enter to see laps or back button
     }
   }
 
@@ -3171,22 +3192,15 @@ void displayLoop() {
     // we are in a menu do weird menu things
     // BUTTON UP
     if (btn1->pressed) {
-      // Replay results page - any button except enter goes back
-      if (currentPage == PAGE_REPLAY_RESULTS) {
-        resetReplayState();
-        switchToDisplayPage(PAGE_MAIN_MENU);
+      // debugln(F("Button Up"));
+      if (menuSelectionIndex == menuLimit-1) {
+        menuSelectionIndex = 0;
       } else {
-        // Normal menu navigation
-        // debugln(F("Button Up"));
-        if (menuSelectionIndex == menuLimit-1) {
-          menuSelectionIndex = 0;
-        } else {
-          menuSelectionIndex++;
-        }
-        debug(F("menu number: "));
-        debugln(menuSelectionIndex);
-        forceDisplayRefresh();
+        menuSelectionIndex++;
       }
+      debug(F("menu number: "));
+      debugln(menuSelectionIndex);
+      forceDisplayRefresh();
     }
     // BUTTON ENTER
     if (btn2->pressed) {
@@ -3195,30 +3209,29 @@ void displayLoop() {
     }
     // BUTTON DOWN
     if (btn3->pressed) {
-      // Replay results page - any button except enter goes back
-      if (currentPage == PAGE_REPLAY_RESULTS) {
-        resetReplayState();
-        switchToDisplayPage(PAGE_MAIN_MENU);
+      // debugln(F("Button Down"));
+      if (menuSelectionIndex == 0) {
+        menuSelectionIndex = menuLimit-1;
       } else {
-        // Normal menu navigation
-        // debugln(F("Button Down"));
-        if (menuSelectionIndex == 0) {
-          menuSelectionIndex = menuLimit-1;
-        } else {
-          menuSelectionIndex--;
-        }
-        debug(F("menu number: "));
-        debugln(menuSelectionIndex);
-        forceDisplayRefresh();
+        menuSelectionIndex--;
       }
+      debug(F("menu number: "));
+      debugln(menuSelectionIndex);
+      forceDisplayRefresh();
     }
   } else if (!buttonsDisabled){
     // page up/down/enter
     // BUTTON LEFT
     if (btn1->pressed) {
       debugln(F("Button Left"));
-      // Special handling for lap list during replay
-      if (currentPage == GPS_LAP_LIST && replayProcessingComplete) {
+      // Special handling for replay results - left goes to lap list
+      if (currentPage == PAGE_REPLAY_RESULTS) {
+        if (lapTimer.getLaps() > 0) {
+          current_lap_list_page = 0;
+          switchToDisplayPage(GPS_LAP_LIST);
+        }
+      // Special handling for lap list during replay - left goes back to results
+      } else if (currentPage == GPS_LAP_LIST && replayProcessingComplete) {
         switchToDisplayPage(PAGE_REPLAY_RESULTS);
       } else {
         if (currentPage <= runningPageStart) {
@@ -3236,18 +3249,15 @@ void displayLoop() {
       debugln(F("Button Middle (running)"));
       handleRunningPageSelection();
     }
-    // BUTTON DOWN
+    // BUTTON DOWN/RIGHT
     if (btn3->pressed) {
       debugln(F("Button Right"));
-      // Special handling for lap list during replay
-      if (currentPage == GPS_LAP_LIST && replayProcessingComplete) {
-        // Cycle through pages in lap list, or next page if on last page goes back to results
-        if (lap_list_pages > 1) {
-          current_lap_list_page = current_lap_list_page == (lap_list_pages-1) ? 0 : current_lap_list_page + 1;
-          forceDisplayRefresh();
-        } else {
-          switchToDisplayPage(PAGE_REPLAY_RESULTS);
-        }
+      // Special handling for replay results - right goes to exit page
+      if (currentPage == PAGE_REPLAY_RESULTS) {
+        switchToDisplayPage(PAGE_REPLAY_EXIT);
+      // Special handling for lap list during replay - right goes back to results
+      } else if (currentPage == GPS_LAP_LIST && replayProcessingComplete) {
+        switchToDisplayPage(PAGE_REPLAY_RESULTS);
       } else {
         if (currentPage >= runningPageEnd) {
           currentPage = runningPageStart;
@@ -3495,8 +3505,8 @@ void loop() {
     // Process replay file
     processReplayFile();
 
-    // Update display less frequently during processing (500ms)
-    if (millis() - displayLastUpdate > 500) {
+    // Update display less frequently during processing
+    if (millis() - displayLastUpdate > 200) {
       displayLastUpdate = millis();
       displayPage_replay_processing();
     }
