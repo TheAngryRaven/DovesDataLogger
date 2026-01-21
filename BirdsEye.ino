@@ -1104,7 +1104,8 @@ bool buildReplayFileList() {
     }
     filesScanned++;
 
-    char name[MAX_REPLAY_FILENAME_LENGTH];
+    // Use larger buffer for getName - SdFat may fail silently with small buffers
+    char name[64];
     entry.getName(name, sizeof(name));
 
     // Debug: show every file/dir found
