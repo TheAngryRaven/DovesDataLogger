@@ -9,7 +9,6 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
 ## Features
 
 ### Core Functionality
-- **Bluetooth Downloads** - Can now download files directly to [HackTheTrack.net](http://HackTheTrack.net)
 - **25Hz GPS Logging** - High-frequency data capture straight to SD card
 - **Track & Layout Selection** - Multiple tracks and configurations loaded from SD card
 - **Sector Timing** - Optional 2 and 3-sector support for detailed performance analysis
@@ -19,6 +18,11 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
 - **RPM Monitoring** - Tachometer input with noise filtering for ignition systems
 - **Speed Display** - Large, easy-to-read speed display
 - **Simple CSV Format** - Easy-to-parse data files with millisecond-precision timestamps
+#### Experimental Features
+- **Bluetooth Downloads** - Can now download files directly to [HackTheTrack.net](http://HackTheTrack.net)
+  - (fast and heckin cool)
+- **Review Data** - Can now "replay" old logs on-device to see laptimes/optimals/etc (slow)
+  - (kind of slow but it works)
 
 ### Display Pages
 - GPS Statistics (battery, satellites, HDOP, logging status)
@@ -374,4 +378,5 @@ See LICENSE file for details.
 
 For issues, questions, or contributions, please visit:
 - GitHub Issues: [https://github.com/TheAngryRaven/DovesDataLogger/issues](https://github.com/TheAngryRaven/DovesDataLogger/issues)
+
 
