@@ -1104,10 +1104,20 @@ bool buildReplayFileList() {
     }
     filesScanned++;
 
-    if (!entry.isDirectory()) {
-      char name[MAX_REPLAY_FILENAME_LENGTH];
-      entry.getName(name, sizeof(name));
+    char name[MAX_REPLAY_FILENAME_LENGTH];
+    entry.getName(name, sizeof(name));
 
+    // Debug: show every file/dir found
+    debug(F("Replay: ["));
+    debug(filesScanned);
+    debug(F("] "));
+    debug(entry.isDirectory() ? F("DIR: ") : F("FILE: "));
+    debug(name);
+    debug(F(" (len="));
+    debug(strlen(name));
+    debugln(F(")"));
+
+    if (!entry.isDirectory()) {
       // Check for .dove or .nmea extension (case insensitive)
       int len = strlen(name);
       if (len > 5) {
@@ -1121,13 +1131,10 @@ bool buildReplayFileList() {
           numReplayFiles++;
           debug(F("Replay: Found file: "));
           debugln(name);
-        } else {
-          debug(F("not replay file: "));
-          debugln(name);
         }
       }
     }
-    entry.close();
+    entry.close();;
   }
 
   root.close();
