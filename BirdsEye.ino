@@ -401,7 +401,7 @@ const float REPLAY_TRACK_DETECTION_THRESHOLD_MILES = 20.0;
 
 // Replay file list - reduced sizes for memory constraints
 #define MAX_REPLAY_FILES 20
-#define MAX_REPLAY_FILENAME_LENGTH 32
+#define MAX_REPLAY_FILENAME_LENGTH 48  // Must fit longest filename (e.g. OKC_Normal_fwd_2025_1123_1459.nmea = 36 chars)
 char replayFiles[MAX_REPLAY_FILES][MAX_REPLAY_FILENAME_LENGTH];
 int numReplayFiles = 0;
 int selectedReplayFile = -1;
