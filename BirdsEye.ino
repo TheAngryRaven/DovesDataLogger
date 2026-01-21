@@ -399,9 +399,9 @@ void checkForNewLapData() {
 // Track detection threshold in miles (configurable)
 const float REPLAY_TRACK_DETECTION_THRESHOLD_MILES = 20.0;
 
-// Replay file list
-#define MAX_REPLAY_FILES 50
-#define MAX_REPLAY_FILENAME_LENGTH 64
+// Replay file list - reduced sizes for memory constraints
+#define MAX_REPLAY_FILES 20
+#define MAX_REPLAY_FILENAME_LENGTH 32
 char replayFiles[MAX_REPLAY_FILES][MAX_REPLAY_FILENAME_LENGTH];
 int numReplayFiles = 0;
 int selectedReplayFile = -1;
@@ -418,7 +418,8 @@ unsigned long replayTotalSamples = 0;
 unsigned long replayProcessedSamples = 0;
 
 // Line buffer for streaming file reads (bounded memory)
-#define REPLAY_LINE_BUFFER_SIZE 256
+// NMEA max is 82 chars, DOVE CSV lines ~100 chars, 128 is plenty
+#define REPLAY_LINE_BUFFER_SIZE 128
 char replayLineBuffer[REPLAY_LINE_BUFFER_SIZE];
 
 // Common sample struct for both DOVE and NMEA parsing
@@ -468,8 +469,8 @@ File replayFile;
 // Replay function prototypes (must be after SdFat include for File type)
 bool buildReplayFileList();
 bool readReplayLine(File& file, char* buffer, int bufferSize);
-bool parseDoveLine(const char* line, ReplaySample& sample);
-bool parseNmeaSentence(const char* line, ReplaySample& sample);
+bool parseDoveLine(char* line, ReplaySample& sample);  // non-const, parses in-place
+bool parseNmeaSentence(char* line, ReplaySample& sample);  // non-const, parses in-place
 bool extractGpsPointFromReplayFile(const char* filename, double& lat, double& lng);
 bool extractGpsPointFromTrackFile(int trackIndex, double& lat, double& lng);
 double haversineDistanceMiles(double lat1, double lng1, double lat2, double lng2);
@@ -1145,13 +1146,13 @@ bool readReplayLine(File& file, char* buffer, int bufferSize) {
 }
 
 /**
- * @brief Parse a DOVE CSV line into a ReplaySample
+ * @brief Parse a DOVE CSV line into a ReplaySample (parses in-place, modifies line)
  * Format: timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,rpm,exhaust_temp_c,water_temp_c
- * @param line Input CSV line
+ * @param line Input CSV line (will be modified by strtok)
  * @param sample Output sample struct
  * @return true if parsed successfully
  */
-bool parseDoveLine(const char* line, ReplaySample& sample) {
+bool parseDoveLine(char* line, ReplaySample& sample) {
   sample.valid = false;
   sample.rpm = -1;
 
@@ -1165,15 +1166,11 @@ bool parseDoveLine(const char* line, ReplaySample& sample) {
     return false;
   }
 
-  // Parse CSV fields
-  char lineCopy[REPLAY_LINE_BUFFER_SIZE];
-  strncpy(lineCopy, line, sizeof(lineCopy) - 1);
-  lineCopy[sizeof(lineCopy) - 1] = '\0';
-
+  // Parse CSV fields in-place (no copy needed - saves 128+ bytes of stack)
   char* token;
   int fieldIndex = 0;
 
-  token = strtok(lineCopy, ",");
+  token = strtok(line, ",");
   while (token != NULL && fieldIndex < 10) {
     switch (fieldIndex) {
       case 0: // timestamp
@@ -1214,13 +1211,13 @@ bool parseDoveLine(const char* line, ReplaySample& sample) {
 }
 
 /**
- * @brief Parse an NMEA sentence into a ReplaySample
+ * @brief Parse an NMEA sentence into a ReplaySample (parses in-place, modifies line)
  * Supports GPGGA, GNGGA, GPRMC, GNRMC
- * @param line Input NMEA sentence
+ * @param line Input NMEA sentence (will be modified by strtok)
  * @param sample Output sample struct
  * @return true if parsed successfully
  */
-bool parseNmeaSentence(const char* line, ReplaySample& sample) {
+bool parseNmeaSentence(char* line, ReplaySample& sample) {
   sample.valid = false;
   sample.rpm = -1;  // NMEA has no RPM
   sample.altitude = 0.0;
@@ -1230,7 +1227,7 @@ bool parseNmeaSentence(const char* line, ReplaySample& sample) {
     return false;
   }
 
-  // Check sentence type
+  // Check sentence type (do this before strtok modifies the line)
   bool isGGA = (strstr(line, "GGA") != NULL);
   bool isRMC = (strstr(line, "RMC") != NULL);
 
@@ -1238,11 +1235,7 @@ bool parseNmeaSentence(const char* line, ReplaySample& sample) {
     return false;
   }
 
-  // Parse NMEA sentence
-  char lineCopy[REPLAY_LINE_BUFFER_SIZE];
-  strncpy(lineCopy, line, sizeof(lineCopy) - 1);
-  lineCopy[sizeof(lineCopy) - 1] = '\0';
-
+  // Parse NMEA sentence in-place (no copy needed - saves 128+ bytes of stack)
   char* token;
   int fieldIndex = 0;
 
@@ -1251,7 +1244,7 @@ bool parseNmeaSentence(const char* line, ReplaySample& sample) {
   char latDir = 'N', lngDir = 'W';
   float speedKnots = 0;
 
-  token = strtok(lineCopy, ",");
+  token = strtok(line, ",");
   while (token != NULL) {
     if (isGGA) {
       switch (fieldIndex) {
