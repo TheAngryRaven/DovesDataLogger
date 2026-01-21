@@ -1039,7 +1039,7 @@ void resetReplayState() {
   lastLap = 0;
   memset(lapHistory, 0, sizeof(lapHistory));
 
-  if (replayFile) {
+  if (replayFile.isOpen()) {
     replayFile.close();
   }
 }
@@ -1528,12 +1528,19 @@ int detectTrackForReplayFile(const char* filename) {
  * Call this from loop() when in replay processing state
  */
 void processReplayFile() {
-  if (!replayFile) {
+  // Use isOpen() for proper SdFat file checking
+  if (!replayFile.isOpen()) {
+    debugln(F("Replay: File not open, marking complete"));
+    replayProcessingComplete = true;
     return;
   }
 
   // Process multiple lines per call to speed things up
   const int linesPerCall = 50;
+
+  // Determine file type once per batch (optimization)
+  int len = strlen(replayFiles[selectedReplayFile]);
+  bool isDove = (len > 5 && strcasecmp(replayFiles[selectedReplayFile] + len - 5, ".dove") == 0);
 
   for (int i = 0; i < linesPerCall; i++) {
     if (!readReplayLine(replayFile, replayLineBuffer, sizeof(replayLineBuffer))) {
@@ -1553,10 +1560,6 @@ void processReplayFile() {
     }
 
     replayTotalSamples++;
-
-    // Determine file type from selected file
-    int len = strlen(replayFiles[selectedReplayFile]);
-    bool isDove = (len > 5 && strcasecmp(replayFiles[selectedReplayFile] + len - 5, ".dove") == 0);
 
     ReplaySample sample;
     bool parsed = false;
