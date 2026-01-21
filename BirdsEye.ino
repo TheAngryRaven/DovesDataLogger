@@ -1068,14 +1068,22 @@ bool buildReplayFileList() {
     debugln(F("Replay: Closing stale file handle"));
     file.close();
   }
+  if (trackDir.isOpen()) {
+    debugln(F("Replay: Closing stale trackDir handle"));
+    trackDir.close();
+  }
+  if (trackFile.isOpen()) {
+    debugln(F("Replay: Closing stale trackFile handle"));
+    trackFile.close();
+  }
 
   // Warn if data logging is active (potential conflict)
   if (dataFile.isOpen()) {
     debugln(F("Replay: WARNING - dataFile is open, may cause SD conflicts"));
   }
 
-  // Small delay to let SD card settle after any previous operations
-  delay(10);
+  // Delay to let SD card settle after any previous operations
+  delay(50);
 
   File32 root = SD.open("/");
   if (!root) {
@@ -1083,9 +1091,18 @@ bool buildReplayFileList() {
     return false;
   }
 
+  debugln(F("Replay: Root opened, scanning files..."));
+
+  int filesScanned = 0;
   while (numReplayFiles < MAX_REPLAY_FILES) {
     File32 entry = root.openNextFile();
-    if (!entry) break;
+    if (!entry) {
+      debug(F("Replay: openNextFile returned null after "));
+      debug(filesScanned);
+      debugln(F(" files"));
+      break;
+    }
+    filesScanned++;
 
     if (!entry.isDirectory()) {
       char name[MAX_REPLAY_FILENAME_LENGTH];
