@@ -2001,11 +2001,24 @@ void displayPage_replay_file_select() {
       } else {
         display.print(F("  "));
       }
-      // Truncate long filenames for display
+      // Split long filenames across two lines
+      int fileNameLen = strlen(replayFiles[i]);
       char displayName[20];
+
+      // First line: first 19 characters
       strncpy(displayName, replayFiles[i], 19);
       displayName[19] = '\0';
       display.println(displayName);
+
+      // Second line: next 19 characters if filename is longer
+      if (fileNameLen > 19) {
+        display.print(F("  "));  // Indent to align with first line
+        strncpy(displayName, replayFiles[i] + 19, 19);
+        displayName[19] = '\0';
+        display.println(displayName);
+      } else {
+        display.println();  // Blank line if no wrap needed
+      }
     }
   } else {
     // Scrolling menu
@@ -2014,21 +2027,52 @@ void displayPage_replay_file_select() {
     int indexC = menuSelectionIndex == 0 ? numReplayFiles - 1 : menuSelectionIndex - 1;
 
     char displayName[20];
+    int fileNameLen;
 
+    // First item
     display.print(F("  "));
+    fileNameLen = strlen(replayFiles[indexA]);
     strncpy(displayName, replayFiles[indexA], 19);
     displayName[19] = '\0';
     display.println(displayName);
+    if (fileNameLen > 19) {
+      display.print(F("  "));
+      strncpy(displayName, replayFiles[indexA] + 19, 19);
+      displayName[19] = '\0';
+      display.println(displayName);
+    } else {
+      display.println();
+    }
 
+    // Second item (selected)
     display.print(F("->"));
+    fileNameLen = strlen(replayFiles[indexB]);
     strncpy(displayName, replayFiles[indexB], 19);
     displayName[19] = '\0';
     display.println(displayName);
+    if (fileNameLen > 19) {
+      display.print(F("  "));
+      strncpy(displayName, replayFiles[indexB] + 19, 19);
+      displayName[19] = '\0';
+      display.println(displayName);
+    } else {
+      display.println();
+    }
 
+    // Third item
     display.print(F("  "));
+    fileNameLen = strlen(replayFiles[indexC]);
     strncpy(displayName, replayFiles[indexC], 19);
     displayName[19] = '\0';
     display.println(displayName);
+    if (fileNameLen > 19) {
+      display.print(F("  "));
+      strncpy(displayName, replayFiles[indexC] + 19, 19);
+      displayName[19] = '\0';
+      display.println(displayName);
+    } else {
+      display.println();
+    }
   }
 
   display.display();
