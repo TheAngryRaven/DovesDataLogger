@@ -15,7 +15,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
       - name: Claude Code Review
-        uses: anthropics/claude-code-action@v1.0 # Use the latest version
+        uses: anthropics/claude-code-action@v1 # Use the latest version
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           # The prompt guides Claude's review
