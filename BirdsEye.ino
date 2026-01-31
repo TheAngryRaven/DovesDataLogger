@@ -33,6 +33,23 @@ bool trackSelected = false;
 #define MAX_LAYOUT_LENGTH 15
 #define FILEPATH_MAX 50        // "/TRACKS/" (8) + name (13) + ".json" (5) + null = 27, using 50 for safety
 #include <string.h>
+///////////////////////////////////////////
+// BUTTON CONFIGURATION
+//
+// HARDWARE EMI RECOMMENDATIONS FOR BUTTONS:
+// Phantom button presses can occur from EMI coupling, especially from
+// the tachometer signal. To improve button reliability:
+//
+// 1. RC FILTER: Add 10K resistor + 100nF cap from each button pin to GND
+//    This creates a ~160Hz low-pass filter that eliminates high-freq noise
+// 2. WIRE ROUTING: Keep button wires away from tach/ignition wiring
+// 3. SHIELDING: If buttons are on a ribbon cable, add ground wire between signals
+// 4. FERRITE: Add ferrite bead on button cable near MCU for extra HF rejection
+//
+// The software debouncing below uses multi-sample verification to reject
+// transient noise spikes that get through hardware filtering.
+///////////////////////////////////////////
+
 struct ButtonState {
   int pin = 0;
   bool pressed = false;
@@ -1995,7 +2012,13 @@ int runningPageEnd = LOGGING_STOP; // only changes if sd:/tracks not found
 
 int buttonPressIntv = 500;
 int buttonHoldIntv = 1000;
-int antiBounceIntv = 500;
+
+// Debounce settings - tuned for EMI rejection while maintaining responsiveness
+// 150ms allows ~6 presses/sec which is plenty fast for menu navigation
+// Multi-sample verification catches EMI spikes that slip through hardware filtering
+int antiBounceIntv = 150;
+const int BUTTON_SAMPLE_COUNT = 3;      // Number of samples to take
+const int BUTTON_SAMPLE_DELAY_US = 500; // Microseconds between samples
 
 bool recentlyChanged = false;
 
@@ -2042,10 +2065,44 @@ void resetButtons() {
 void resetButton(ButtonState* button) {
   button->pressed = false;
 }
+
+/**
+ * @brief Multi-sample button read with EMI rejection
+ *
+ * Takes multiple samples with small delays and requires ALL samples
+ * to show the button pressed. This rejects transient EMI spikes that
+ * might cause a single false LOW reading.
+ *
+ * @param pin The GPIO pin to read
+ * @return true only if ALL samples show button pressed (LOW)
+ */
+bool readButtonMultiSample(int pin) {
+  for (int i = 0; i < BUTTON_SAMPLE_COUNT; i++) {
+    if (digitalRead(pin) != LOW) {
+      return false;  // Any HIGH reading = not pressed
+    }
+    if (i < BUTTON_SAMPLE_COUNT - 1) {
+      delayMicroseconds(BUTTON_SAMPLE_DELAY_US);
+    }
+  }
+  return true;  // All samples were LOW = definitely pressed
+}
+
+/**
+ * @brief Check button state with debouncing and multi-sample verification
+ *
+ * Combines time-based debouncing with multi-sample verification for
+ * robust button detection in electrically noisy environments.
+ */
 void checkButton(ButtonState* button) {
-  bool btnPressed = digitalRead(button->pin) == LOW;
+  // Time-based debounce: ignore if pressed too recently
   bool btnReady = millis() - button->lastPressed >= antiBounceIntv;
-  if (btnReady && btnPressed) {
+  if (!btnReady) return;
+
+  // Multi-sample read: require consistent LOW across all samples
+  bool btnPressed = readButtonMultiSample(button->pin);
+
+  if (btnPressed) {
     button->lastPressed = millis();
     button->pressed = true;
   }
