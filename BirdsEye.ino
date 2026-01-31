@@ -3754,10 +3754,19 @@ void GPS_LOOP() {
       gpsFrameCounter++;
     // }
 
-    // update the timer loop everytime we have fixed data
+    // Update the lap timer with fixed GPS data
+    // Use atomic snapshot to prevent torn reads on 64-bit doubles
     if (trackSelected && gps->fix) {
+      double ltLat, ltLng, ltAlt, ltSpeed;
+      noInterrupts();
+      ltLat = gps->latitudeDegrees;
+      ltLng = gps->longitudeDegrees;
+      ltAlt = gps->altitude;
+      ltSpeed = gps->speed;
+      interrupts();
+
       lapTimer.updateCurrentTime(getGpsTimeInMilliseconds());
-      lapTimer.loop(gps->latitudeDegrees, gps->longitudeDegrees, gps->altitude, gps->speed);
+      lapTimer.loop(ltLat, ltLng, ltAlt, ltSpeed);
     }
 
     #ifdef SD_CARD_LOGGING_ENABLED
@@ -3770,46 +3779,78 @@ void GPS_LOOP() {
         // Check if this is a GPGGA or GNGGA packet
         if (strstr(nmea, "$GPGGA") != NULL || strstr(nmea, "$GNGGA") != NULL) {
 
-          // Build CSV line: timestamp,sats,hdop,lat,lng,speed_mph,alt_m,rpm,egt,water_temp,reserved1,reserved2
-          char csvLine[256];
+          // CRITICAL: Snapshot GPS values with interrupts disabled to prevent torn reads
+          // On 32-bit ARM, reading 64-bit doubles is NOT atomic - we could get half of
+          // one value and half of another if GPS library updates mid-read = garbage data
+          double snapLat, snapLng, snapAlt, snapHdop, snapSpeed;
+          int snapSats;
 
-          // Convert floats to strings with proper precision
-          char latStr[16], lngStr[16], hdopStr[8], speedStr[12], altStr[12];
+          noInterrupts();
+          snapLat = gps->latitudeDegrees;
+          snapLng = gps->longitudeDegrees;
+          snapAlt = gps->altitude;
+          snapHdop = gps->HDOP;
+          snapSpeed = gps->speed;
+          snapSats = gps->satellites;
+          interrupts();
 
-          // 8 decimals for lat/lng (racing precision)
-          dtostrf(gps->latitudeDegrees, 1, 8, latStr);
-          dtostrf(gps->longitudeDegrees, 1, 8, lngStr);
+          // Convert speed to mph
+          double snapSpeedMph = snapSpeed * 1.15078;
 
-          // 1 decimal for HDOP
-          dtostrf(gps->HDOP, 1, 1, hdopStr);
+          // VALIDATE: Check for reasonable GPS values before logging
+          // Invalid data from partial parse or uninitialized memory will be rejected
+          bool validLat = (snapLat >= -90.0 && snapLat <= 90.0);
+          bool validLng = (snapLng >= -180.0 && snapLng <= 180.0);
+          bool validAlt = (snapAlt >= -1000.0 && snapAlt <= 50000.0);  // -1km to 50km
+          bool validHdop = (snapHdop >= 0.0 && snapHdop <= 99.9);
+          bool validSpeed = (snapSpeedMph >= 0.0 && snapSpeedMph <= 500.0);  // 0-500 mph
+          bool validSats = (snapSats >= 0 && snapSats <= 50);
 
-          // 2 decimals for speed and altitude
-          dtostrf(gps_speed_mph, 1, 2, speedStr);
-          dtostrf(gps->altitude, 1, 2, altStr);
+          if (!validLat || !validLng || !validAlt || !validHdop || !validSpeed || !validSats) {
+            // Skip this sample - data is garbage
+            debugln(F("GPS data validation failed - skipping log entry"));
+          } else {
+            // Build CSV line: timestamp,sats,hdop,lat,lng,speed_mph,alt_m,rpm,...
+            char csvLine[256];
 
-          // Build the complete CSV line
-          snprintf(csvLine, sizeof(csvLine), "%llu,%d,%s,%s,%s,%s,%s,%d,0,0",
-                   getGpsUnixTimestampMillis(), // timestamp (Unix milliseconds)
-                   (int)gps->satellites,        // sats
-                   hdopStr,                     // hdop
-                   latStr,                      // lat
-                   lngStr,                      // lng
-                   speedStr,                    // speed_mph
-                   altStr,                      // alt_m
-                   tachLastReported             // rpm
-                   // egt, water_temp, reserved1, reserved2 are all 0
-          );
+            // Convert floats to strings with proper precision
+            // Increased buffer sizes for safety margin (was 16, now 24)
+            char latStr[24], lngStr[24], hdopStr[12], speedStr[16], altStr[16];
 
-          // Write with error checking - EMI can corrupt writes
-          size_t written = dataFile.println(csvLine);
-          if (written == 0) {
-            debugln(F("SD write failed - disabling logging"));
-            enableLogging = false;
-            sdDataLogInitComplete = false;
-            dataFile.close();
-            releaseSDAccess(SD_ACCESS_LOGGING);  // Release SD access on write failure
-            internalNotification = "SD Write Failed!\nCheck card/connections";
-            switchToDisplayPage(PAGE_INTERNAL_FAULT);
+            // 8 decimals for lat/lng (racing precision)
+            dtostrf(snapLat, 1, 8, latStr);
+            dtostrf(snapLng, 1, 8, lngStr);
+
+            // 1 decimal for HDOP
+            dtostrf(snapHdop, 1, 1, hdopStr);
+
+            // 2 decimals for speed and altitude
+            dtostrf(snapSpeedMph, 1, 2, speedStr);
+            dtostrf(snapAlt, 1, 2, altStr);
+
+            // Build the complete CSV line
+            snprintf(csvLine, sizeof(csvLine), "%llu,%d,%s,%s,%s,%s,%s,%d,0,0",
+                     getGpsUnixTimestampMillis(), // timestamp (Unix milliseconds)
+                     snapSats,                    // sats (use snapshot)
+                     hdopStr,                     // hdop
+                     latStr,                      // lat
+                     lngStr,                      // lng
+                     speedStr,                    // speed_mph
+                     altStr,                      // alt_m
+                     tachLastReported             // rpm
+            );
+
+            // Write with error checking
+            size_t written = dataFile.println(csvLine);
+            if (written == 0) {
+              debugln(F("SD write failed - disabling logging"));
+              enableLogging = false;
+              sdDataLogInitComplete = false;
+              dataFile.close();
+              releaseSDAccess(SD_ACCESS_LOGGING);
+              internalNotification = "SD Write Failed!\nCheck card/connections";
+              switchToDisplayPage(PAGE_INTERNAL_FAULT);
+            }
           }
         }
         /////////////////////////////////////////////////////////////////
@@ -3869,10 +3910,11 @@ void GPS_LOOP() {
         // debug(lastNMEA);
       }
     #endif
-  }
 
-  // update globals for display
-  gps_speed_mph = gps->speed * 1.15078;
+    // Update display speed - do this inside NMEA received block
+    // so it only updates when we have fresh data
+    gps_speed_mph = gps->speed * 1.15078;
+  }
 }
 
 void calculateGPSFrameRate() {
