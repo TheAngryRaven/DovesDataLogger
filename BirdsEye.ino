@@ -31,10 +31,29 @@ bool trackSelected = false;
 #define MAX_LOCATION_LENGTH 13 // 13 is old dos format for fat16
 #define MAX_LAYOUTS 10
 #define MAX_LAYOUT_LENGTH 15
+#define FILEPATH_MAX 50        // "/TRACKS/" (8) + name (13) + ".json" (5) + null = 27, using 50 for safety
 #include <string.h>
+///////////////////////////////////////////
+// BUTTON CONFIGURATION
+//
+// HARDWARE EMI RECOMMENDATIONS FOR BUTTONS:
+// Phantom button presses can occur from EMI coupling, especially from
+// the tachometer signal. To improve button reliability:
+//
+// 1. RC FILTER: Add 10K resistor + 100nF cap from each button pin to GND
+//    This creates a ~160Hz low-pass filter that eliminates high-freq noise
+// 2. WIRE ROUTING: Keep button wires away from tach/ignition wiring
+// 3. SHIELDING: If buttons are on a ribbon cable, add ground wire between signals
+// 4. FERRITE: Add ferrite bead on button cable near MCU for extra HF rejection
+//
+// The software debouncing below uses multi-sample verification to reject
+// transient noise spikes that get through hardware filtering.
+///////////////////////////////////////////
+
 struct ButtonState {
   int pin = 0;
-  bool pressed = false;
+  bool pressed = false;           // Flag for "button was pressed" (consumed by handler)
+  bool wasReleased = true;        // Edge detection: must release before next press
   unsigned long lastPressed = 0;
 };
 struct TrackLayout {
@@ -104,68 +123,106 @@ float getBatteryVoltage() {
   #endif
 }
 ///////////////////////////////////////////
-// NEW TACHOMETER settings
+// TACHOMETER CONFIGURATION
+//
+// HARDWARE EMI RECOMMENDATIONS:
+// The tach input (D0) picks up inductive kickback from ignition systems.
+// To reduce phantom readings and noise coupling to other GPIO (buttons):
+//
+// 1. SHIELDING: Run tach signal wire in shielded cable, ground shield at MCU end only
+// 2. FILTERING: Add RC low-pass filter at input: 1K resistor + 100nF cap to GND
+//    This creates ~1.6kHz cutoff, plenty fast for 20,000 RPM (333Hz)
+// 3. CLAMPING: Add TVS diode or zener (5.1V) from D0 to GND for spike protection
+// 4. SEPARATION: Keep tach wiring physically away from button wires
+// 5. PULL-DOWN: Ensure 10K pull-down on D0 to prevent floating when no signal
+//
+// Signal characteristics: Magneto/CDI typically produces sharp negative-going
+// pulses with significant ringing. The debounce timing below filters this.
+///////////////////////////////////////////
 
 const int tachInputPin = D0;
 unsigned long tachLastUpdate = 0;
-volatile int tachLastReported = 0;  // FIXED: Made volatile for thread safety
+volatile int tachLastReported = 0;  // Volatile for ISR/main-loop sharing
 int topTachReported = 0;
 
-static const uint32_t tachMinPulseGapUs = 3000; // ignore bounces/noise faster than this
+// Debounce timing: ignore pulses faster than this (filters ignition ringing)
+// 3000us = 3ms minimum gap, allows up to 20,000 RPM max (333Hz)
+static const uint32_t tachMinPulseGapUs = 3000;
 volatile uint32_t tachLastPulseUs = 0;
 
-// capture last pulse period so loop can compute RPM
+// Pulse period capture for RPM calculation (written by ISR, read by loop)
 volatile uint32_t tachLastPeriodUs = 0;
 volatile bool tachHavePeriod = false;
 
-// Gate to reduce interrupt storm from noisy inductive pickup
-// After accepting a pulse, we ignore ALL interrupts for tachMinPulseGapUs
-// This prevents the ISR from running hundreds of times per ignition event
+// Software gate to prevent interrupt storm from noisy inductive pickup.
+// After accepting a pulse, we ignore subsequent ISR calls for tachMinPulseGapUs.
+// This is PURELY a volatile flag - we do NOT use noInterrupts() in the ISR
+// because that would disable ALL system interrupts and cause deadlocks.
 volatile bool tachInterruptShouldProcess = true;
 
-// filtered RPM state (updated in loop, not ISR)
+// Filtered RPM state (updated in main loop, not ISR)
 float tachRpmFiltered = 0.0f;
 
-// tunable settings
+// Tunable settings
 const int tachUpdateRateHz = 3;
-static const float tachRevsPerPulse = 1.0f;     // magneto 4T single is usually wasted spark (1 pulse / rev)
-static const float tachFilterAlpha = 0.20f;     // 0..1, higher = snappier, lower = smoother
-static const uint32_t tachStopTimeoutUs = 500000; // if no pulses for this long, force RPM to 0
+static const float tachRevsPerPulse = 1.0f;     // Magneto 4T single: wasted spark = 1 pulse/rev
+static const float tachFilterAlpha = 0.20f;     // EMA filter: 0=smooth, 1=instant
+static const uint32_t tachStopTimeoutUs = 500000; // 500ms with no pulse = engine stopped
 
-// interrupt
+/**
+ * Tachometer ISR - called on rising edge of tach signal
+ *
+ * CRITICAL: This ISR must be fast and must NOT call noInterrupts().
+ * Calling noInterrupts() here would disable ALL system interrupts,
+ * and if the main loop is delayed (e.g., SD write), interrupts would
+ * stay disabled forever, freezing button input and causing system lockup.
+ *
+ * Instead, we use a volatile flag gate (tachInterruptShouldProcess) that
+ * the main loop re-enables after the debounce period.
+ */
 void TACH_COUNT_PULSE() {
-  // CRITICAL: Exit immediately if we're in the dead-time window
-  // This prevents interrupt storm from noisy inductive pickup
+  // Exit immediately if we're in the debounce window
   if (!tachInterruptShouldProcess) return;
 
   uint32_t now = micros();
   uint32_t dt = now - tachLastPulseUs;
 
+  // Secondary debounce check (belt and suspenders with the flag)
   if (dt < tachMinPulseGapUs) return;
 
+  // Record this pulse
   tachLastPulseUs = now;
   tachLastPeriodUs = dt;
   tachHavePeriod = true;
 
-  // Disable interrupt processing until TACH_LOOP re-enables it
-  // This blocks the interrupt storm that follows each ignition event
+  // Gate off further interrupts until main loop re-enables
+  // DO NOT call noInterrupts() here - that causes system-wide deadlock!
   tachInterruptShouldProcess = false;
-  noInterrupts();  // Disable interrupts at hardware level
 }
 
+/**
+ * Tachometer main loop processing
+ *
+ * Re-enables the ISR gate after debounce period, reads pulse data,
+ * applies exponential moving average filter, and handles timeout.
+ */
 void TACH_LOOP() {
-  // Re-enable interrupt processing after the dead-time window
-  // Keep interrupts disabled until we're ready for the next pulse
+  // Re-enable interrupt processing after debounce window expires
   if (!tachInterruptShouldProcess) {
     uint32_t elapsed = micros() - tachLastPulseUs;
-
     if (elapsed >= tachMinPulseGapUs) {
       tachInterruptShouldProcess = true;
-      interrupts();  // Only re-enable when ready for next pulse
+      // Note: We don't call interrupts() here anymore - they were never disabled!
     }
   }
 
-  // Update filtered RPM (highest "real" update rate)
+  // CRITICAL SECTION: Read-modify-clear of ISR shared data
+  // This DOES need noInterrupts() because:
+  // 1. Read tachHavePeriod
+  // 2. Read tachLastPeriodUs
+  // 3. Clear tachHavePeriod
+  // Without protection, ISR could fire between 2 and 3, writing a new
+  // period value that we'd then lose when we clear the flag.
   uint32_t periodUs = 0;
   bool havePeriod = false;
 
@@ -177,22 +234,21 @@ void TACH_LOOP() {
   }
   interrupts();
 
+  // Apply exponential moving average filter to smooth RPM
   if (havePeriod && periodUs > 0) {
     float rpmInst = (60.0e6f * tachRevsPerPulse) / (float)periodUs;
     tachRpmFiltered += tachFilterAlpha * (rpmInst - tachRpmFiltered);
   }
 
-  // Timeout to zero if signal disappears
-  uint32_t lastPulseUs;
-  noInterrupts();
-  lastPulseUs = tachLastPulseUs;
-  interrupts();
+  // Timeout: if no pulses for tachStopTimeoutUs, engine is stopped
+  // Note: 32-bit reads are atomic on ARM Cortex-M4, no noInterrupts() needed
+  uint32_t lastPulseUs = tachLastPulseUs;
 
   if ((uint32_t)(micros() - lastPulseUs) > tachStopTimeoutUs) {
     tachRpmFiltered = 0.0f;
   }
 
-  // Snapshot for display/log at any chosen rate (can be high; value stays "latest filtered RPM")
+  // Update display/log value at configured rate
   if (millis() - tachLastUpdate > (1000 / tachUpdateRateHz)) {
     tachLastUpdate = millis();
     tachLastReported = (int)(tachRpmFiltered + 0.5f);
@@ -203,15 +259,18 @@ void TACH_LOOP() {
 #include <Adafruit_GPS.h>
 #include "gps_config.h"
 Adafruit_GPS* gps = NULL;
+bool gpsInitialized = false;  // Safety flag - true only after successful GPS init
 
 #define GPS_SERIAL Serial1
 #ifndef GPS_CONFIGURATION
   /**
    * @brief Returns the GPS time since midnight in milliseconds
    *
-   * @return unsigned long The time since midnight in milliseconds
+   * @return unsigned long The time since midnight in milliseconds, or 0 if GPS unavailable
    */
   unsigned long getGpsTimeInMilliseconds() {
+    if (!gpsInitialized || gps == NULL) return 0;
+
     unsigned long timeInMillis = 0;
     timeInMillis += gps->hour * 3600000ULL;   // Convert hours to milliseconds
     timeInMillis += gps->minute * 60000ULL;   // Convert minutes to milliseconds
@@ -224,9 +283,11 @@ Adafruit_GPS* gps = NULL;
   /**
    * @brief Converts GPS date/time to Unix timestamp (seconds since Jan 1, 1970)
    *
-   * @return unsigned long Unix timestamp in seconds
+   * @return unsigned long Unix timestamp in seconds, or 0 if GPS unavailable
    */
   unsigned long getGpsUnixTimestamp() {
+    if (!gpsInitialized || gps == NULL) return 0;
+
     // Days in each month (non-leap year)
     const uint8_t daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
 
@@ -273,6 +334,8 @@ Adafruit_GPS* gps = NULL;
    * @return unsigned long long Unix timestamp in milliseconds since Jan 1, 1970
    */
   unsigned long long getGpsUnixTimestampMillis() {
+    if (!gpsInitialized || gps == NULL) return 0;
+
     // Get the Unix timestamp in seconds
     unsigned long long timestampMillis = (unsigned long long)getGpsUnixTimestamp() * 1000ULL;
 
@@ -322,6 +385,8 @@ Adafruit_GPS* gps = NULL;
   }
 
   void GPS_SETUP() {
+    gpsInitialized = false;  // Reset flag at start of setup
+
     #ifndef WOKWI
       debugln(F("ACTUAL GPS SETUP"));
       // first try serial at 9600 baud
@@ -335,6 +400,11 @@ Adafruit_GPS* gps = NULL;
 
       // reconnect at proper baud
       gps = new Adafruit_GPS(&GPS_SERIAL);
+      if (gps == NULL) {
+        debugln(F("ERROR: GPS allocation failed!"));
+        return;  // Leave gpsInitialized = false
+      }
+
       GPS_SERIAL.begin(115200);
       // wait for the GPS to boot
       delay(2250);
@@ -356,16 +426,22 @@ Adafruit_GPS* gps = NULL;
         // GPS_SendConfig(Navrate18hz, 14);
         // GPS_SendConfig(Navrate20hz, 14);
         GPS_SendConfig(Navrate25hz, 14);
+
+        gpsInitialized = true;  // Success!
+        debugln(F("GPS initialized successfully"));
       } else {
-        debugln("No GPS????");
+        debugln(F("ERROR: GPS Serial not available!"));
       }
     #else
       debugln(F("WOKWI GPS SETUP"));
       // reconnect at proper baud
       gps = new Adafruit_GPS(&GPS_SERIAL);
+      if (gps == NULL) {
+        debugln(F("ERROR: GPS allocation failed!"));
+        return;
+      }
       GPS_SERIAL.begin(19200);
-      // GPS_SERIAL.begin(14400);
-      // GPS_SERIAL.begin(9600);
+      gpsInitialized = true;
     #endif
   }
 #endif
@@ -466,6 +542,58 @@ File dataFile;
 // Replay file handle (must be after SdFat include)
 File replayFile;
 
+///////////////////////////////////////////
+// SD CARD ACCESS STATE MANAGEMENT
+// Prevents race conditions between logging, replay, and BLE file transfers
+///////////////////////////////////////////
+// Note: Using #define instead of enum to avoid Arduino preprocessor issues
+// (Arduino generates function prototypes before seeing enum definitions)
+#define SD_ACCESS_NONE         0   // SD card not in use by any subsystem
+#define SD_ACCESS_LOGGING      1   // Data logging active (dataFile in use)
+#define SD_ACCESS_REPLAY       2   // Replay mode active (replayFile in use)
+#define SD_ACCESS_BLE_TRANSFER 3   // BLE file transfer active (bleCurrentFile in use)
+#define SD_ACCESS_TRACK_PARSE  4   // Track file parsing (temporary, should release quickly)
+
+volatile int currentSDAccess = SD_ACCESS_NONE;
+
+/**
+ * @brief Attempt to acquire SD card access for a subsystem
+ * @param mode The access mode being requested (SD_ACCESS_*)
+ * @return true if access granted, false if SD busy with another operation
+ */
+bool acquireSDAccess(int mode) {
+  // Allow re-acquiring same mode (idempotent)
+  if (currentSDAccess == mode) return true;
+
+  // Only allow acquisition if currently free or track parsing (which is temporary)
+  if (currentSDAccess == SD_ACCESS_NONE || currentSDAccess == SD_ACCESS_TRACK_PARSE) {
+    currentSDAccess = mode;
+    return true;
+  }
+
+  // SD busy with another subsystem
+  debug(F("SD access denied, current mode: "));
+  debugln(currentSDAccess);
+  return false;
+}
+
+/**
+ * @brief Release SD card access
+ * @param mode The access mode being released (must match current)
+ */
+void releaseSDAccess(int mode) {
+  if (currentSDAccess == mode) {
+    currentSDAccess = SD_ACCESS_NONE;
+  }
+}
+
+/**
+ * @brief Force release all SD access (use during cleanup/error recovery)
+ */
+void forceReleaseSDAccess() {
+  currentSDAccess = SD_ACCESS_NONE;
+}
+
 // Replay function prototypes (must be after SdFat include for File type)
 bool buildReplayFileList();
 bool readReplayLine(File& file, char* buffer, int bufferSize);
@@ -492,18 +620,10 @@ int selectedLocation = -1;
 char locations[MAX_LOCATIONS][MAX_LOCATION_LENGTH]; // 13 is old dos format for fat16
 int numOfLocations = 0;
 
-void makeFullTrackPath(char* trackName, char* filepath) {
-  char basePath[9] = "/TRACKS/";
-  char fileExtension[6] = ".json";
-
-  // Start with the base path
-  strcpy(filepath, basePath);
-
-  // Append the selected file name
-  strcat(filepath, trackName);
-
-  // Append the file extension
-  strcat(filepath, fileExtension);
+void makeFullTrackPath(const char* trackName, char* filepath) {
+  // Use snprintf for bounds safety - prevents buffer overflow
+  // Caller MUST provide buffer of at least FILEPATH_MAX bytes
+  snprintf(filepath, FILEPATH_MAX, "/TRACKS/%s.json", trackName);
 }
 
 bool SD_SETUP() {
@@ -553,8 +673,9 @@ bool buildTrackList() {
     // Print the filename without the extension
     // debugln(filename);
 
-    // Add the file to the array
-    strncpy(locations[numOfLocations], filename, sizeof(filename));
+    // Add the file to the array (use destination size, not source size!)
+    strncpy(locations[numOfLocations], filename, MAX_LOCATION_LENGTH - 1);
+    locations[numOfLocations][MAX_LOCATION_LENGTH - 1] = '\0';  // Ensure null-termination
 
     // Increment the numOfLocations
     numOfLocations++;
@@ -746,6 +867,7 @@ void bleDisconnectCallback(uint16_t conn_handle, uint8_t reason) {
   bleNegotiatedMtu = 23; // Reset to default
   if (bleCurrentFile) {
     bleCurrentFile.close();
+    releaseSDAccess(SD_ACCESS_BLE_TRANSFER);  // Release SD access on disconnect
   }
   bleTransferInProgress = false;
 }
@@ -839,6 +961,13 @@ void bleSendFileList() {
 void bleStartFileTransfer(String filename) {
   if (bleCurrentFile) bleCurrentFile.close();
 
+  // Check if we can acquire SD access for BLE transfer
+  if (!acquireSDAccess(SD_ACCESS_BLE_TRANSFER)) {
+    debugln(F("BLE: SD card busy - cannot start transfer"));
+    fileStatusChar.notify((uint8_t*)"BUSY", 4);
+    return;
+  }
+
   debug(F("BLE: Opening file: ["));
   debug(filename);
   debugln(F("]"));
@@ -847,6 +976,7 @@ void bleStartFileTransfer(String filename) {
 
   if (!bleCurrentFile) {
     debugln(F("BLE: Failed to open file!"));
+    releaseSDAccess(SD_ACCESS_BLE_TRANSFER);  // Release on failure
     fileStatusChar.notify((uint8_t*)"ERROR", 5);
     return;
   }
@@ -953,9 +1083,10 @@ void BLE_STOP() {
 
   debugln(F("BLE: Stopping Bluetooth..."));
 
-  // Close any open file
+  // Close any open file and release SD access
   if (bleCurrentFile) {
     bleCurrentFile.close();
+    releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
   }
   bleTransferInProgress = false;
 
@@ -1010,6 +1141,7 @@ void BLUETOOTH_LOOP() {
       // Transfer complete
       bleCurrentFile.close();
       bleTransferInProgress = false;
+      releaseSDAccess(SD_ACCESS_BLE_TRANSFER);  // Release SD access when transfer completes
 
       debugln(F("BLE: Transfer complete!"));
 
@@ -1040,11 +1172,12 @@ void resetReplayState() {
   lastLap = 0;
   memset(lapHistory, 0, sizeof(lapHistory));
 
-  // Close replay file if open
+  // Close replay file if open and release SD access
   if (replayFile.isOpen()) {
     replayFile.close();
     debugln(F("Replay: Closed replay file"));
   }
+  releaseSDAccess(SD_ACCESS_REPLAY);
 }
 
 /**
@@ -1472,7 +1605,7 @@ bool extractGpsPointFromTrackFile(int trackIndex, double& lat, double& lng) {
   }
 
   // Parse the track file to get coordinates
-  char filepath[50];
+  char filepath[FILEPATH_MAX];
   makeFullTrackPath(locations[trackIndex], filepath);
 
   File trackFileTemp;
@@ -1719,7 +1852,13 @@ int runningPageEnd = LOGGING_STOP; // only changes if sd:/tracks not found
 
 int buttonPressIntv = 500;
 int buttonHoldIntv = 1000;
-int antiBounceIntv = 500;
+
+// Debounce settings - tuned for EMI rejection while maintaining responsiveness
+// 200ms allows ~5 presses/sec which is plenty fast for menu navigation
+// Edge detection ensures button must be released before registering again
+int antiBounceIntv = 200;
+const int BUTTON_SAMPLE_COUNT = 3;      // Number of samples to take
+const int BUTTON_SAMPLE_DELAY_US = 500; // Microseconds between samples
 
 bool recentlyChanged = false;
 
@@ -1766,12 +1905,54 @@ void resetButtons() {
 void resetButton(ButtonState* button) {
   button->pressed = false;
 }
+
+/**
+ * @brief Multi-sample button read with EMI rejection
+ *
+ * Takes multiple samples with small delays and requires ALL samples
+ * to show the button pressed. This rejects transient EMI spikes that
+ * might cause a single false LOW reading.
+ *
+ * @param pin The GPIO pin to read
+ * @return true only if ALL samples show button pressed (LOW)
+ */
+bool readButtonMultiSample(int pin) {
+  for (int i = 0; i < BUTTON_SAMPLE_COUNT; i++) {
+    if (digitalRead(pin) != LOW) {
+      return false;  // Any HIGH reading = not pressed
+    }
+    if (i < BUTTON_SAMPLE_COUNT - 1) {
+      delayMicroseconds(BUTTON_SAMPLE_DELAY_US);
+    }
+  }
+  return true;  // All samples were LOW = definitely pressed
+}
+
+/**
+ * @brief Check button state with debouncing, edge detection, and multi-sample verification
+ *
+ * Uses edge detection to only trigger on button PRESS (not while held).
+ * Button must be released before it can trigger again.
+ */
 void checkButton(ButtonState* button) {
-  bool btnPressed = digitalRead(button->pin) == LOW;
+  // Multi-sample read: require consistent LOW across all samples
+  bool btnCurrentlyPressed = readButtonMultiSample(button->pin);
+
+  if (!btnCurrentlyPressed) {
+    // Button is released - mark it as ready for next press
+    button->wasReleased = true;
+    return;
+  }
+
+  // Button is pressed - check if we should register this press
+  // Requires: 1) button was released since last press (edge detection)
+  //           2) debounce time has passed
   bool btnReady = millis() - button->lastPressed >= antiBounceIntv;
-  if (btnReady && btnPressed) {
+
+  if (button->wasReleased && btnReady) {
     button->lastPressed = millis();
     button->pressed = true;
+    button->wasReleased = false;  // Must release before next press
   }
 }
 
@@ -2281,6 +2462,13 @@ void displayPage_replay_exit() {
 void displayPage_gps_stats() {
   resetDisplay();
 
+  // Safety: GPS stats page requires GPS to be initialized
+  if (!gpsInitialized || gps == NULL) {
+    display.println(F("GPS not\ninitialized"));
+    display.display();
+    return;
+  }
+
   // display.println(F("   Doves Magic Box\n"));
 
   if (millis() - lastBatteryCheck > batteryUpdateInterval) {
@@ -2367,7 +2555,7 @@ void displayPage_gps_speed() {
   resetDisplay();
 
   display.println(F("SPEED"));
-  
+
   if (sdSetupSuccess && sdTrackSuccess) {
     int currentLap = lapTimer.getLaps() + (lapTimer.getRaceStarted() ? 1 : 0);
     if (currentLap > 0) {
@@ -2383,13 +2571,13 @@ void displayPage_gps_speed() {
 
   display.setCursor(40, 5);
   display.setTextSize(7);
-  // display.println(F("69"));
-  if (gps->fix) {
+  // Safety check for GPS access
+  if (gpsInitialized && gps != NULL && gps->fix) {
     display.println(round(gps_speed_mph));
   } else {
     display.println(F("--"));
   }
-  
+
   display.display();
 }
 
@@ -2743,6 +2931,13 @@ void displayPage_gps_debug() {
   resetDisplay();
   display.println(F("GPS LapTimer Debug"));
 
+  // Safety check for GPS access
+  if (!gpsInitialized || gps == NULL) {
+    display.println(F("\nGPS not available"));
+    display.display();
+    return;
+  }
+
   double dist2Line = lapTimer.pointLineSegmentDistance(gps->latitudeDegrees, gps->longitudeDegrees, crossingPointALat, crossingPointALng, crossingPointBLat, crossingPointBLng);
   display.print(F("DistToLine: "));
   display.println(dist2Line, 2);
@@ -2910,7 +3105,7 @@ void handleMenuPageSelection() {
       if (replayDetectedTrackIndex >= 0) {
         // Track found - parse it and go to layout selection
         selectedLocation = replayDetectedTrackIndex;
-        char filepath[50];
+        char filepath[FILEPATH_MAX];
         makeFullTrackPath(locations[selectedLocation], filepath);
         numOfTracks = 0; // Reset before parsing
         int parseStatus = parseTrackFile(filepath);
@@ -2968,12 +3163,16 @@ void handleMenuPageSelection() {
     debug(F("Replay: Selected direction: "));
     debugln(selectedDirection == RACE_DIRECTION_FORWARD ? "Forward" : "Reverse");
 
-    // Open the replay file and start processing
-    if (replayFile.open(replayFiles[selectedReplayFile], O_READ)) {
+    // Acquire SD access for replay before opening file
+    if (!acquireSDAccess(SD_ACCESS_REPLAY)) {
+      internalNotification = "SD card busy!\nCannot start replay";
+      switchToDisplayPage(PAGE_INTERNAL_FAULT);
+    } else if (replayFile.open(replayFiles[selectedReplayFile], O_READ)) {
       replayModeActive = true;
       replayProcessingComplete = false;
       switchToDisplayPage(PAGE_REPLAY_PROCESSING);
     } else {
+      releaseSDAccess(SD_ACCESS_REPLAY);  // Release on failure
       internalNotification = "Failed to open\nreplay file!";
       switchToDisplayPage(PAGE_INTERNAL_FAULT);
     }
@@ -2994,7 +3193,7 @@ void handleMenuPageSelection() {
   } else if (currentPage == PAGE_SELECT_LOCATION) {
     selectedLocation = menuSelectionIndex;
 
-    char filepath[13];
+    char filepath[FILEPATH_MAX];
     makeFullTrackPath(locations[selectedLocation], filepath);
     int parseStatus = parseTrackFile(filepath);
 
@@ -3084,6 +3283,7 @@ void handleMenuPageSelection() {
       trackSelected = false;
       dataFile.flush();
       dataFile.close();
+      releaseSDAccess(SD_ACCESS_LOGGING);  // Release SD access when logging stops
       lapTimer.reset();
 
       // reset lap history
@@ -3387,6 +3587,11 @@ void displayLoop() {
 ///////////////////////////////////////////
 
 void GPS_LOOP() {
+  // Safety check: skip if GPS not initialized (prevents null pointer crash)
+  if (!gpsInitialized || gps == NULL) {
+    return;
+  }
+
   char c = gps->read();
 
   if (gps->newNMEAreceived() && gps->parse(gps->lastNMEA())) {
@@ -3397,10 +3602,19 @@ void GPS_LOOP() {
       gpsFrameCounter++;
     // }
 
-    // update the timer loop everytime we have fixed data
+    // Update the lap timer with fixed GPS data
+    // Use atomic snapshot to prevent torn reads on 64-bit doubles
     if (trackSelected && gps->fix) {
+      double ltLat, ltLng, ltAlt, ltSpeed;
+      noInterrupts();
+      ltLat = gps->latitudeDegrees;
+      ltLng = gps->longitudeDegrees;
+      ltAlt = gps->altitude;
+      ltSpeed = gps->speed;
+      interrupts();
+
       lapTimer.updateCurrentTime(getGpsTimeInMilliseconds());
-      lapTimer.loop(gps->latitudeDegrees, gps->longitudeDegrees, gps->altitude, gps->speed);
+      lapTimer.loop(ltLat, ltLng, ltAlt, ltSpeed);
     }
 
     #ifdef SD_CARD_LOGGING_ENABLED
@@ -3413,45 +3627,130 @@ void GPS_LOOP() {
         // Check if this is a GPGGA or GNGGA packet
         if (strstr(nmea, "$GPGGA") != NULL || strstr(nmea, "$GNGGA") != NULL) {
 
-          // Build CSV line: timestamp,sats,hdop,lat,lng,speed_mph,alt_m,rpm,egt,water_temp,reserved1,reserved2
-          char csvLine[256];
+          // CRITICAL: Snapshot GPS values with interrupts disabled to prevent torn reads
+          // On 32-bit ARM, reading 64-bit doubles is NOT atomic - we could get half of
+          // one value and half of another if GPS library updates mid-read = garbage data
+          double snapLat, snapLng, snapAlt, snapHdop, snapSpeed;
+          int snapSats;
 
-          // Convert floats to strings with proper precision
-          char latStr[16], lngStr[16], hdopStr[8], speedStr[12], altStr[12];
+          noInterrupts();
+          snapLat = gps->latitudeDegrees;
+          snapLng = gps->longitudeDegrees;
+          snapAlt = gps->altitude;
+          snapHdop = gps->HDOP;
+          snapSpeed = gps->speed;
+          snapSats = gps->satellites;
+          interrupts();
 
-          // 8 decimals for lat/lng (racing precision)
-          dtostrf(gps->latitudeDegrees, 1, 8, latStr);
-          dtostrf(gps->longitudeDegrees, 1, 8, lngStr);
+          // Convert speed to mph
+          double snapSpeedMph = snapSpeed * 1.15078;
 
-          // 1 decimal for HDOP
-          dtostrf(gps->HDOP, 1, 1, hdopStr);
+          // VALIDATE: Strict checks for GPS data quality
+          // The data shows gps->fix can be true before coordinates are valid
+          // Also check for NaN/Inf and require actual satellite lock
+          bool hasActualFix = (snapSats > 0);  // Must have satellites, not just fix flag
+          bool validLat = (snapLat >= -90.0 && snapLat <= 90.0 && snapLat != 0.0);
+          bool validLng = (snapLng >= -180.0 && snapLng <= 180.0 && snapLng != 0.0);
+          bool validAlt = (snapAlt >= -1000.0 && snapAlt <= 50000.0);
+          bool validHdop = (snapHdop > 0.0 && snapHdop <= 50.0);  // HDOP 0 = invalid
+          bool validSpeed = (snapSpeedMph >= 0.0 && snapSpeedMph <= 500.0);
 
-          // 2 decimals for speed and altitude
-          dtostrf(gps_speed_mph, 1, 2, speedStr);
-          dtostrf(gps->altitude, 1, 2, altStr);
+          // Check for NaN/Inf which can slip through range checks
+          bool noNaN = !isnan(snapLat) && !isnan(snapLng) && !isnan(snapAlt) &&
+                       !isnan(snapHdop) && !isnan(snapSpeed);
+          bool noInf = !isinf(snapLat) && !isinf(snapLng) && !isinf(snapAlt) &&
+                       !isinf(snapHdop) && !isinf(snapSpeed);
 
-          // Build the complete CSV line
-          snprintf(csvLine, sizeof(csvLine), "%llu,%d,%s,%s,%s,%s,%s,%d,0,0",
-                   getGpsUnixTimestampMillis(), // timestamp (Unix milliseconds)
-                   (int)gps->satellites,        // sats
-                   hdopStr,                     // hdop
-                   latStr,                      // lat
-                   lngStr,                      // lng
-                   speedStr,                    // speed_mph
-                   altStr,                      // alt_m
-                   tachLastReported             // rpm
-                   // egt, water_temp, reserved1, reserved2 are all 0
-          );
+          if (!hasActualFix || !validLat || !validLng || !validAlt ||
+              !validHdop || !validSpeed || !noNaN || !noInf) {
+            // Skip this sample - data is not trustworthy
+            // Don't spam debug output - this can happen frequently during GPS acquisition
+          } else {
+            // Build CSV line: timestamp,sats,hdop,lat,lng,speed_mph,alt_m,rpm,...
+            char csvLine[256];
 
-          // Write with error checking - EMI can corrupt writes
-          size_t written = dataFile.println(csvLine);
-          if (written == 0) {
-            debugln(F("SD write failed - disabling logging"));
-            enableLogging = false;
-            sdDataLogInitComplete = false;
-            dataFile.close();
-            internalNotification = "SD Write Failed!\nCheck card/connections";
-            switchToDisplayPage(PAGE_INTERNAL_FAULT);
+            // Convert floats to strings with proper precision
+            char latStr[24], lngStr[24], hdopStr[12], speedStr[16], altStr[16];
+
+            // 8 decimals for lat/lng (racing precision)
+            dtostrf(snapLat, 1, 8, latStr);
+            dtostrf(snapLng, 1, 8, lngStr);
+
+            // 1 decimal for HDOP
+            dtostrf(snapHdop, 1, 1, hdopStr);
+
+            // 2 decimals for speed and altitude
+            dtostrf(snapSpeedMph, 1, 2, speedStr);
+            dtostrf(snapAlt, 1, 2, altStr);
+
+            // FINAL SAFETY CHECK: Verify strings are valid ASCII numbers
+            // Catches any remaining garbage that slipped through numeric validation
+            bool stringsValid = true;
+            const char* strs[] = {latStr, lngStr, hdopStr, speedStr, altStr};
+            for (int i = 0; i < 5 && stringsValid; i++) {
+              int len = strlen(strs[i]);
+              if (len == 0 || len > 20) {
+                stringsValid = false;  // Empty or suspiciously long
+              }
+              for (int j = 0; j < len && stringsValid; j++) {
+                char c = strs[i][j];
+                // Valid: digits, decimal point, minus sign
+                if (!((c >= '0' && c <= '9') || c == '.' || c == '-')) {
+                  stringsValid = false;
+                }
+              }
+            }
+
+            if (!stringsValid) {
+              // dtostrf produced garbage - skip this entry silently
+            } else {
+              // Convert timestamp to string manually - Arduino's snprintf doesn't support %llu
+              // This was causing "lu,0,," garbage in the CSV output
+              unsigned long long timestamp = getGpsUnixTimestampMillis();
+              char timestampStr[24];
+              // Convert 64-bit integer to string (Arduino lacks %llu support)
+              if (timestamp == 0) {
+                strcpy(timestampStr, "0");
+              } else {
+                // Build string from right to left
+                char temp[24];
+                int i = 0;
+                unsigned long long t = timestamp;
+                while (t > 0) {
+                  temp[i++] = '0' + (t % 10);
+                  t /= 10;
+                }
+                // Reverse into timestampStr
+                for (int j = 0; j < i; j++) {
+                  timestampStr[j] = temp[i - 1 - j];
+                }
+                timestampStr[i] = '\0';
+              }
+
+              // Build the complete CSV line (using %s for timestamp now)
+              snprintf(csvLine, sizeof(csvLine), "%s,%d,%s,%s,%s,%s,%s,%d,0,0",
+                       timestampStr,
+                       snapSats,
+                       hdopStr,
+                       latStr,
+                       lngStr,
+                       speedStr,
+                       altStr,
+                       tachLastReported
+              );
+
+              // Write with error checking
+              size_t written = dataFile.println(csvLine);
+              if (written == 0) {
+                debugln(F("SD write failed - disabling logging"));
+                enableLogging = false;
+                sdDataLogInitComplete = false;
+                dataFile.close();
+                releaseSDAccess(SD_ACCESS_LOGGING);
+                internalNotification = "SD Write Failed!\nCheck card/connections";
+                switchToDisplayPage(PAGE_INTERNAL_FAULT);
+              }
+            }
           }
         }
         /////////////////////////////////////////////////////////////////
@@ -3463,60 +3762,59 @@ void GPS_LOOP() {
         }
       } else if (trackSelected && gps->fix && sdSetupSuccess && !sdDataLogInitComplete && enableLogging && gps->day > 0) {
         debugln(F("Attempt to initialize logfile"));
-        
-        // all this could be much cleaner.....
-        // todo: timezones?
-        String gpsYear = "20" + String(gps->year);
-        String gpsMonth = gps->month < 10 ? "0" + String(gps->month) : String(gps->month);
-        String gpsDay = gps->day < 10 ? "0" + String(gps->day) : String(gps->day);
-        String gpsHour = gps->hour < 10 ? "0" + String(gps->hour) : String(gps->hour);
-        String gpsMinute = gps->minute < 10 ? "0" + String(gps->minute) : String(gps->minute);
 
-        String trackLocation = locations[selectedLocation];
-        String trackLayout= tracks[selectedTrack];
-        String layoutDirection = selectedDirection == RACE_DIRECTION_FORWARD ? "fwd" : "rev";
-
-        String dataFileNameS = trackLocation + "_" + trackLayout + "_" + layoutDirection + "_" + gpsYear + "_" + gpsMonth + gpsDay + "_" + gpsHour + gpsMinute + ".dove";
-
-        // const char* dataFileName = dataFileNameS.c_str();
-
-        debug(F("dataFileNameS: ["));
-        debug(dataFileNameS.c_str());
-        debugln(F("]"));
-
-        // Open for writing - removed O_NONBLOCK as it doesn't work on SD
-        dataFile.open(dataFileNameS.c_str(), O_CREAT | O_WRITE);
-
-        if (!dataFile) {
-          debugln(F("Error opening log file"));
-
-          // hmmm
-          String errorMessage = String("Error saving log:\n") + dataFileNameS;
-          internalNotification = errorMessage;
-          // internalNotification = errorMessage.c_str();
-          // int errorMessageLength = errorMessage.length() + 1;
-          // char errorMessageCharArray[errorMessageLength];
-          // errorMessage.toCharArray(errorMessageCharArray, errorMessageLength);
-          // internalNotification = "Error creating log!";
-
-          switchToDisplayPage(PAGE_INTERNAL_FAULT);
-
+        // Check if we can acquire SD access for logging
+        if (!acquireSDAccess(SD_ACCESS_LOGGING)) {
+          debugln(F("Cannot start logging - SD card busy"));
           enableLogging = false;
+          internalNotification = "SD card busy!\nCannot start logging";
+          switchToDisplayPage(PAGE_INTERNAL_FAULT);
         } else {
-          // Write CSV header as first line
-          dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,rpm,exhaust_temp_c,water_temp_c"));
-          debugln(F("CSV header written"));
+          // Build filename from GPS date/time
+          String gpsYear = "20" + String(gps->year);
+          String gpsMonth = gps->month < 10 ? "0" + String(gps->month) : String(gps->month);
+          String gpsDay = gps->day < 10 ? "0" + String(gps->day) : String(gps->day);
+          String gpsHour = gps->hour < 10 ? "0" + String(gps->hour) : String(gps->hour);
+          String gpsMinute = gps->minute < 10 ? "0" + String(gps->minute) : String(gps->minute);
+
+          String trackLocation = locations[selectedLocation];
+          String trackLayout= tracks[selectedTrack];
+          String layoutDirection = selectedDirection == RACE_DIRECTION_FORWARD ? "fwd" : "rev";
+
+          String dataFileNameS = trackLocation + "_" + trackLayout + "_" + layoutDirection + "_" + gpsYear + "_" + gpsMonth + gpsDay + "_" + gpsHour + gpsMinute + ".dove";
+
+          debug(F("dataFileNameS: ["));
+          debug(dataFileNameS.c_str());
+          debugln(F("]"));
+
+          // Open for writing
+          dataFile.open(dataFileNameS.c_str(), O_CREAT | O_WRITE);
+
+          if (!dataFile) {
+            debugln(F("Error opening log file"));
+            releaseSDAccess(SD_ACCESS_LOGGING);  // Release on failure
+
+            String errorMessage = String("Error saving log:\n") + dataFileNameS;
+            internalNotification = errorMessage;
+            switchToDisplayPage(PAGE_INTERNAL_FAULT);
+            enableLogging = false;
+          } else {
+            // Write CSV header as first line
+            dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,rpm,exhaust_temp_c,water_temp_c"));
+            debugln(F("CSV header written"));
+          }
+          sdDataLogInitComplete = true;
         }
-        sdDataLogInitComplete = true;
       }
       if (gps->fix) {
         // debug(lastNMEA);
       }
     #endif
-  }
 
-  // update globals for display
-  gps_speed_mph = gps->speed * 1.15078;
+    // Update display speed - do this inside NMEA received block
+    // so it only updates when we have fresh data
+    gps_speed_mph = gps->speed * 1.15078;
+  }
 }
 
 void calculateGPSFrameRate() {
@@ -3555,7 +3853,7 @@ void setup() {
   if(sdSetupSuccess && sdTrackSuccess) {
     debugln(F("Obtained Track List"));
     for (int i = 0; i < numOfLocations; i++) {
-      char filepath[50];
+      char filepath[FILEPATH_MAX];
       makeFullTrackPath(locations[i], filepath);
       debugln(filepath);
     }
