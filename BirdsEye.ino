@@ -545,22 +545,22 @@ File replayFile;
 // SD CARD ACCESS STATE MANAGEMENT
 // Prevents race conditions between logging, replay, and BLE file transfers
 ///////////////////////////////////////////
-enum SDAccessMode {
-  SD_ACCESS_NONE = 0,      // SD card not in use by any subsystem
-  SD_ACCESS_LOGGING,       // Data logging active (dataFile in use)
-  SD_ACCESS_REPLAY,        // Replay mode active (replayFile in use)
-  SD_ACCESS_BLE_TRANSFER,  // BLE file transfer active (bleCurrentFile in use)
-  SD_ACCESS_TRACK_PARSE    // Track file parsing (temporary, should release quickly)
-};
+// Note: Using #define instead of enum to avoid Arduino preprocessor issues
+// (Arduino generates function prototypes before seeing enum definitions)
+#define SD_ACCESS_NONE         0   // SD card not in use by any subsystem
+#define SD_ACCESS_LOGGING      1   // Data logging active (dataFile in use)
+#define SD_ACCESS_REPLAY       2   // Replay mode active (replayFile in use)
+#define SD_ACCESS_BLE_TRANSFER 3   // BLE file transfer active (bleCurrentFile in use)
+#define SD_ACCESS_TRACK_PARSE  4   // Track file parsing (temporary, should release quickly)
 
-volatile SDAccessMode currentSDAccess = SD_ACCESS_NONE;
+volatile int currentSDAccess = SD_ACCESS_NONE;
 
 /**
  * @brief Attempt to acquire SD card access for a subsystem
- * @param mode The access mode being requested
+ * @param mode The access mode being requested (SD_ACCESS_*)
  * @return true if access granted, false if SD busy with another operation
  */
-bool acquireSDAccess(SDAccessMode mode) {
+bool acquireSDAccess(int mode) {
   // Allow re-acquiring same mode (idempotent)
   if (currentSDAccess == mode) return true;
 
@@ -580,7 +580,7 @@ bool acquireSDAccess(SDAccessMode mode) {
  * @brief Release SD card access
  * @param mode The access mode being released (must match current)
  */
-void releaseSDAccess(SDAccessMode mode) {
+void releaseSDAccess(int mode) {
   if (currentSDAccess == mode) {
     currentSDAccess = SD_ACCESS_NONE;
   }
