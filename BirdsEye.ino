@@ -522,6 +522,58 @@ File dataFile;
 // Replay file handle (must be after SdFat include)
 File replayFile;
 
+///////////////////////////////////////////
+// SD CARD ACCESS STATE MANAGEMENT
+// Prevents race conditions between logging, replay, and BLE file transfers
+///////////////////////////////////////////
+enum SDAccessMode {
+  SD_ACCESS_NONE = 0,      // SD card not in use by any subsystem
+  SD_ACCESS_LOGGING,       // Data logging active (dataFile in use)
+  SD_ACCESS_REPLAY,        // Replay mode active (replayFile in use)
+  SD_ACCESS_BLE_TRANSFER,  // BLE file transfer active (bleCurrentFile in use)
+  SD_ACCESS_TRACK_PARSE    // Track file parsing (temporary, should release quickly)
+};
+
+volatile SDAccessMode currentSDAccess = SD_ACCESS_NONE;
+
+/**
+ * @brief Attempt to acquire SD card access for a subsystem
+ * @param mode The access mode being requested
+ * @return true if access granted, false if SD busy with another operation
+ */
+bool acquireSDAccess(SDAccessMode mode) {
+  // Allow re-acquiring same mode (idempotent)
+  if (currentSDAccess == mode) return true;
+
+  // Only allow acquisition if currently free or track parsing (which is temporary)
+  if (currentSDAccess == SD_ACCESS_NONE || currentSDAccess == SD_ACCESS_TRACK_PARSE) {
+    currentSDAccess = mode;
+    return true;
+  }
+
+  // SD busy with another subsystem
+  debug(F("SD access denied, current mode: "));
+  debugln(currentSDAccess);
+  return false;
+}
+
+/**
+ * @brief Release SD card access
+ * @param mode The access mode being released (must match current)
+ */
+void releaseSDAccess(SDAccessMode mode) {
+  if (currentSDAccess == mode) {
+    currentSDAccess = SD_ACCESS_NONE;
+  }
+}
+
+/**
+ * @brief Force release all SD access (use during cleanup/error recovery)
+ */
+void forceReleaseSDAccess() {
+  currentSDAccess = SD_ACCESS_NONE;
+}
+
 // Replay function prototypes (must be after SdFat include for File type)
 bool buildReplayFileList();
 bool readReplayLine(File& file, char* buffer, int bufferSize);
@@ -601,8 +653,9 @@ bool buildTrackList() {
     // Print the filename without the extension
     // debugln(filename);
 
-    // Add the file to the array
-    strncpy(locations[numOfLocations], filename, sizeof(filename));
+    // Add the file to the array (use destination size, not source size!)
+    strncpy(locations[numOfLocations], filename, MAX_LOCATION_LENGTH - 1);
+    locations[numOfLocations][MAX_LOCATION_LENGTH - 1] = '\0';  // Ensure null-termination
 
     // Increment the numOfLocations
     numOfLocations++;
@@ -794,6 +847,7 @@ void bleDisconnectCallback(uint16_t conn_handle, uint8_t reason) {
   bleNegotiatedMtu = 23; // Reset to default
   if (bleCurrentFile) {
     bleCurrentFile.close();
+    releaseSDAccess(SD_ACCESS_BLE_TRANSFER);  // Release SD access on disconnect
   }
   bleTransferInProgress = false;
 }
@@ -887,6 +941,13 @@ void bleSendFileList() {
 void bleStartFileTransfer(String filename) {
   if (bleCurrentFile) bleCurrentFile.close();
 
+  // Check if we can acquire SD access for BLE transfer
+  if (!acquireSDAccess(SD_ACCESS_BLE_TRANSFER)) {
+    debugln(F("BLE: SD card busy - cannot start transfer"));
+    fileStatusChar.notify((uint8_t*)"BUSY", 4);
+    return;
+  }
+
   debug(F("BLE: Opening file: ["));
   debug(filename);
   debugln(F("]"));
@@ -895,6 +956,7 @@ void bleStartFileTransfer(String filename) {
 
   if (!bleCurrentFile) {
     debugln(F("BLE: Failed to open file!"));
+    releaseSDAccess(SD_ACCESS_BLE_TRANSFER);  // Release on failure
     fileStatusChar.notify((uint8_t*)"ERROR", 5);
     return;
   }
@@ -1001,9 +1063,10 @@ void BLE_STOP() {
 
   debugln(F("BLE: Stopping Bluetooth..."));
 
-  // Close any open file
+  // Close any open file and release SD access
   if (bleCurrentFile) {
     bleCurrentFile.close();
+    releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
   }
   bleTransferInProgress = false;
 
@@ -1058,6 +1121,7 @@ void BLUETOOTH_LOOP() {
       // Transfer complete
       bleCurrentFile.close();
       bleTransferInProgress = false;
+      releaseSDAccess(SD_ACCESS_BLE_TRANSFER);  // Release SD access when transfer completes
 
       debugln(F("BLE: Transfer complete!"));
 
@@ -1088,11 +1152,12 @@ void resetReplayState() {
   lastLap = 0;
   memset(lapHistory, 0, sizeof(lapHistory));
 
-  // Close replay file if open
+  // Close replay file if open and release SD access
   if (replayFile.isOpen()) {
     replayFile.close();
     debugln(F("Replay: Closed replay file"));
   }
+  releaseSDAccess(SD_ACCESS_REPLAY);
 }
 
 /**
@@ -1520,7 +1585,7 @@ bool extractGpsPointFromTrackFile(int trackIndex, double& lat, double& lng) {
   }
 
   // Parse the track file to get coordinates
-  char filepath[50];
+  char filepath[FILEPATH_MAX];
   makeFullTrackPath(locations[trackIndex], filepath);
 
   File trackFileTemp;
@@ -2972,7 +3037,7 @@ void handleMenuPageSelection() {
       if (replayDetectedTrackIndex >= 0) {
         // Track found - parse it and go to layout selection
         selectedLocation = replayDetectedTrackIndex;
-        char filepath[50];
+        char filepath[FILEPATH_MAX];
         makeFullTrackPath(locations[selectedLocation], filepath);
         numOfTracks = 0; // Reset before parsing
         int parseStatus = parseTrackFile(filepath);
@@ -3030,12 +3095,16 @@ void handleMenuPageSelection() {
     debug(F("Replay: Selected direction: "));
     debugln(selectedDirection == RACE_DIRECTION_FORWARD ? "Forward" : "Reverse");
 
-    // Open the replay file and start processing
-    if (replayFile.open(replayFiles[selectedReplayFile], O_READ)) {
+    // Acquire SD access for replay before opening file
+    if (!acquireSDAccess(SD_ACCESS_REPLAY)) {
+      internalNotification = "SD card busy!\nCannot start replay";
+      switchToDisplayPage(PAGE_INTERNAL_FAULT);
+    } else if (replayFile.open(replayFiles[selectedReplayFile], O_READ)) {
       replayModeActive = true;
       replayProcessingComplete = false;
       switchToDisplayPage(PAGE_REPLAY_PROCESSING);
     } else {
+      releaseSDAccess(SD_ACCESS_REPLAY);  // Release on failure
       internalNotification = "Failed to open\nreplay file!";
       switchToDisplayPage(PAGE_INTERNAL_FAULT);
     }
@@ -3056,7 +3125,7 @@ void handleMenuPageSelection() {
   } else if (currentPage == PAGE_SELECT_LOCATION) {
     selectedLocation = menuSelectionIndex;
 
-    char filepath[50];  // Must fit "/TRACKS/" + name + ".json" (was 13, caused overflow!)
+    char filepath[FILEPATH_MAX];
     makeFullTrackPath(locations[selectedLocation], filepath);
     int parseStatus = parseTrackFile(filepath);
 
@@ -3146,6 +3215,7 @@ void handleMenuPageSelection() {
       trackSelected = false;
       dataFile.flush();
       dataFile.close();
+      releaseSDAccess(SD_ACCESS_LOGGING);  // Release SD access when logging stops
       lapTimer.reset();
 
       // reset lap history
@@ -3517,6 +3587,7 @@ void GPS_LOOP() {
             enableLogging = false;
             sdDataLogInitComplete = false;
             dataFile.close();
+            releaseSDAccess(SD_ACCESS_LOGGING);  // Release SD access on write failure
             internalNotification = "SD Write Failed!\nCheck card/connections";
             switchToDisplayPage(PAGE_INTERNAL_FAULT);
           }
@@ -3530,51 +3601,49 @@ void GPS_LOOP() {
         }
       } else if (trackSelected && gps->fix && sdSetupSuccess && !sdDataLogInitComplete && enableLogging && gps->day > 0) {
         debugln(F("Attempt to initialize logfile"));
-        
-        // all this could be much cleaner.....
-        // todo: timezones?
-        String gpsYear = "20" + String(gps->year);
-        String gpsMonth = gps->month < 10 ? "0" + String(gps->month) : String(gps->month);
-        String gpsDay = gps->day < 10 ? "0" + String(gps->day) : String(gps->day);
-        String gpsHour = gps->hour < 10 ? "0" + String(gps->hour) : String(gps->hour);
-        String gpsMinute = gps->minute < 10 ? "0" + String(gps->minute) : String(gps->minute);
 
-        String trackLocation = locations[selectedLocation];
-        String trackLayout= tracks[selectedTrack];
-        String layoutDirection = selectedDirection == RACE_DIRECTION_FORWARD ? "fwd" : "rev";
-
-        String dataFileNameS = trackLocation + "_" + trackLayout + "_" + layoutDirection + "_" + gpsYear + "_" + gpsMonth + gpsDay + "_" + gpsHour + gpsMinute + ".dove";
-
-        // const char* dataFileName = dataFileNameS.c_str();
-
-        debug(F("dataFileNameS: ["));
-        debug(dataFileNameS.c_str());
-        debugln(F("]"));
-
-        // Open for writing - removed O_NONBLOCK as it doesn't work on SD
-        dataFile.open(dataFileNameS.c_str(), O_CREAT | O_WRITE);
-
-        if (!dataFile) {
-          debugln(F("Error opening log file"));
-
-          // hmmm
-          String errorMessage = String("Error saving log:\n") + dataFileNameS;
-          internalNotification = errorMessage;
-          // internalNotification = errorMessage.c_str();
-          // int errorMessageLength = errorMessage.length() + 1;
-          // char errorMessageCharArray[errorMessageLength];
-          // errorMessage.toCharArray(errorMessageCharArray, errorMessageLength);
-          // internalNotification = "Error creating log!";
-
-          switchToDisplayPage(PAGE_INTERNAL_FAULT);
-
+        // Check if we can acquire SD access for logging
+        if (!acquireSDAccess(SD_ACCESS_LOGGING)) {
+          debugln(F("Cannot start logging - SD card busy"));
           enableLogging = false;
+          internalNotification = "SD card busy!\nCannot start logging";
+          switchToDisplayPage(PAGE_INTERNAL_FAULT);
         } else {
-          // Write CSV header as first line
-          dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,rpm,exhaust_temp_c,water_temp_c"));
-          debugln(F("CSV header written"));
+          // Build filename from GPS date/time
+          String gpsYear = "20" + String(gps->year);
+          String gpsMonth = gps->month < 10 ? "0" + String(gps->month) : String(gps->month);
+          String gpsDay = gps->day < 10 ? "0" + String(gps->day) : String(gps->day);
+          String gpsHour = gps->hour < 10 ? "0" + String(gps->hour) : String(gps->hour);
+          String gpsMinute = gps->minute < 10 ? "0" + String(gps->minute) : String(gps->minute);
+
+          String trackLocation = locations[selectedLocation];
+          String trackLayout= tracks[selectedTrack];
+          String layoutDirection = selectedDirection == RACE_DIRECTION_FORWARD ? "fwd" : "rev";
+
+          String dataFileNameS = trackLocation + "_" + trackLayout + "_" + layoutDirection + "_" + gpsYear + "_" + gpsMonth + gpsDay + "_" + gpsHour + gpsMinute + ".dove";
+
+          debug(F("dataFileNameS: ["));
+          debug(dataFileNameS.c_str());
+          debugln(F("]"));
+
+          // Open for writing
+          dataFile.open(dataFileNameS.c_str(), O_CREAT | O_WRITE);
+
+          if (!dataFile) {
+            debugln(F("Error opening log file"));
+            releaseSDAccess(SD_ACCESS_LOGGING);  // Release on failure
+
+            String errorMessage = String("Error saving log:\n") + dataFileNameS;
+            internalNotification = errorMessage;
+            switchToDisplayPage(PAGE_INTERNAL_FAULT);
+            enableLogging = false;
+          } else {
+            // Write CSV header as first line
+            dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,rpm,exhaust_temp_c,water_temp_c"));
+            debugln(F("CSV header written"));
+          }
+          sdDataLogInitComplete = true;
         }
-        sdDataLogInitComplete = true;
       }
       if (gps->fix) {
         // debug(lastNMEA);
@@ -3622,7 +3691,7 @@ void setup() {
   if(sdSetupSuccess && sdTrackSuccess) {
     debugln(F("Obtained Track List"));
     for (int i = 0; i < numOfLocations; i++) {
-      char filepath[50];
+      char filepath[FILEPATH_MAX];
       makeFullTrackPath(locations[i], filepath);
       debugln(filepath);
     }
