@@ -3808,24 +3808,31 @@ void GPS_LOOP() {
           // Convert speed to mph
           double snapSpeedMph = snapSpeed * 1.15078;
 
-          // VALIDATE: Check for reasonable GPS values before logging
-          // Invalid data from partial parse or uninitialized memory will be rejected
-          bool validLat = (snapLat >= -90.0 && snapLat <= 90.0);
-          bool validLng = (snapLng >= -180.0 && snapLng <= 180.0);
-          bool validAlt = (snapAlt >= -1000.0 && snapAlt <= 50000.0);  // -1km to 50km
-          bool validHdop = (snapHdop >= 0.0 && snapHdop <= 99.9);
-          bool validSpeed = (snapSpeedMph >= 0.0 && snapSpeedMph <= 500.0);  // 0-500 mph
-          bool validSats = (snapSats >= 0 && snapSats <= 50);
+          // VALIDATE: Strict checks for GPS data quality
+          // The data shows gps->fix can be true before coordinates are valid
+          // Also check for NaN/Inf and require actual satellite lock
+          bool hasActualFix = (snapSats > 0);  // Must have satellites, not just fix flag
+          bool validLat = (snapLat >= -90.0 && snapLat <= 90.0 && snapLat != 0.0);
+          bool validLng = (snapLng >= -180.0 && snapLng <= 180.0 && snapLng != 0.0);
+          bool validAlt = (snapAlt >= -1000.0 && snapAlt <= 50000.0);
+          bool validHdop = (snapHdop > 0.0 && snapHdop <= 50.0);  // HDOP 0 = invalid
+          bool validSpeed = (snapSpeedMph >= 0.0 && snapSpeedMph <= 500.0);
 
-          if (!validLat || !validLng || !validAlt || !validHdop || !validSpeed || !validSats) {
-            // Skip this sample - data is garbage
-            debugln(F("GPS data validation failed - skipping log entry"));
+          // Check for NaN/Inf which can slip through range checks
+          bool noNaN = !isnan(snapLat) && !isnan(snapLng) && !isnan(snapAlt) &&
+                       !isnan(snapHdop) && !isnan(snapSpeed);
+          bool noInf = !isinf(snapLat) && !isinf(snapLng) && !isinf(snapAlt) &&
+                       !isinf(snapHdop) && !isinf(snapSpeed);
+
+          if (!hasActualFix || !validLat || !validLng || !validAlt ||
+              !validHdop || !validSpeed || !noNaN || !noInf) {
+            // Skip this sample - data is not trustworthy
+            // Don't spam debug output - this can happen frequently during GPS acquisition
           } else {
             // Build CSV line: timestamp,sats,hdop,lat,lng,speed_mph,alt_m,rpm,...
             char csvLine[256];
 
             // Convert floats to strings with proper precision
-            // Increased buffer sizes for safety margin (was 16, now 24)
             char latStr[24], lngStr[24], hdopStr[12], speedStr[16], altStr[16];
 
             // 8 decimals for lat/lng (racing precision)
@@ -3839,31 +3846,75 @@ void GPS_LOOP() {
             dtostrf(snapSpeedMph, 1, 2, speedStr);
             dtostrf(snapAlt, 1, 2, altStr);
 
-            // Build the complete CSV line
-            snprintf(csvLine, sizeof(csvLine), "%llu,%d,%s,%s,%s,%s,%s,%d,0,0",
-                     getGpsUnixTimestampMillis(), // timestamp (Unix milliseconds)
-                     snapSats,                    // sats (use snapshot)
-                     hdopStr,                     // hdop
-                     latStr,                      // lat
-                     lngStr,                      // lng
-                     speedStr,                    // speed_mph
-                     altStr,                      // alt_m
-                     tachLastReported             // rpm
-            );
+            // FINAL SAFETY CHECK: Verify strings are valid ASCII numbers
+            // Catches any remaining garbage that slipped through numeric validation
+            bool stringsValid = true;
+            const char* strs[] = {latStr, lngStr, hdopStr, speedStr, altStr};
+            for (int i = 0; i < 5 && stringsValid; i++) {
+              int len = strlen(strs[i]);
+              if (len == 0 || len > 20) {
+                stringsValid = false;  // Empty or suspiciously long
+              }
+              for (int j = 0; j < len && stringsValid; j++) {
+                char c = strs[i][j];
+                // Valid: digits, decimal point, minus sign
+                if (!((c >= '0' && c <= '9') || c == '.' || c == '-')) {
+                  stringsValid = false;
+                }
+              }
+            }
 
-            // Write with error checking
-            size_t written = dataFile.println(csvLine);
-            if (written == 0) {
-              debugln(F("SD write failed - disabling logging"));
-              enableLogging = false;
-              sdDataLogInitComplete = false;
-              dataFile.close();
-              releaseSDAccess(SD_ACCESS_LOGGING);
-              internalNotification = "SD Write Failed!\nCheck card/connections";
-              switchToDisplayPage(PAGE_INTERNAL_FAULT);
+            if (!stringsValid) {
+              // dtostrf produced garbage - skip this entry silently
+            } else {
+              // Convert timestamp to string manually - Arduino's snprintf doesn't support %llu
+              // This was causing "lu,0,," garbage in the CSV output
+              unsigned long long timestamp = getGpsUnixTimestampMillis();
+              char timestampStr[24];
+              // Convert 64-bit integer to string (Arduino lacks %llu support)
+              if (timestamp == 0) {
+                strcpy(timestampStr, "0");
+              } else {
+                // Build string from right to left
+                char temp[24];
+                int i = 0;
+                unsigned long long t = timestamp;
+                while (t > 0) {
+                  temp[i++] = '0' + (t % 10);
+                  t /= 10;
+                }
+                // Reverse into timestampStr
+                for (int j = 0; j < i; j++) {
+                  timestampStr[j] = temp[i - 1 - j];
+                }
+                timestampStr[i] = '\0';
+              }
+
+              // Build the complete CSV line (using %s for timestamp now)
+              snprintf(csvLine, sizeof(csvLine), "%s,%d,%s,%s,%s,%s,%s,%d,0,0",
+                       timestampStr,
+                       snapSats,
+                       hdopStr,
+                       latStr,
+                       lngStr,
+                       speedStr,
+                       altStr,
+                       tachLastReported
+              );
+
+              // Write with error checking
+              size_t written = dataFile.println(csvLine);
+              if (written == 0) {
+                debugln(F("SD write failed - disabling logging"));
+                enableLogging = false;
+                sdDataLogInitComplete = false;
+                dataFile.close();
+                releaseSDAccess(SD_ACCESS_LOGGING);
+                internalNotification = "SD Write Failed!\nCheck card/connections";
+                switchToDisplayPage(PAGE_INTERNAL_FAULT);
+              }
             }
           }
-        }
         /////////////////////////////////////////////////////////////////
 
         // Flush more frequently to avoid data loss - every 2 seconds
