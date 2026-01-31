@@ -52,7 +52,8 @@ bool trackSelected = false;
 
 struct ButtonState {
   int pin = 0;
-  bool pressed = false;
+  bool pressed = false;           // Flag for "button was pressed" (consumed by handler)
+  bool wasReleased = true;        // Edge detection: must release before next press
   unsigned long lastPressed = 0;
 };
 struct TrackLayout {
@@ -1853,9 +1854,9 @@ int buttonPressIntv = 500;
 int buttonHoldIntv = 1000;
 
 // Debounce settings - tuned for EMI rejection while maintaining responsiveness
-// 150ms allows ~6 presses/sec which is plenty fast for menu navigation
-// Multi-sample verification catches EMI spikes that slip through hardware filtering
-int antiBounceIntv = 150;
+// 200ms allows ~5 presses/sec which is plenty fast for menu navigation
+// Edge detection ensures button must be released before registering again
+int antiBounceIntv = 200;
 const int BUTTON_SAMPLE_COUNT = 3;      // Number of samples to take
 const int BUTTON_SAMPLE_DELAY_US = 500; // Microseconds between samples
 
@@ -1928,22 +1929,30 @@ bool readButtonMultiSample(int pin) {
 }
 
 /**
- * @brief Check button state with debouncing and multi-sample verification
+ * @brief Check button state with debouncing, edge detection, and multi-sample verification
  *
- * Combines time-based debouncing with multi-sample verification for
- * robust button detection in electrically noisy environments.
+ * Uses edge detection to only trigger on button PRESS (not while held).
+ * Button must be released before it can trigger again.
  */
 void checkButton(ButtonState* button) {
-  // Time-based debounce: ignore if pressed too recently
-  bool btnReady = millis() - button->lastPressed >= antiBounceIntv;
-  if (!btnReady) return;
-
   // Multi-sample read: require consistent LOW across all samples
-  bool btnPressed = readButtonMultiSample(button->pin);
+  bool btnCurrentlyPressed = readButtonMultiSample(button->pin);
 
-  if (btnPressed) {
+  if (!btnCurrentlyPressed) {
+    // Button is released - mark it as ready for next press
+    button->wasReleased = true;
+    return;
+  }
+
+  // Button is pressed - check if we should register this press
+  // Requires: 1) button was released since last press (edge detection)
+  //           2) debounce time has passed
+  bool btnReady = millis() - button->lastPressed >= antiBounceIntv;
+
+  if (button->wasReleased && btnReady) {
     button->lastPressed = millis();
     button->pressed = true;
+    button->wasReleased = false;  // Must release before next press
   }
 }
 
