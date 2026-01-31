@@ -221,9 +221,13 @@ void TACH_LOOP() {
     }
   }
 
-  // Atomically read the pulse period captured by ISR
-  // On ARM Cortex-M4 (NRF52840), 32-bit aligned reads are atomic,
-  // but we use noInterrupts() briefly for the read-modify-clear sequence
+  // CRITICAL SECTION: Read-modify-clear of ISR shared data
+  // This DOES need noInterrupts() because:
+  // 1. Read tachHavePeriod
+  // 2. Read tachLastPeriodUs
+  // 3. Clear tachHavePeriod
+  // Without protection, ISR could fire between 2 and 3, writing a new
+  // period value that we'd then lose when we clear the flag.
   uint32_t periodUs = 0;
   bool havePeriod = false;
 
@@ -231,7 +235,7 @@ void TACH_LOOP() {
   havePeriod = tachHavePeriod;
   if (havePeriod) {
     periodUs = tachLastPeriodUs;
-    tachHavePeriod = false;  // Clear flag so we don't re-process
+    tachHavePeriod = false;
   }
   interrupts();
 
@@ -242,10 +246,8 @@ void TACH_LOOP() {
   }
 
   // Timeout: if no pulses for tachStopTimeoutUs, engine is stopped
-  uint32_t lastPulseUs;
-  noInterrupts();
-  lastPulseUs = tachLastPulseUs;
-  interrupts();
+  // Note: 32-bit reads are atomic on ARM Cortex-M4, no noInterrupts() needed
+  uint32_t lastPulseUs = tachLastPulseUs;
 
   if ((uint32_t)(micros() - lastPulseUs) > tachStopTimeoutUs) {
     tachRpmFiltered = 0.0f;
