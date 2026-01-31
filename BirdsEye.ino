@@ -3752,6 +3752,7 @@ void GPS_LOOP() {
               }
             }
           }
+        }
         /////////////////////////////////////////////////////////////////
 
         // Flush more frequently to avoid data loss - every 2 seconds
