@@ -31,6 +31,7 @@ bool trackSelected = false;
 #define MAX_LOCATION_LENGTH 13 // 13 is old dos format for fat16
 #define MAX_LAYOUTS 10
 #define MAX_LAYOUT_LENGTH 15
+#define FILEPATH_MAX 50        // "/TRACKS/" (8) + name (13) + ".json" (5) + null = 27, using 50 for safety
 #include <string.h>
 struct ButtonState {
   int pin = 0;
@@ -104,68 +105,102 @@ float getBatteryVoltage() {
   #endif
 }
 ///////////////////////////////////////////
-// NEW TACHOMETER settings
+// TACHOMETER CONFIGURATION
+//
+// HARDWARE EMI RECOMMENDATIONS:
+// The tach input (D0) picks up inductive kickback from ignition systems.
+// To reduce phantom readings and noise coupling to other GPIO (buttons):
+//
+// 1. SHIELDING: Run tach signal wire in shielded cable, ground shield at MCU end only
+// 2. FILTERING: Add RC low-pass filter at input: 1K resistor + 100nF cap to GND
+//    This creates ~1.6kHz cutoff, plenty fast for 20,000 RPM (333Hz)
+// 3. CLAMPING: Add TVS diode or zener (5.1V) from D0 to GND for spike protection
+// 4. SEPARATION: Keep tach wiring physically away from button wires
+// 5. PULL-DOWN: Ensure 10K pull-down on D0 to prevent floating when no signal
+//
+// Signal characteristics: Magneto/CDI typically produces sharp negative-going
+// pulses with significant ringing. The debounce timing below filters this.
+///////////////////////////////////////////
 
 const int tachInputPin = D0;
 unsigned long tachLastUpdate = 0;
-volatile int tachLastReported = 0;  // FIXED: Made volatile for thread safety
+volatile int tachLastReported = 0;  // Volatile for ISR/main-loop sharing
 int topTachReported = 0;
 
-static const uint32_t tachMinPulseGapUs = 3000; // ignore bounces/noise faster than this
+// Debounce timing: ignore pulses faster than this (filters ignition ringing)
+// 3000us = 3ms minimum gap, allows up to 20,000 RPM max (333Hz)
+static const uint32_t tachMinPulseGapUs = 3000;
 volatile uint32_t tachLastPulseUs = 0;
 
-// capture last pulse period so loop can compute RPM
+// Pulse period capture for RPM calculation (written by ISR, read by loop)
 volatile uint32_t tachLastPeriodUs = 0;
 volatile bool tachHavePeriod = false;
 
-// Gate to reduce interrupt storm from noisy inductive pickup
-// After accepting a pulse, we ignore ALL interrupts for tachMinPulseGapUs
-// This prevents the ISR from running hundreds of times per ignition event
+// Software gate to prevent interrupt storm from noisy inductive pickup.
+// After accepting a pulse, we ignore subsequent ISR calls for tachMinPulseGapUs.
+// This is PURELY a volatile flag - we do NOT use noInterrupts() in the ISR
+// because that would disable ALL system interrupts and cause deadlocks.
 volatile bool tachInterruptShouldProcess = true;
 
-// filtered RPM state (updated in loop, not ISR)
+// Filtered RPM state (updated in main loop, not ISR)
 float tachRpmFiltered = 0.0f;
 
-// tunable settings
+// Tunable settings
 const int tachUpdateRateHz = 3;
-static const float tachRevsPerPulse = 1.0f;     // magneto 4T single is usually wasted spark (1 pulse / rev)
-static const float tachFilterAlpha = 0.20f;     // 0..1, higher = snappier, lower = smoother
-static const uint32_t tachStopTimeoutUs = 500000; // if no pulses for this long, force RPM to 0
+static const float tachRevsPerPulse = 1.0f;     // Magneto 4T single: wasted spark = 1 pulse/rev
+static const float tachFilterAlpha = 0.20f;     // EMA filter: 0=smooth, 1=instant
+static const uint32_t tachStopTimeoutUs = 500000; // 500ms with no pulse = engine stopped
 
-// interrupt
+/**
+ * Tachometer ISR - called on rising edge of tach signal
+ *
+ * CRITICAL: This ISR must be fast and must NOT call noInterrupts().
+ * Calling noInterrupts() here would disable ALL system interrupts,
+ * and if the main loop is delayed (e.g., SD write), interrupts would
+ * stay disabled forever, freezing button input and causing system lockup.
+ *
+ * Instead, we use a volatile flag gate (tachInterruptShouldProcess) that
+ * the main loop re-enables after the debounce period.
+ */
 void TACH_COUNT_PULSE() {
-  // CRITICAL: Exit immediately if we're in the dead-time window
-  // This prevents interrupt storm from noisy inductive pickup
+  // Exit immediately if we're in the debounce window
   if (!tachInterruptShouldProcess) return;
 
   uint32_t now = micros();
   uint32_t dt = now - tachLastPulseUs;
 
+  // Secondary debounce check (belt and suspenders with the flag)
   if (dt < tachMinPulseGapUs) return;
 
+  // Record this pulse
   tachLastPulseUs = now;
   tachLastPeriodUs = dt;
   tachHavePeriod = true;
 
-  // Disable interrupt processing until TACH_LOOP re-enables it
-  // This blocks the interrupt storm that follows each ignition event
+  // Gate off further interrupts until main loop re-enables
+  // DO NOT call noInterrupts() here - that causes system-wide deadlock!
   tachInterruptShouldProcess = false;
-  noInterrupts();  // Disable interrupts at hardware level
 }
 
+/**
+ * Tachometer main loop processing
+ *
+ * Re-enables the ISR gate after debounce period, reads pulse data,
+ * applies exponential moving average filter, and handles timeout.
+ */
 void TACH_LOOP() {
-  // Re-enable interrupt processing after the dead-time window
-  // Keep interrupts disabled until we're ready for the next pulse
+  // Re-enable interrupt processing after debounce window expires
   if (!tachInterruptShouldProcess) {
     uint32_t elapsed = micros() - tachLastPulseUs;
-
     if (elapsed >= tachMinPulseGapUs) {
       tachInterruptShouldProcess = true;
-      interrupts();  // Only re-enable when ready for next pulse
+      // Note: We don't call interrupts() here anymore - they were never disabled!
     }
   }
 
-  // Update filtered RPM (highest "real" update rate)
+  // Atomically read the pulse period captured by ISR
+  // On ARM Cortex-M4 (NRF52840), 32-bit aligned reads are atomic,
+  // but we use noInterrupts() briefly for the read-modify-clear sequence
   uint32_t periodUs = 0;
   bool havePeriod = false;
 
@@ -173,16 +208,17 @@ void TACH_LOOP() {
   havePeriod = tachHavePeriod;
   if (havePeriod) {
     periodUs = tachLastPeriodUs;
-    tachHavePeriod = false;
+    tachHavePeriod = false;  // Clear flag so we don't re-process
   }
   interrupts();
 
+  // Apply exponential moving average filter to smooth RPM
   if (havePeriod && periodUs > 0) {
     float rpmInst = (60.0e6f * tachRevsPerPulse) / (float)periodUs;
     tachRpmFiltered += tachFilterAlpha * (rpmInst - tachRpmFiltered);
   }
 
-  // Timeout to zero if signal disappears
+  // Timeout: if no pulses for tachStopTimeoutUs, engine is stopped
   uint32_t lastPulseUs;
   noInterrupts();
   lastPulseUs = tachLastPulseUs;
@@ -192,7 +228,7 @@ void TACH_LOOP() {
     tachRpmFiltered = 0.0f;
   }
 
-  // Snapshot for display/log at any chosen rate (can be high; value stays "latest filtered RPM")
+  // Update display/log value at configured rate
   if (millis() - tachLastUpdate > (1000 / tachUpdateRateHz)) {
     tachLastUpdate = millis();
     tachLastReported = (int)(tachRpmFiltered + 0.5f);
@@ -203,15 +239,18 @@ void TACH_LOOP() {
 #include <Adafruit_GPS.h>
 #include "gps_config.h"
 Adafruit_GPS* gps = NULL;
+bool gpsInitialized = false;  // Safety flag - true only after successful GPS init
 
 #define GPS_SERIAL Serial1
 #ifndef GPS_CONFIGURATION
   /**
    * @brief Returns the GPS time since midnight in milliseconds
    *
-   * @return unsigned long The time since midnight in milliseconds
+   * @return unsigned long The time since midnight in milliseconds, or 0 if GPS unavailable
    */
   unsigned long getGpsTimeInMilliseconds() {
+    if (!gpsInitialized || gps == NULL) return 0;
+
     unsigned long timeInMillis = 0;
     timeInMillis += gps->hour * 3600000ULL;   // Convert hours to milliseconds
     timeInMillis += gps->minute * 60000ULL;   // Convert minutes to milliseconds
@@ -224,9 +263,11 @@ Adafruit_GPS* gps = NULL;
   /**
    * @brief Converts GPS date/time to Unix timestamp (seconds since Jan 1, 1970)
    *
-   * @return unsigned long Unix timestamp in seconds
+   * @return unsigned long Unix timestamp in seconds, or 0 if GPS unavailable
    */
   unsigned long getGpsUnixTimestamp() {
+    if (!gpsInitialized || gps == NULL) return 0;
+
     // Days in each month (non-leap year)
     const uint8_t daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
 
@@ -273,6 +314,8 @@ Adafruit_GPS* gps = NULL;
    * @return unsigned long long Unix timestamp in milliseconds since Jan 1, 1970
    */
   unsigned long long getGpsUnixTimestampMillis() {
+    if (!gpsInitialized || gps == NULL) return 0;
+
     // Get the Unix timestamp in seconds
     unsigned long long timestampMillis = (unsigned long long)getGpsUnixTimestamp() * 1000ULL;
 
@@ -322,6 +365,8 @@ Adafruit_GPS* gps = NULL;
   }
 
   void GPS_SETUP() {
+    gpsInitialized = false;  // Reset flag at start of setup
+
     #ifndef WOKWI
       debugln(F("ACTUAL GPS SETUP"));
       // first try serial at 9600 baud
@@ -335,6 +380,11 @@ Adafruit_GPS* gps = NULL;
 
       // reconnect at proper baud
       gps = new Adafruit_GPS(&GPS_SERIAL);
+      if (gps == NULL) {
+        debugln(F("ERROR: GPS allocation failed!"));
+        return;  // Leave gpsInitialized = false
+      }
+
       GPS_SERIAL.begin(115200);
       // wait for the GPS to boot
       delay(2250);
@@ -356,16 +406,22 @@ Adafruit_GPS* gps = NULL;
         // GPS_SendConfig(Navrate18hz, 14);
         // GPS_SendConfig(Navrate20hz, 14);
         GPS_SendConfig(Navrate25hz, 14);
+
+        gpsInitialized = true;  // Success!
+        debugln(F("GPS initialized successfully"));
       } else {
-        debugln("No GPS????");
+        debugln(F("ERROR: GPS Serial not available!"));
       }
     #else
       debugln(F("WOKWI GPS SETUP"));
       // reconnect at proper baud
       gps = new Adafruit_GPS(&GPS_SERIAL);
+      if (gps == NULL) {
+        debugln(F("ERROR: GPS allocation failed!"));
+        return;
+      }
       GPS_SERIAL.begin(19200);
-      // GPS_SERIAL.begin(14400);
-      // GPS_SERIAL.begin(9600);
+      gpsInitialized = true;
     #endif
   }
 #endif
@@ -492,18 +548,10 @@ int selectedLocation = -1;
 char locations[MAX_LOCATIONS][MAX_LOCATION_LENGTH]; // 13 is old dos format for fat16
 int numOfLocations = 0;
 
-void makeFullTrackPath(char* trackName, char* filepath) {
-  char basePath[9] = "/TRACKS/";
-  char fileExtension[6] = ".json";
-
-  // Start with the base path
-  strcpy(filepath, basePath);
-
-  // Append the selected file name
-  strcat(filepath, trackName);
-
-  // Append the file extension
-  strcat(filepath, fileExtension);
+void makeFullTrackPath(const char* trackName, char* filepath) {
+  // Use snprintf for bounds safety - prevents buffer overflow
+  // Caller MUST provide buffer of at least FILEPATH_MAX bytes
+  snprintf(filepath, FILEPATH_MAX, "/TRACKS/%s.json", trackName);
 }
 
 bool SD_SETUP() {
@@ -2281,6 +2329,13 @@ void displayPage_replay_exit() {
 void displayPage_gps_stats() {
   resetDisplay();
 
+  // Safety: GPS stats page requires GPS to be initialized
+  if (!gpsInitialized || gps == NULL) {
+    display.println(F("GPS not\ninitialized"));
+    display.display();
+    return;
+  }
+
   // display.println(F("   Doves Magic Box\n"));
 
   if (millis() - lastBatteryCheck > batteryUpdateInterval) {
@@ -2367,7 +2422,7 @@ void displayPage_gps_speed() {
   resetDisplay();
 
   display.println(F("SPEED"));
-  
+
   if (sdSetupSuccess && sdTrackSuccess) {
     int currentLap = lapTimer.getLaps() + (lapTimer.getRaceStarted() ? 1 : 0);
     if (currentLap > 0) {
@@ -2383,13 +2438,13 @@ void displayPage_gps_speed() {
 
   display.setCursor(40, 5);
   display.setTextSize(7);
-  // display.println(F("69"));
-  if (gps->fix) {
+  // Safety check for GPS access
+  if (gpsInitialized && gps != NULL && gps->fix) {
     display.println(round(gps_speed_mph));
   } else {
     display.println(F("--"));
   }
-  
+
   display.display();
 }
 
@@ -2743,6 +2798,13 @@ void displayPage_gps_debug() {
   resetDisplay();
   display.println(F("GPS LapTimer Debug"));
 
+  // Safety check for GPS access
+  if (!gpsInitialized || gps == NULL) {
+    display.println(F("\nGPS not available"));
+    display.display();
+    return;
+  }
+
   double dist2Line = lapTimer.pointLineSegmentDistance(gps->latitudeDegrees, gps->longitudeDegrees, crossingPointALat, crossingPointALng, crossingPointBLat, crossingPointBLng);
   display.print(F("DistToLine: "));
   display.println(dist2Line, 2);
@@ -2994,7 +3056,7 @@ void handleMenuPageSelection() {
   } else if (currentPage == PAGE_SELECT_LOCATION) {
     selectedLocation = menuSelectionIndex;
 
-    char filepath[13];
+    char filepath[50];  // Must fit "/TRACKS/" + name + ".json" (was 13, caused overflow!)
     makeFullTrackPath(locations[selectedLocation], filepath);
     int parseStatus = parseTrackFile(filepath);
 
@@ -3387,6 +3449,11 @@ void displayLoop() {
 ///////////////////////////////////////////
 
 void GPS_LOOP() {
+  // Safety check: skip if GPS not initialized (prevents null pointer crash)
+  if (!gpsInitialized || gps == NULL) {
+    return;
+  }
+
   char c = gps->read();
 
   if (gps->newNMEAreceived() && gps->parse(gps->lastNMEA())) {
