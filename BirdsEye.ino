@@ -82,6 +82,7 @@ BLECharacteristic fileListChar = BLECharacteristic(0x2A3D);
 BLECharacteristic fileRequestChar = BLECharacteristic(0x2A3E);
 BLECharacteristic fileDataChar = BLECharacteristic(0x2A3F);
 BLECharacteristic fileStatusChar = BLECharacteristic(0x2A40);
+BLECharacteristic fileUploadChar = BLECharacteristic(0x2A41);
 
 // BLE state variables
 bool bleInitialized = false;
@@ -91,6 +92,11 @@ bool bleTransferInProgress = false;
 uint32_t bleFileSize = 0;
 uint32_t bleBytesTransferred = 0;
 uint16_t bleNegotiatedMtu = 23;
+// Upload state variables
+bool bleUploadInProgress = false;
+uint32_t bleUploadExpectedSize = 0;
+uint32_t bleUploadBytesReceived = 0;
+File32 bleUploadFile;
 // Note: bleCurrentFile is declared after SdFat include
 
 ///////////////////////////////////////////
@@ -752,6 +758,7 @@ void bleDisconnectCallback(uint16_t conn_handle, uint8_t reason) {
 
 // Forward declaration for callback
 void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, uint16_t len);
+void bleUploadDataCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, uint16_t len);
 
 void bleSetupFileService() {
   fileService.begin();
@@ -762,14 +769,14 @@ void bleSetupFileService() {
   fileListChar.setMaxLen(244);
   fileListChar.begin();
 
-  // File Request Characteristic
+  // File Request Characteristic (commands)
   fileRequestChar.setProperties(CHR_PROPS_WRITE | CHR_PROPS_WRITE_WO_RESP);
   fileRequestChar.setPermission(SECMODE_NO_ACCESS, SECMODE_OPEN);
-  fileRequestChar.setMaxLen(64);
+  fileRequestChar.setMaxLen(128);  // Increased for longer commands like UPLOAD:{path}:{size}
   fileRequestChar.setWriteCallback(bleFileRequestCallback);
   fileRequestChar.begin();
 
-  // File Data Characteristic
+  // File Data Characteristic (download data - device to client)
   fileDataChar.setProperties(CHR_PROPS_NOTIFY);
   fileDataChar.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
   fileDataChar.setMaxLen(244);
@@ -780,6 +787,13 @@ void bleSetupFileService() {
   fileStatusChar.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
   fileStatusChar.setMaxLen(64);
   fileStatusChar.begin();
+
+  // File Upload Characteristic (upload data - client to device)
+  fileUploadChar.setProperties(CHR_PROPS_WRITE | CHR_PROPS_WRITE_WO_RESP);
+  fileUploadChar.setPermission(SECMODE_NO_ACCESS, SECMODE_OPEN);
+  fileUploadChar.setMaxLen(244);
+  fileUploadChar.setWriteCallback(bleUploadDataCallback);
+  fileUploadChar.begin();
 }
 
 void bleStartAdvertising() {
@@ -794,9 +808,21 @@ void bleStartAdvertising() {
   Bluefruit.Advertising.start(0);
 }
 
-void bleSendFileList() {
+void bleSendFileList(String directory = "/") {
+  // Ensure directory starts with /
+  if (!directory.startsWith("/")) {
+    directory = "/" + directory;
+  }
+
   String fileList = "";
-  File32 root = SD.open("/");
+  File32 root = SD.open(directory.c_str());
+
+  if (!root) {
+    debug(F("BLE: Failed to open directory: "));
+    debugln(directory);
+    fileListChar.notify((uint8_t*)"ERROR", 5);
+    return;
+  }
 
   while (true) {
     File32 entry = root.openNextFile();
@@ -813,7 +839,9 @@ void bleSendFileList() {
   }
   root.close();
 
-  debug(F("BLE: Sending file list ("));
+  debug(F("BLE: Sending file list for "));
+  debug(directory);
+  debug(F(" ("));
   debug(fileList.length());
   debugln(F(" bytes)"));
 
@@ -886,10 +914,112 @@ void bleDeleteFile(String filename) {
   }
 }
 
+void bleStartUpload(String filepath, uint32_t expectedSize) {
+  // Close any existing upload
+  if (bleUploadFile) {
+    bleUploadFile.close();
+  }
+
+  debug(F("BLE: Starting upload: ["));
+  debug(filepath);
+  debug(F("] size: "));
+  debugln(expectedSize);
+
+  // Ensure path starts with /
+  if (!filepath.startsWith("/")) {
+    filepath = "/" + filepath;
+  }
+
+  // Create parent directories if needed
+  int lastSlash = filepath.lastIndexOf('/');
+  if (lastSlash > 0) {
+    String parentDir = filepath.substring(0, lastSlash);
+    if (!SD.exists(parentDir.c_str())) {
+      debug(F("BLE: Creating directory: "));
+      debugln(parentDir);
+      SD.mkdir(parentDir.c_str());
+    }
+  }
+
+  // Open file for writing (will overwrite if exists)
+  bleUploadFile = SD.open(filepath.c_str(), FILE_WRITE);
+
+  if (!bleUploadFile) {
+    debugln(F("BLE: Failed to open file for upload!"));
+    fileStatusChar.notify((uint8_t*)"UPLOAD_ERR", 10);
+    return;
+  }
+
+  bleUploadExpectedSize = expectedSize;
+  bleUploadBytesReceived = 0;
+  bleUploadInProgress = true;
+
+  debugln(F("BLE: Ready to receive upload data"));
+  fileStatusChar.notify((uint8_t*)"READY", 5);
+}
+
+void bleUploadDataCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, uint16_t len) {
+  if (!bleUploadInProgress || !bleUploadFile) {
+    debugln(F("BLE: Upload data received but no upload in progress"));
+    return;
+  }
+
+  size_t written = bleUploadFile.write(data, len);
+  bleUploadBytesReceived += written;
+
+  // Progress update every 10KB
+  if (bleUploadBytesReceived % 10000 < len) {
+    debug(F("BLE: Upload progress: "));
+    debug(bleUploadBytesReceived);
+    debug(F(" / "));
+    debug(bleUploadExpectedSize);
+    debug(F(" ("));
+    debug((bleUploadBytesReceived * 100) / bleUploadExpectedSize);
+    debugln(F("%)"));
+  }
+}
+
+void bleFinishUpload() {
+  if (!bleUploadInProgress) {
+    debugln(F("BLE: No upload in progress to finish"));
+    fileStatusChar.notify((uint8_t*)"UPLOAD_ERR", 10);
+    return;
+  }
+
+  bleUploadFile.flush();
+  bleUploadFile.close();
+  bleUploadInProgress = false;
+
+  debug(F("BLE: Upload complete! Received "));
+  debug(bleUploadBytesReceived);
+  debug(F(" of "));
+  debug(bleUploadExpectedSize);
+  debugln(F(" bytes"));
+
+  if (bleUploadBytesReceived == bleUploadExpectedSize) {
+    fileStatusChar.notify((uint8_t*)"UPLOADED", 8);
+  } else {
+    debugln(F("BLE: Warning - size mismatch!"));
+    fileStatusChar.notify((uint8_t*)"UPLOADED", 8);  // Still report success, let client validate
+  }
+}
+
+void bleCancelUpload() {
+  if (bleUploadFile) {
+    bleUploadFile.close();
+  }
+  bleUploadInProgress = false;
+  bleUploadBytesReceived = 0;
+  bleUploadExpectedSize = 0;
+
+  debugln(F("BLE: Upload canceled"));
+  fileStatusChar.notify((uint8_t*)"UPLOAD_CANCELED", 15);
+}
+
 void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, uint16_t len) {
-  char buffer[65];
+  char buffer[129];
   memset(buffer, 0, sizeof(buffer));
-  memcpy(buffer, data, min(len, (uint16_t)64));
+  memcpy(buffer, data, min(len, (uint16_t)128));
 
   String command = String(buffer);
   command.trim();
@@ -898,8 +1028,14 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
   debug(command);
   debugln(F("]"));
 
-  if (command.startsWith("LIST")) {
-    bleSendFileList();
+  if (command == "LIST") {
+    // List root directory (datalogs)
+    bleSendFileList("/");
+  } else if (command.startsWith("LIST:")) {
+    // List specified directory
+    String directory = command.substring(5);
+    directory.trim();
+    bleSendFileList(directory);
   } else if (command.startsWith("GET:")) {
     String filename = command.substring(4);
     filename.trim();
@@ -908,6 +1044,25 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
     String filename = command.substring(7);
     filename.trim();
     bleDeleteFile(filename);
+  } else if (command.startsWith("UPLOAD:")) {
+    // Format: UPLOAD:{filepath}:{size}
+    String params = command.substring(7);
+    int colonPos = params.lastIndexOf(':');
+    if (colonPos > 0) {
+      String filepath = params.substring(0, colonPos);
+      String sizeStr = params.substring(colonPos + 1);
+      filepath.trim();
+      sizeStr.trim();
+      uint32_t size = sizeStr.toInt();
+      bleStartUpload(filepath, size);
+    } else {
+      debugln(F("BLE: Invalid UPLOAD command format"));
+      fileStatusChar.notify((uint8_t*)"UPLOAD_ERR", 10);
+    }
+  } else if (command == "UPLOAD_DONE") {
+    bleFinishUpload();
+  } else if (command == "UPLOAD_CANCEL") {
+    bleCancelUpload();
   }
 }
 
@@ -953,11 +1108,19 @@ void BLE_STOP() {
 
   debugln(F("BLE: Stopping Bluetooth..."));
 
-  // Close any open file
+  // Close any open download file
   if (bleCurrentFile) {
     bleCurrentFile.close();
   }
   bleTransferInProgress = false;
+
+  // Close any open upload file
+  if (bleUploadFile) {
+    bleUploadFile.close();
+  }
+  bleUploadInProgress = false;
+  bleUploadBytesReceived = 0;
+  bleUploadExpectedSize = 0;
 
   // Disconnect any connected device
   if (Bluefruit.connected()) {
