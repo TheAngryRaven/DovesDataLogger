@@ -1,0 +1,26 @@
+name: Claude PR Comment Review
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  review:
+    if: contains(github.event.comment.body, '@claude')
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write # Needed for Claude to post comments
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Claude Code Review
+        uses: anthropics/claude-code-action@v1 # Use the latest version
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # The prompt guides Claude's review
+          prompt: "Remember this is a MCU project in the Arduino environment and Review this Pull Request for bugs, style guide adherence, and potential improvements. Provide feedback as inline comments."
+          # Allows Claude to interact with GitHub APIs
+          allowedTools: "Read,Glob,Grep,Bash(git:*),Bash(gh pr comment:*)"
+          
