@@ -2535,12 +2535,12 @@ void displayPage_gps_stats() {
   display.print(F("SDCard   : "));
   if (!sdSetupSuccess) {
     display.println(F("Bad Init"));
-  } else if (enableLogging == true && sdDataLogInitComplete == false) {
-    display.println(F("Waiting..."));
-  } else if (enableLogging == true && sdDataLogInitComplete == true) {
+  } else if (enableLogging && sdDataLogInitComplete) {
     display.println(F("Logging"));
-  } else if (enableLogging == false && sdDataLogInitComplete == true) {
-    display.println(F("Bad File"));
+  } else if (enableLogging && !sdDataLogInitComplete) {
+    display.println(F("Waiting GPS"));
+  } else {
+    display.println(F("Ready"));
   }
 
   display.println();
@@ -2563,15 +2563,6 @@ void displayPage_gps_speed() {
   resetDisplay();
 
   display.println(F("SPEED"));
-
-  // Show logging status indicator in top-right corner
-  if (enableLogging && sdDataLogInitComplete) {
-    display.setCursor(104, 0);
-    display.print(F("REC"));
-  } else if (enableLogging && !sdDataLogInitComplete) {
-    display.setCursor(104, 0);
-    display.print(F("..."));
-  }
 
   if (sdSetupSuccess && sdTrackSuccess) {
     int currentLap = lapTimer.getLaps() + (lapTimer.getRaceStarted() ? 1 : 0);
