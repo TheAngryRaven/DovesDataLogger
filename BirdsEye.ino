@@ -2556,6 +2556,15 @@ void displayPage_gps_speed() {
 
   display.println(F("SPEED"));
 
+  // Show logging status indicator in top-right corner
+  if (enableLogging && sdDataLogInitComplete) {
+    display.setCursor(104, 0);
+    display.print(F("REC"));
+  } else if (enableLogging && !sdDataLogInitComplete) {
+    display.setCursor(104, 0);
+    display.print(F("..."));
+  }
+
   if (sdSetupSuccess && sdTrackSuccess) {
     int currentLap = lapTimer.getLaps() + (lapTimer.getRaceStarted() ? 1 : 0);
     if (currentLap > 0) {
@@ -3802,8 +3811,8 @@ void GPS_LOOP() {
             // Write CSV header as first line
             dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,rpm,exhaust_temp_c,water_temp_c"));
             debugln(F("CSV header written"));
+            sdDataLogInitComplete = true;
           }
-          sdDataLogInitComplete = true;
         }
       }
       if (gps->fix) {
