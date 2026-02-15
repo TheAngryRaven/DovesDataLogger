@@ -917,8 +917,23 @@ void bleStartAdvertising() {
 }
 
 void bleSendFileList() {
-  String fileList = "";
+  // Note: BLE callbacks run in a separate FreeRTOS task from loop().
+  // Directory listing is read-only and brief, so we don't acquire exclusive
+  // SD access (that would block listing during active logging).
+  // If the SD is mid-flush and open fails, we send BUSY gracefully.
   File32 root = SD.open("/");
+  if (!root) {
+    debugln(F("BLE: Failed to open root directory"));
+    fileListChar.notify((uint8_t*)"BUSY", 4);
+    return;
+  }
+
+  // Stream entries directly over BLE using a fixed buffer per entry
+  // instead of building one giant String (avoids heap fragmentation
+  // that was silently truncating the file list)
+  char entryBuf[300];
+  int fileCount = 0;
+  bool firstEntry = true;
 
   while (true) {
     File32 entry = root.openNextFile();
@@ -928,34 +943,27 @@ void bleSendFileList() {
       char name[256];
       entry.getName(name, sizeof(name));
 
-      if (fileList.length() > 0) fileList += "|";
-      fileList += String(name) + ":" + String(entry.size());
+      // Build single entry: "|name:size" (skip | for first entry)
+      int len = snprintf(entryBuf, sizeof(entryBuf), "%s%s:%lu",
+                         firstEntry ? "" : "|",
+                         name,
+                         (unsigned long)entry.size());
+      firstEntry = false;
+
+      if (len > 0 && len < (int)sizeof(entryBuf)) {
+        fileListChar.notify((uint8_t*)entryBuf, len);
+        delay(10);
+        fileCount++;
+      }
     }
     entry.close();
   }
   root.close();
 
-  debug(F("BLE: Sending file list ("));
-  debug(fileList.length());
-  debugln(F(" bytes)"));
-
-  uint16_t maxChunk = bleNegotiatedMtu - 3;
-  uint16_t offset = 0;
-
-  while (offset < fileList.length()) {
-    uint16_t chunkSize = min(maxChunk, (uint16_t)(fileList.length() - offset));
-
-    char chunkBuf[600];
-    fileList.substring(offset, offset + chunkSize).toCharArray(chunkBuf, chunkSize + 1);
-
-    fileListChar.notify((uint8_t*)chunkBuf, chunkSize);
-
-    offset += chunkSize;
-    delay(10);
-  }
-
   fileListChar.notify((uint8_t*)"END", 3);
-  debugln(F("BLE: File list sent!"));
+  debug(F("BLE: File list sent, "));
+  debug(fileCount);
+  debugln(F(" files"));
 }
 
 void bleStartFileTransfer(String filename) {
@@ -2527,12 +2535,12 @@ void displayPage_gps_stats() {
   display.print(F("SDCard   : "));
   if (!sdSetupSuccess) {
     display.println(F("Bad Init"));
-  } else if (enableLogging == true && sdDataLogInitComplete == false) {
-    display.println(F("Waiting..."));
-  } else if (enableLogging == true && sdDataLogInitComplete == true) {
+  } else if (enableLogging && sdDataLogInitComplete) {
     display.println(F("Logging"));
-  } else if (enableLogging == false && sdDataLogInitComplete == true) {
-    display.println(F("Bad File"));
+  } else if (enableLogging && !sdDataLogInitComplete) {
+    display.println(F("Waiting GPS"));
+  } else {
+    display.println(F("Ready"));
   }
 
   display.println();
@@ -3776,19 +3784,20 @@ void GPS_LOOP() {
           String gpsDay = gps->day < 10 ? "0" + String(gps->day) : String(gps->day);
           String gpsHour = gps->hour < 10 ? "0" + String(gps->hour) : String(gps->hour);
           String gpsMinute = gps->minute < 10 ? "0" + String(gps->minute) : String(gps->minute);
+          String gpsSecond = gps->seconds < 10 ? "0" + String(gps->seconds) : String(gps->seconds);
 
           String trackLocation = locations[selectedLocation];
           String trackLayout= tracks[selectedTrack];
           String layoutDirection = selectedDirection == RACE_DIRECTION_FORWARD ? "fwd" : "rev";
 
-          String dataFileNameS = trackLocation + "_" + trackLayout + "_" + layoutDirection + "_" + gpsYear + "_" + gpsMonth + gpsDay + "_" + gpsHour + gpsMinute + ".dove";
+          String dataFileNameS = trackLocation + "_" + trackLayout + "_" + layoutDirection + "_" + gpsYear + "_" + gpsMonth + gpsDay + "_" + gpsHour + gpsMinute + gpsSecond + ".dove";
 
           debug(F("dataFileNameS: ["));
           debug(dataFileNameS.c_str());
           debugln(F("]"));
 
-          // Open for writing
-          dataFile.open(dataFileNameS.c_str(), O_CREAT | O_WRITE);
+          // Open for writing - O_TRUNC ensures clean file if name collision occurs
+          dataFile.open(dataFileNameS.c_str(), O_CREAT | O_WRITE | O_TRUNC);
 
           if (!dataFile) {
             debugln(F("Error opening log file"));
@@ -3802,8 +3811,8 @@ void GPS_LOOP() {
             // Write CSV header as first line
             dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,rpm,exhaust_temp_c,water_temp_c"));
             debugln(F("CSV header written"));
+            sdDataLogInitComplete = true;
           }
-          sdDataLogInitComplete = true;
         }
       }
       if (gps->fix) {
