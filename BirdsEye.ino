@@ -419,8 +419,7 @@ bool gpsInitialized = false;  // Safety flag - true only after successful GPS in
         GPS_SendConfig(GPGSAOff, 16);
         // GPS_SendConfig(GPGGAOn5, 16); // for 10hz
         // GPS_SendConfig(GPGGAOn10, 16); // for 18hz
-        // NOTE: Not sending GPGGAOn5/10 means GPGGA comes every packet (full 25Hz)
-        // The throttle was limiting actual log rate to ~2.5Hz at 25Hz nav rate
+        GPS_SendConfig(GPGGAOn1, 16); // every packet - full 25Hz logging
         GPS_SendConfig(NavTypeAutomobile, 44);
         // GPS_SendConfig(ENABLE_GPS_ONLY, 68);
         GPS_SendConfig(ENABLE_GPS_ONLY_M10, 60);
