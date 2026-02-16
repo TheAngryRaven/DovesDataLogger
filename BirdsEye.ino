@@ -418,7 +418,9 @@ bool gpsInitialized = false;  // Safety flag - true only after successful GPS in
         GPS_SendConfig(GPGSVOff, 16);
         GPS_SendConfig(GPGSAOff, 16);
         // GPS_SendConfig(GPGGAOn5, 16); // for 10hz
-        GPS_SendConfig(GPGGAOn10, 16); // for 18hz
+        // GPS_SendConfig(GPGGAOn10, 16); // for 18hz
+        // NOTE: Not sending GPGGAOn5/10 means GPGGA comes every packet (full 25Hz)
+        // The throttle was limiting actual log rate to ~2.5Hz at 25Hz nav rate
         GPS_SendConfig(NavTypeAutomobile, 44);
         // GPS_SendConfig(ENABLE_GPS_ONLY, 68);
         GPS_SendConfig(ENABLE_GPS_ONLY_M10, 60);
@@ -3653,14 +3655,15 @@ void GPS_LOOP() {
           // Convert speed to mph
           double snapSpeedMph = snapSpeed * 1.15078;
 
-          // VALIDATE: Strict checks for GPS data quality
-          // The data shows gps->fix can be true before coordinates are valid
-          // Also check for NaN/Inf and require actual satellite lock
+          // VALIDATE: Minimal checks to prevent genuinely corrupt data from being logged
+          // Philosophy: log everything possible, HDOP/sats are in the CSV for post-filtering
+          // Only reject data that would be file-corrupting garbage or clearly unfixed
           bool hasActualFix = (snapSats > 0);  // Must have satellites, not just fix flag
-          bool validLat = (snapLat >= -90.0 && snapLat <= 90.0 && snapLat != 0.0);
-          bool validLng = (snapLng >= -180.0 && snapLng <= 180.0 && snapLng != 0.0);
+          bool validCoords = !(snapLat == 0.0 && snapLng == 0.0);  // Both zero = no position computed
+          bool validLat = (snapLat >= -90.0 && snapLat <= 90.0);
+          bool validLng = (snapLng >= -180.0 && snapLng <= 180.0);
           bool validAlt = (snapAlt >= -1000.0 && snapAlt <= 50000.0);
-          bool validHdop = (snapHdop > 0.0 && snapHdop <= 50.0);  // HDOP 0 = invalid
+          bool validHdop = (snapHdop > 0.0);  // HDOP 0 = no fix, any positive value gets logged
           bool validSpeed = (snapSpeedMph >= 0.0 && snapSpeedMph <= 500.0);
 
           // Check for NaN/Inf which can slip through range checks
@@ -3669,7 +3672,7 @@ void GPS_LOOP() {
           bool noInf = !isinf(snapLat) && !isinf(snapLng) && !isinf(snapAlt) &&
                        !isinf(snapHdop) && !isinf(snapSpeed);
 
-          if (!hasActualFix || !validLat || !validLng || !validAlt ||
+          if (!hasActualFix || !validCoords || !validLat || !validLng || !validAlt ||
               !validHdop || !validSpeed || !noNaN || !noInf) {
             // Skip this sample - data is not trustworthy
             // Don't spam debug output - this can happen frequently during GPS acquisition
