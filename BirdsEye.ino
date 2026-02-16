@@ -3912,8 +3912,8 @@ void loop() {
     }
     resetButtons();
 
-    // Update display at 1Hz during transfer to maximize BLE throughput
-    if (millis() - displayLastUpdate > 1000) {
+    // Update display every 5s during transfer to maximize BLE throughput
+    if (millis() - displayLastUpdate > 5000) {
       displayLastUpdate = millis();
       displayPage_bluetooth();
     }
