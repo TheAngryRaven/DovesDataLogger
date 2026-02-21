@@ -3761,8 +3761,8 @@ void GPS_LOOP() {
         }
         /////////////////////////////////////////////////////////////////
 
-        // Flush more frequently to avoid data loss - every 2 seconds
-        if (millis() - lastCardFlush > 2000) {
+        // Flush periodically to avoid data loss - every 10 seconds
+        if (millis() - lastCardFlush > 10000) {
           lastCardFlush = millis();
           dataFile.flush();
         }
