@@ -207,7 +207,13 @@ void GPS_LOOP() {
     charsProcessed++;
 
     if (gps->newNMEAreceived() && gps->parse(gps->lastNMEA())) {
-      gpsFrameCounter++;
+      // Only count GPGGA/GNGGA sentences for frame rate — GPRMC is also
+      // sent at the nav rate but isn't disabled, so counting all sentences
+      // would double the reported Hz.
+      const char* nmeaSentence = gps->lastNMEA();
+      if (strstr(nmeaSentence, "$GPGGA") != NULL || strstr(nmeaSentence, "$GNGGA") != NULL) {
+        gpsFrameCounter++;
+      }
 
       // Update the lap timer with fixed GPS data
       if (trackSelected && gps->fix) {
