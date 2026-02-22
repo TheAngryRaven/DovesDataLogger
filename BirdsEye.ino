@@ -3601,30 +3601,31 @@ void GPS_LOOP() {
     return;
   }
 
-  char c = gps->read();
+  // CRITICAL: Drain ALL available characters from GPS serial buffer each call.
+  // At 25Hz nav rate the GPS sends GPRMC+GPGGA = ~50 sentences/sec (~4000 chars/sec).
+  // Reading only 1 char per loop() caused serial buffer overflow during display
+  // updates and SD writes, dropping NMEA sentences and producing jagged/stale data.
+  // Safety cap prevents runaway loop in case of hardware malfunction.
+  int charsProcessed = 0;
+  const int maxCharsPerCall = 512;
 
-  if (gps->newNMEAreceived() && gps->parse(gps->lastNMEA())) {
-    // char *lastNMEA = gps->lastNMEA();
-    // char *nmeaSearch = "$GPRMC";
-    // bool isRMCPacket = strstr(lastNMEA, nmeaSearch) != NULL;
-    // if (isRMCPacket) {
+  while (GPS_SERIAL.available() && charsProcessed < maxCharsPerCall) {
+    gps->read();
+    charsProcessed++;
+
+    if (gps->newNMEAreceived() && gps->parse(gps->lastNMEA())) {
       gpsFrameCounter++;
-    // }
 
-    // Update the lap timer with fixed GPS data
-    // Use atomic snapshot to prevent torn reads on 64-bit doubles
-    if (trackSelected && gps->fix) {
-      double ltLat, ltLng, ltAlt, ltSpeed;
-      noInterrupts();
-      ltLat = gps->latitudeDegrees;
-      ltLng = gps->longitudeDegrees;
-      ltAlt = gps->altitude;
-      ltSpeed = gps->speed;
-      interrupts();
+      // Update the lap timer with fixed GPS data
+      if (trackSelected && gps->fix) {
+        double ltLat = gps->latitudeDegrees;
+        double ltLng = gps->longitudeDegrees;
+        double ltAlt = gps->altitude;
+        double ltSpeed = gps->speed;
 
-      lapTimer.updateCurrentTime(getGpsTimeInMilliseconds());
-      lapTimer.loop(ltLat, ltLng, ltAlt, ltSpeed);
-    }
+        lapTimer.updateCurrentTime(getGpsTimeInMilliseconds());
+        lapTimer.loop(ltLat, ltLng, ltAlt, ltSpeed);
+      }
 
     #ifdef SD_CARD_LOGGING_ENABLED
       if (trackSelected && gps->fix && sdSetupSuccess && sdDataLogInitComplete && enableLogging) {
@@ -3636,20 +3637,15 @@ void GPS_LOOP() {
         // Check if this is a GPGGA or GNGGA packet
         if (strstr(nmea, "$GPGGA") != NULL || strstr(nmea, "$GNGGA") != NULL) {
 
-          // CRITICAL: Snapshot GPS values with interrupts disabled to prevent torn reads
-          // On 32-bit ARM, reading 64-bit doubles is NOT atomic - we could get half of
-          // one value and half of another if GPS library updates mid-read = garbage data
-          double snapLat, snapLng, snapAlt, snapHdop, snapSpeed;
-          int snapSats;
-
-          noInterrupts();
-          snapLat = gps->latitudeDegrees;
-          snapLng = gps->longitudeDegrees;
-          snapAlt = gps->altitude;
-          snapHdop = gps->HDOP;
-          snapSpeed = gps->speed;
-          snapSats = gps->satellites;
-          interrupts();
+          // Snapshot GPS values for logging
+          // Note: No race condition here - gps->read()/parse() runs in this same
+          // main-loop context, not in an ISR, so values can't change mid-read.
+          double snapLat = gps->latitudeDegrees;
+          double snapLng = gps->longitudeDegrees;
+          double snapAlt = gps->altitude;
+          double snapHdop = gps->HDOP;
+          double snapSpeed = gps->speed;
+          int snapSats = gps->satellites;
 
           // Convert speed to mph
           double snapSpeedMph = snapSpeed * 1.15078;
@@ -3765,8 +3761,8 @@ void GPS_LOOP() {
         }
         /////////////////////////////////////////////////////////////////
 
-        // Flush more frequently to avoid data loss - every 2 seconds
-        if (millis() - lastCardFlush > 2000) {
+        // Flush periodically to avoid data loss - every 10 seconds
+        if (millis() - lastCardFlush > 10000) {
           lastCardFlush = millis();
           dataFile.flush();
         }
@@ -3822,10 +3818,11 @@ void GPS_LOOP() {
       }
     #endif
 
-    // Update display speed - do this inside NMEA received block
-    // so it only updates when we have fresh data
-    gps_speed_mph = gps->speed * 1.15078;
-  }
+      // Update display speed - do this inside NMEA received block
+      // so it only updates when we have fresh data
+      gps_speed_mph = gps->speed * 1.15078;
+    }
+  } // end while (GPS_SERIAL.available())
 }
 
 void calculateGPSFrameRate() {
