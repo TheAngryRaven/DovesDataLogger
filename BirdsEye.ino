@@ -174,12 +174,28 @@ static const uint32_t tachStopTimeoutUs = 500000; // 500ms with no pulse = engin
 ///////////////////////////////////////////
 // GPS GLOBALS
 ///////////////////////////////////////////
-#include <Adafruit_GPS.h>
+#include <SparkFun_u-blox_GNSS_v3.h>
 #include "gps_config.h"
-Adafruit_GPS* gps = NULL;
+SFE_UBLOX_GNSS_SERIAL myGNSS;
 bool gpsInitialized = false;  // Safety flag - true only after successful GPS init
 
-#define GPS_SERIAL Serial1
+// Cached PVT data — updated each time getPVT() succeeds in GPS_LOOP()
+struct GpsData {
+  double latitudeDegrees;
+  double longitudeDegrees;
+  double altitude;       // meters
+  double speed;          // knots (for DovesLapTimer compatibility)
+  double HDOP;
+  int satellites;
+  bool fix;
+  uint16_t year;         // 2-digit (e.g. 25 for 2025) for compat with existing code
+  uint8_t month;
+  uint8_t day;
+  uint8_t hour;
+  uint8_t minute;
+  uint8_t seconds;
+  uint16_t milliseconds;
+} gpsData = {};
 
 double crossingPointALat = 0.00;
 double crossingPointALng = 0.00;
