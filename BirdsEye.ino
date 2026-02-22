@@ -25,6 +25,12 @@
 // todo: make dynamic in next UI version
 // #define ENDURANCE_MODE
 
+// Project-wide types and macros - MUST be included before Arduino
+// auto-generates function prototypes from the other .ino files,
+// otherwise custom types (ButtonState, ReplaySample, etc.) won't
+// be resolved in function signatures.
+#include "project.h"
+
 ///////////////////////////////////////////
 // BATTERY CONFIGURATION
 ///////////////////////////////////////////
@@ -64,7 +70,6 @@ bool trackSelected = false;
 // PROJECT DEFINES
 ///////////////////////////////////////////
 
-// TODO: setup header for project
 #define SD_CARD_LOGGING_ENABLED
 #define MAX_LOCATIONS 100
 #define MAX_LOCATION_LENGTH 13 // 13 is old dos format for fat16
@@ -90,50 +95,12 @@ bool trackSelected = false;
 // transient noise spikes that get through hardware filtering.
 ///////////////////////////////////////////
 
-struct ButtonState {
-  int pin = 0;
-  bool pressed = false;           // Flag for "button was pressed" (consumed by handler)
-  bool wasReleased = true;        // Edge detection: must release before next press
-  unsigned long lastPressed = 0;
-};
-
-struct TrackLayout {
-  double start_a_lat = 0.00;
-  double start_a_lng = 0.00;
-  double start_b_lat = 0.00;
-  double start_b_lng = 0.00;
-
-  // Sector 2 line data (optional)
-  double sector_2_a_lat = 0.00;
-  double sector_2_a_lng = 0.00;
-  double sector_2_b_lat = 0.00;
-  double sector_2_b_lng = 0.00;
-  bool hasSector2 = false;
-
-  // Sector 3 line data (optional)
-  double sector_3_a_lat = 0.00;
-  double sector_3_a_lng = 0.00;
-  double sector_3_b_lat = 0.00;
-  double sector_3_b_lng = 0.00;
-  bool hasSector3 = false;
-};
+// ButtonState, TrackLayout, ReplaySample structs defined in project.h
 
 const int RACE_DIRECTION_FORWARD  = 0;
 const int RACE_DIRECTION_REVERSE  = 1;
 
-///////////////////////////////////////////
-// DEBUG MACROS
-///////////////////////////////////////////
-
-#ifdef HAS_DEBUG
-#define debugln Serial.println
-#define debug Serial.print
-#else
-void dummy_debug(...) {
-}
-#define debug dummy_debug
-#define debugln dummy_debug
-#endif
+// debug/debugln macros defined in project.h
 
 ///////////////////////////////////////////
 // BLUETOOTH (BLE) GLOBALS
@@ -268,16 +235,7 @@ unsigned long replayProcessedSamples = 0;
 #define REPLAY_LINE_BUFFER_SIZE 128
 char replayLineBuffer[REPLAY_LINE_BUFFER_SIZE];
 
-// Common sample struct for both DOVE and NMEA parsing
-struct ReplaySample {
-  unsigned long timestamp;  // milliseconds
-  double lat;
-  double lng;
-  float speed_mph;
-  float altitude;
-  int rpm;  // -1 if not available
-  bool valid;
-};
+// ReplaySample struct defined in project.h
 
 ///////////////////////////////////////////
 // SD CARD GLOBALS
