@@ -7,4 +7,4 @@ ArxTypeTraits
 ArduinoJson
 SdFat
 Adafruit GPS Library
-DovesLapTimer@0.2.1
+DovesLapTimer@3.1.0
