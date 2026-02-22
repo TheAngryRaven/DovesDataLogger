@@ -487,7 +487,7 @@ void displayPage_gps_stats() {
   resetDisplay();
 
   // Safety: GPS stats page requires GPS to be initialized
-  if (!gpsInitialized || gps == NULL) {
+  if (!gpsInitialized) {
     display.println(F("GPS not\ninitialized"));
     display.display();
     return;
@@ -528,10 +528,10 @@ void displayPage_gps_stats() {
 
 
   display.print(F("Sats     : "));
-  display.println(gps->satellites);
+  display.println(gpsData.satellites);
 
   display.print(F("Rate     : "));
-  if (gps->fix) {
+  if (gpsData.fix) {
     display.print(gpsFrameRate, 1);
     display.println(F("Hz"));
   } else {
@@ -539,8 +539,8 @@ void displayPage_gps_stats() {
   }
 
   display.print(F("HDOP     : "));
-  if (gps->fix) {
-    display.println(gps->HDOP, 1);
+  if (gpsData.fix) {
+    display.println(gpsData.HDOP, 1);
   } else {
     display.println(F("NO FIX"));
   }
@@ -593,7 +593,7 @@ void displayPage_gps_speed() {
   display.setCursor(40, 5);
   display.setTextSize(7);
   // Safety check for GPS access
-  if (gpsInitialized && gps != NULL && gps->fix) {
+  if (gpsInitialized && gpsData.fix) {
     display.println(round(gps_speed_mph));
   } else {
     display.println(F("--"));
@@ -918,13 +918,13 @@ void displayPage_gps_debug() {
   display.println(F("GPS LapTimer Debug"));
 
   // Safety check for GPS access
-  if (!gpsInitialized || gps == NULL) {
+  if (!gpsInitialized) {
     display.println(F("\nGPS not available"));
     display.display();
     return;
   }
 
-  double dist2Line = lapTimer.pointLineSegmentDistance(gps->latitudeDegrees, gps->longitudeDegrees, crossingPointALat, crossingPointALng, crossingPointBLat, crossingPointBLng);
+  double dist2Line = lapTimer.pointLineSegmentDistance(gpsData.latitudeDegrees, gpsData.longitudeDegrees, crossingPointALat, crossingPointALng, crossingPointBLat, crossingPointBLng);
   display.print(F("DistToLine: "));
   display.println(dist2Line, 2);
 

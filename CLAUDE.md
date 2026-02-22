@@ -31,8 +31,8 @@ Core capabilities:
 | `display_config.h` | Display driver abstraction (SH110X vs SSD1306 toggle) |
 | `display_ui.ino` | Display init, button reading (multi-sample debounce), menu navigation |
 | `display_pages.ino` | All page rendering functions (`displayPage_*()`) |
-| `gps_config.h` | u-blox UBX binary config commands (PROGMEM arrays) |
-| `gps_functions.ino` | GPS init, NMEA parsing, time conversion, SD logging pipeline |
+| `gps_config.h` | GPS configuration constants (baud rate, nav rate, serial port) |
+| `gps_functions.ino` | GPS init (SparkFun UBX PVT), time conversion, SD logging pipeline |
 | `sd_functions.ino` | SD init, track list/JSON parsing, SD access arbitration |
 | `tachometer.ino` | Falling-edge ISR on D0, EMA-filtered RPM calculation |
 | `bluetooth.ino` | BLE service (file listing, transfer, status characteristics) |
@@ -72,11 +72,11 @@ Core capabilities:
 
 ```
 loop()  ~250 Hz
- ├─ GPS_LOOP()          read serial, parse GGA, feed DovesLapTimer, log CSV
+ ├─ GPS_LOOP()          checkUblox, checkCallbacks, feed DovesLapTimer, log CSV
  ├─ TACH_LOOP()         re-enable ISR after debounce, apply EMA filter
  ├─ BLUETOOTH_LOOP()    stream file chunks if transfer active
  ├─ checkForNewLapData()  append completed laps to lapHistory[]
- ├─ calculateGPSFrameRate()  1-second GGA counter
+ ├─ calculateGPSFrameRate()  1-second PVT counter
  ├─ readButtons()       multi-sample debounce + edge detection
  ├─ displayLoop()       render current page at 3 Hz
  └─ resetButtons()      clear pressed flags
@@ -84,8 +84,15 @@ loop()  ~250 Hz
 
 ### 1. GPS & Lap Timing (`gps_functions.ino`, `gps_config.h`)
 
-- Drains Serial1 buffer (up to 512 bytes/call).
-- Parses GGA-only NMEA via Adafruit_GPS.
+- Uses SparkFun u-blox GNSS v3 library with UBX binary protocol.
+- `myGNSS` (SFE_UBLOX_GNSS_SERIAL) is stack-allocated in `BirdsEye.ino`.
+- `GPS_SETUP()` configures module via VALSET API: 115200 baud, 25 Hz nav,
+  GPS-only constellation, automotive dynamic model, PVT callback registered.
+- `GPS_LOOP()` calls `checkUblox()` + `checkCallbacks()`. The registered
+  `onPVTReceived()` callback fires with the full `UBX_NAV_PVT_data_t` struct,
+  populates `gpsData`, and sets `gpsDataFresh` flag for downstream processing.
+- PVT data is cached in `gpsData` struct (GpsData) for access by display
+  pages and other subsystems.
 - Feeds lat/lng/alt/speed into `DovesLapTimer.loop()` for line-crossing
   and sector detection.
 - Logs validated CSV rows to SD (9-check validation pipeline).
@@ -164,7 +171,7 @@ and optional sector lines. Stored in `trackLayouts[MAX_LAYOUTS]` (max 10).
 
 | Constant | Value | Location |
 |---|---|---|
-| GPS baud | 115 200 | `gps_functions.ino` |
+| GPS baud | 115 200 | `gps_config.h` |
 | GPS nav rate | 25 Hz | `gps_config.h` |
 | Crossing threshold | 7.0 m | `BirdsEye.ino` |
 | Max laps/session | 1 000 | `BirdsEye.ino` |
@@ -190,7 +197,7 @@ and optional sector lines. Stored in `trackLayouts[MAX_LAYOUTS]` (max 10).
 | Adafruit GFX | Graphics primitives |
 | Adafruit SSD1306 | SSD1306 OLED driver |
 | Adafruit SH110X | SH110X OLED driver |
-| Adafruit GPS | NMEA parsing |
+| SparkFun u-blox GNSS v3 | UBX binary PVT GPS interface |
 | ArduinoJson 6.x | Track file JSON parsing |
 | SdFat | SD card (FAT16/32) |
 | DovesLapTimer | Lap/sector timing (external: TheAngryRaven/DovesLapTimer) |
@@ -216,7 +223,7 @@ This device operates in ignition-noise environments. Three layers of defense:
 - **Board**: Seeed XIAO nRF52840 (Arduino or PlatformIO).
 - `project.h` must be included before other `.ino` modules so Arduino's
   auto-prototype generator sees custom types first.
-- PROGMEM is used for GPS config commands and bitmap images to save RAM.
+- PROGMEM is used for bitmap images to save RAM.
 - Avoid Arduino `String` in hot paths (heap fragmentation risk on 256 KB).
 - SD chip-select is hardwired to GND; pass `-1` to SdFat.
 - `#define WOKWI` enables simulator-specific tweaks (smaller JSON buffer).
