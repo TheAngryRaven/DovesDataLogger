@@ -87,6 +87,29 @@
     return timestampMillis;
   }
 
+  // PVT callback — called synchronously from checkCallbacks() when a new
+  // NAV-PVT message arrives.  Populates the shared gpsData struct and sets
+  // the gpsDataFresh flag so GPS_LOOP() knows to run lap-timer / logging.
+  void onPVTReceived(UBX_NAV_PVT_data_t *pvt) {
+    gpsData.latitudeDegrees = pvt->lat / 1e7;
+    gpsData.longitudeDegrees = pvt->lon / 1e7;
+    gpsData.altitude = pvt->hMSL / 1000.0;          // mm → meters
+    gpsData.speed = pvt->gSpeed / 514.444;           // mm/s → knots
+    gpsData.HDOP = pvt->pDOP / 100.0;               // pDOP ≈ HDOP for track use
+    gpsData.satellites = pvt->numSV;
+    gpsData.fix = (pvt->fixType >= 2);               // 2D or 3D
+    gpsData.year = pvt->year - 2000;
+    gpsData.month = pvt->month;
+    gpsData.day = pvt->day;
+    gpsData.hour = pvt->hour;
+    gpsData.minute = pvt->min;
+    gpsData.seconds = pvt->sec;
+    gpsData.milliseconds = (pvt->iTOW % 1000);       // ms from GPS time-of-week
+
+    gpsDataFresh = true;
+    gpsFrameCounter++;
+  }
+
   void GPS_SETUP() {
     gpsInitialized = false;  // Reset flag at start of setup
 
@@ -142,8 +165,8 @@
         myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_BEIDOU);
         myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_GLONASS);
 
-        // Enable automatic PVT messages
-        myGNSS.setAutoPVT(true);
+        // Register PVT callback (called from checkCallbacks())
+        myGNSS.setAutoPVTcallbackPtr(&onPVTReceived);
 
         gpsInitialized = true;
         debugln(F("GPS initialized successfully (SparkFun UBX PVT)"));
@@ -154,7 +177,7 @@
       debugln(F("WOKWI GPS SETUP"));
       GPS_SERIAL.begin(19200);
       if (myGNSS.begin(GPS_SERIAL)) {
-        myGNSS.setAutoPVT(true);
+        myGNSS.setAutoPVTcallbackPtr(&onPVTReceived);
         gpsInitialized = true;
       } else {
         debugln(F("ERROR: WOKWI GPS not detected!"));
@@ -169,29 +192,14 @@ void GPS_LOOP() {
     return;
   }
 
-  // Process incoming UBX bytes from GPS serial buffer
+  // Process incoming UBX bytes and fire onPVTReceived() callback if a
+  // complete PVT message has arrived.  The callback populates gpsData
+  // and sets gpsDataFresh = true.
   myGNSS.checkUblox();
+  myGNSS.checkCallbacks();
 
-  // Check if new PVT data is available
-  if (myGNSS.getPVT()) {
-    // Populate gpsData cache from PVT message
-    gpsData.latitudeDegrees = myGNSS.getLatitude() / 1e7;
-    gpsData.longitudeDegrees = myGNSS.getLongitude() / 1e7;
-    gpsData.altitude = myGNSS.getAltitudeMSL() / 1000.0;     // mm -> meters
-    gpsData.speed = myGNSS.getGroundSpeed() / 514.444;        // mm/s -> knots
-    gpsData.HDOP = myGNSS.getHorizontalDOP() / 100.0;        // 0.01 units -> actual
-    gpsData.satellites = myGNSS.getSIV();
-    gpsData.fix = (myGNSS.getFixType() >= 2);                 // 2D or 3D fix
-    gpsData.year = myGNSS.getYear() - 2000;                   // Keep 2-digit for compat
-    gpsData.month = myGNSS.getMonth();
-    gpsData.day = myGNSS.getDay();
-    gpsData.hour = myGNSS.getHour();
-    gpsData.minute = myGNSS.getMinute();
-    gpsData.seconds = myGNSS.getSecond();
-    gpsData.milliseconds = myGNSS.getMillisecond();
-
-    // Count frames for frame rate calculation
-    gpsFrameCounter++;
+  if (gpsDataFresh) {
+    gpsDataFresh = false;
 
     // Update the lap timer with fresh GPS data
     if (trackSelected && gpsData.fix) {
@@ -390,7 +398,7 @@ void GPS_LOOP() {
 
     // Update display speed with fresh PVT data
     gps_speed_mph = gpsData.speed * 1.15078;
-  } // end if (myGNSS.getPVT())
+  } // end if (gpsDataFresh)
 }
 
 void calculateGPSFrameRate() {

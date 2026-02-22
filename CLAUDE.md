@@ -72,7 +72,7 @@ Core capabilities:
 
 ```
 loop()  ~250 Hz
- ├─ GPS_LOOP()          checkUblox, getPVT, feed DovesLapTimer, log CSV
+ ├─ GPS_LOOP()          checkUblox, checkCallbacks, feed DovesLapTimer, log CSV
  ├─ TACH_LOOP()         re-enable ISR after debounce, apply EMA filter
  ├─ BLUETOOTH_LOOP()    stream file chunks if transfer active
  ├─ checkForNewLapData()  append completed laps to lapHistory[]
@@ -87,10 +87,12 @@ loop()  ~250 Hz
 - Uses SparkFun u-blox GNSS v3 library with UBX binary protocol.
 - `myGNSS` (SFE_UBLOX_GNSS_SERIAL) is stack-allocated in `BirdsEye.ino`.
 - `GPS_SETUP()` configures module via VALSET API: 115200 baud, 25 Hz nav,
-  GPS-only constellation, automotive dynamic model, auto-PVT enabled.
-- `GPS_LOOP()` calls `checkUblox()` then `getPVT()` to read PVT messages.
+  GPS-only constellation, automotive dynamic model, PVT callback registered.
+- `GPS_LOOP()` calls `checkUblox()` + `checkCallbacks()`. The registered
+  `onPVTReceived()` callback fires with the full `UBX_NAV_PVT_data_t` struct,
+  populates `gpsData`, and sets `gpsDataFresh` flag for downstream processing.
 - PVT data is cached in `gpsData` struct (GpsData) for access by display
-  pages and other subsystems — replaces direct `gps->property` accesses.
+  pages and other subsystems.
 - Feeds lat/lng/alt/speed into `DovesLapTimer.loop()` for line-crossing
   and sector detection.
 - Logs validated CSV rows to SD (9-check validation pipeline).

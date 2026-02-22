@@ -31,6 +31,12 @@
 // be resolved in function signatures.
 #include "project.h"
 
+// SparkFun GPS library must be included here (in the top include block)
+// so that UBX_NAV_PVT_data_t is in scope when Arduino auto-generates
+// function prototypes for the onPVTReceived() callback.
+#include <SparkFun_u-blox_GNSS_v3.h>
+#include "gps_config.h"
+
 ///////////////////////////////////////////
 // BATTERY CONFIGURATION
 ///////////////////////////////////////////
@@ -174,12 +180,10 @@ static const uint32_t tachStopTimeoutUs = 500000; // 500ms with no pulse = engin
 ///////////////////////////////////////////
 // GPS GLOBALS
 ///////////////////////////////////////////
-#include <SparkFun_u-blox_GNSS_v3.h>
-#include "gps_config.h"
 SFE_UBLOX_GNSS_SERIAL myGNSS;
 bool gpsInitialized = false;  // Safety flag - true only after successful GPS init
 
-// Cached PVT data — updated each time getPVT() succeeds in GPS_LOOP()
+// Cached PVT data — updated by onPVTReceived() callback from checkCallbacks()
 struct GpsData {
   double latitudeDegrees;
   double longitudeDegrees;
@@ -196,6 +200,8 @@ struct GpsData {
   uint8_t seconds;
   uint16_t milliseconds;
 } gpsData = {};
+
+volatile bool gpsDataFresh = false;  // Set by PVT callback, cleared by GPS_LOOP()
 
 double crossingPointALat = 0.00;
 double crossingPointALng = 0.00;

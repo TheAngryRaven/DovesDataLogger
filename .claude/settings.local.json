@@ -1,7 +1,13 @@
 {
   "permissions": {
     "allow": [
-      "Bash(tail:*)"
+      "Bash(tail:*)",
+      "WebSearch",
+      "WebFetch(domain:docs.arduino.cc)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:docs.sparkfun.com)",
+      "WebFetch(domain:content.u-blox.com)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }
