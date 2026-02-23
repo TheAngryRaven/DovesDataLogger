@@ -95,6 +95,8 @@ void onPVTReceived(UBX_NAV_PVT_data_t *pvt) {
   gpsData.altitude = pvt->hMSL / 1000.0;          // mm → meters
   gpsData.speed = pvt->gSpeed / 514.444;           // mm/s → knots
   gpsData.HDOP = pvt->pDOP / 100.0;               // pDOP ≈ HDOP for track use
+  gpsData.heading = pvt->headMot / 1e5;            // deg * 1e-5 → degrees
+  gpsData.horizontalAccuracy = pvt->hAcc / 1000.0; // mm → meters
   gpsData.satellites = pvt->numSV;
   gpsData.fix = (pvt->fixType >= 2);               // 2D or 3D
   gpsData.year = pvt->year - 2000;
@@ -254,6 +256,7 @@ void GPS_LOOP() {
 
         // Convert floats to strings with proper precision
         char latStr[24], lngStr[24], hdopStr[12], speedStr[16], altStr[16];
+        char headingStr[12], hAccStr[12];
 
         // 8 decimals for lat/lng (racing precision)
         dtostrf(snapLat, 1, 8, latStr);
@@ -266,11 +269,15 @@ void GPS_LOOP() {
         dtostrf(snapSpeedMph, 1, 2, speedStr);
         dtostrf(snapAlt, 1, 2, altStr);
 
+        // 2 decimals for heading and horizontal accuracy
+        dtostrf(gpsData.heading, 1, 2, headingStr);
+        dtostrf(gpsData.horizontalAccuracy, 1, 2, hAccStr);
+
         // FINAL SAFETY CHECK: Verify strings are valid ASCII numbers
         // Catches any remaining garbage that slipped through numeric validation
         bool stringsValid = true;
-        const char* strs[] = {latStr, lngStr, hdopStr, speedStr, altStr};
-        for (int i = 0; i < 5 && stringsValid; i++) {
+        const char* strs[] = {latStr, lngStr, hdopStr, speedStr, altStr, headingStr, hAccStr};
+        for (int i = 0; i < 7 && stringsValid; i++) {
           int len = strlen(strs[i]);
           if (len == 0 || len > 20) {
             stringsValid = false;  // Empty or suspiciously long
@@ -311,7 +318,7 @@ void GPS_LOOP() {
           }
 
           // Build the complete CSV line (using %s for timestamp now)
-          snprintf(csvLine, sizeof(csvLine), "%s,%d,%s,%s,%s,%s,%s,%d,0,0",
+          snprintf(csvLine, sizeof(csvLine), "%s,%d,%s,%s,%s,%s,%s,%s,%s,%d",
                    timestampStr,
                    snapSats,
                    hdopStr,
@@ -319,6 +326,8 @@ void GPS_LOOP() {
                    lngStr,
                    speedStr,
                    altStr,
+                   headingStr,
+                   hAccStr,
                    tachLastReported
           );
 
@@ -383,7 +392,7 @@ void GPS_LOOP() {
           enableLogging = false;
         } else {
           // Write CSV header as first line
-          dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,rpm,exhaust_temp_c,water_temp_c"));
+          dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm"));
           debugln(F("CSV header written"));
           sdDataLogInitComplete = true;
         }

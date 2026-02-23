@@ -190,6 +190,8 @@ struct GpsData {
   double altitude;       // meters
   double speed;          // knots (for DovesLapTimer compatibility)
   double HDOP;
+  double heading;            // degrees (0-360), heading of motion
+  double horizontalAccuracy; // meters, horizontal accuracy estimate
   int satellites;
   bool fix;
   uint16_t year;         // 2-digit (e.g. 25 for 2025) for compat with existing code

@@ -153,12 +153,14 @@ loop()  ~250 Hz
 ### CSV Log Row (`.dove` files)
 
 ```
-timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,rpm,exhaust_temp_c,water_temp_c
+timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm
 ```
 
 - `timestamp`: Unix epoch milliseconds (uint64, written as string).
 - `lat`/`lng`: 8 decimal places (~1.1 mm precision).
 - `speed_mph`, `altitude_m`: 2 decimal places.
+- `heading_deg`: heading of motion in degrees (0–360), 2 decimals. From UBX `headMot`.
+- `h_acc_m`: horizontal accuracy estimate in meters, 2 decimals. From UBX `hAcc`.
 
 ### Track JSON (`/TRACKS/*.json`)
 
