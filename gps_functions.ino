@@ -4,187 +4,187 @@
 // Uses SparkFun u-blox GNSS v3 library with UBX PVT binary protocol
 ///////////////////////////////////////////
 
-#ifndef GPS_CONFIGURATION
-  /**
-   * @brief Returns the GPS time since midnight in milliseconds
-   *
-   * @return unsigned long The time since midnight in milliseconds, or 0 if GPS unavailable
-   */
-  unsigned long getGpsTimeInMilliseconds() {
-    if (!gpsInitialized) return 0;
+/**
+  * @brief Returns the GPS time since midnight in milliseconds
+  *
+  * @return unsigned long The time since midnight in milliseconds, or 0 if GPS unavailable
+  */
+unsigned long getGpsTimeInMilliseconds() {
+  if (!gpsInitialized) return 0;
 
-    unsigned long timeInMillis = 0;
-    timeInMillis += gpsData.hour * 3600000ULL;   // Convert hours to milliseconds
-    timeInMillis += gpsData.minute * 60000ULL;   // Convert minutes to milliseconds
-    timeInMillis += gpsData.seconds * 1000ULL;   // Convert seconds to milliseconds
-    timeInMillis += gpsData.milliseconds;        // Add the milliseconds part
+  unsigned long timeInMillis = 0;
+  timeInMillis += gpsData.hour * 3600000ULL;   // Convert hours to milliseconds
+  timeInMillis += gpsData.minute * 60000ULL;   // Convert minutes to milliseconds
+  timeInMillis += gpsData.seconds * 1000ULL;   // Convert seconds to milliseconds
+  timeInMillis += gpsData.milliseconds;        // Add the milliseconds part
 
-    return timeInMillis;
-  }
+  return timeInMillis;
+}
 
-  /**
-   * @brief Converts GPS date/time to Unix timestamp (seconds since Jan 1, 1970)
-   *
-   * @return unsigned long Unix timestamp in seconds, or 0 if GPS unavailable
-   */
-  unsigned long getGpsUnixTimestamp() {
-    if (!gpsInitialized) return 0;
+/**
+  * @brief Converts GPS date/time to Unix timestamp (seconds since Jan 1, 1970)
+  *
+  * @return unsigned long Unix timestamp in seconds, or 0 if GPS unavailable
+  */
+unsigned long getGpsUnixTimestamp() {
+  if (!gpsInitialized) return 0;
 
-    // Days in each month (non-leap year)
-    const uint8_t daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  // Days in each month (non-leap year)
+  const uint8_t daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
 
-    uint16_t year = 2000 + gpsData.year;
-    uint8_t month = gpsData.month;
-    uint8_t day = gpsData.day;
+  uint16_t year = 2000 + gpsData.year;
+  uint8_t month = gpsData.month;
+  uint8_t day = gpsData.day;
 
-    // Calculate days since Unix epoch (Jan 1, 1970)
-    unsigned long days = 0;
+  // Calculate days since Unix epoch (Jan 1, 1970)
+  unsigned long days = 0;
 
-    // Add days for complete years since 1970
-    for (uint16_t y = 1970; y < year; y++) {
-      if ((y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)) {
-        days += 366; // Leap year
-      } else {
-        days += 365;
-      }
+  // Add days for complete years since 1970
+  for (uint16_t y = 1970; y < year; y++) {
+    if ((y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)) {
+      days += 366; // Leap year
+    } else {
+      days += 365;
     }
+  }
 
-    // Add days for complete months this year
-    for (uint8_t m = 1; m < month; m++) {
-      days += daysInMonth[m - 1];
-      // Add leap day if February and leap year
-      if (m == 2 && ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0))) {
-        days++;
-      }
+  // Add days for complete months this year
+  for (uint8_t m = 1; m < month; m++) {
+    days += daysInMonth[m - 1];
+    // Add leap day if February and leap year
+    if (m == 2 && ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0))) {
+      days++;
     }
-
-    // Add remaining days
-    days += day - 1;
-
-    // Convert to seconds and add time of day
-    unsigned long timestamp = days * 86400UL;
-    timestamp += gpsData.hour * 3600UL;
-    timestamp += gpsData.minute * 60UL;
-    timestamp += gpsData.seconds;
-
-    return timestamp;
   }
 
-  /**
-   * @brief Converts GPS date/time to Unix timestamp with millisecond precision
-   *
-   * @return unsigned long long Unix timestamp in milliseconds since Jan 1, 1970
-   */
-  unsigned long long getGpsUnixTimestampMillis() {
-    if (!gpsInitialized) return 0;
+  // Add remaining days
+  days += day - 1;
 
-    // Get the Unix timestamp in seconds
-    unsigned long long timestampMillis = (unsigned long long)getGpsUnixTimestamp() * 1000ULL;
+  // Convert to seconds and add time of day
+  unsigned long timestamp = days * 86400UL;
+  timestamp += gpsData.hour * 3600UL;
+  timestamp += gpsData.minute * 60UL;
+  timestamp += gpsData.seconds;
 
-    // Add the milliseconds from GPS
-    timestampMillis += gpsData.milliseconds;
+  return timestamp;
+}
 
-    return timestampMillis;
-  }
+/**
+  * @brief Converts GPS date/time to Unix timestamp with millisecond precision
+  *
+  * @return unsigned long long Unix timestamp in milliseconds since Jan 1, 1970
+  */
+unsigned long long getGpsUnixTimestampMillis() {
+  if (!gpsInitialized) return 0;
 
-  // PVT callback — called synchronously from checkCallbacks() when a new
-  // NAV-PVT message arrives.  Populates the shared gpsData struct and sets
-  // the gpsDataFresh flag so GPS_LOOP() knows to run lap-timer / logging.
-  void onPVTReceived(UBX_NAV_PVT_data_t *pvt) {
-    gpsData.latitudeDegrees = pvt->lat / 1e7;
-    gpsData.longitudeDegrees = pvt->lon / 1e7;
-    gpsData.altitude = pvt->hMSL / 1000.0;          // mm → meters
-    gpsData.speed = pvt->gSpeed / 514.444;           // mm/s → knots
-    gpsData.HDOP = pvt->pDOP / 100.0;               // pDOP ≈ HDOP for track use
-    gpsData.satellites = pvt->numSV;
-    gpsData.fix = (pvt->fixType >= 2);               // 2D or 3D
-    gpsData.year = pvt->year - 2000;
-    gpsData.month = pvt->month;
-    gpsData.day = pvt->day;
-    gpsData.hour = pvt->hour;
-    gpsData.minute = pvt->min;
-    gpsData.seconds = pvt->sec;
-    gpsData.milliseconds = (pvt->iTOW % 1000);       // ms from GPS time-of-week
+  // Get the Unix timestamp in seconds
+  unsigned long long timestampMillis = (unsigned long long)getGpsUnixTimestamp() * 1000ULL;
 
-    gpsDataFresh = true;
-    gpsFrameCounter++;
-  }
+  // Add the milliseconds from GPS
+  timestampMillis += gpsData.milliseconds;
 
-  void GPS_SETUP() {
-    gpsInitialized = false;  // Reset flag at start of setup
+  return timestampMillis;
+}
 
-    #ifndef WOKWI
-      debugln(F("ACTUAL GPS SETUP"));
+// PVT callback — called synchronously from checkCallbacks() when a new
+// NAV-PVT message arrives.  Populates the shared gpsData struct and sets
+// the gpsDataFresh flag so GPS_LOOP() knows to run lap-timer / logging.
+void onPVTReceived(UBX_NAV_PVT_data_t *pvt) {
+  gpsData.latitudeDegrees = pvt->lat / 1e7;
+  gpsData.longitudeDegrees = pvt->lon / 1e7;
+  gpsData.altitude = pvt->hMSL / 1000.0;          // mm → meters
+  gpsData.speed = pvt->gSpeed / 514.444;           // mm/s → knots
+  gpsData.HDOP = pvt->pDOP / 100.0;               // pDOP ≈ HDOP for track use
+  gpsData.heading = pvt->headMot / 1e5;            // deg * 1e-5 → degrees
+  gpsData.horizontalAccuracy = pvt->hAcc / 1000.0; // mm → meters
+  gpsData.satellites = pvt->numSV;
+  gpsData.fix = (pvt->fixType >= 2);               // 2D or 3D
+  gpsData.year = pvt->year - 2000;
+  gpsData.month = pvt->month;
+  gpsData.day = pvt->day;
+  gpsData.hour = pvt->hour;
+  gpsData.minute = pvt->min;
+  gpsData.seconds = pvt->sec;
+  gpsData.milliseconds = (pvt->iTOW % 1000);       // ms from GPS time-of-week
 
-      // Start at u-blox default baud rate (9600 for fresh modules)
-      GPS_SERIAL.begin(9600);
-      // Wait for the GPS to boot
-      delay(2250);
+  gpsDataFresh = true;
+  gpsFrameCounter++;
+}
 
-      if (GPS_SERIAL) {
-        // Connect to GPS at default baud
+void GPS_SETUP() {
+  gpsInitialized = false;  // Reset flag at start of setup
+
+  #ifndef WOKWI
+    debugln(F("ACTUAL GPS SETUP"));
+
+    // Start at u-blox default baud rate (9600 for fresh modules)
+    GPS_SERIAL.begin(9600);
+    // Wait for the GPS to boot
+    delay(2250);
+
+    if (GPS_SERIAL) {
+      // Connect to GPS at default baud
+      if (!myGNSS.begin(GPS_SERIAL)) {
+        debugln(F("GPS not detected at 9600 baud, trying 115200..."));
+        GPS_SERIAL.end();
+        delay(100);
+
+        // Module may already be configured to 115200 from a previous session
+        GPS_SERIAL.begin(GPS_BAUD_RATE);
+        delay(100);
         if (!myGNSS.begin(GPS_SERIAL)) {
-          debugln(F("GPS not detected at 9600 baud, trying 115200..."));
-          GPS_SERIAL.end();
-          delay(100);
-
-          // Module may already be configured to 115200 from a previous session
-          GPS_SERIAL.begin(GPS_BAUD_RATE);
-          delay(100);
-          if (!myGNSS.begin(GPS_SERIAL)) {
-            debugln(F("ERROR: GPS not detected at any baud rate!"));
-            return;  // Leave gpsInitialized = false
-          }
-          debugln(F("GPS found at 115200 baud (already configured)"));
-        } else {
-          // Connected at 9600, switch module to 115200
-          debugln(F("GPS found at 9600, switching to 115200..."));
-          myGNSS.setSerialRate(GPS_BAUD_RATE);
-          delay(100);
-          GPS_SERIAL.end();
-          delay(100);
-          GPS_SERIAL.begin(GPS_BAUD_RATE);
-          delay(100);
-
-          if (!myGNSS.begin(GPS_SERIAL)) {
-            debugln(F("ERROR: GPS lost after baud switch!"));
-            return;
-          }
-          debugln(F("GPS reconnected at 115200"));
+          debugln(F("ERROR: GPS not detected at any baud rate!"));
+          return;  // Leave gpsInitialized = false
         }
-
-        // Configure via VALSET API
-        myGNSS.setUART1Output(COM_TYPE_UBX);          // UBX only, disable NMEA output
-        myGNSS.setNavigationFrequency(GPS_NAV_RATE_HZ); // 25 Hz
-        myGNSS.setDynamicModel(DYN_MODEL_AUTOMOTIVE);
-
-        // Enable GPS only (disable GLONASS/Galileo/BeiDou/SBAS/QZSS for max nav rate)
-        myGNSS.enableGNSS(true, SFE_UBLOX_GNSS_ID_GPS);
-        myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_SBAS);
-        myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_GALILEO);
-        myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_BEIDOU);
-        myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_GLONASS);
-
-        // Register PVT callback (called from checkCallbacks())
-        myGNSS.setAutoPVTcallbackPtr(&onPVTReceived);
-
-        gpsInitialized = true;
-        debugln(F("GPS initialized successfully (SparkFun UBX PVT)"));
+        debugln(F("GPS found at 115200 baud (already configured)"));
       } else {
-        debugln(F("ERROR: GPS Serial not available!"));
+        // Connected at 9600, switch module to 115200
+        debugln(F("GPS found at 9600, switching to 115200..."));
+        myGNSS.setSerialRate(GPS_BAUD_RATE);
+        delay(100);
+        GPS_SERIAL.end();
+        delay(100);
+        GPS_SERIAL.begin(GPS_BAUD_RATE);
+        delay(100);
+
+        if (!myGNSS.begin(GPS_SERIAL)) {
+          debugln(F("ERROR: GPS lost after baud switch!"));
+          return;
+        }
+        debugln(F("GPS reconnected at 115200"));
       }
-    #else
-      debugln(F("WOKWI GPS SETUP"));
-      GPS_SERIAL.begin(19200);
-      if (myGNSS.begin(GPS_SERIAL)) {
-        myGNSS.setAutoPVTcallbackPtr(&onPVTReceived);
-        gpsInitialized = true;
-      } else {
-        debugln(F("ERROR: WOKWI GPS not detected!"));
-      }
-    #endif
-  }
-#endif
+
+      // Configure via VALSET API
+      myGNSS.setUART1Output(COM_TYPE_UBX);          // UBX only, disable NMEA output
+      myGNSS.setNavigationFrequency(GPS_NAV_RATE_HZ); // 25 Hz
+      myGNSS.setDynamicModel(DYN_MODEL_AUTOMOTIVE);
+
+      // Enable GPS only (disable GLONASS/Galileo/BeiDou/SBAS/QZSS for max nav rate)
+      myGNSS.enableGNSS(true, SFE_UBLOX_GNSS_ID_GPS);
+      myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_SBAS);
+      myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_GALILEO);
+      myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_BEIDOU);
+      myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_GLONASS);
+
+      // Register PVT callback (called from checkCallbacks())
+      myGNSS.setAutoPVTcallbackPtr(&onPVTReceived);
+
+      gpsInitialized = true;
+      debugln(F("GPS initialized successfully (SparkFun UBX PVT)"));
+    } else {
+      debugln(F("ERROR: GPS Serial not available!"));
+    }
+  #else
+    debugln(F("WOKWI GPS SETUP"));
+    GPS_SERIAL.begin(19200);
+    if (myGNSS.begin(GPS_SERIAL)) {
+      myGNSS.setAutoPVTcallbackPtr(&onPVTReceived);
+      gpsInitialized = true;
+    } else {
+      debugln(F("ERROR: WOKWI GPS not detected!"));
+    }
+  #endif
+}
 
 void GPS_LOOP() {
   // Safety check: skip if GPS not initialized
@@ -256,6 +256,7 @@ void GPS_LOOP() {
 
         // Convert floats to strings with proper precision
         char latStr[24], lngStr[24], hdopStr[12], speedStr[16], altStr[16];
+        char headingStr[12], hAccStr[12];
 
         // 8 decimals for lat/lng (racing precision)
         dtostrf(snapLat, 1, 8, latStr);
@@ -268,11 +269,15 @@ void GPS_LOOP() {
         dtostrf(snapSpeedMph, 1, 2, speedStr);
         dtostrf(snapAlt, 1, 2, altStr);
 
+        // 2 decimals for heading and horizontal accuracy
+        dtostrf(gpsData.heading, 1, 2, headingStr);
+        dtostrf(gpsData.horizontalAccuracy, 1, 2, hAccStr);
+
         // FINAL SAFETY CHECK: Verify strings are valid ASCII numbers
         // Catches any remaining garbage that slipped through numeric validation
         bool stringsValid = true;
-        const char* strs[] = {latStr, lngStr, hdopStr, speedStr, altStr};
-        for (int i = 0; i < 5 && stringsValid; i++) {
+        const char* strs[] = {latStr, lngStr, hdopStr, speedStr, altStr, headingStr, hAccStr};
+        for (int i = 0; i < 7 && stringsValid; i++) {
           int len = strlen(strs[i]);
           if (len == 0 || len > 20) {
             stringsValid = false;  // Empty or suspiciously long
@@ -313,7 +318,7 @@ void GPS_LOOP() {
           }
 
           // Build the complete CSV line (using %s for timestamp now)
-          snprintf(csvLine, sizeof(csvLine), "%s,%d,%s,%s,%s,%s,%s,%d,0,0",
+          snprintf(csvLine, sizeof(csvLine), "%s,%d,%s,%s,%s,%s,%s,%s,%s,%d",
                    timestampStr,
                    snapSats,
                    hdopStr,
@@ -321,6 +326,8 @@ void GPS_LOOP() {
                    lngStr,
                    speedStr,
                    altStr,
+                   headingStr,
+                   hAccStr,
                    tachLastReported
           );
 
@@ -385,7 +392,7 @@ void GPS_LOOP() {
           enableLogging = false;
         } else {
           // Write CSV header as first line
-          dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,rpm,exhaust_temp_c,water_temp_c"));
+          dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm"));
           debugln(F("CSV header written"));
           sdDataLogInitComplete = true;
         }

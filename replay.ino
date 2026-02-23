@@ -178,7 +178,7 @@ bool readReplayLine(File& file, char* buffer, int bufferSize) {
 
 /**
  * @brief Parse a DOVE CSV line into a ReplaySample (parses in-place, modifies line)
- * Format: timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,rpm,exhaust_temp_c,water_temp_c
+ * Format: timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm
  * @param line Input CSV line (will be modified by strtok)
  * @param sample Output sample struct
  * @return true if parsed successfully
@@ -223,10 +223,13 @@ bool parseDoveLine(char* line, ReplaySample& sample) {
       case 6: // altitude_m
         sample.altitude = atof(token);
         break;
-      case 7: // rpm
+      case 7: // heading_deg - skip (replay doesn't use it)
+        break;
+      case 8: // h_acc_m - skip (replay doesn't use it)
+        break;
+      case 9: // rpm
         sample.rpm = atoi(token);
         break;
-      // 8, 9: exhaust_temp_c, water_temp_c - skip
     }
     fieldIndex++;
     token = strtok(NULL, ",");

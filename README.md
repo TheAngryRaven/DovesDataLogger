@@ -149,14 +149,14 @@ The track will automatically appear in the track selection menu on next boot.
 Data is logged in simple CSV format with the following columns:
 
 ```
-timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,rpm,exhaust_temp_c,water_temp_c
+timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm
 ```
 
 **Example:**
 ```csv
-timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,rpm,exhaust_temp_c,water_temp_c
-1704724801234,12,0.8,28.41270817,-81.37973266,87.32,125.45,8450,0,0
-1704724801274,12,0.8,28.41270821,-81.37973270,87.45,125.46,8475,0,0
+timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm
+1704724801234,12,0.8,28.41270817,-81.37973266,87.32,125.45,182.34,1.25,8450
+1704724801274,12,0.8,28.41270821,-81.37973270,87.45,125.46,182.50,1.22,8475
 ```
 
 - **timestamp**: Unix timestamp in milliseconds (since Jan 1, 1970)
@@ -165,9 +165,9 @@ timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,rpm,exhaust_temp_c,water_temp_c
 - **lat/lng**: GPS coordinates (8 decimal places)
 - **speed_mph**: Speed in miles per hour (2 decimal places)
 - **altitude_m**: Altitude in meters (2 decimal places)
+- **heading_deg**: Heading of motion in degrees (0-360, 2 decimal places, from UBX headMot)
+- **h_acc_m**: Horizontal accuracy estimate in meters (2 decimal places, from UBX hAcc)
 - **rpm**: Engine RPM from tachometer input
-- **exhaust_temp_c**: Reserved for future use (currently 0)
-- **water_temp_c**: Reserved for future use (currently 0)
 
 **Log File Naming:**
 `[TRACK]_[LAYOUT]_[DIRECTION]_[YYYY]_[MMDD]_[HHMM].dove`
