@@ -12,7 +12,7 @@ void bleConnectCallback(uint16_t conn_handle) {
   debug(F("BLE: Initial MTU: "));
   debugln(connection->getMtu());
 
-  // Request MTU exchange
+  // Request MTU exchange - result will be read in BLUETOOTH_LOOP() after 500ms
   debugln(F("BLE: Requesting MTU exchange to 247..."));
   if (connection->requestMtuExchange(247)) {
     debugln(F("BLE: MTU exchange requested successfully"));
@@ -20,12 +20,10 @@ void bleConnectCallback(uint16_t conn_handle) {
     debugln(F("BLE: MTU exchange request failed!"));
   }
 
-  // Wait for MTU negotiation
-  delay(500);
-
-  bleNegotiatedMtu = connection->getMtu();
-  debug(F("BLE: Negotiated MTU: "));
-  debugln(bleNegotiatedMtu);
+  // Defer MTU read to main loop instead of blocking here with delay(500)
+  bleWaitingForMTU = true;
+  bleMTURequestTime = millis();
+  bleMTUConnHandle = conn_handle;
 
   debug(F("BLE: Connection interval: "));
   debug(connection->getConnectionInterval() * 1.25);
@@ -88,10 +86,16 @@ void bleStartAdvertising() {
 }
 
 void bleSendFileList() {
-  // Note: BLE callbacks run in a separate FreeRTOS task from loop().
-  // Directory listing is read-only and brief, so we don't acquire exclusive
-  // SD access (that would block listing during active logging).
-  // If the SD is mid-flush and open fails, we send BUSY gracefully.
+  // BLE callbacks run in a separate FreeRTOS task from loop().
+  // SdFat is NOT thread-safe — concurrent access from BLE task and main
+  // loop (e.g. CSV logging) can corrupt internal state.
+  // Check if SD is in use and return BUSY if so.
+  if (currentSDAccess != SD_ACCESS_NONE) {
+    debugln(F("BLE: SD busy, cannot list files"));
+    fileListChar.notify((uint8_t*)"BUSY", 4);
+    return;
+  }
+
   File32 root = SD.open("/");
   if (!root) {
     debugln(F("BLE: Failed to open root directory"));
@@ -137,7 +141,7 @@ void bleSendFileList() {
   debugln(F(" files"));
 }
 
-void bleStartFileTransfer(String filename) {
+void bleStartFileTransfer(const char* filename) {
   if (bleCurrentFile) bleCurrentFile.close();
 
   // Check if we can acquire SD access for BLE transfer
@@ -151,7 +155,7 @@ void bleStartFileTransfer(String filename) {
   debug(filename);
   debugln(F("]"));
 
-  bleCurrentFile = SD.open(filename.c_str(), FILE_READ);
+  bleCurrentFile = SD.open(filename, FILE_READ);
 
   if (!bleCurrentFile) {
     debugln(F("BLE: Failed to open file!"));
@@ -172,17 +176,15 @@ void bleStartFileTransfer(String filename) {
   char sizeMsg[32];
   snprintf(sizeMsg, sizeof(sizeMsg), "SIZE:%lu", bleFileSize);
   fileStatusChar.notify((uint8_t*)sizeMsg, strlen(sizeMsg));
-
-  delay(50);
 }
 
-void bleDeleteFile(String filename) {
+void bleDeleteFile(const char* filename) {
   debug(F("BLE: Deleting file: ["));
   debug(filename);
   debugln(F("]"));
 
-  if (SD.exists(filename.c_str())) {
-    if (SD.remove(filename.c_str())) {
+  if (SD.exists(filename)) {
+    if (SD.remove(filename)) {
       debugln(F("BLE: File deleted successfully"));
       fileStatusChar.notify((uint8_t*)"DELETED", 7);
     } else {
@@ -198,24 +200,30 @@ void bleDeleteFile(String filename) {
 void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, uint16_t len) {
   char buffer[65];
   memset(buffer, 0, sizeof(buffer));
-  memcpy(buffer, data, min(len, (uint16_t)64));
+  uint16_t copyLen = len < 64 ? len : 64;
+  memcpy(buffer, data, copyLen);
 
-  String command = String(buffer);
-  command.trim();
+  // Trim trailing whitespace/newlines in-place
+  int end = strlen(buffer) - 1;
+  while (end >= 0 && (buffer[end] == ' ' || buffer[end] == '\r' || buffer[end] == '\n')) {
+    buffer[end--] = '\0';
+  }
 
   debug(F("BLE: Received command: ["));
-  debug(command);
+  debug(buffer);
   debugln(F("]"));
 
-  if (command.startsWith("LIST")) {
+  if (strncmp(buffer, "LIST", 4) == 0) {
     bleSendFileList();
-  } else if (command.startsWith("GET:")) {
-    String filename = command.substring(4);
-    filename.trim();
+  } else if (strncmp(buffer, "GET:", 4) == 0) {
+    // Skip "GET:" prefix and trim leading whitespace
+    char* filename = buffer + 4;
+    while (*filename == ' ') filename++;
     bleStartFileTransfer(filename);
-  } else if (command.startsWith("DELETE:")) {
-    String filename = command.substring(7);
-    filename.trim();
+  } else if (strncmp(buffer, "DELETE:", 7) == 0) {
+    // Skip "DELETE:" prefix and trim leading whitespace
+    char* filename = buffer + 7;
+    while (*filename == ' ') filename++;
     bleDeleteFile(filename);
   }
 }
@@ -272,7 +280,7 @@ void BLE_STOP() {
   // Disconnect any connected device
   if (Bluefruit.connected()) {
     Bluefruit.disconnect(Bluefruit.connHandle());
-    delay(100);
+    // BLE disconnect is async; no delay needed - stack handles it
   }
 
   // Stop advertising
@@ -291,6 +299,17 @@ void BLE_STOP() {
 
 void BLUETOOTH_LOOP() {
   if (!bleActive) return;
+
+  // Deferred MTU negotiation - read result 500ms after request
+  if (bleWaitingForMTU && millis() - bleMTURequestTime >= 500) {
+    bleWaitingForMTU = false;
+    BLEConnection* connection = Bluefruit.Connection(bleMTUConnHandle);
+    if (connection) {
+      bleNegotiatedMtu = connection->getMtu();
+      debug(F("BLE: Negotiated MTU: "));
+      debugln(bleNegotiatedMtu);
+    }
+  }
 
   if (bleTransferInProgress && bleCurrentFile && Bluefruit.connected()) {
     // Use actual negotiated MTU

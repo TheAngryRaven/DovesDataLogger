@@ -13,7 +13,7 @@ void displayPage_boot() {
   display.println(F(" Timer + Data Logger"));
   display.println(F("\n    Initializing..."));
 
-  display.display();
+  safeDisplayUpdate();
 }
 
 void displayPage_select_location() {
@@ -61,7 +61,7 @@ void displayPage_select_location() {
     display.println(locations[indexC]);
   }
 
-  display.display();
+  safeDisplayUpdate();
 }
 
 void displayPage_select_track() {
@@ -108,7 +108,7 @@ void displayPage_select_track() {
     display.println(tracks[indexC]);
   }
 
-  display.display();
+  safeDisplayUpdate();
 }
 
 void displayPage_select_direction() {
@@ -127,7 +127,7 @@ void displayPage_select_direction() {
   display.print(menuSelectionIndex == 1 ? "->" : "  ");
   display.println(F("Reverse"));
 
-  display.display();
+  safeDisplayUpdate();
 }
 
 void displayPage_main_menu() {
@@ -146,7 +146,7 @@ void displayPage_main_menu() {
   display.print(menuSelectionIndex == 2 ? "->" : "  ");
   display.println(F("Transfer"));
 
-  display.display();
+  safeDisplayUpdate();
 }
 
 void displayPage_bluetooth() {
@@ -178,7 +178,7 @@ void displayPage_bluetooth() {
   display.setTextSize(1);
   display.println(F("->Exit"));
 
-  display.display();
+  safeDisplayUpdate();
 }
 
 void displayPage_replay_file_select() {
@@ -280,7 +280,7 @@ void displayPage_replay_file_select() {
     }
   }
 
-  display.display();
+  safeDisplayUpdate();
 }
 
 void displayPage_replay_detecting() {
@@ -294,7 +294,7 @@ void displayPage_replay_detecting() {
   display.println(F(" Please"));
   display.println(F("   Wait..."));
 
-  display.display();
+  safeDisplayUpdate();
 }
 
 void displayPage_replay_select_track() {
@@ -333,7 +333,7 @@ void displayPage_replay_select_track() {
     display.println(tracks[indexC]);
   }
 
-  display.display();
+  safeDisplayUpdate();
 }
 
 void displayPage_replay_select_direction() {
@@ -353,7 +353,7 @@ void displayPage_replay_select_direction() {
   display.print(menuSelectionIndex == 1 ? "->" : "  ");
   display.println(F("Reverse"));
 
-  display.display();
+  safeDisplayUpdate();
 }
 
 void displayPage_replay_processing() {
@@ -389,7 +389,7 @@ void displayPage_replay_processing() {
     display.println(lapTimer.getLaps());
   }
 
-  display.display();
+  safeDisplayUpdate();
 }
 
 void displayPage_replay_results() {
@@ -463,7 +463,7 @@ void displayPage_replay_results() {
   display.println();
   display.println(F("<- Laps       Exit ->"));
 
-  display.display();
+  safeDisplayUpdate();
 }
 
 void displayPage_replay_exit() {
@@ -480,7 +480,7 @@ void displayPage_replay_exit() {
   display.print(menuSelectionIndex == 1 ? "->" : "  ");
   display.println(F("Exit"));
 
-  display.display();
+  safeDisplayUpdate();
 }
 
 void displayPage_gps_stats() {
@@ -489,7 +489,7 @@ void displayPage_gps_stats() {
   // Safety: GPS stats page requires GPS to be initialized
   if (!gpsInitialized) {
     display.println(F("GPS not\ninitialized"));
-    display.display();
+    safeDisplayUpdate();
     return;
   }
 
@@ -569,7 +569,7 @@ void displayPage_gps_stats() {
     display.print(F("Autologging\nShut off to stop"));
   }
 
-  display.display();
+  safeDisplayUpdate();
 }
 
 void displayPage_gps_speed() {
@@ -599,7 +599,7 @@ void displayPage_gps_speed() {
     display.println(F("--"));
   }
 
-  display.display();
+  safeDisplayUpdate();
 }
 
 void displayPage_gps_lap_time() {
@@ -635,7 +635,7 @@ void displayPage_gps_lap_time() {
     display.print("  N/A");
   }
 
-  display.display();
+  safeDisplayUpdate();
 }
 
 void displayPage_gps_pace() {
@@ -696,7 +696,7 @@ void displayPage_gps_pace() {
   }
 
 
-  display.display();
+  safeDisplayUpdate();
 }
 
 void displayPage_gps_best_lap() {
@@ -741,7 +741,7 @@ void displayPage_gps_best_lap() {
     display.print("  N/A");
   }
 
-  display.display();
+  safeDisplayUpdate();
 }
 
 void displayPage_tachometer() {
@@ -775,7 +775,7 @@ void displayPage_tachometer() {
   display.print(F("     max: "));
   display.print(topTachReported);
 
-  display.display();
+  safeDisplayUpdate();
 }
 
 void displayPage_optimal_lap() {
@@ -830,7 +830,7 @@ void displayPage_optimal_lap() {
     display.print("  N/A");
   }
 
-  display.display();
+  safeDisplayUpdate();
 }
 
 // TODO: this page probably needs some kind of delayed rendering?
@@ -881,7 +881,7 @@ void displayPage_gps_lap_list() {
     display.print(F("  N/A"));
   }
 
-  display.display();
+  safeDisplayUpdate();
 }
 
 void displayPage_stop_logging() {
@@ -894,7 +894,7 @@ void displayPage_stop_logging() {
   display.println();
   display.println(F(" press middle button"));
 
-  display.display();
+  safeDisplayUpdate();
 }
 
 void displayPage_stop_logging_confirm() {
@@ -910,7 +910,7 @@ void displayPage_stop_logging_confirm() {
   display.print(menuSelectionIndex == 1 ? "->" : "  ");
   display.println(F("END RACE"));
 
-  display.display();
+  safeDisplayUpdate();
 }
 
 void displayPage_gps_debug() {
@@ -920,7 +920,7 @@ void displayPage_gps_debug() {
   // Safety check for GPS access
   if (!gpsInitialized) {
     display.println(F("\nGPS not available"));
-    display.display();
+    safeDisplayUpdate();
     return;
   }
 
@@ -948,7 +948,7 @@ void displayPage_gps_debug() {
   display.print(F("Pace   : "));
   display.println(lapTimer.getPaceDifference());
 
-  display.display();
+  safeDisplayUpdate();
 }
 
 void displayPage_internal_fault() {
@@ -967,7 +967,7 @@ void displayPage_internal_fault() {
   display.println(F(" Please Reboot Device"));
   display.println(F(""));
   display.println(internalNotification);
-  display.display();
+  safeDisplayUpdate();
 }
 
 void displayPage_internal_warning() {
@@ -985,7 +985,7 @@ void displayPage_internal_warning() {
   display.println(F("Continue With Caution"));
   display.println(F(""));
   display.println(internalNotification);
-  display.display();
+  safeDisplayUpdate();
 }
 
 ///////////////////////////////////////////
@@ -1005,5 +1005,5 @@ void displayCrossing() {
   #else
   #endif
 
-  display.display();
+  safeDisplayUpdate();
 }

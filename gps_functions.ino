@@ -339,7 +339,8 @@ void GPS_LOOP() {
             sdDataLogInitComplete = false;
             dataFile.close();
             releaseSDAccess(SD_ACCESS_LOGGING);
-            internalNotification = "SD Write Failed!\nCheck card/connections";
+            strncpy(internalNotification, "SD Write Failed!\nCheck card/connections", sizeof(internalNotification) - 1);
+            internalNotification[sizeof(internalNotification) - 1] = '\0';
             switchToDisplayPage(PAGE_INTERNAL_FAULT);
           }
         }
@@ -358,36 +359,33 @@ void GPS_LOOP() {
       if (!acquireSDAccess(SD_ACCESS_LOGGING)) {
         debugln(F("Cannot start logging - SD card busy"));
         enableLogging = false;
-        internalNotification = "SD card busy!\nCannot start logging";
+        strncpy(internalNotification, "SD card busy!\nCannot start logging", sizeof(internalNotification) - 1);
+        internalNotification[sizeof(internalNotification) - 1] = '\0';
         switchToDisplayPage(PAGE_INTERNAL_FAULT);
       } else {
-        // Build filename from GPS date/time
-        String gpsYear = "20" + String(gpsData.year);
-        String gpsMonth = gpsData.month < 10 ? "0" + String(gpsData.month) : String(gpsData.month);
-        String gpsDay = gpsData.day < 10 ? "0" + String(gpsData.day) : String(gpsData.day);
-        String gpsHour = gpsData.hour < 10 ? "0" + String(gpsData.hour) : String(gpsData.hour);
-        String gpsMinute = gpsData.minute < 10 ? "0" + String(gpsData.minute) : String(gpsData.minute);
-        String gpsSecond = gpsData.seconds < 10 ? "0" + String(gpsData.seconds) : String(gpsData.seconds);
+        // Build filename from GPS date/time using snprintf (no heap allocation)
+        char dataFileName[80];
+        snprintf(dataFileName, sizeof(dataFileName),
+                 "%s_%s_%s_20%02d_%02d%02d_%02d%02d%02d.dove",
+                 locations[selectedLocation],
+                 tracks[selectedTrack],
+                 selectedDirection == RACE_DIRECTION_FORWARD ? "fwd" : "rev",
+                 gpsData.year, gpsData.month, gpsData.day,
+                 gpsData.hour, gpsData.minute, gpsData.seconds);
 
-        String trackLocation = locations[selectedLocation];
-        String trackLayout= tracks[selectedTrack];
-        String layoutDirection = selectedDirection == RACE_DIRECTION_FORWARD ? "fwd" : "rev";
-
-        String dataFileNameS = trackLocation + "_" + trackLayout + "_" + layoutDirection + "_" + gpsYear + "_" + gpsMonth + gpsDay + "_" + gpsHour + gpsMinute + gpsSecond + ".dove";
-
-        debug(F("dataFileNameS: ["));
-        debug(dataFileNameS.c_str());
+        debug(F("dataFileName: ["));
+        debug(dataFileName);
         debugln(F("]"));
 
         // Open for writing - O_TRUNC ensures clean file if name collision occurs
-        dataFile.open(dataFileNameS.c_str(), O_CREAT | O_WRITE | O_TRUNC);
+        dataFile.open(dataFileName, O_CREAT | O_WRITE | O_TRUNC);
 
         if (!dataFile) {
           debugln(F("Error opening log file"));
           releaseSDAccess(SD_ACCESS_LOGGING);  // Release on failure
 
-          String errorMessage = String("Error saving log:\n") + dataFileNameS;
-          internalNotification = errorMessage;
+          snprintf(internalNotification, sizeof(internalNotification),
+                   "Error saving log:\n%s", dataFileName);
           switchToDisplayPage(PAGE_INTERNAL_FAULT);
           enableLogging = false;
         } else {
