@@ -37,6 +37,7 @@ Core capabilities:
 | `tachometer.ino` | Falling-edge ISR on D0, EMA-filtered RPM calculation |
 | `bluetooth.ino` | BLE service (file listing, transfer, status characteristics) |
 | `replay.ino` | Session replay: file parsing (DOVE/NMEA), track auto-detection |
+| `settings.ino` | Persistent JSON settings on SD (`/SETTINGS.json`), `getSetting()`/`setSetting()` |
 | `images.h` | PROGMEM bitmap data (splash screen, animations) |
 
 ### Non-Source
@@ -146,6 +147,20 @@ loop()  ~250 Hz
 - Streams file line-by-line (128-byte buffer) through DovesLapTimer.
 - Shows max speed, max RPM, lap times, and optimal lap.
 
+### 7. Settings (`settings.ino`)
+
+- Persistent JSON key-value store at `/SETTINGS.json` on SD card.
+- `SETTINGS_SETUP()` called once from `setup()` after SD init; creates
+  default file on first boot (random BLE name + PIN).
+- `getSetting(key, buf, bufSize)` reads a value into a caller-provided
+  buffer. Returns `true` if found, `false` on any failure (buf set empty).
+  Always reads fresh from disk (no cache).
+- `setSetting(key, value)` does read-modify-write to update a single key.
+- Uses `SD_ACCESS_TRACK_PARSE` mode for brief SD access.
+- Separate `StaticJsonDocument<512>` — does not share the track parser's
+  2048-byte buffer.
+- Total RAM cost: ~1 KB (512-byte file buffer + 512-byte JSON document).
+
 ---
 
 ## Data Formats
@@ -166,6 +181,19 @@ timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm
 
 Array of layout objects, each with a start/finish line (two GPS points)
 and optional sector lines. Stored in `trackLayouts[MAX_LAYOUTS]` (max 10).
+
+### Settings JSON (`/SETTINGS.json`)
+
+```json
+{
+  "bluetooth_name": "DovesDataLogger-042",
+  "bluetooth_pin": "7391"
+}
+```
+
+- Created automatically on first boot with random values.
+- Editable on a computer — changes take effect on next reboot.
+- Read on-demand via `getSetting()`, written via `setSetting()`.
 
 ---
 
@@ -189,6 +217,8 @@ and optional sector lines. Stored in `trackLayouts[MAX_LAYOUTS]` (max 10).
 | Battery check interval | 5 s | `BirdsEye.ino` |
 | BLE default MTU | 23 | `bluetooth.ino` |
 | JSON buffer | 2048 (1024 on Wokwi) | `sd_functions.ino` |
+| Settings JSON buffer | 512 | `settings.ino` |
+| Settings file path | `/SETTINGS.json` | `settings.ino` |
 
 ---
 

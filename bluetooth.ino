@@ -244,7 +244,12 @@ void BLE_SETUP() {
   Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
   Bluefruit.begin();
   Bluefruit.setTxPower(4);
-  Bluefruit.setName("DovesLapTimer");
+  char bleName[32];
+  if (getSetting("bluetooth_name", bleName, sizeof(bleName))) {
+    Bluefruit.setName(bleName);
+  } else {
+    Bluefruit.setName("DovesLapTimer");
+  }
 
   // Enable connection LED
   Bluefruit.autoConnLed(true);
