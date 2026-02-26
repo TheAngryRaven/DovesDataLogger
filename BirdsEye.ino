@@ -11,6 +11,7 @@
 //   gps_functions.ino - GPS setup, loop, time functions, data logging
 //   replay.ino       - Session replay system
 //   sd_functions.ino - SD card setup, track parsing, access management
+//   settings.ino     - Persistent JSON settings on SD (/SETTINGS.json)
 //   tachometer.ino   - Tachometer ISR and loop processing
 //
 ///////////////////////////////////////////
@@ -526,6 +527,9 @@ void setup() {
       debugln(filepath);
     }
   }
+
+  // Load settings from SD (creates defaults on first boot)
+  SETTINGS_SETUP();
 
   GPS_SETUP();
 
