@@ -3,6 +3,68 @@
 // Display setup, button handling, menu navigation, and display loop
 ///////////////////////////////////////////
 
+///////////////////////////////////////////
+// I2C BUS RECOVERY
+// EMI from ignition can glitch the I2C bus, leaving a slave holding SDA low.
+// The Wire library may hang forever waiting. This recovery routine bit-bangs
+// 9 SCL clocks to free a stuck slave, then re-initializes Wire.
+///////////////////////////////////////////
+
+static bool i2cRecoveryNeeded = false;
+
+void i2cBusRecover() {
+  debugln(F("I2C: Bus recovery - bit-banging 9 SCL clocks"));
+
+  Wire.end();
+
+  // Manually toggle SCL 9 times to free stuck slave
+  // SDA must be floating (input) so slave can release it
+  pinMode(PIN_WIRE_SDA, INPUT);
+  pinMode(PIN_WIRE_SCL, OUTPUT);
+
+  for (int i = 0; i < 9; i++) {
+    digitalWrite(PIN_WIRE_SCL, LOW);
+    delayMicroseconds(5);
+    digitalWrite(PIN_WIRE_SCL, HIGH);
+    delayMicroseconds(5);
+  }
+
+  // Generate STOP condition: SDA low-to-high while SCL is high
+  pinMode(PIN_WIRE_SDA, OUTPUT);
+  digitalWrite(PIN_WIRE_SDA, LOW);
+  delayMicroseconds(5);
+  digitalWrite(PIN_WIRE_SCL, HIGH);
+  delayMicroseconds(5);
+  digitalWrite(PIN_WIRE_SDA, HIGH);
+  delayMicroseconds(5);
+
+  // Re-init Wire
+  Wire.begin();
+
+  // Re-init display
+  #ifdef USE_1306_DISPLAY
+    display.begin(SSD1306_SWITCHCAPVCC, I2C_DISPLAY_ADDRESS);
+  #else
+    display.begin(I2C_DISPLAY_ADDRESS, true);
+  #endif
+
+  debugln(F("I2C: Bus recovery complete"));
+}
+
+// Safe wrapper around display.display() - detects hung I2C and recovers.
+// A normal 1024-byte I2C transfer at 100kHz takes ~100ms.
+// If it takes >250ms, something is wrong.
+void safeDisplayUpdate() {
+  unsigned long start = millis();
+  display.display();
+  unsigned long elapsed = millis() - start;
+
+  if (elapsed > 250) {
+    debugln(F("I2C: display.display() took too long, scheduling recovery"));
+    i2cRecoveryNeeded = true;
+  }
+}
+
 void setupButtons() {
   #ifndef WOKWI
   // greybox
@@ -129,6 +191,10 @@ void switchToDisplayPage(int newDisplayPage) {
 void displaySetup() {
   debugln(F("SETTING UP DISPLAY"));
   delay(250); // wait for the OLED to power up
+
+  // Set I2C timeout to prevent infinite hangs from EMI-induced bus faults
+  Wire.setTimeout(100);
+
 #ifdef USE_1306_DISPLAY
   display.begin(SSD1306_SWITCHCAPVCC, I2C_DISPLAY_ADDRESS);
 #else
@@ -147,7 +213,7 @@ void displaySetup() {
   // silly boot splash, maybe anim?
   resetDisplay();
   display.drawBitmap(0, 0, image_data_bird1, 128, 64, 1);
-  display.display();
+  safeDisplayUpdate();
   delay(750);
 
   displayPage_boot();
@@ -166,7 +232,8 @@ void handleMenuPageSelection() {
       if (buildReplayFileList()) {
         switchToDisplayPage(PAGE_REPLAY_FILE_SELECT);
       } else {
-        internalNotification = "No .dove or .nmea\nfiles found on SD!";
+        strncpy(internalNotification, "No .dove or .nmea\nfiles found on SD!", sizeof(internalNotification) - 1);
+        internalNotification[sizeof(internalNotification) - 1] = '\0';
         switchToDisplayPage(PAGE_INTERNAL_WARNING);
       }
     } else {
@@ -203,12 +270,14 @@ void handleMenuPageSelection() {
         if (parseStatus == PARSE_STATUS_GOOD) {
           switchToDisplayPage(PAGE_REPLAY_SELECT_TRACK);
         } else {
-          internalNotification = "Failed to parse\ntrack file!";
+          strncpy(internalNotification, "Failed to parse\ntrack file!", sizeof(internalNotification) - 1);
+          internalNotification[sizeof(internalNotification) - 1] = '\0';
           switchToDisplayPage(PAGE_INTERNAL_FAULT);
         }
       } else {
         // No track detected - let user select manually
-        internalNotification = "Track not detected!\nSelect manually.";
+        strncpy(internalNotification, "Track not detected!\nSelect manually.", sizeof(internalNotification) - 1);
+        internalNotification[sizeof(internalNotification) - 1] = '\0';
         // Go to normal track selection
         switchToDisplayPage(PAGE_SELECT_LOCATION);
         replayModeActive = true; // Set flag so we know we're in replay mode
@@ -255,7 +324,8 @@ void handleMenuPageSelection() {
 
     // Acquire SD access for replay before opening file
     if (!acquireSDAccess(SD_ACCESS_REPLAY)) {
-      internalNotification = "SD card busy!\nCannot start replay";
+      strncpy(internalNotification, "SD card busy!\nCannot start replay", sizeof(internalNotification) - 1);
+      internalNotification[sizeof(internalNotification) - 1] = '\0';
       switchToDisplayPage(PAGE_INTERNAL_FAULT);
     } else if (replayFile.open(replayFiles[selectedReplayFile], O_READ)) {
       replayModeActive = true;
@@ -263,7 +333,8 @@ void handleMenuPageSelection() {
       switchToDisplayPage(PAGE_REPLAY_PROCESSING);
     } else {
       releaseSDAccess(SD_ACCESS_REPLAY);  // Release on failure
-      internalNotification = "Failed to open\nreplay file!";
+      strncpy(internalNotification, "Failed to open\nreplay file!", sizeof(internalNotification) - 1);
+      internalNotification[sizeof(internalNotification) - 1] = '\0';
       switchToDisplayPage(PAGE_INTERNAL_FAULT);
     }
   } else if (currentPage == PAGE_REPLAY_EXIT) {
@@ -290,10 +361,12 @@ void handleMenuPageSelection() {
     if (parseStatus == PARSE_STATUS_GOOD) {
       switchToDisplayPage(PAGE_SELECT_TRACK);
     } else if (parseStatus == PARSE_STATUS_LOAD_FAILED) {
-      internalNotification = "Could not load file!";
+      strncpy(internalNotification, "Could not load file!", sizeof(internalNotification) - 1);
+      internalNotification[sizeof(internalNotification) - 1] = '\0';
       switchToDisplayPage(PAGE_INTERNAL_FAULT);
     } else if (parseStatus == PARSE_STATUS_PARSE_FAILED) {
-      internalNotification = "JSON Parsing Failed!";
+      strncpy(internalNotification, "JSON Parsing Failed!", sizeof(internalNotification) - 1);
+      internalNotification[sizeof(internalNotification) - 1] = '\0';
       switchToDisplayPage(PAGE_INTERNAL_FAULT);
     }
 
@@ -418,6 +491,12 @@ void handleRunningPageSelection() {
 }
 
 void displayLoop() {
+  // Check if I2C recovery was flagged by a previous slow display update
+  if (i2cRecoveryNeeded) {
+    i2cRecoveryNeeded = false;
+    i2cBusRecover();
+  }
+
   // todo: better page handling
   if (millis() - displayLastUpdate > (1000 / displayUpdateRateHz)) {
     displayLastUpdate = millis();

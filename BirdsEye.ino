@@ -17,6 +17,7 @@
 
 #include <avr/dtostrf.h>
 #include <SPI.h>
+#include <nrf_wdt.h>
 
 // #define WOKWI
 // #define HAS_DEBUG
@@ -128,6 +129,9 @@ bool bleTransferInProgress = false;
 uint32_t bleFileSize = 0;
 uint32_t bleBytesTransferred = 0;
 uint16_t bleNegotiatedMtu = 23;
+bool bleWaitingForMTU = false;         // Deferred MTU negotiation (avoids delay in callback)
+unsigned long bleMTURequestTime = 0;   // Timestamp when MTU was requested
+uint16_t bleMTUConnHandle = 0;        // Connection handle for deferred MTU read
 // Note: bleCurrentFile is declared after SdFat include
 
 ///////////////////////////////////////////
@@ -467,11 +471,28 @@ int selectedDirection = -1;
 int menuSelectionIndex = 0;
 bool paceFlashStatus = false;
 bool notificationFlash = false;
-String internalNotification = "N/A";
+char internalNotification[64] = "N/A";
 bool calculatingFlip = false;
 const int lapsPerPage = 3;
 int current_lap_list_page = 0;
 int lap_list_pages = 1;
+
+///////////////////////////////////////////
+// WATCHDOG TIMER
+// nRF52840 hardware WDT - recovers from any lockup within ~4 seconds.
+// Primary defense against I2C bus hangs, SD card stalls, etc.
+///////////////////////////////////////////
+
+void wdtSetup() {
+  NRF_WDT->CONFIG = WDT_CONFIG_SLEEP_Run << WDT_CONFIG_SLEEP_Pos;  // Keep running in sleep
+  NRF_WDT->CRV = 4 * 32768;  // ~4 second timeout (32768 Hz clock)
+  NRF_WDT->RREN = WDT_RREN_RR0_Enabled << WDT_RREN_RR0_Pos;      // Enable reload register 0
+  NRF_WDT->TASKS_START = 1;   // Start WDT (cannot be stopped once started)
+}
+
+void wdtPet() {
+  NRF_WDT->RR[0] = WDT_RR_RR_Reload;  // Feed the watchdog
+}
 
 ///////////////////////////////////////////
 // SETUP
@@ -509,10 +530,12 @@ void setup() {
   GPS_SETUP();
 
   if (!sdSetupSuccess) {
-    internalNotification = "SD Init failed!\n\nlogging not possible!";
+    strncpy(internalNotification, "SD Init failed!\n\nlogging not possible!", sizeof(internalNotification) - 1);
+    internalNotification[sizeof(internalNotification) - 1] = '\0';
     switchToDisplayPage(PAGE_INTERNAL_FAULT);
   } else if (sdSetupSuccess && !sdTrackSuccess) {
-    internalNotification = "sd:/TRACKS not found!\n\nlogging not possible!";
+    strncpy(internalNotification, "sd:/TRACKS not found!\n\nlogging not possible!", sizeof(internalNotification) - 1);
+    internalNotification[sizeof(internalNotification) - 1] = '\0';
     switchToDisplayPage(PAGE_INTERNAL_FAULT);
   } else {
     switchToDisplayPage(PAGE_MAIN_MENU);
@@ -521,13 +544,33 @@ void setup() {
   // tachometer
   pinMode(tachInputPin, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(tachInputPin), TACH_COUNT_PULSE, FALLING);
+
+  // Start hardware watchdog LAST - everything above must complete before
+  // the 4-second timeout starts counting. If setup itself hangs, the
+  // device won't boot-loop because WDT hasn't started yet.
+  #ifndef WOKWI
+  wdtSetup();
+  debugln(F("Watchdog timer started (~4s timeout)"));
+  #endif
 }
 
 ///////////////////////////////////////////
 // MAIN LOOP
 ///////////////////////////////////////////
 
+#ifdef HAS_DEBUG
+unsigned long loopMaxTime = 0;
+#endif
+
 void loop() {
+  #ifndef WOKWI
+  wdtPet();
+  #endif
+
+  #ifdef HAS_DEBUG
+  unsigned long loopStart = millis();
+  #endif
+
   // When BLE transfer is active, run tight loop for maximum throughput
   if (bleTransferInProgress) {
     BLUETOOTH_LOOP();
@@ -592,4 +635,18 @@ void loop() {
   if (tachLastReported > topTachReported) {
     topTachReported = tachLastReported;
   }
+
+  #ifdef HAS_DEBUG
+  unsigned long loopElapsed = millis() - loopStart;
+  if (loopElapsed > loopMaxTime) {
+    loopMaxTime = loopElapsed;
+  }
+  if (loopElapsed > 100) {
+    debug(F("SLOW LOOP: "));
+    debug(loopElapsed);
+    debug(F("ms (max: "));
+    debug(loopMaxTime);
+    debugln(F("ms)"));
+  }
+  #endif
 }

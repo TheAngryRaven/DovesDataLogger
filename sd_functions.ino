@@ -108,6 +108,11 @@ bool buildTrackList() {
   return true;
 }
 
+// Static buffers for JSON parsing — saves ~4KB of stack per call.
+// Only one parseTrackFile() call can be active at a time (single-threaded).
+static char jsonFileBuffer[JSON_BUFFER_SIZE];
+static StaticJsonDocument<JSON_BUFFER_SIZE> trackJson;
+
 int parseTrackFile(char* filepath) {
   debug(F("ParseTrackFile:"));
   debugln(filepath);
@@ -125,9 +130,8 @@ int parseTrackFile(char* filepath) {
     return PARSE_STATUS_LOAD_FAILED;
   }
 
-  // Create a buffer to store file content
-  char buffer[JSON_BUFFER_SIZE];
-  int bytesRead = trackFile.read(buffer, sizeof(buffer));
+  // Read file into static buffer (not stack-allocated)
+  int bytesRead = trackFile.read(jsonFileBuffer, sizeof(jsonFileBuffer));
 
   // Check if read was successful
   if (bytesRead == -1) {
@@ -136,15 +140,15 @@ int parseTrackFile(char* filepath) {
   }
 
   // Null-terminate the buffer
-  if (bytesRead < sizeof(buffer)) {
-    buffer[bytesRead] = '\0';
+  if (bytesRead < (int)sizeof(jsonFileBuffer)) {
+    jsonFileBuffer[bytesRead] = '\0';
   } else {
-    buffer[sizeof(buffer) - 1] = '\0';
+    jsonFileBuffer[sizeof(jsonFileBuffer) - 1] = '\0';
   }
 
-  // Parse JSON
-  StaticJsonDocument<JSON_BUFFER_SIZE> trackJson;
-  DeserializationError error = deserializeJson(trackJson, buffer);
+  // Parse JSON (using file-scope static document to save stack)
+  trackJson.clear();
+  DeserializationError error = deserializeJson(trackJson, jsonFileBuffer);
   if (error != DeserializationError::Ok) {
     // todo: add better parsing error handing
     if (error == DeserializationError::EmptyInput) {
