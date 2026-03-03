@@ -44,7 +44,7 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
 ## Hardware Requirements
 
 ### Core Components
-- **MCU**: Seeed XIAO nRF52840 (64MHz ARM Cortex-M4 with FPU + Bluetooth)
+- **MCU**: Seeed XIAO nRF52840 Sense (64MHz ARM Cortex-M4 with FPU + Bluetooth + 6 axis IMU)
   - Low power consumption: ~120mAh with 2.45" screen
   - Built-in battery charging circuit
   - *Note: May switch to Seeed XIAO ESP32 (same form factor) for WiFi data transfer at cost of higher power usage*

@@ -86,5 +86,6 @@ void TACH_LOOP() {
   if (millis() - tachLastUpdate > (1000 / tachUpdateRateHz)) {
     tachLastUpdate = millis();
     tachLastReported = (int)(tachRpmFiltered + 0.5f);
+
   }
 }

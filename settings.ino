@@ -61,7 +61,11 @@ static bool createDefaultSettings() {
  */
 bool SETTINGS_SETUP() {
   // Seed random for generating default BLE name and PIN
-  randomSeed(analogRead(A0) ^ micros());
+  // WARNING: Do NOT use analogRead() on ANY pin here! On nRF52840, analogRead()
+  // permanently disables the digital input buffer on the target pin:
+  //   A0 = D0 (tach ISR), A1-A3 = buttons, A4 = SDA, A5 = SCL
+  // micros() provides sufficient entropy — this only runs on first boot.
+  randomSeed(micros());
 
   if (!sdSetupSuccess) {
     debugln(F("Settings: SD not available, skipping"));
