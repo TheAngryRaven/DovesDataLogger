@@ -10,20 +10,23 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
 
 ### Core Functionality
 - **25Hz GPS Logging** - High-frequency data capture straight to SD card
+- **Accelerometer** - On-board 6-axis IMU when using Seeed XIAO nrf52840 sense +-15g
+- **RPM Monitoring** - Tachometer input with noise filtering for ignition systems
 - **Track & Layout Selection** - Multiple tracks and configurations loaded from SD card
 - **Sector Timing** - Optional 2 and 3-sector support for detailed performance analysis
 - **Lap Timing** - Current lap, best lap, last lap, and optimal lap calculation
 - **Pace Comparison** - Real-time pace difference vs. best lap
 - **Lap History** - Session-based lap history (up to 1000 laps)
-- **RPM Monitoring** - Tachometer input with noise filtering for ignition systems
 - **Speed Display** - Large, easy-to-read speed display
 - **Simple CSV Format** - Easy-to-parse data files with millisecond-precision timestamps
-- **Accelerometer** - On-board 6-axis IMU when using Seeed XIAO nrf52840 sense +-15g
 - **Bluetooth Downloads** - Can now download files directly to [HackTheTrack.net](http://HackTheTrack.net)
   - (fast and heckin cool)
+#### To-Do Features
+- **Automatic Track/Course Detection** - Would be nice to just drive
+- **Configure settings via webapp** - none of us want to fill in text with three buttons
 #### Experimental Features
 - **Review Data** - Can now "replay" old logs on-device to see laptimes/optimals/etc (slow)
-  - (kind of slow but it works)
+  - (kind of slow, kind of works)
 
 ### Display Pages
 - GPS Statistics (battery, satellites, HDOP, logging status)
