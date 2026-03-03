@@ -22,7 +22,7 @@
 #include <nrf_wdt.h>
 
 // #define WOKWI
-#define HAS_DEBUG
+// #define HAS_DEBUG
 
 // Hides a couple pages and changes some behavior
 // todo: make dynamic in next UI version

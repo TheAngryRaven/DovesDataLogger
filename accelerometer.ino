@@ -52,4 +52,11 @@ void ACCEL_LOOP() {
   accelX = accelIMU.readFloatAccelX();
   accelY = accelIMU.readFloatAccelY();
   accelZ = accelIMU.readFloatAccelZ();
+
+  // debug(F("ACCEL: X="));
+  // debug(accelX, 3);
+  // debug(F("  Y="));
+  // debug(accelY, 3);
+  // debug(F("  Z="));
+  // debugln(accelZ, 3);
 }
