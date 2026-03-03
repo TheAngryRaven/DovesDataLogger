@@ -18,9 +18,10 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
 - **RPM Monitoring** - Tachometer input with noise filtering for ignition systems
 - **Speed Display** - Large, easy-to-read speed display
 - **Simple CSV Format** - Easy-to-parse data files with millisecond-precision timestamps
-#### Experimental Features
+- **Accelerometer** - On-board 6-axis IMU when using Seeed XIAO nrf52840 sense +-15g
 - **Bluetooth Downloads** - Can now download files directly to [HackTheTrack.net](http://HackTheTrack.net)
   - (fast and heckin cool)
+#### Experimental Features
 - **Review Data** - Can now "replay" old logs on-device to see laptimes/optimals/etc (slow)
   - (kind of slow but it works)
 
