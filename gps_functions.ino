@@ -273,11 +273,17 @@ void GPS_LOOP() {
         dtostrf(gpsData.heading, 1, 2, headingStr);
         dtostrf(gpsData.horizontalAccuracy, 1, 2, hAccStr);
 
+        // 3 decimals for accelerometer (g-force)
+        char accelXStr[12], accelYStr[12], accelZStr[12];
+        dtostrf(accelX, 1, 3, accelXStr);
+        dtostrf(accelY, 1, 3, accelYStr);
+        dtostrf(accelZ, 1, 3, accelZStr);
+
         // FINAL SAFETY CHECK: Verify strings are valid ASCII numbers
         // Catches any remaining garbage that slipped through numeric validation
         bool stringsValid = true;
-        const char* strs[] = {latStr, lngStr, hdopStr, speedStr, altStr, headingStr, hAccStr};
-        for (int i = 0; i < 7 && stringsValid; i++) {
+        const char* strs[] = {latStr, lngStr, hdopStr, speedStr, altStr, headingStr, hAccStr, accelXStr, accelYStr, accelZStr};
+        for (int i = 0; i < 10 && stringsValid; i++) {
           int len = strlen(strs[i]);
           if (len == 0 || len > 20) {
             stringsValid = false;  // Empty or suspiciously long
@@ -318,7 +324,7 @@ void GPS_LOOP() {
           }
 
           // Build the complete CSV line (using %s for timestamp now)
-          snprintf(csvLine, sizeof(csvLine), "%s,%d,%s,%s,%s,%s,%s,%s,%s,%d",
+          snprintf(csvLine, sizeof(csvLine), "%s,%d,%s,%s,%s,%s,%s,%s,%s,%d,%s,%s,%s",
                    timestampStr,
                    snapSats,
                    hdopStr,
@@ -328,7 +334,10 @@ void GPS_LOOP() {
                    altStr,
                    headingStr,
                    hAccStr,
-                   tachLastReported
+                   tachLastReported,
+                   accelXStr,
+                   accelYStr,
+                   accelZStr
           );
 
           // Write with error checking
@@ -390,7 +399,7 @@ void GPS_LOOP() {
           enableLogging = false;
         } else {
           // Write CSV header as first line
-          dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm"));
+          dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z"));
           debugln(F("CSV header written"));
           sdDataLogInitComplete = true;
         }

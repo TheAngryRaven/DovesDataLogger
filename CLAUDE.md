@@ -8,11 +8,12 @@
 ## What Is BirdsEye?
 
 A high-precision GPS lap timer and data logger for motorsports / track days.
-Built on the **Seeed XIAO nRF52840** (ARM Cortex-M4, 256 KB RAM, BLE 5.0).
+Built on the **Seeed XIAO nRF52840 Sense** (ARM Cortex-M4, 256 KB RAM, BLE 5.0, onboard LSM6DS3 IMU).
 
 Core capabilities:
 - 25 Hz GPS lap timing with sector support (DovesLapTimer library)
 - RPM monitoring via inductive tachometer pickup
+- Accelerometer logging (g-force X/Y/Z) via onboard LSM6DS3 IMU
 - CSV data logging to SD card at full GPS rate
 - 8+ display pages on a 128x64 OLED (3 Hz refresh)
 - Bluetooth LE file download to companion apps / HackTheTrack.net
@@ -34,6 +35,7 @@ Core capabilities:
 | `gps_config.h` | GPS configuration constants (baud rate, nav rate, serial port) |
 | `gps_functions.ino` | GPS init (SparkFun UBX PVT), time conversion, SD logging pipeline |
 | `sd_functions.ino` | SD init, track list/JSON parsing, SD access arbitration |
+| `accelerometer.ino` | LSM6DS3 IMU init and g-force reads (onboard XIAO Sense) |
 | `tachometer.ino` | Falling-edge ISR on D0, EMA-filtered RPM calculation |
 | `bluetooth.ino` | BLE service (file listing, transfer, status characteristics) |
 | `replay.ino` | Session replay: file parsing (DOVE/NMEA), track auto-detection |
@@ -58,6 +60,7 @@ Core capabilities:
 |---|---|---|
 | Serial1 RX/TX | GPS UART | u-blox SAM-M10Q, 115200 baud |
 | I2C SDA/SCL | OLED display | 128x64, address 0x3C |
+| I2C SDA/SCL | LSM6DS3 IMU | Onboard accelerometer/gyro (Sense variant), address 0x6A |
 | SPI MOSI/SCK/MISO | SD card | 4 MHz SPI clock, CS grounded on PCB |
 | D1 | Button 1 (Left) | INPUT_PULLUP, RC filter recommended |
 | D2 | Button 2 (Select) | INPUT_PULLUP, RC filter recommended |
@@ -75,6 +78,7 @@ Core capabilities:
 loop()  ~250 Hz
  ├─ GPS_LOOP()          checkUblox, checkCallbacks, feed DovesLapTimer, log CSV
  ├─ TACH_LOOP()         re-enable ISR after debounce, apply EMA filter
+ ├─ ACCEL_LOOP()        read LSM6DS3 accelerometer X/Y/Z (g-force)
  ├─ BLUETOOTH_LOOP()    stream file chunks if transfer active
  ├─ checkForNewLapData()  append completed laps to lapHistory[]
  ├─ calculateGPSFrameRate()  1-second PVT counter
@@ -108,7 +112,17 @@ loop()  ~250 Hz
 - `TACH_LOOP()` applies EMA filter (alpha 0.20) and updates at 3 Hz.
 - 500 ms timeout sets RPM to 0 (engine stopped).
 
-### 3. SD Card & Logging (`sd_functions.ino`)
+### 3. Accelerometer (`accelerometer.ino`)
+
+- Onboard LSM6DS3 6-axis IMU on XIAO nRF52840 Sense (I2C address 0x6A).
+- Shares I2C bus with OLED display (0x3C) — different addresses, no conflict.
+- `ACCEL_SETUP()` initializes IMU; sets `accelAvailable` flag. Graceful
+  degradation if IMU not present (non-Sense board).
+- `ACCEL_LOOP()` reads `readFloatAccelX/Y/Z()` into global floats every
+  main loop iteration (~250 Hz). Values in g-force (1g = 9.81 m/s²).
+- No filtering — raw g-force is the standard unit for motorsports data.
+
+### 4. SD Card & Logging (`sd_functions.ino`)
 
 - SdFat library, FAT16/32, 4 MHz SPI.
 - Track files live under `/TRACKS/*.json` (ArduinoJson 6 parsing).
@@ -118,7 +132,7 @@ loop()  ~250 Hz
     `BLE_TRANSFER` (3), `TRACK_PARSE` (4).
 - Data flushes every 10 seconds during logging.
 
-### 4. Display & UI (`display_ui.ino`, `display_pages.ino`, `display_config.h`)
+### 5. Display & UI (`display_ui.ino`, `display_pages.ino`, `display_config.h`)
 
 - Driver selected at compile time (`USE_1306_DISPLAY` define).
 - Button debounce: 3 samples at 500 us intervals, 200 ms refire lockout.
@@ -132,7 +146,7 @@ loop()  ~250 Hz
   - BLE: `PAGE_BLUETOOTH` (-2).
   - Errors: `PAGE_INTERNAL_WARNING` (100), `PAGE_INTERNAL_FAULT` (105).
 
-### 5. Bluetooth (`bluetooth.ino`)
+### 6. Bluetooth (`bluetooth.ino`)
 
 - BLE service UUID `0x1820`.
 - Characteristics: file list (0x2A3D), file request (0x2A3E),
@@ -140,14 +154,14 @@ loop()  ~250 Hz
 - MTU negotiation (requests 247, default 23).
 - File listing does not require exclusive SD access; transfer does.
 
-### 6. Replay (`replay.ino`)
+### 7. Replay (`replay.ino`)
 
 - Reads `.dove` (CSV) and `.nmea` files from SD root.
 - Auto-detects track via haversine distance (< 20 miles threshold).
 - Streams file line-by-line (128-byte buffer) through DovesLapTimer.
 - Shows max speed, max RPM, lap times, and optimal lap.
 
-### 7. Settings (`settings.ino`)
+### 8. Settings (`settings.ino`)
 
 - Persistent JSON key-value store at `/SETTINGS.json` on SD card.
 - `SETTINGS_SETUP()` called once from `setup()` after SD init; creates
@@ -168,7 +182,7 @@ loop()  ~250 Hz
 ### CSV Log Row (`.dove` files)
 
 ```
-timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm
+timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z
 ```
 
 - `timestamp`: Unix epoch milliseconds (uint64, written as string).
@@ -176,6 +190,8 @@ timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm
 - `speed_mph`, `altitude_m`: 2 decimal places.
 - `heading_deg`: heading of motion in degrees (0–360), 2 decimals. From UBX `headMot`.
 - `h_acc_m`: horizontal accuracy estimate in meters, 2 decimals. From UBX `hAcc`.
+- `accel_x`/`accel_y`/`accel_z`: accelerometer g-force, 3 decimal places. From LSM6DS3.
+  Logs `0.000` if IMU not available (non-Sense board).
 
 ### Track JSON (`/TRACKS/*.json`)
 
@@ -233,6 +249,7 @@ and optional sector lines. Stored in `trackLayouts[MAX_LAYOUTS]` (max 10).
 | ArduinoJson 6.x | Track file JSON parsing |
 | SdFat | SD card (FAT16/32) |
 | DovesLapTimer | Lap/sector timing (external: TheAngryRaven/DovesLapTimer) |
+| Seeed Arduino LSM6DS3 | Onboard IMU accelerometer/gyro (Sense variant, ±16g) |
 | Bluefruit nRF52 | BLE (built into board package) |
 
 ---
@@ -252,13 +269,18 @@ This device operates in ignition-noise environments. Three layers of defense:
 
 ## Build Notes
 
-- **Board**: Seeed XIAO nRF52840 (Arduino or PlatformIO).
+- **Board**: Seeed XIAO nRF52840 Sense (Arduino or PlatformIO).
 - `project.h` must be included before other `.ino` modules so Arduino's
   auto-prototype generator sees custom types first.
 - PROGMEM is used for bitmap images to save RAM.
 - Avoid Arduino `String` in hot paths (heap fragmentation risk on 256 KB).
 - SD chip-select is hardwired to GND; pass `-1` to SdFat.
 - `#define WOKWI` enables simulator-specific tweaks (smaller JSON buffer).
+- **CRITICAL: NEVER use `analogRead()` on any GPIO pin.** On the nRF52840,
+  `analogRead()` permanently disables the digital input buffer on the target
+  pin for the remainder of the session. Every analog-capable pin on the XIAO
+  is also a critical digital function: A0=tach ISR, A1-A3=buttons, A4=SDA,
+  A5=SCL. Use `micros()` or the hardware RNG for entropy instead.
 
 ---
 

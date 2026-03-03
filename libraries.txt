@@ -8,3 +8,4 @@ ArduinoJson
 SdFat
 Adafruit GPS Library
 DovesLapTimer@3.1.0
+Seeed Arduino LSM6DS3
