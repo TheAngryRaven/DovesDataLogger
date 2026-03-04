@@ -20,10 +20,12 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
 - **Speed Display** - Large, easy-to-read speed display
 - **Simple CSV Format** - Easy-to-parse data files with millisecond-precision timestamps
 - **Bluetooth Downloads** - Can now download files directly to [HackTheTrack.net](http://HackTheTrack.net)
-  - (fast and heckin cool)
+- **Configure settings via webapp** - none of us want to fill in text with three buttons
+- **Track Sync** - Update on-device track library via the webapp
 #### To-Do Features
 - **Automatic Track/Course Detection** - Would be nice to just drive
-- **Configure settings via webapp** - none of us want to fill in text with three buttons
+- **Pin Lock** - require pin to pull logs from device
+
 #### Experimental Features
 - **Review Data** - Can now "replay" old logs on-device to see laptimes/optimals/etc (slow)
   - (kind of slow, kind of works)
