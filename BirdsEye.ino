@@ -575,26 +575,26 @@ void loop() {
   unsigned long loopStart = millis();
   #endif
 
-  // When BLE transfer is active, run tight loop for maximum throughput
-  if (bleTransferInProgress) {
+  // When BLE is active, skip GPS/tach/lap processing for better throughput
+  if (bleActive) {
     BLUETOOTH_LOOP();
 
     // Minimal button check for exit
     readButtons();
     if (btn2->pressed) {
-      // Exit button during transfer
       BLE_STOP();
       switchToDisplayPage(PAGE_MAIN_MENU);
     }
     resetButtons();
 
-    // Update display every 5s during transfer to maximize BLE throughput
-    if (millis() - displayLastUpdate > 5000) {
+    // Reduced display rate: 5s during transfer, normal otherwise
+    unsigned long displayInterval = bleTransferInProgress ? 5000 : (1000 / displayUpdateRateHz);
+    if (millis() - displayLastUpdate > displayInterval) {
       displayLastUpdate = millis();
       displayPage_bluetooth();
     }
 
-    return; // Skip everything else during transfer
+    return; // Skip GPS, tach, lap checks while BLE is active
   }
 
   // Replay processing mode - tight loop for fast file processing

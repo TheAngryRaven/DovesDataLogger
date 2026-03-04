@@ -139,6 +139,13 @@ loop()  ~250 Hz
   file data (0x2A3F), file status (0x2A40).
 - MTU negotiation (requests 247, default 23).
 - File listing does not require exclusive SD access; transfer does.
+- **Settings commands** (via `fileRequestChar` / `fileStatusChar`):
+  - `SLIST` → `SVAL:key=value` per entry, then `SEND`
+  - `SGET:key` → `SVAL:key=value` or `SERR:NOT_FOUND`
+  - `SSET:key=value` → `SOK:key` or `SERR:reason`
+  - `SBUSY` returned if a command is already pending.
+  - Uses deferred execution: BLE callback copies command into buffer,
+    `BLUETOOTH_LOOP()` processes it in main loop for thread-safe SD access.
 
 ### 6. Replay (`replay.ino`)
 

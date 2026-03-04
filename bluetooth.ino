@@ -3,6 +3,10 @@
 // All BLE-related functions: callbacks, setup, file transfer, loop
 ///////////////////////////////////////////
 
+// Deferred settings command buffer (BLE callback -> main loop)
+static volatile bool settingsCmdPending = false;
+static char settingsCmdBuffer[65];  // 64 chars + null
+
 void bleConnectCallback(uint16_t conn_handle) {
   debugln(F("BLE: Device connected!"));
   bleConnected = true;
@@ -225,6 +229,17 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
     char* filename = buffer + 7;
     while (*filename == ' ') filename++;
     bleDeleteFile(filename);
+  } else if (strcmp(buffer, "SLIST") == 0 ||
+             strncmp(buffer, "SGET:", 5) == 0 ||
+             strncmp(buffer, "SSET:", 5) == 0) {
+    // Settings commands — defer to main loop for thread-safe SD access
+    if (settingsCmdPending) {
+      fileStatusChar.notify((uint8_t*)"SBUSY", 5);
+      return;
+    }
+    strncpy(settingsCmdBuffer, buffer, sizeof(settingsCmdBuffer) - 1);
+    settingsCmdBuffer[sizeof(settingsCmdBuffer) - 1] = '\0';
+    settingsCmdPending = true;
   }
 }
 
@@ -302,8 +317,130 @@ void BLE_STOP() {
   debugln(F("BLE: Bluetooth stopped"));
 }
 
+void processSettingsCommand() {
+  debug(F("BLE: Processing settings cmd: ["));
+  debug(settingsCmdBuffer);
+  debugln(F("]"));
+
+  if (strcmp(settingsCmdBuffer, "SLIST") == 0) {
+    debugln(F("BLE: SLIST - listing all settings"));
+    if (!acquireSDAccess(SD_ACCESS_TRACK_PARSE)) {
+      debugln(F("BLE: SLIST - SD busy"));
+      fileStatusChar.notify((uint8_t*)"SERR:SD_BUSY", 12);
+      return;
+    }
+
+    File settingsFile;
+    settingsFile.open("/SETTINGS.json", O_READ);
+    if (!settingsFile) {
+      debugln(F("BLE: SLIST - failed to open settings file"));
+      releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+      fileStatusChar.notify((uint8_t*)"SERR:NO_FILE", 12);
+      return;
+    }
+
+    char fileBuf[512];
+    int bytesRead = settingsFile.read(fileBuf, sizeof(fileBuf) - 1);
+    settingsFile.close();
+    releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+
+    debug(F("BLE: SLIST - read "));
+    debug(bytesRead);
+    debugln(F(" bytes"));
+
+    if (bytesRead <= 0) {
+      debugln(F("BLE: SLIST - file empty"));
+      fileStatusChar.notify((uint8_t*)"SERR:EMPTY", 10);
+      return;
+    }
+    fileBuf[bytesRead] = '\0';
+
+    StaticJsonDocument<512> doc;
+    DeserializationError err = deserializeJson(doc, fileBuf);
+    if (err != DeserializationError::Ok) {
+      debug(F("BLE: SLIST - JSON parse error: "));
+      debugln(err.c_str());
+      fileStatusChar.notify((uint8_t*)"SERR:PARSE", 10);
+      return;
+    }
+
+    int count = 0;
+    for (JsonPair kv : doc.as<JsonObject>()) {
+      char entry[64];
+      snprintf(entry, sizeof(entry), "SVAL:%s=%s", kv.key().c_str(), kv.value().as<const char*>());
+      debug(F("BLE: SLIST - sending: "));
+      debugln(entry);
+      fileStatusChar.notify((uint8_t*)entry, strlen(entry));
+      delay(10);  // BLE notify spacing
+      count++;
+    }
+    debugln(F("BLE: SLIST - sending SEND"));
+    fileStatusChar.notify((uint8_t*)"SEND", 4);
+    debug(F("BLE: SLIST - done, sent "));
+    debug(count);
+    debugln(F(" entries"));
+
+  } else if (strncmp(settingsCmdBuffer, "SGET:", 5) == 0) {
+    char* key = settingsCmdBuffer + 5;
+    debug(F("BLE: SGET - key: ["));
+    debug(key);
+    debugln(F("]"));
+
+    char valueBuf[48];
+    if (getSetting(key, valueBuf, sizeof(valueBuf))) {
+      char response[64];
+      snprintf(response, sizeof(response), "SVAL:%s=%s", key, valueBuf);
+      debug(F("BLE: SGET - responding: "));
+      debugln(response);
+      fileStatusChar.notify((uint8_t*)response, strlen(response));
+    } else {
+      debugln(F("BLE: SGET - key not found"));
+      fileStatusChar.notify((uint8_t*)"SERR:NOT_FOUND", 14);
+    }
+
+  } else if (strncmp(settingsCmdBuffer, "SSET:", 5) == 0) {
+    char* payload = settingsCmdBuffer + 5;
+    char* eq = strchr(payload, '=');
+    if (!eq) {
+      debugln(F("BLE: SSET - missing '=' in command"));
+      fileStatusChar.notify((uint8_t*)"SERR:BAD_CMD", 12);
+      return;
+    }
+    *eq = '\0';
+    char* key = payload;
+    char* value = eq + 1;
+
+    debug(F("BLE: SSET - key: ["));
+    debug(key);
+    debug(F("] value: ["));
+    debug(value);
+    debugln(F("]"));
+
+    if (setSetting(key, value)) {
+      char response[64];
+      snprintf(response, sizeof(response), "SOK:%s", key);
+      debug(F("BLE: SSET - success: "));
+      debugln(response);
+      fileStatusChar.notify((uint8_t*)response, strlen(response));
+    } else {
+      debugln(F("BLE: SSET - write failed"));
+      fileStatusChar.notify((uint8_t*)"SERR:WRITE_FAIL", 15);
+    }
+  } else {
+    debug(F("BLE: Unknown settings cmd: ["));
+    debug(settingsCmdBuffer);
+    debugln(F("]"));
+  }
+}
+
 void BLUETOOTH_LOOP() {
   if (!bleActive) return;
+
+  // Process deferred settings commands (thread-safe: runs in main loop)
+  if (settingsCmdPending) {
+    processSettingsCommand();
+    settingsCmdPending = false;
+  }
 
   // Deferred MTU negotiation - read result 500ms after request
   if (bleWaitingForMTU && millis() - bleMTURequestTime >= 500) {
