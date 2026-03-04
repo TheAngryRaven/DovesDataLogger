@@ -3,8 +3,20 @@
 // ISR and main loop processing for tachometer input
 ///////////////////////////////////////////
 
+// After engine-stopped timeout, the first pulse period is garbage (it's the
+// time since the last pulse before stopping, not a real RPM measurement).
+// This flag tells TACH_LOOP to discard that first period.
+static volatile bool tachNeedFirstPulseDiscard = true;
+
+// Median-of-3 filter: rejects single-pulse noise spikes from ignition
+// ringing that slip past the debounce window. Two out of three readings
+// must agree for a value to pass through to the EMA.
+static uint32_t tachPeriodBuf[3];
+static uint8_t tachPeriodIdx = 0;
+static uint8_t tachPeriodCount = 0;
+
 /**
- * Tachometer ISR - called on rising edge of tach signal
+ * Tachometer ISR - called on falling edge of tach signal
  *
  * CRITICAL: This ISR must be fast and must NOT call noInterrupts().
  * Calling noInterrupts() here would disable ALL system interrupts,
@@ -68,10 +80,35 @@ void TACH_LOOP() {
   }
   interrupts();
 
-  // Apply exponential moving average filter to smooth RPM
+  // Apply median-of-3 filter then EMA to smooth RPM
   if (havePeriod && periodUs > 0) {
-    float rpmInst = (60.0e6f * tachRevsPerPulse) / (float)periodUs;
-    tachRpmFiltered += tachFilterAlpha * (rpmInst - tachRpmFiltered);
+    // Discard first period after engine-stopped state. That period is
+    // the gap since the last pulse before stopping — not a real RPM.
+    if (tachNeedFirstPulseDiscard) {
+      tachNeedFirstPulseDiscard = false;
+      // Still update tachLastPulseUs (already done in ISR) so the NEXT
+      // period is measured from this pulse. Just don't feed filters.
+    } else {
+      // Feed period into median-of-3 ring buffer
+      tachPeriodBuf[tachPeriodIdx] = periodUs;
+      tachPeriodIdx = (tachPeriodIdx + 1) % 3;
+      if (tachPeriodCount < 3) tachPeriodCount++;
+
+      // Need at least 3 samples for median
+      if (tachPeriodCount >= 3) {
+        // Median of 3 values (branchless-ish sort)
+        uint32_t a = tachPeriodBuf[0], b = tachPeriodBuf[1], c = tachPeriodBuf[2];
+        uint32_t median;
+        if (a <= b) {
+          median = (b <= c) ? b : ((a <= c) ? c : a);
+        } else {
+          median = (a <= c) ? a : ((b <= c) ? c : b);
+        }
+
+        float rpmInst = (60.0e6f * tachRevsPerPulse) / (float)median;
+        tachRpmFiltered += tachFilterAlpha * (rpmInst - tachRpmFiltered);
+      }
+    }
   }
 
   // Timeout: if no pulses for tachStopTimeoutUs, engine is stopped
@@ -80,6 +117,8 @@ void TACH_LOOP() {
 
   if ((uint32_t)(micros() - lastPulseUs) > tachStopTimeoutUs) {
     tachRpmFiltered = 0.0f;
+    tachNeedFirstPulseDiscard = true;
+    tachPeriodCount = 0;  // Reset median buffer for next startup
   }
 
   // Update display/log value at configured rate

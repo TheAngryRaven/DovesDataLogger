@@ -9,6 +9,19 @@
       "WebFetch(domain:content.u-blox.com)",
       "WebFetch(domain:raw.githubusercontent.com)",
       "Bash(wc:*)"
+      "Bash(ls:*)",
+      "Bash(arduino-cli version:*)",
+      "Bash(arduino-cli board:*)",
+      "Bash(arduino-cli core:*)",
+      "Bash(arduino-cli lib:*)",
+      "Bash(arduino-cli compile:*)",
+      "WebFetch(domain:wiki.seeedstudio.com)",
+      "WebFetch(domain:forum.seeedstudio.com)",
+      "WebFetch(domain:learn.sparkfun.com)",
+      "WebFetch(domain:www.arduinolibraries.info)",
+      "WebFetch(domain:forum.arduino.cc)",
+      "WebFetch(domain:devzone.nordicsemi.com)",
+      "WebFetch(domain:community.platformio.org)"
     ]
   }
 }

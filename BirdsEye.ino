@@ -5,6 +5,7 @@
 // setup(), and loop(). All function implementations are split into
 // separate module files (Arduino concatenates .ino files automatically):
 //
+//   accelerometer.ino - LSM6DS3 IMU accelerometer reads (g-force)
 //   bluetooth.ino    - BLE file transfer service
 //   display_pages.ino - All display page rendering functions
 //   display_ui.ino   - Display setup, button handling, menu navigation
@@ -181,6 +182,16 @@ const int tachUpdateRateHz = 3;
 static const float tachRevsPerPulse = 1.0f;     // Magneto 4T single: wasted spark = 1 pulse/rev
 static const float tachFilterAlpha = 0.20f;     // EMA filter: 0=smooth, 1=instant
 static const uint32_t tachStopTimeoutUs = 500000; // 500ms with no pulse = engine stopped
+
+///////////////////////////////////////////
+// ACCELEROMETER GLOBALS
+///////////////////////////////////////////
+#include <LSM6DS3.h>
+LSM6DS3 accelIMU(I2C_MODE, 0x6A);
+bool accelAvailable = false;
+float accelX = 0.0f;
+float accelY = 0.0f;
+float accelZ = 0.0f;
 
 ///////////////////////////////////////////
 // GPS GLOBALS
@@ -531,6 +542,8 @@ void setup() {
   // Load settings from SD (creates defaults on first boot)
   SETTINGS_SETUP();
 
+  ACCEL_SETUP();
+
   GPS_SETUP();
 
   if (!sdSetupSuccess) {
@@ -619,6 +632,7 @@ void loop() {
 
   GPS_LOOP();
   TACH_LOOP();
+  ACCEL_LOOP();
   BLUETOOTH_LOOP();
 
   #ifndef ENDURANCE_MODE
