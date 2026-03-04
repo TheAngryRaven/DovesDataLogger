@@ -19,9 +19,12 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
 - **Lap History** - Session-based lap history (up to 1000 laps)
 - **Speed Display** - Large, easy-to-read speed display
 - **Simple CSV Format** - Easy-to-parse data files with millisecond-precision timestamps
+
+#### WebApp Features (no login)
 - **Bluetooth Downloads** - Can now download files directly to [HackTheTrack.net](http://HackTheTrack.net)
-- **Configure settings via webapp** - none of us want to fill in text with three buttons
+- **Configure settings** - none of us want to fill in text with three buttons
 - **Track Sync** - Update on-device track library via the webapp
+
 #### To-Do Features
 - **Automatic Track/Course Detection** - Would be nice to just drive
 - **Pin Lock** - require pin to pull logs from device
@@ -53,7 +56,6 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
 - **MCU**: Seeed XIAO nRF52840 Sense (64MHz ARM Cortex-M4 with FPU + Bluetooth + 6 axis IMU)
   - Low power consumption: ~120mAh with 2.45" screen
   - Built-in battery charging circuit
-  - *Note: May switch to Seeed XIAO ESP32 (same form factor) for WiFi data transfer at cost of higher power usage*
 - **GPS**: u-blox SAM-M10Q (Matek SAM-M10Q-CAN recommended)
   - Configured for 25Hz update rate
   - GPS-only mode for maximum performance
@@ -72,6 +74,7 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
   - Input on pin D0
   - Noise filtering for ignition systems
   - *Circuit diagram: `tachometer-circuit.jpg` (README coming soon)*
+  - diagram is missing required optocoupler and isolated dc-dc power supply
 
 ### Power Usage
 - Current draw: ~120mAh with 2.45" OLED display
@@ -150,19 +153,35 @@ Use [Google Maps](https://maps.google.com) or your preferred mapping tool:
 
 The track will automatically appear in the track selection menu on next boot.
 
+## Device Settings
+
+Settings are stored in `/SETTINGS.json` on the SD card. The file is created automatically on first boot with random default values.
+
+```json
+{
+  "bluetooth_name": "DovesDataLogger-042",
+  "bluetooth_pin": "7391"
+}
+```
+
+| Setting | Description | Default |
+|---|---|---|
+| `bluetooth_name` | BLE device name visible during pairing | Random (e.g. `DovesDataLogger-042`) |
+| `bluetooth_pin` | PIN displayed on device for webapp pairing | Random 4-digit |
+
 ## CSV Data Format
 
 Data is logged in simple CSV format with the following columns:
 
 ```
-timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm
+timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z
 ```
 
 **Example:**
 ```csv
-timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm
-1704724801234,12,0.8,28.41270817,-81.37973266,87.32,125.45,182.34,1.25,8450
-1704724801274,12,0.8,28.41270821,-81.37973270,87.45,125.46,182.50,1.22,8475
+timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z
+1741128001234,12,0.8,28.41270817,-81.37973266,87.32,125.45,182.34,1.25,8450,0.123,-0.945,0.032
+1741128001274,12,0.8,28.41270821,-81.37973270,87.45,125.46,182.50,1.22,8475,0.118,-0.951,0.028
 ```
 
 - **timestamp**: Unix timestamp in milliseconds (since Jan 1, 1970)
@@ -174,6 +193,7 @@ timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm
 - **heading_deg**: Heading of motion in degrees (0-360, 2 decimal places, from UBX headMot)
 - **h_acc_m**: Horizontal accuracy estimate in meters (2 decimal places, from UBX hAcc)
 - **rpm**: Engine RPM from tachometer input
+- **accel_x/y/z**: Accelerometer g-force from onboard LSM6DS3 IMU (3 decimal places, logs `0.000` if IMU not available)
 
 **Log File Naming:**
 `[TRACK]_[LAYOUT]_[DIRECTION]_[YYYY]_[MMDD]_[HHMM].dove`
