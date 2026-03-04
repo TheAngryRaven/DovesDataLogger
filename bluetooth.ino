@@ -7,6 +7,15 @@
 static volatile bool settingsCmdPending = false;
 static char settingsCmdBuffer[65];  // 64 chars + null
 
+// Track upload state (BLE callback -> main loop)
+static volatile bool trackUploadActive = false;
+static volatile bool trackUploadReady = false;      // signals main loop to send TREADY
+static volatile bool trackUploadComplete = false;    // signals main loop to write file
+static volatile bool trackUploadError = false;
+static char trackUploadFilename[25];                 // just the filename (e.g. "OKC.json")
+static char trackUploadBuffer[2048];
+static volatile uint16_t trackUploadOffset = 0;
+
 void bleConnectCallback(uint16_t conn_handle) {
   debugln(F("BLE: Device connected!"));
   bleConnected = true;
@@ -43,6 +52,11 @@ void bleDisconnectCallback(uint16_t conn_handle, uint8_t reason) {
     releaseSDAccess(SD_ACCESS_BLE_TRANSFER);  // Release SD access on disconnect
   }
   bleTransferInProgress = false;
+  // Reset track upload state on disconnect
+  trackUploadActive = false;
+  trackUploadReady = false;
+  trackUploadComplete = false;
+  trackUploadError = false;
 }
 
 // Forward declaration for callback
@@ -145,6 +159,47 @@ void bleSendFileList() {
   debugln(F(" files"));
 }
 
+void bleSendTrackList() {
+  if (currentSDAccess != SD_ACCESS_NONE) {
+    debugln(F("BLE: SD busy, cannot list tracks"));
+    fileStatusChar.notify((uint8_t*)"TERR:SD_BUSY", 12);
+    return;
+  }
+
+  File32 trackDir2 = SD.open("/TRACKS/");
+  if (!trackDir2) {
+    debugln(F("BLE: Failed to open TRACKS directory"));
+    fileStatusChar.notify((uint8_t*)"TEND", 4);
+    return;
+  }
+
+  int fileCount = 0;
+  while (true) {
+    File32 entry = trackDir2.openNextFile();
+    if (!entry) break;
+
+    if (!entry.isDirectory()) {
+      char name[64];
+      entry.getName(name, sizeof(name));
+
+      char msg[70];
+      int len = snprintf(msg, sizeof(msg), "TFILE:%s", name);
+      if (len > 0 && len < (int)sizeof(msg)) {
+        fileStatusChar.notify((uint8_t*)msg, len);
+        delay(10);
+        fileCount++;
+      }
+    }
+    entry.close();
+  }
+  trackDir2.close();
+
+  fileStatusChar.notify((uint8_t*)"TEND", 4);
+  debug(F("BLE: Track list sent, "));
+  debug(fileCount);
+  debugln(F(" files"));
+}
+
 void bleStartFileTransfer(const char* filename) {
   if (bleCurrentFile) bleCurrentFile.close();
 
@@ -213,6 +268,23 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
     buffer[end--] = '\0';
   }
 
+  // Handle upload data mode — all writes are raw data until TDONE
+  if (trackUploadActive) {
+    if (strncmp(buffer, "TDONE", 5) == 0 && len <= 6) {
+      debugln(F("BLE: TDONE received"));
+      trackUploadComplete = true;
+      return;
+    }
+    // Append raw data to buffer
+    if (trackUploadOffset + len <= sizeof(trackUploadBuffer)) {
+      memcpy(trackUploadBuffer + trackUploadOffset, data, len);
+      trackUploadOffset += len;
+    } else {
+      trackUploadError = true;
+    }
+    return;
+  }
+
   debug(F("BLE: Received command: ["));
   debug(buffer);
   debugln(F("]"));
@@ -240,6 +312,27 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
     strncpy(settingsCmdBuffer, buffer, sizeof(settingsCmdBuffer) - 1);
     settingsCmdBuffer[sizeof(settingsCmdBuffer) - 1] = '\0';
     settingsCmdPending = true;
+
+  // Track management commands
+  } else if (strcmp(buffer, "TLIST") == 0) {
+    bleSendTrackList();
+  } else if (strncmp(buffer, "TGET:", 5) == 0) {
+    char filepath[FILEPATH_MAX];
+    snprintf(filepath, sizeof(filepath), "/TRACKS/%s", buffer + 5);
+    bleStartFileTransfer(filepath);
+  } else if (strncmp(buffer, "TPUT:", 5) == 0) {
+    if (trackUploadActive || bleTransferInProgress) {
+      fileStatusChar.notify((uint8_t*)"TERR:BUSY", 9);
+      return;
+    }
+    strncpy(trackUploadFilename, buffer + 5, sizeof(trackUploadFilename) - 1);
+    trackUploadFilename[sizeof(trackUploadFilename) - 1] = '\0';
+    trackUploadOffset = 0;
+    trackUploadError = false;
+    trackUploadComplete = false;
+    trackUploadReady = true;
+    trackUploadActive = true;
+    debugln(F("BLE: Track upload started"));
   }
 }
 
@@ -433,6 +526,66 @@ void processSettingsCommand() {
   }
 }
 
+void processTrackUpload() {
+  debug(F("BLE: Writing track file: ["));
+  debug(trackUploadFilename);
+  debug(F("] size: "));
+  debugln(trackUploadOffset);
+
+  if (trackUploadError) {
+    debugln(F("BLE: Track upload too large"));
+    fileStatusChar.notify((uint8_t*)"TERR:TOO_LARGE", 14);
+    trackUploadActive = false;
+    trackUploadComplete = false;
+    trackUploadError = false;
+    return;
+  }
+
+  if (!acquireSDAccess(SD_ACCESS_BLE_TRANSFER)) {
+    debugln(F("BLE: SD busy, cannot write track"));
+    fileStatusChar.notify((uint8_t*)"TERR:SD_BUSY", 12);
+    trackUploadActive = false;
+    trackUploadComplete = false;
+    return;
+  }
+
+  char filepath[FILEPATH_MAX];
+  snprintf(filepath, sizeof(filepath), "/TRACKS/%s", trackUploadFilename);
+
+  // Delete existing file if present
+  if (SD.exists(filepath)) {
+    SD.remove(filepath);
+  }
+
+  File32 outFile = SD.open(filepath, FILE_WRITE);
+  if (!outFile) {
+    debugln(F("BLE: Failed to create track file"));
+    releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
+    fileStatusChar.notify((uint8_t*)"TERR:WRITE_FAIL", 15);
+    trackUploadActive = false;
+    trackUploadComplete = false;
+    return;
+  }
+
+  size_t written = outFile.write((uint8_t*)trackUploadBuffer, trackUploadOffset);
+  outFile.close();
+  releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
+
+  if (written != trackUploadOffset) {
+    debugln(F("BLE: Track file write incomplete"));
+    fileStatusChar.notify((uint8_t*)"TERR:WRITE_FAIL", 15);
+  } else {
+    debugln(F("BLE: Track file written successfully"));
+    fileStatusChar.notify((uint8_t*)"TOK", 3);
+    // Refresh in-memory track list
+    buildTrackList();
+  }
+
+  trackUploadActive = false;
+  trackUploadComplete = false;
+  trackUploadError = false;
+}
+
 void BLUETOOTH_LOOP() {
   if (!bleActive) return;
 
@@ -440,6 +593,16 @@ void BLUETOOTH_LOOP() {
   if (settingsCmdPending) {
     processSettingsCommand();
     settingsCmdPending = false;
+  }
+
+  // Process track upload state machine
+  if (trackUploadReady) {
+    fileStatusChar.notify((uint8_t*)"TREADY", 6);
+    trackUploadReady = false;
+  }
+
+  if (trackUploadComplete) {
+    processTrackUpload();
   }
 
   // Deferred MTU negotiation - read result 500ms after request

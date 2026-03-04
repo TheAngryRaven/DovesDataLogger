@@ -160,6 +160,15 @@ loop()  ~250 Hz
   - `SBUSY` returned if a command is already pending.
   - Uses deferred execution: BLE callback copies command into buffer,
     `BLUETOOTH_LOOP()` processes it in main loop for thread-safe SD access.
+- **Track management commands** (via `fileRequestChar` / `fileStatusChar`):
+  - `TLIST` → `TFILE:name.json` per file, then `TEND`
+  - `TGET:name.json` → reuses existing file transfer (`SIZE:N` → data chunks → `DONE`)
+  - `TPUT:name.json` → `TREADY` → app sends data chunks → `TDONE` → `TOK`
+  - Upload uses a 2048-byte static RAM buffer; `TERR:TOO_LARGE` if exceeded.
+  - Error responses: `TERR:SD_BUSY`, `TERR:BUSY`, `TERR:WRITE_FAIL`, `TERR:NO_FILE`.
+  - Upload state machine: BLE callback accumulates data + sets flags,
+    `BLUETOOTH_LOOP()` sends `TREADY` and calls `processTrackUpload()`
+    for thread-safe SD writes. Calls `buildTrackList()` after successful upload.
 
 ### 7. Replay (`replay.ino`)
 
@@ -242,6 +251,7 @@ and optional sector lines. Stored in `trackLayouts[MAX_LAYOUTS]` (max 10).
 | JSON buffer | 2048 (1024 on Wokwi) | `sd_functions.ino` |
 | Settings JSON buffer | 512 | `settings.ino` |
 | Settings file path | `/SETTINGS.json` | `settings.ino` |
+| Track upload buffer | 2048 | `bluetooth.ino` |
 
 ---
 
