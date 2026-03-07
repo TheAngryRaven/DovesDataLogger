@@ -125,21 +125,21 @@ void GPS_SETUP() {
     if (GPS_SERIAL) {
       // Connect to GPS at default baud
       if (!myGNSS.begin(GPS_SERIAL)) {
-        debugln(F("GPS not detected at 9600 baud, trying 115200..."));
+        debugln(F("GPS not detected at 9600 baud, trying 57600..."));
         GPS_SERIAL.end();
         delay(100);
 
-        // Module may already be configured to 115200 from a previous session
+        // Module may already be configured to 57600 from a previous session
         GPS_SERIAL.begin(GPS_BAUD_RATE);
         delay(100);
         if (!myGNSS.begin(GPS_SERIAL)) {
           debugln(F("ERROR: GPS not detected at any baud rate!"));
           return;  // Leave gpsInitialized = false
         }
-        debugln(F("GPS found at 115200 baud (already configured)"));
+        debugln(F("GPS found at 57600 baud (already configured)"));
       } else {
-        // Connected at 9600, switch module to 115200
-        debugln(F("GPS found at 9600, switching to 115200..."));
+        // Connected at 9600, switch module to 57600
+        debugln(F("GPS found at 9600, switching to 57600..."));
         myGNSS.setSerialRate(GPS_BAUD_RATE);
         delay(100);
         GPS_SERIAL.end();
@@ -151,7 +151,7 @@ void GPS_SETUP() {
           debugln(F("ERROR: GPS lost after baud switch!"));
           return;
         }
-        debugln(F("GPS reconnected at 115200"));
+        debugln(F("GPS reconnected at 57600"));
       }
 
       // Configure via VALSET API
