@@ -292,9 +292,9 @@ char replayLineBuffer[REPLAY_LINE_BUFFER_SIZE];
 // #define PIN_SPI_CS 3 // todo: ground out for A0/battery voltage...
 #endif
 
-// Reduced from 25MHz to 4MHz for better EMI resistance
+// Reduced from 25MHz to 1MHz for better EMI resistance
 // Slower speed = more robust against ignition noise
-#define SPI_SPEED SD_SCK_MHZ(4)
+#define SPI_SPEED SD_SCK_MHZ(1)
 
 #include "SdFat.h"
 #include "sdios.h"
