@@ -31,7 +31,8 @@ void resetReplayState() {
 }
 
 /**
- * @brief Build list of .dove and .nmea files from SD card root
+ * @brief Build list of replay files from SD card root
+ * New UI: only .dovex files. Legacy: .dove and .nmea files.
  * @return true if files found, false otherwise
  */
 bool buildReplayFileList() {
@@ -87,11 +88,9 @@ bool buildReplayFileList() {
     }
     filesScanned++;
 
-    // Use larger buffer for getName - SdFat may fail silently with small buffers
     char name[64];
     entry.getName(name, sizeof(name));
 
-    // Debug: show every file/dir found
     debug(F("Replay: ["));
     debug(filesScanned);
     debug(F("] "));
@@ -102,8 +101,22 @@ bool buildReplayFileList() {
     debugln(F(")"));
 
     if (!entry.isDirectory()) {
-      // Check for .dove or .nmea extension (case insensitive)
       int len = strlen(name);
+
+      #ifdef ENABLE_NEW_UI
+      // New UI: only .dovex files
+      if (len > 6) {
+        char* ext = name + len - 6;
+        if (strcasecmp(ext, ".dovex") == 0) {
+          strncpy(replayFiles[numReplayFiles], name, MAX_REPLAY_FILENAME_LENGTH - 1);
+          replayFiles[numReplayFiles][MAX_REPLAY_FILENAME_LENGTH - 1] = '\0';
+          numReplayFiles++;
+          debug(F("Replay: Found file: "));
+          debugln(name);
+        }
+      }
+      #else
+      // Legacy: .dove and .nmea files
       if (len > 5) {
         char* ext = name + len - 5;
         bool isDove = (strcasecmp(ext, ".dove") == 0);
@@ -117,8 +130,9 @@ bool buildReplayFileList() {
           debugln(name);
         }
       }
+      #endif
     }
-    entry.close();;
+    entry.close();
   }
 
   root.close();
@@ -469,8 +483,9 @@ bool extractGpsPointFromTrackFile(int trackIndex, double& lat, double& lng) {
     return false;
   }
 
-  // Read JSON content
-  char buffer[JSON_BUFFER_SIZE];
+  // Read JSON content (static to avoid ~4KB stack pressure per call)
+  static char buffer[JSON_BUFFER_SIZE];
+  static StaticJsonDocument<JSON_BUFFER_SIZE> replayTrackJson;
   int bytesRead = trackFileTemp.read(buffer, sizeof(buffer) - 1);
   trackFileTemp.close();
 
@@ -480,19 +495,28 @@ bool extractGpsPointFromTrackFile(int trackIndex, double& lat, double& lng) {
   buffer[bytesRead] = '\0';
 
   // Parse JSON
-  StaticJsonDocument<JSON_BUFFER_SIZE> trackJson;
-  DeserializationError error = deserializeJson(trackJson, buffer);
+  replayTrackJson.clear();
+  DeserializationError error = deserializeJson(replayTrackJson, buffer);
   if (error != DeserializationError::Ok) {
     return false;
   }
 
-  // Get first layout's start line midpoint
-  JsonArray array = trackJson.as<JsonArray>();
-  if (array.size() == 0) {
+  // Get first layout's start line midpoint — handles both formats
+  JsonVariant firstLayout;
+  if (replayTrackJson.is<JsonObject>()) {
+    // New format: { "courses": [...] }
+    JsonArray courses = replayTrackJson["courses"];
+    if (courses.size() == 0) return false;
+    firstLayout = courses[0];
+  } else if (replayTrackJson.is<JsonArray>()) {
+    // Legacy format: bare array
+    JsonArray array = replayTrackJson.as<JsonArray>();
+    if (array.size() == 0) return false;
+    firstLayout = array[0];
+  } else {
     return false;
   }
 
-  JsonVariant firstLayout = array[0];
   double a_lat = firstLayout["start_a_lat"];
   double a_lng = firstLayout["start_a_lng"];
   double b_lat = firstLayout["start_b_lat"];
@@ -617,3 +641,94 @@ void processReplayFile() {
     }
   }
 }
+
+#ifdef ENABLE_NEW_UI
+///////////////////////////////////////////
+// DOVEX REPLAY (header-only, instant)
+///////////////////////////////////////////
+
+// dovexReplay* globals are declared in BirdsEye.ino (must be visible to display_pages.ino)
+
+/**
+ * @brief Parse a DOVEX file's header (first 4KB) for instant replay results.
+ * Line 1: datetime, driver, course, short_name, best_lap_ms, optimal_ms
+ * Line 2: lap1_ms,lap2_ms,lap3_ms,...
+ * @return true if header parsed successfully
+ */
+bool parseDovexHeader(const char* filename) {
+  File replayDovex;
+  if (!replayDovex.open(filename, O_READ)) {
+    debugln(F("DOVEX Replay: Cannot open file"));
+    return false;
+  }
+
+  // Line 1 is the column header label — skip it
+  char headerBuf[256];
+  if (!readReplayLine(replayDovex, headerBuf, sizeof(headerBuf))) {
+    replayDovex.close();
+    debugln(F("DOVEX Replay: Cannot read line 1"));
+    return false;
+  }
+
+  // Check for empty/null header (crash recovery — metadata never written)
+  if (headerBuf[0] == '\0' || headerBuf[0] == '\n' || headerBuf[0] == '\r') {
+    replayDovex.close();
+    debugln(F("DOVEX Replay: Empty header (incomplete session)"));
+    return false;
+  }
+
+  // Read line 2 (metadata values)
+  if (!readReplayLine(replayDovex, headerBuf, sizeof(headerBuf))) {
+    replayDovex.close();
+    debugln(F("DOVEX Replay: Cannot read line 2"));
+    return false;
+  }
+
+  // Parse line 2: datetime, driver, course, short_name, best_lap, optimal
+  char* tok = strtok(headerBuf, ",");
+  if (tok) { strncpy(dovexReplayDatetime, tok, sizeof(dovexReplayDatetime) - 1); dovexReplayDatetime[sizeof(dovexReplayDatetime) - 1] = '\0'; }
+  tok = strtok(NULL, ",");
+  if (tok) { strncpy(dovexReplayDriver, tok, sizeof(dovexReplayDriver) - 1); dovexReplayDriver[sizeof(dovexReplayDriver) - 1] = '\0'; }
+  tok = strtok(NULL, ",");
+  if (tok) { strncpy(dovexReplayCourseName, tok, sizeof(dovexReplayCourseName) - 1); dovexReplayCourseName[sizeof(dovexReplayCourseName) - 1] = '\0'; }
+  tok = strtok(NULL, ",");
+  if (tok) { strncpy(dovexReplayShortName, tok, sizeof(dovexReplayShortName) - 1); dovexReplayShortName[sizeof(dovexReplayShortName) - 1] = '\0'; }
+  tok = strtok(NULL, ",");
+  if (tok) { strncpy(dovexReplayBestLap, tok, sizeof(dovexReplayBestLap) - 1); dovexReplayBestLap[sizeof(dovexReplayBestLap) - 1] = '\0'; }
+  tok = strtok(NULL, ",");
+  if (tok) { strncpy(dovexReplayOptimal, tok, sizeof(dovexReplayOptimal) - 1); dovexReplayOptimal[sizeof(dovexReplayOptimal) - 1] = '\0'; }
+
+  // Skip line 3 (lap column header)
+  static char lapBuf[7800];
+  readReplayLine(replayDovex, lapBuf, sizeof(lapBuf));
+
+  // Read line 4 (lap times)
+  if (!readReplayLine(replayDovex, lapBuf, sizeof(lapBuf))) {
+    // No lap times — session with no laps
+    replayDovex.close();
+    lapHistoryCount = 0;
+    return true;
+  }
+
+  replayDovex.close();
+
+  // Parse comma-separated lap times
+  lapHistoryCount = 0;
+  lastLap = 0;
+  tok = strtok(lapBuf, ",");
+  while (tok != NULL && lapHistoryCount < lapHistoryMaxLaps) {
+    unsigned long lapMs = strtoul(tok, NULL, 10);
+    if (lapMs > 0) {
+      lapHistory[lapHistoryCount++] = lapMs;
+      lastLap = lapMs;
+    }
+    tok = strtok(NULL, ",");
+  }
+
+  debug(F("DOVEX Replay: Parsed "));
+  debug(lapHistoryCount);
+  debugln(F(" laps from header"));
+
+  return true;
+}
+#endif // ENABLE_NEW_UI

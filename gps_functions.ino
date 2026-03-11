@@ -202,6 +202,17 @@ void GPS_LOOP() {
     gpsDataFresh = false;
 
     // Update the lap timer with fresh GPS data
+    #ifdef ENABLE_NEW_UI
+    if (gpsData.fix && courseManager != nullptr) {
+      double ltLat = gpsData.latitudeDegrees;
+      double ltLng = gpsData.longitudeDegrees;
+      double ltAlt = gpsData.altitude;
+      double ltSpeed = gpsData.speed;
+
+      courseManager->updateCurrentTime(getGpsTimeInMilliseconds());
+      courseManager->loop(ltLat, ltLng, ltAlt, ltSpeed);
+    }
+    #else
     if (trackSelected && gpsData.fix) {
       double ltLat = gpsData.latitudeDegrees;
       double ltLng = gpsData.longitudeDegrees;
@@ -211,9 +222,17 @@ void GPS_LOOP() {
       lapTimer.updateCurrentTime(getGpsTimeInMilliseconds());
       lapTimer.loop(ltLat, ltLng, ltAlt, ltSpeed);
     }
+    #endif
 
   #ifdef SD_CARD_LOGGING_ENABLED
-    if (trackSelected && gpsData.fix && sdSetupSuccess && sdDataLogInitComplete && enableLogging) {
+    // Determine if logging conditions are met
+    #ifdef ENABLE_NEW_UI
+    bool loggingCondition = gpsData.fix && sdSetupSuccess && enableLogging;
+    #else
+    bool loggingCondition = trackSelected && gpsData.fix && sdSetupSuccess && enableLogging;
+    #endif
+
+    if (loggingCondition && sdDataLogInitComplete) {
 
       /////////////////////////////////////////////////////////////////
       // Log every PVT update (~25Hz)
@@ -230,17 +249,14 @@ void GPS_LOOP() {
       double snapSpeedMph = snapSpeed * 1.15078;
 
       // VALIDATE: Minimal checks to prevent genuinely corrupt data from being logged
-      // Philosophy: log everything possible, HDOP/sats are in the CSV for post-filtering
-      // Only reject data that would be file-corrupting garbage or clearly unfixed
-      bool hasActualFix = (snapSats > 0);  // Must have satellites, not just fix flag
-      bool validCoords = !(snapLat == 0.0 && snapLng == 0.0);  // Both zero = no position computed
+      bool hasActualFix = (snapSats > 0);
+      bool validCoords = !(snapLat == 0.0 && snapLng == 0.0);
       bool validLat = (snapLat >= -90.0 && snapLat <= 90.0);
       bool validLng = (snapLng >= -180.0 && snapLng <= 180.0);
       bool validAlt = (snapAlt >= -1000.0 && snapAlt <= 50000.0);
-      bool validHdop = (snapHdop > 0.0);  // HDOP 0 = no fix, any positive value gets logged
+      bool validHdop = (snapHdop > 0.0);
       bool validSpeed = (snapSpeedMph >= 0.0 && snapSpeedMph <= 500.0);
 
-      // Check for NaN/Inf which can slip through range checks
       bool noNaN = !isnan(snapLat) && !isnan(snapLng) && !isnan(snapAlt) &&
                    !isnan(snapHdop) && !isnan(snapSpeed);
       bool noInf = !isinf(snapLat) && !isinf(snapLng) && !isinf(snapAlt) &&
@@ -249,48 +265,34 @@ void GPS_LOOP() {
       if (!hasActualFix || !validCoords || !validLat || !validLng || !validAlt ||
           !validHdop || !validSpeed || !noNaN || !noInf) {
         // Skip this sample - data is not trustworthy
-        // Don't spam debug output - this can happen frequently during GPS acquisition
       } else {
-        // Build CSV line: timestamp,sats,hdop,lat,lng,speed_mph,alt_m,rpm,...
         char csvLine[256];
-
-        // Convert floats to strings with proper precision
         char latStr[24], lngStr[24], hdopStr[12], speedStr[16], altStr[16];
         char headingStr[12], hAccStr[12];
 
-        // 8 decimals for lat/lng (racing precision)
         dtostrf(snapLat, 1, 8, latStr);
         dtostrf(snapLng, 1, 8, lngStr);
-
-        // 1 decimal for HDOP
         dtostrf(snapHdop, 1, 1, hdopStr);
-
-        // 2 decimals for speed and altitude
         dtostrf(snapSpeedMph, 1, 2, speedStr);
         dtostrf(snapAlt, 1, 2, altStr);
-
-        // 2 decimals for heading and horizontal accuracy
         dtostrf(gpsData.heading, 1, 2, headingStr);
         dtostrf(gpsData.horizontalAccuracy, 1, 2, hAccStr);
 
-        // 3 decimals for accelerometer (g-force)
         char accelXStr[12], accelYStr[12], accelZStr[12];
         dtostrf(accelX, 1, 3, accelXStr);
         dtostrf(accelY, 1, 3, accelYStr);
         dtostrf(accelZ, 1, 3, accelZStr);
 
-        // FINAL SAFETY CHECK: Verify strings are valid ASCII numbers
-        // Catches any remaining garbage that slipped through numeric validation
+        // String validation
         bool stringsValid = true;
         const char* strs[] = {latStr, lngStr, hdopStr, speedStr, altStr, headingStr, hAccStr, accelXStr, accelYStr, accelZStr};
         for (int i = 0; i < 10 && stringsValid; i++) {
           int len = strlen(strs[i]);
           if (len == 0 || len > 20) {
-            stringsValid = false;  // Empty or suspiciously long
+            stringsValid = false;
           }
           for (int j = 0; j < len && stringsValid; j++) {
             char c = strs[i][j];
-            // Valid: digits, decimal point, minus sign
             if (!((c >= '0' && c <= '9') || c == '.' || c == '-')) {
               stringsValid = false;
             }
@@ -300,15 +302,11 @@ void GPS_LOOP() {
         if (!stringsValid) {
           // dtostrf produced garbage - skip this entry silently
         } else {
-          // Convert timestamp to string manually - Arduino's snprintf doesn't support %llu
-          // This was causing "lu,0,," garbage in the CSV output
           unsigned long long timestamp = getGpsUnixTimestampMillis();
           char timestampStr[24];
-          // Convert 64-bit integer to string (Arduino lacks %llu support)
           if (timestamp == 0) {
             strcpy(timestampStr, "0");
           } else {
-            // Build string from right to left
             char temp[24];
             int i = 0;
             unsigned long long t = timestamp;
@@ -316,31 +314,17 @@ void GPS_LOOP() {
               temp[i++] = '0' + (t % 10);
               t /= 10;
             }
-            // Reverse into timestampStr
             for (int j = 0; j < i; j++) {
               timestampStr[j] = temp[i - 1 - j];
             }
             timestampStr[i] = '\0';
           }
 
-          // Build the complete CSV line (using %s for timestamp now)
           snprintf(csvLine, sizeof(csvLine), "%s,%d,%s,%s,%s,%s,%s,%s,%s,%d,%s,%s,%s",
-                   timestampStr,
-                   snapSats,
-                   hdopStr,
-                   latStr,
-                   lngStr,
-                   speedStr,
-                   altStr,
-                   headingStr,
-                   hAccStr,
-                   tachLastReported,
-                   accelXStr,
-                   accelYStr,
-                   accelZStr
-          );
+                   timestampStr, snapSats, hdopStr, latStr, lngStr,
+                   speedStr, altStr, headingStr, hAccStr,
+                   tachLastReported, accelXStr, accelYStr, accelZStr);
 
-          // Write with error checking
           size_t written = dataFile.println(csvLine);
           if (written == 0) {
             debugln(F("SD write failed - disabling logging"));
@@ -361,10 +345,9 @@ void GPS_LOOP() {
         lastCardFlush = millis();
         dataFile.flush();
       }
-    } else if (trackSelected && gpsData.fix && sdSetupSuccess && !sdDataLogInitComplete && enableLogging && gpsData.day > 0) {
+    } else if (loggingCondition && !sdDataLogInitComplete && gpsData.day > 0) {
       debugln(F("Attempt to initialize logfile"));
 
-      // Check if we can acquire SD access for logging
       if (!acquireSDAccess(SD_ACCESS_LOGGING)) {
         debugln(F("Cannot start logging - SD card busy"));
         enableLogging = false;
@@ -372,8 +355,26 @@ void GPS_LOOP() {
         internalNotification[sizeof(internalNotification) - 1] = '\0';
         switchToDisplayPage(PAGE_INTERNAL_FAULT);
       } else {
-        // Build filename from GPS date/time using snprintf (no heap allocation)
         char dataFileName[80];
+
+        #ifdef ENABLE_NEW_UI
+        if (settingUseLegacyCsv && selectedLocation >= 0 && selectedTrack >= 0) {
+          // Legacy .dove filename
+          snprintf(dataFileName, sizeof(dataFileName),
+                   "%s_%s_%s_20%02d_%02d%02d_%02d%02d%02d.dove",
+                   locations[selectedLocation],
+                   tracks[selectedTrack],
+                   selectedDirection == RACE_DIRECTION_FORWARD ? "fwd" : "rev",
+                   gpsData.year, gpsData.month, gpsData.day,
+                   gpsData.hour, gpsData.minute, gpsData.seconds);
+        } else {
+          // DOVEX filename: 20YYMMDD_HHMM.dovex
+          snprintf(dataFileName, sizeof(dataFileName),
+                   "20%02d%02d%02d_%02d%02d.dovex",
+                   gpsData.year, gpsData.month, gpsData.day,
+                   gpsData.hour, gpsData.minute);
+        }
+        #else
         snprintf(dataFileName, sizeof(dataFileName),
                  "%s_%s_%s_20%02d_%02d%02d_%02d%02d%02d.dove",
                  locations[selectedLocation],
@@ -381,32 +382,33 @@ void GPS_LOOP() {
                  selectedDirection == RACE_DIRECTION_FORWARD ? "fwd" : "rev",
                  gpsData.year, gpsData.month, gpsData.day,
                  gpsData.hour, gpsData.minute, gpsData.seconds);
+        #endif
 
         debug(F("dataFileName: ["));
         debug(dataFileName);
         debugln(F("]"));
 
-        // Open for writing - O_TRUNC ensures clean file if name collision occurs
         dataFile.open(dataFileName, O_CREAT | O_WRITE | O_TRUNC);
 
         if (!dataFile) {
           debugln(F("Error opening log file"));
-          releaseSDAccess(SD_ACCESS_LOGGING);  // Release on failure
-
+          releaseSDAccess(SD_ACCESS_LOGGING);
           snprintf(internalNotification, sizeof(internalNotification),
                    "Error saving log:\n%s", dataFileName);
           switchToDisplayPage(PAGE_INTERNAL_FAULT);
           enableLogging = false;
         } else {
-          // Write CSV header as first line
+          #ifdef ENABLE_NEW_UI
+          if (!settingUseLegacyCsv) {
+            // DOVEX: reserve header, write CSV column header after reserved area
+            dataFile.seekSet(DOVEX_HEADER_SIZE);
+          }
+          #endif
           dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z"));
           debugln(F("CSV header written"));
           sdDataLogInitComplete = true;
         }
       }
-    }
-    if (gpsData.fix) {
-      // debug(lastNMEA);
     }
   #endif
 

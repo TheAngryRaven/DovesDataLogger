@@ -34,6 +34,13 @@ static bool createDefaultSettings() {
   snprintf(defaultPin, sizeof(defaultPin), "%04d", (int)random(1000, 10000));
   settingsJson["bluetooth_pin"] = defaultPin;
 
+  // New default settings
+  settingsJson["driver_name"] = "Driver";
+  settingsJson["lap_detection_distance"] = "7";
+  settingsJson["waypoint_detection_distance"] = "30";
+  settingsJson["use_legacy_csv"] = "false";
+  settingsJson["waypoint_speed"] = "30";
+
   File settingsFile;
   settingsFile.open(SETTINGS_FILE_PATH, O_WRITE | O_CREAT | O_TRUNC);
   if (!settingsFile) {
@@ -55,6 +62,28 @@ static bool createDefaultSettings() {
 }
 
 /**
+ * @brief Ensure all expected settings keys exist, adding missing ones with defaults.
+ * Called when settings file already exists to handle firmware upgrades that add new keys.
+ */
+static void ensureDefaultSettings() {
+  // Table of all expected settings with their defaults
+  static const struct { const char* key; const char* defaultValue; } defaults[] = {
+    { "driver_name", "Driver" },
+    { "lap_detection_distance", "7" },
+    { "waypoint_detection_distance", "30" },
+    { "use_legacy_csv", "false" },
+    { "waypoint_speed", "30" },
+  };
+
+  char buf[48];
+  for (int i = 0; i < (int)(sizeof(defaults) / sizeof(defaults[0])); i++) {
+    if (!getSetting(defaults[i].key, buf, sizeof(buf))) {
+      setSetting(defaults[i].key, defaults[i].defaultValue);
+    }
+  }
+}
+
+/**
  * @brief Initialize settings subsystem. Creates default file on first boot.
  * Call once from setup() after SD is initialized.
  * @return true if settings file exists (or was created)
@@ -72,13 +101,14 @@ bool SETTINGS_SETUP() {
     return false;
   }
 
-  if (SD.exists(SETTINGS_FILE_PATH)) {
-    debugln(F("Settings: File exists"));
-    return true;
+  if (!SD.exists(SETTINGS_FILE_PATH)) {
+    debugln(F("Settings: First boot, creating defaults"));
+    return createDefaultSettings();
   }
 
-  debugln(F("Settings: First boot, creating defaults"));
-  return createDefaultSettings();
+  debugln(F("Settings: File exists, checking for missing keys"));
+  ensureDefaultSettings();
+  return true;
 }
 
 /**

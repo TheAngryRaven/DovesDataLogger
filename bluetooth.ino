@@ -57,6 +57,16 @@ void bleDisconnectCallback(uint16_t conn_handle, uint8_t reason) {
   trackUploadReady = false;
   trackUploadComplete = false;
   trackUploadError = false;
+
+  // Auto-reboot after BLE disconnect to apply any changed settings —
+  // but only if not in an active race session (would lose data)
+  if (!enableLogging) {
+    debugln(F("BLE: Rebooting to apply settings..."));
+    delay(100);  // Brief delay for debug output to flush
+    NVIC_SystemReset();
+  } else {
+    debugln(F("BLE: Skipping reboot (logging active)"));
+  }
 }
 
 // Forward declaration for callback

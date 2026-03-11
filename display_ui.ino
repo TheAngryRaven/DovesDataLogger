@@ -224,11 +224,30 @@ void handleMenuPageSelection() {
     if (menuSelectionIndex == 0) {
       // Race selected
       debugln(F("Main Menu: Race selected"));
+      #ifdef ENABLE_NEW_UI
+      // New UI: go directly to race mode, start logging on GPS fix
+      newUiRaceActive = true;
+      enableLogging = true;
+      trackSelected = true;
+      // Create CourseManager if not already created by track detection
+      createLapAnythingCourseManager();
+      switchToDisplayPage(GPS_SPEED);
+      #else
       switchToDisplayPage(PAGE_SELECT_LOCATION);
+      #endif
     } else if (menuSelectionIndex == 1) {
       // Replay selected
       debugln(F("Main Menu: Replay selected"));
       resetReplayState();
+      #ifdef ENABLE_NEW_UI
+      if (buildReplayFileList()) {
+        switchToDisplayPage(PAGE_REPLAY_FILE_SELECT);
+      } else {
+        strncpy(internalNotification, "No .dovex files\nfound on SD!", sizeof(internalNotification) - 1);
+        internalNotification[sizeof(internalNotification) - 1] = '\0';
+        switchToDisplayPage(PAGE_INTERNAL_WARNING);
+      }
+      #else
       if (buildReplayFileList()) {
         switchToDisplayPage(PAGE_REPLAY_FILE_SELECT);
       } else {
@@ -236,6 +255,7 @@ void handleMenuPageSelection() {
         internalNotification[sizeof(internalNotification) - 1] = '\0';
         switchToDisplayPage(PAGE_INTERNAL_WARNING);
       }
+      #endif
     } else {
       // Bluetooth selected
       debugln(F("Main Menu: Bluetooth selected"));
@@ -251,6 +271,17 @@ void handleMenuPageSelection() {
       debug(F("Replay: Selected file: "));
       debugln(replayFiles[selectedReplayFile]);
 
+      #ifdef ENABLE_NEW_UI
+      // DOVEX instant replay: parse header and go straight to results
+      if (parseDovexHeader(replayFiles[selectedReplayFile])) {
+        replayProcessingComplete = true;
+        switchToDisplayPage(PAGE_REPLAY_RESULTS);
+      } else {
+        strncpy(internalNotification, "Cannot read DOVEX\nheader (incomplete?)", sizeof(internalNotification) - 1);
+        internalNotification[sizeof(internalNotification) - 1] = '\0';
+        switchToDisplayPage(PAGE_INTERNAL_WARNING);
+      }
+      #else
       // Show detecting page
       switchToDisplayPage(PAGE_REPLAY_DETECTING);
       forceDisplayRefresh();
@@ -282,6 +313,7 @@ void handleMenuPageSelection() {
         switchToDisplayPage(PAGE_SELECT_LOCATION);
         replayModeActive = true; // Set flag so we know we're in replay mode
       }
+      #endif
     }
   } else if (currentPage == PAGE_REPLAY_SELECT_TRACK) {
     selectedTrack = menuSelectionIndex;
@@ -440,19 +472,23 @@ void handleMenuPageSelection() {
       switchToDisplayPage(GPS_SPEED);
     } else {
       // LOGGING STOP
+      #ifdef ENABLE_NEW_UI
+      endRaceSession();
+      switchToDisplayPage(PAGE_MAIN_MENU);
+      #else
       switchToDisplayPage(PAGE_SELECT_TRACK);
       enableLogging = false;
       sdDataLogInitComplete = false;
       trackSelected = false;
       dataFile.flush();
       dataFile.close();
-      releaseSDAccess(SD_ACCESS_LOGGING);  // Release SD access when logging stops
+      releaseSDAccess(SD_ACCESS_LOGGING);
       lapTimer.reset();
 
-      // reset lap history
       lapHistoryCount = 0;
       lastLap = 0;
       memset(lapHistory, 0, sizeof(lapHistory));
+      #endif
     }
     debug(F("Stop Logging?: "));
     debugln(menuSelectionIndex == 0 ? "NO" : "YES");
@@ -507,6 +543,12 @@ void displayLoop() {
       bool inEndurance = false;
     #endif
 
+    #ifdef ENABLE_NEW_UI
+    bool isCrossing = activeTimerCrossing();
+    #else
+    bool isCrossing = lapTimer.getCrossing();
+    #endif
+
     if (
       currentPage != GPS_STATS &&
       currentPage != GPS_DEBUG &&
@@ -514,7 +556,7 @@ void displayLoop() {
       currentPage != LOGGING_STOP_CONFIRM &&
       currentPage != PAGE_INTERNAL_FAULT &&
       currentPage != PAGE_INTERNAL_WARNING &&
-      lapTimer.getCrossing() &&
+      isCrossing &&
       inEndurance == false
     ) {
       displayCrossing();
@@ -704,7 +746,11 @@ void displayLoop() {
       debugln(F("Button Left"));
       // Special handling for replay results - left goes to lap list
       if (currentPage == PAGE_REPLAY_RESULTS) {
+        #ifdef ENABLE_NEW_UI
+        if (lapHistoryCount > 0) {
+        #else
         if (lapTimer.getLaps() > 0) {
+        #endif
           current_lap_list_page = 0;
           switchToDisplayPage(GPS_LAP_LIST);
         }
