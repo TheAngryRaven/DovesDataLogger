@@ -12,13 +12,16 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
 - **25Hz GPS Logging** - High-frequency data capture straight to SD card
 - **Accelerometer** - On-board 6-axis IMU when using Seeed XIAO nrf52840 sense +-15g
 - **RPM Monitoring** - Tachometer input with noise filtering for ignition systems
-- **Track & Layout Selection** - Multiple tracks and configurations loaded from SD card
+- **"Just Drive" Mode** - Automatic track detection, course detection, and lap timing — no manual selection needed (`ENABLE_NEW_UI`)
+- **Track & Layout Selection** - Multiple tracks and configurations loaded from SD card (legacy mode)
 - **Sector Timing** - Optional 2 and 3-sector support for detailed performance analysis
+- **Lap Anything** - Automatic waypoint-based lap timing when no track files match or no sectors configured
 - **Lap Timing** - Current lap, best lap, last lap, and optimal lap calculation
 - **Pace Comparison** - Real-time pace difference vs. best lap
 - **Lap History** - Session-based lap history (up to 1000 laps)
 - **Speed Display** - Large, easy-to-read speed display
-- **Simple CSV Format** - Easy-to-parse data files with millisecond-precision timestamps
+- **DOVEX Format** - Crash-safe logging with reserved header for instant replay
+- **Simple CSV Format** - Legacy `.dove` data files with millisecond-precision timestamps
 
 #### WebApp Features (no login)
 - **Bluetooth Downloads** - Can now download files directly to [HackTheTrack.net](http://HackTheTrack.net)
@@ -26,12 +29,10 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
 - **Track Sync** - Update on-device track library via the webapp
 
 #### To-Do Features
-- **Automatic Track/Course Detection** - Would be nice to just drive
 - **Pin Lock** - require pin to pull logs from device
 
 #### Experimental Features
-- **Review Data** - Can now "replay" old logs on-device to see laptimes/optimals/etc (slow)
-  - (kind of slow, kind of works)
+- **Review Data** - Instant replay of DOVEX session headers (new UI), or streamed replay of legacy logs (slower)
 
 ### Display Pages
 - GPS Statistics (battery, satellites, HDOP, logging status)
@@ -100,7 +101,37 @@ SDCARD/
 
 ### Track JSON Format
 
-Each track file contains an array of layouts. Each layout defines a start/finish line and optional sector lines using GPS coordinates:
+Two formats are supported. The device auto-detects which format is used.
+
+**New format** (recommended, matches [HackTheTrack.net](http://HackTheTrack.net) web simulator):
+
+```json
+{
+  "longName": "Orlando Kart Center",
+  "shortName": "OKC",
+  "defaultCourse": "Normal",
+  "courses": [
+    {
+      "name": "Normal",
+      "lengthFt": 3383,
+      "start_a_lat": 28.4127081705638,
+      "start_a_lng": -81.3797326641803,
+      "start_b_lat": 28.4127303867932,
+      "start_b_lng": -81.3795704875378,
+      "sector_2_a_lat": 28.4119049886871,
+      "sector_2_a_lng": -81.3790708193926,
+      "sector_2_b_lat": 28.4118316342961,
+      "sector_2_b_lng": -81.3791856652217,
+      "sector_3_a_lat": 28.4115010664104,
+      "sector_3_a_lng": -81.3799856475317,
+      "sector_3_b_lat": 28.4115084390461,
+      "sector_3_b_lng": -81.3798064021136
+    }
+  ]
+}
+```
+
+**Legacy format** (still supported):
 
 ```json
 [
@@ -110,26 +141,18 @@ Each track file contains an array of layouts. Each layout defines a start/finish
     "start_a_lng": -81.37973266,
     "start_b_lat": 28.41273039,
     "start_b_lng": -81.37957049,
-
     "sector_2_a_lat": 28.41190499,
     "sector_2_a_lng": -81.37907082,
     "sector_2_b_lat": 28.41183163,
-    "sector_2_b_lng": -81.37918567,
-
-    "sector_3_a_lat": 28.41150107,
-    "sector_3_a_lng": -81.37998565,
-    "sector_3_b_lat": 28.41150844,
-    "sector_3_b_lng": -81.37980640
-  },
-  {
-    "name": "Short Course",
-    "start_a_lat": 28.41199350,
-    "start_a_lng": -81.37995885,
-    "start_b_lat": 28.41199385,
-    "start_b_lng": -81.37986484
+    "sector_2_b_lng": -81.37918567
   }
 ]
 ```
+
+**New format fields:**
+- `longName` / `shortName`: track display names
+- `defaultCourse`: which course to prefer (used by CourseDetector)
+- `courses[].lengthFt`: track length in feet (enables automatic course detection ranking)
 
 **Coordinate Requirements:**
 - **Start/Finish Line**: `start_a_lat`, `start_a_lng`, `start_b_lat`, `start_b_lng` (required)
@@ -155,12 +178,17 @@ The track will automatically appear in the track selection menu on next boot.
 
 ## Device Settings
 
-Settings are stored in `/SETTINGS.json` on the SD card. The file is created automatically on first boot with random default values.
+Settings are stored in `/SETTINGS.json` on the SD card. The file is created automatically on first boot with random default values. Missing keys are auto-populated on boot when firmware is updated.
 
 ```json
 {
   "bluetooth_name": "DovesDataLogger-042",
-  "bluetooth_pin": "7391"
+  "bluetooth_pin": "7391",
+  "driver_name": "Driver",
+  "lap_detection_distance": "7",
+  "waypoint_detection_distance": "30",
+  "use_legacy_csv": "false",
+  "waypoint_speed": "30"
 }
 ```
 
@@ -168,21 +196,46 @@ Settings are stored in `/SETTINGS.json` on the SD card. The file is created auto
 |---|---|---|
 | `bluetooth_name` | BLE device name visible during pairing | Random (e.g. `DovesDataLogger-042`) |
 | `bluetooth_pin` | PIN displayed on device for webapp pairing | Random 4-digit |
+| `driver_name` | Driver name logged in DOVEX session header | `Driver` |
+| `lap_detection_distance` | Crossing detection threshold in meters | `7` |
+| `waypoint_detection_distance` | Waypoint proximity zone in meters (Lap Anything) | `30` |
+| `use_legacy_csv` | Use legacy `.dove` CSV format instead of DOVEX | `false` |
+| `waypoint_speed` | Minimum speed in mph to activate lap timing | `30` |
 
-## CSV Data Format
+## Data Formats
 
-Data is logged in simple CSV format with the following columns:
+### DOVEX Format (default)
 
+DOVEX files (`.dovex`) use a reserved 4 KB header for session metadata, with GPS data streaming after byte 4096. This enables crash-safe logging and instant on-device replay.
+
+**Structure:**
 ```
-timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z
+Bytes 0-4095:    Session header (written when session ends)
+  Line 1:        datetime,driver_name,course_name,short_name,best_lap_ms,optimal_lap_ms
+  Line 2:        lap1_ms,lap2_ms,lap3_ms,...
+  Remaining:     \n padding to byte 4096
+
+Bytes 4096+:     GPS data
+  Header row:    timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z
+  Data rows:     1741128001234,12,0.8,28.41270817,-81.37973266,87.32,125.45,182.34,1.25,8450,0.123,-0.945,0.032
 ```
 
-**Example:**
+If the device loses power mid-session, the header will be empty but all GPS data after byte 4096 is still valid and recoverable.
+
+**File naming:** `20YYMMDD_HHMM.dovex` (e.g. `20240115_1430.dovex`)
+
+### Legacy CSV Format
+
+When `use_legacy_csv` is set to `true`, data is logged in flat CSV format (`.dove` files).
+
 ```csv
 timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z
 1741128001234,12,0.8,28.41270817,-81.37973266,87.32,125.45,182.34,1.25,8450,0.123,-0.945,0.032
-1741128001274,12,0.8,28.41270821,-81.37973270,87.45,125.46,182.50,1.22,8475,0.118,-0.951,0.028
 ```
+
+**File naming:** `[TRACK]_[LAYOUT]_[DIRECTION]_[YYYY]_[MMDD]_[HHMM].dove` (e.g. `OKC_Normal_fwd_2024_0115_1430.dove`)
+
+### Column Reference
 
 - **timestamp**: Unix timestamp in milliseconds (since Jan 1, 1970)
 - **sats**: Number of GPS satellites
@@ -194,11 +247,6 @@ timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x
 - **h_acc_m**: Horizontal accuracy estimate in meters (2 decimal places, from UBX hAcc)
 - **rpm**: Engine RPM from tachometer input
 - **accel_x/y/z**: Accelerometer g-force from onboard LSM6DS3 IMU (3 decimal places, logs `0.000` if IMU not available)
-
-**Log File Naming:**
-`[TRACK]_[LAYOUT]_[DIRECTION]_[YYYY]_[MMDD]_[HHMM].dove`
-
-Example: `OKC_Normal_fwd_2024_0115_1430.dove`
 
 ## File Structure
 
@@ -293,7 +341,14 @@ Install these libraries via Arduino Library Manager:
 - **Left/Right Buttons**: Navigate between pages
 - **Middle Button**: Select/Enter (in menus), Quick-jump to Pace/Best Lap (while racing)
 
-**Startup Sequence:**
+**Startup Sequence (New UI / "Just Drive" mode):**
+1. Power on → Boot screen → Main menu
+2. Start driving — device auto-enters race mode at 10+ mph or 500+ RPM
+3. GPS fix acquired → DOVEX logging starts immediately
+4. Track auto-detected via GPS proximity → course detection begins
+5. Lap timing activates automatically (sector timing if configured, "Lap Anything" otherwise)
+
+**Startup Sequence (Legacy mode):**
 1. Power on → Boot screen
 2. Select Track location
 3. Select Track layout
@@ -301,9 +356,9 @@ Install these libraries via Arduino Library Manager:
 5. Logging begins automatically when GPS fix is acquired
 
 **Ending Session:**
-- Navigate to "END RACE" page (only accessible when speed < 2 mph)
-- Confirm to stop logging and close file
-- Returns to track selection
+- **Auto-idle** (new UI): stops automatically after 60 seconds below 2 mph
+- **Manual**: navigate to "END RACE" page (only accessible when speed < 2 mph), confirm to stop
+- Returns to main menu
 
 ## Technical Details
 
@@ -383,6 +438,7 @@ Look at existing pages like `displayPage_gps_speed()` (line 992) or `displayPage
 
 ## Future Enhancements
 
+- Pin lock — require PIN to pull logs from device
 - WiFi data transfer (if switching to ESP32 variant)
 - Additional sensor inputs (exhaust temp, water temp)
 - Bluetooth data streaming
@@ -390,11 +446,13 @@ Look at existing pages like `displayPage_gps_speed()` (line 992) or `displayPage
 
 ## Notes
 
-- Crossing detection threshold: 7.0 meters (configurable in code)
-- Maximum track locations: 100
+- Crossing detection threshold: configurable via `lap_detection_distance` setting (default 7m)
+- Maximum track locations: 1000
 - Maximum layouts per track: 10
 - Maximum lap history: 1000 laps per session
 - GPS coordinates stored with 8 decimal places (~1.1mm precision)
+- `ENABLE_NEW_UI` compile flag controls new vs legacy behavior (defined in `BirdsEye.ino`)
+- BLE disconnect triggers automatic device reboot (ensures settings changes take effect)
 
 ## License
 
