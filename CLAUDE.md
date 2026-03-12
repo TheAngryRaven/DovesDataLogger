@@ -16,7 +16,7 @@ Core capabilities:
   track proximity matching, course detection, and Lap Anything fallback
 - RPM monitoring via inductive tachometer pickup
 - Accelerometer logging (g-force X/Y/Z) via onboard LSM6DS3 IMU
-- DOVEX data logging with reserved 4 KB header (crash-safe GPS data)
+- DOVEX data logging with reserved 1 KB header (crash-safe GPS data)
 - Legacy CSV (`.dove`) logging still supported via `use_legacy_csv` setting
 - 8+ display pages on a 128x64 OLED (3 Hz refresh)
 - Bluetooth LE file download to companion apps / HackTheTrack.net
@@ -125,7 +125,7 @@ loop()  ~250 Hz
 - **New UI mode**: Feeds into `CourseManager.loop()` which handles course
   detection, Lap Anything fallback, and sector timing internally.
 - Logs validated data rows to SD (9-check validation pipeline).
-  - **DOVEX** (new UI default): reserved 4 KB header + CSV data after byte 4096.
+  - **DOVEX** (new UI default): reserved 1 KB header + CSV data after byte 1024.
   - **Legacy CSV** (`.dove`): flat CSV with track/layout/direction in filename.
 - Time helpers: `getGpsTimeInMilliseconds()`, `getGpsUnixTimestampMillis()`.
 - 64-bit timestamps are manually converted to strings (Arduino lacks `%llu`).
@@ -158,8 +158,8 @@ loop()  ~250 Hz
   - **Array** (legacy): bare array of course objects, metadata derived from
     filename, `lengthFt = 0`.
 - **Track manifest** (`ENABLE_NEW_UI`): `buildTrackList()` also builds an
-  in-RAM `trackManifest[]` (up to 1000 entries) with first lat/lon per track
-  for haversine proximity matching. ~48 KB RAM.
+  in-RAM `trackManifest[]` (up to 200 entries) with first lat/lon per track
+  for haversine proximity matching. ~10 KB RAM.
 - **SD access arbitration** prevents concurrent access:
   - `acquireSDAccess(mode)` / `releaseSDAccess(mode)`
   - Modes: `SD_ACCESS_NONE` (0), `LOGGING` (1), `REPLAY` (2),
@@ -198,11 +198,12 @@ loop()  ~250 Hz
   - `TLIST` → `TFILE:name.json` per file, then `TEND`
   - `TGET:name.json` → reuses existing file transfer (`SIZE:N` → data chunks → `DONE`)
   - `TPUT:name.json` → `TREADY` → app sends data chunks → `TDONE` → `TOK`
-  - Upload uses a 2048-byte static RAM buffer; `TERR:TOO_LARGE` if exceeded.
+  - `TDEL:name.json` → `TOK` or `TERR:NO_FILE`
+  - Upload uses a 4096-byte static RAM buffer; `TERR:TOO_LARGE` if exceeded.
   - Error responses: `TERR:SD_BUSY`, `TERR:BUSY`, `TERR:WRITE_FAIL`, `TERR:NO_FILE`.
-  - Upload state machine: BLE callback accumulates data + sets flags,
-    `BLUETOOTH_LOOP()` sends `TREADY` and calls `processTrackUpload()`
-    for thread-safe SD writes. Calls `buildTrackList()` after successful upload.
+  - Upload/delete state machines: BLE callback sets flags, `BLUETOOTH_LOOP()`
+    calls `processTrackUpload()` / `processTrackDelete()` for thread-safe SD
+    access. Both call `buildTrackList()` after success.
 - **Auto-reboot on BLE disconnect**: `bleDisconnectCallback()` calls
   `NVIC_SystemReset()` after 100 ms delay, ensuring new settings take
   effect without manual power cycle.
@@ -211,7 +212,7 @@ loop()  ~250 Hz
 
 - **DOVEX replay** (`ENABLE_NEW_UI`): instant header-only replay.
   `parseDovexHeader()` reads line 1 (metadata) and line 2 (lap times CSV)
-  from the first 4 KB. Populates `dovexReplay*` globals and `lapHistory[]`.
+  from the first 1 KB. Populates `dovexReplay*` globals and `lapHistory[]`.
   No file streaming needed — jumps straight to results page.
   Only `.dovex` files shown in file browser.
 - **Legacy replay** (without `ENABLE_NEW_UI`): reads `.dove`/`.nmea` files.
@@ -269,19 +270,19 @@ loop()  ~250 Hz
 ```
 datetime,driver_name,course_name,short_name,best_lap_ms,optimal_lap_ms
 lap1_ms,lap2_ms,lap3_ms,...
-\n padding to byte 4096
+\n padding to byte 1024
 timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z
 1710512400123,12,0.8,35.12345678,-97.12345678,65.32,234.56,...
 ```
 
-- **Reserved header** (bytes 0–4095): Line 1 = session metadata, Line 2 =
-  all lap times (comma-separated ms values), padded with `\n` to 4096 bytes.
-- **GPS data** (byte 4096+): CSV column header then streaming GPS rows.
-- **Crash safety**: file created with `seekSet(4096)` before any data.
-  Header written on session end. If header is empty (crash), GPS data
-  after 4096 is still valid.
+- **Reserved header** (bytes 0–1023): Line 1 = session metadata, Line 2 =
+  all lap times (comma-separated ms values), padded with `\n` to 1024 bytes.
+- **GPS data** (byte 1024+): CSV column header then streaming GPS rows.
+- **Crash safety**: file created with pre-filled newlines to 1024 bytes
+  before any data. Header written on session end. If header is empty
+  (crash), GPS data after 1024 is still valid.
 - **Filename**: `20YYMMDD_HHMM.dovex`
-- 4 KB handles ~450 laps (8 chars per lap time). Extremely unlikely to exceed.
+- 1 KB handles ~100 laps (8 chars per lap time). Extremely unlikely to exceed.
 
 ### CSV Log Row (`.dove` files) — Legacy format
 
@@ -375,10 +376,10 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | GPS nav rate | 25 Hz | `gps_config.h` |
 | Crossing threshold | 7.0 m | `BirdsEye.ino` |
 | Max laps/session | 1 000 | `BirdsEye.ino` |
-| Max locations | 1 000 | `project.h` |
+| Max locations | 200 | `project.h` |
 | Max layouts/track | 10 | `project.h` |
 | Max replay files | 20 | `replay.ino` |
-| DOVEX header size | 4 096 bytes | `gps_functions.ino` |
+| DOVEX header size | 1 024 bytes | `gps_functions.ino` |
 | Auto-idle timeout | 60 s at <2 mph | `BirdsEye.ino` |
 | Track detect radius | 5 miles | `BirdsEye.ino` |
 | Tach min pulse gap | 3 ms | `tachometer.ino` |
@@ -389,10 +390,10 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | SD SPI clock | 4 MHz | `sd_functions.ino` |
 | Battery check interval | 5 s | `BirdsEye.ino` |
 | BLE default MTU | 23 | `bluetooth.ino` |
-| JSON buffer | 2048 (1024 on Wokwi) | `sd_functions.ino` |
+| JSON buffer | 4096 (1024 on Wokwi) | `sd_functions.ino` |
 | Settings JSON buffer | 512 | `settings.ino` |
 | Settings file path | `/SETTINGS.json` | `settings.ino` |
-| Track upload buffer | 2048 | `bluetooth.ino` |
+| Track upload buffer | 4096 | `bluetooth.ino` |
 
 ---
 

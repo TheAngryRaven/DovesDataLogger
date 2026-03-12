@@ -10,7 +10,7 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
 
 ### Core Functionality
 - **25Hz GPS Logging** - High-frequency data capture straight to SD card
-- **Accelerometer** - On-board 6-axis IMU when using Seeed XIAO nrf52840 sense +-15g
+- **Accelerometer** - On-board 6-axis IMU when using Seeed XIAO nRF52840 Sense, +/-16g
 - **RPM Monitoring** - Tachometer input with noise filtering for ignition systems
 - **"Just Drive" Mode** - Automatic track detection, course detection, and lap timing — no manual selection needed (`ENABLE_NEW_UI`)
 - **Track & Layout Selection** - Multiple tracks and configurations loaded from SD card (legacy mode)
@@ -20,6 +20,7 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
 - **Pace Comparison** - Real-time pace difference vs. best lap
 - **Lap History** - Session-based lap history (up to 1000 laps)
 - **Speed Display** - Large, easy-to-read speed display
+- **Sleep Mode** - Low-power sleep with display/GPS/IMU off (~2-4 mA), instant wake on button press or engine start
 - **DOVEX Format** - Crash-safe logging with reserved header for instant replay
 - **Simple CSV Format** - Legacy `.dove` data files with millisecond-precision timestamps
 
@@ -54,21 +55,23 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
 ## Hardware Requirements
 
 ### Core Components
-- **MCU**: Seeed XIAO nRF52840 Sense (64MHz ARM Cortex-M4 with FPU + Bluetooth + 6 axis IMU)
-  - Low power consumption: ~120mAh with 2.45" screen
-  - Built-in battery charging circuit
-- **GPS**: u-blox SAM-M10Q (Matek SAM-M10Q-CAN recommended)
-  - Configured for 25Hz update rate
-  - GPS-only mode for maximum performance
-- **Display**: 2.45" 128x64 OLED LCD (SH110X or SSD1306 compatible)
+- **MCU**: Seeed XIAO nRF52840 Sense (64MHz ARM Cortex-M4 with FPU + BLE 5.0 + 6-axis IMU)
+  - ~120 mA active draw with 2.45" screen, ~2-4 mA sleep
+  - Built-in battery charging circuit (BQ25101)
+- **GPS**: u-blox SAM-M10Q (Matek SAM-M10Q recommended, found from most RC hobby shops)
+  - Configured for 25Hz UBX binary (PVT) update rate
+  - GPS-only constellation for maximum nav rate
+- **Display**: 2.45" 128x64 OLED (SH110X or SSD1306 compatible)
   - I2C interface (address: 0x3C)
+  - Software sleep/wake via I2C commands (~10uA when off)
 - **SD Card**: Standard SD card module
   - FAT16/FAT32 formatted
-  - 4MHz SPI for EMI resistance
+  - 1 MHz SPI for EMI resistance
 - **Battery**: 1500mAh 103050 LiPo
-  - ~13 hours runtime on full charge
+  - ~12.5 hours active, ~15-30 days in sleep mode
 - **Buttons**: 3x momentary pushbuttons for navigation
-  - Up/Left, Select/Enter, Down/Right
+  - Left, Select/Enter, Right
+  - RC low-pass filters recommended (10K + 100nF) for EMI rejection
 
 ### Optional Components
 - **Tachometer Circuit**: Inductive pickup for RPM sensing
@@ -78,9 +81,11 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
   - diagram is missing required optocoupler and isolated dc-dc power supply
 
 ### Power Usage
-- Current draw: ~120mAh with 2.45" OLED display
-- Battery life: ~13 hours continuous operation
-- Voltage monitoring with visual battery indicator
+- Active draw: ~120 mA with 2.45" OLED display
+- Active battery life: ~12.5 hours continuous on 1500 mAh
+- Sleep draw: ~2-4 mA (display, GPS, IMU off)
+- Sleep battery life: ~15-30 days on 1500 mAh
+- Battery percentage and voltage displayed on stats page and charging screen
 
 ## Track Loading System
 
@@ -103,7 +108,7 @@ SDCARD/
 
 Two formats are supported. The device auto-detects which format is used.
 
-**New format** (recommended, matches [HackTheTrack.net](http://HackTheTrack.net) web simulator):
+**New format** (recommended, can use [HackTheTrack.net](http://HackTheTrack.net) to update tracks on the device):
 
 ```json
 {
@@ -206,21 +211,23 @@ Settings are stored in `/SETTINGS.json` on the SD card. The file is created auto
 
 ### DOVEX Format (default)
 
-DOVEX files (`.dovex`) use a reserved 4 KB header for session metadata, with GPS data streaming after byte 4096. This enables crash-safe logging and instant on-device replay.
+DOVEX files (`.dovex`) use a reserved 8 KB header for session metadata, with GPS data streaming after byte 8192. This enables crash-safe logging and instant on-device replay.
 
 **Structure:**
 ```
-Bytes 0-4095:    Session header (written when session ends)
-  Line 1:        datetime,driver_name,course_name,short_name,best_lap_ms,optimal_lap_ms
-  Line 2:        lap1_ms,lap2_ms,lap3_ms,...
-  Remaining:     \n padding to byte 4096
+Bytes 0-8191:    Session header (written when session ends)
+  Line 1:        datetime,driver,course,short_name,best_lap_ms,optimal_ms   (column labels)
+  Line 2:        2025-03-11 14:30:00,Driver,Normal,OKC,62345,61890          (session metadata)
+  Line 3:        laps_ms                                                     (column label)
+  Line 4:        65432,63210,62345,64567,...                                 (all lap times in ms)
+  Remaining:     \n padding to byte 8192
 
-Bytes 4096+:     GPS data
+Bytes 8192+:     GPS data
   Header row:    timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z
   Data rows:     1741128001234,12,0.8,28.41270817,-81.37973266,87.32,125.45,182.34,1.25,8450,0.123,-0.945,0.032
 ```
 
-If the device loses power mid-session, the header will be empty but all GPS data after byte 4096 is still valid and recoverable.
+The 8 KB header can store ~1000 lap times. If the device loses power mid-session, the header will be empty but all GPS data after byte 8192 is still valid and recoverable.
 
 **File naming:** `20YYMMDD_HHMM.dovex` (e.g. `20240115_1430.dovex`)
 
@@ -251,66 +258,52 @@ timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x
 ## File Structure
 
 ```
-DovesDataLogger/
-├── BirdsEye.ino              # Main Arduino sketch
-├── display_config.h          # Display configuration (SH110X/SSD1306)
-├── gps_config.h              # u-blox GPS UBX configuration commands
-├── images.h                  # Bitmap images for display
-├── libraries.txt             # Required Arduino libraries
-├── diagram.json              # Wokwi simulator configuration
+BirdsEye/
+├── BirdsEye.ino              # Entry point: globals, setup(), loop(), state machine
+├── project.h                 # Shared types, debug macros, constants
+├── display_config.h          # Display driver abstraction (SH110X/SSD1306)
+├── gps_config.h              # GPS configuration constants (baud, nav rate)
+├── images.h                  # PROGMEM bitmap data (splash, animations)
+│
+├── display_ui.ino            # Display init, button handling, menu navigation
+├── display_pages.ino         # All page rendering functions (displayPage_*())
+├── gps_functions.ino         # GPS init, PVT callback, time conversion, logging
+├── sd_functions.ino          # SD init, track JSON parsing, track manifest
+├── accelerometer.ino         # LSM6DS3 IMU init and g-force reads
+├── tachometer.ino            # Falling-edge ISR, EMA-filtered RPM
+├── bluetooth.ino             # BLE service (file transfer, settings, track sync)
+├── replay.ino                # Session replay (DOVEX header / legacy streaming)
+├── settings.ino              # Persistent JSON settings (/SETTINGS.json)
 │
 ├── CASE/                     # 3D printable enclosure files
-│   ├── *.STL                 # STL files for 3D printing
-│   └── README.md             # Assembly instructions (coming soon)
+│   └── *.STL
 │
-├── SDCARD/                   # SD card file structure
-│   └── TRACKS/               # Track configuration files
+├── SDCARD/                   # Example SD card file structure
+│   └── TRACKS/
 │       ├── OKC.json
 │       ├── BMP.json
 │       └── ...
 │
-├── tachometer-circuit.jpg    # Tachometer circuit schematic
+├── TACHOMETER/               # Tachometer circuit documentation
 └── README.md                 # This file
 ```
 
-### Key Files
+## Required Libraries
 
-**BirdsEye.ino** (2020 lines)
-- Main application logic
-- GPS parsing and configuration
-- Lap timing integration with [DovesLapTimer library](https://github.com/TheAngryRaven/DovesLapTimer)
-- SD card logging with EMI-resistant retry logic
-- Tachometer input with noise filtering
-- Multi-page display system
-- Button input handling
-- Battery voltage monitoring
+| Library | Purpose |
+|---|---|
+| Adafruit GFX | Graphics primitives |
+| Adafruit SSD1306 | SSD1306 OLED driver (if using SSD1306) |
+| Adafruit SH110X | SH110X OLED driver (if using SH1106) |
+| SparkFun u-blox GNSS v3 | UBX binary PVT GPS interface |
+| ArduinoJson 6.x | Track file and settings JSON parsing |
+| SdFat | SD card (FAT16/FAT32) |
+| [DovesLapTimer](https://github.com/TheAngryRaven/DovesLapTimer) | Lap/sector timing |
+| [CourseManager](https://github.com/TheAngryRaven/DovesLapTimer) | Auto course detection + Lap Anything (part of DovesLapTimer) |
+| Seeed Arduino LSM6DS3 | Onboard IMU accelerometer/gyro (Sense variant) |
+| Bluefruit nRF52 | BLE (built into Seeed nRF52 board package) |
 
-**display_config.h**
-- Abstraction layer for SH110X and SSD1306 displays
-- Screen dimensions and I2C configuration
-- Easy to swap display types
-
-**gps_config.h**
-- u-blox UBX binary configuration commands
-- NMEA sentence filtering
-- Update rate configuration (5/10/18/20/25 Hz)
-- Constellation selection (GPS-only for best performance)
-
-**images.h**
-- Bitmap graphics for splash screen and crossing animations
-
-## Required Arduino Libraries
-
-Install these libraries via Arduino Library Manager:
-
-- **Adafruit GFX Library** - Graphics primitives
-- **Adafruit SSD1306** - SSD1306 OLED driver (if using SSD1306)
-- **Adafruit SH110X** - SH110X OLED driver (if using SH1106)
-- **Adafruit GPS Library** - GPS parsing
-- **ArduinoJson** - JSON parsing for track files
-- **SdFat** - SD card library (use v1.x for FAT16 support)
-- **DovesLapTimer** (v0.2.1+) - Core GPS timing library
-  - [https://github.com/TheAngryRaven/DovesLapTimer](https://github.com/TheAngryRaven/DovesLapTimer)
+**Board package:** Use "Seeed nRF52 Boards" (non-mbed). The mbed variant uses ArduinoBLE instead of Bluefruit and is incompatible.
 
 ## Setup & Usage
 
@@ -325,8 +318,9 @@ Install these libraries via Arduino Library Manager:
    - See "Track Loading System" section above
 
 3. **Flash Firmware**
-   - Install required libraries
-   - Select board: "Seeed XIAO nRF52840"
+   - Install "Seeed nRF52 Boards" board package (non-mbed)
+   - Install required libraries (see table above)
+   - Select board: "Seeed XIAO nRF52840 Sense"
    - Compile and upload `BirdsEye.ino`
 
 4. **Hardware Assembly**
@@ -340,6 +334,8 @@ Install these libraries via Arduino Library Manager:
 **Button Controls:**
 - **Left/Right Buttons**: Navigate between pages
 - **Middle Button**: Select/Enter (in menus), Quick-jump to Pace/Best Lap (while racing)
+- **Hold Left + Right (5s)**: Enter sleep mode (from main menu)
+- **Hold Select + Side (5s)**: Reboot device (from any page)
 
 **Startup Sequence (New UI / "Just Drive" mode):**
 1. Power on → Boot screen → Main menu
@@ -360,27 +356,37 @@ Install these libraries via Arduino Library Manager:
 - **Manual**: navigate to "END RACE" page (only accessible when speed < 2 mph), confirm to stop
 - Returns to main menu
 
+**Sleep Mode** (new UI):
+- Activates via 5-second left+right hold on main menu, or automatically after 5 minutes idle on main menu
+- Turns off display, GPS (backup mode), and IMU — draws ~2-4 mA vs ~120 mA active
+- Wakes instantly on any button press or tachometer pulse (engine start)
+- GPS retains ephemeris in backup RAM for fast warm-start on wake (seconds, not minutes)
+- Daily GPS wake keeps ephemeris fresh (~2 min every 24 hours)
+- Shows charging screen with battery percentage when USB is plugged in during sleep
+- Estimated sleep runtime: ~15-30 days on 1500 mAh battery
+
 ## Technical Details
 
 ### GPS Configuration
+- **Protocol**: UBX binary (PVT messages via SparkFun callback)
 - **Update Rate**: 25Hz (40ms between fixes)
-- **Mode**: Automotive navigation mode
-- **Constellations**: GPS-only (reduces processing time)
-- **NMEA Sentences**: GGA only (reduces serial bandwidth)
-- **Baud Rate**: 115200
+- **Mode**: Automotive dynamic model
+- **Constellations**: GPS-only (max nav rate, no multi-constellation overhead)
+- **Baud Rate**: 57600 (auto-configured from 9600 default on first boot)
 
 ### SD Card Logging
-- **Write Frequency**: Every GGA packet (~25Hz)
-- **Flush Interval**: Every 2 seconds (prevents data loss)
-- **SPI Speed**: 4MHz (reduced from 25MHz for EMI resistance)
-- **Retry Logic**: 3 attempts on initialization failures
+- **Write Frequency**: Every PVT update (~25Hz)
+- **Flush Interval**: Every 10 seconds (prevents data loss)
+- **SPI Speed**: 1 MHz (reduced for EMI resistance)
+- **Access Arbitration**: Mutex prevents concurrent access from logging, replay, BLE, and track parsing
 
 ### Tachometer Input
 - **Input Pin**: D0
-- **Detection**: Rising edge interrupt
-- **Filtering**: 2ms minimum pulse gap (noise rejection)
-- **Dead Time**: Prevents interrupt storms from noisy ignition pickups
-- **Update Rate**: 3Hz filtered display
+- **Detection**: Falling-edge interrupt
+- **Filtering**: 3ms minimum pulse gap (supports up to ~20,000 RPM)
+- **Dead Time**: Volatile flag gating prevents interrupt storms from noisy ignition pickups
+- **Update Rate**: 3Hz with EMA filter (alpha 0.20)
+- **Timeout**: 500ms with no pulse = engine stopped (RPM 0)
 - **Configuration**: 1 pulse per revolution (adjust `tachRevsPerPulse` for multi-cylinder)
 
 ### Display Update Rate
@@ -390,40 +396,40 @@ Install these libraries via Arduino Library Manager:
 ### Battery Monitoring
 - **Update Interval**: 5 seconds
 - **Voltage Divider**: 1510Ω / 510Ω ratio
-- **Display**: 5-segment battery indicator
+- **Display**: Percentage (3.3V = 0%, 4.2V = 100%) with voltage readout
 
 ## Adding Custom Data Pages
 
 The page system is straightforward to extend. Each page needs:
 
-1. **Page Constant** (around line 650):
+1. **Page Constant** in `BirdsEye.ino` (in the running page section):
    ```cpp
    const int MY_NEW_PAGE = 13;
    ```
 
-2. **Display Function**:
+2. **Display Function** in `display_pages.ino`:
    ```cpp
    void displayPage_my_new_page() {
      resetDisplay();
      display.println(F("My Custom Page"));
      // Your display code here
-     display.display();
+     safeDisplayUpdate();
    }
    ```
 
-3. **Page Routing** in `displayLoop()` (around line 1650):
+3. **Page Routing** in `displayLoop()` in `display_ui.ino`:
    ```cpp
    else if (currentPage == MY_NEW_PAGE) {
      displayPage_my_new_page();
    }
    ```
 
-4. **Update Page Range** (line 697):
+4. **Update Page Range** in `BirdsEye.ino`:
    ```cpp
    int runningPageEnd = MY_NEW_PAGE; // Update to new last page
    ```
 
-Look at existing pages like `displayPage_gps_speed()` (line 992) or `displayPage_tachometer()` (line 1196) as examples.
+Look at existing pages like `displayPage_gps_speed()` or `displayPage_tachometer()` in `display_pages.ino` as examples.
 
 ## Related Projects
 
@@ -438,10 +444,9 @@ Look at existing pages like `displayPage_gps_speed()` (line 992) or `displayPage
 
 ## Future Enhancements
 
-- Pin lock — require PIN to pull logs from device
-- WiFi data transfer (if switching to ESP32 variant)
+- Pin lock - require PIN to pull logs from device
 - Additional sensor inputs (exhaust temp, water temp)
-- Bluetooth data streaming
+- WiFi automatic data transfer
 - Real-time telemetry to pit crew
 
 ## Notes

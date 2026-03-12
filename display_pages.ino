@@ -556,34 +556,14 @@ void displayPage_gps_stats() {
     lastBatteryCheck = millis();
     lastBatteryVoltage = getBatteryVoltage();
   }
-  display.print(F("Battery  : "));
-  display.print("[");
-  if (lastBatteryVoltage > 3.7) {
-    display.print("#");
-  } else {
-    display.print(" ");
+  {
+    int battPct = constrain((int)((lastBatteryVoltage - 3.3) / 0.9 * 100), 0, 100);
+    display.print(F("Battery  : "));
+    display.print(battPct);
+    display.print(F("% "));
+    display.print(lastBatteryVoltage, 2);
+    display.println(F("V"));
   }
-  if (lastBatteryVoltage >= 3.8) {
-    display.print("#");
-  } else {
-    display.print(" ");
-  }
-  if (lastBatteryVoltage >= 3.9) {
-    display.print("#");
-  } else {
-    display.print(" ");
-  }
-  if (lastBatteryVoltage >= 4.0) {
-    display.print("#");
-  } else {
-    display.print(" ");
-  }
-  if (lastBatteryVoltage >= 4.1) {
-    display.print("#");
-  } else {
-    display.print(" ");
-  }
-  display.println("]");
 
 
   display.print(F("Sats     : "));
@@ -1159,6 +1139,37 @@ void displayPage_internal_warning() {
   display.println(internalNotification);
   safeDisplayUpdate();
 }
+
+#ifdef ENABLE_NEW_UI
+void displayPage_sleep_charging() {
+  resetDisplay();
+
+  float voltage = getBatteryVoltage();
+  int percent = constrain((int)((voltage - 3.3) / 0.9 * 100), 0, 100);
+
+  display.setTextSize(1);
+  display.setCursor(32, 10);
+  display.print(F("Charging"));
+
+  display.setTextSize(3);
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%d%%", percent);
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(buf, 0, 0, &x1, &y1, &w, &h);
+  display.setCursor((128 - w) / 2, 28);
+  display.print(buf);
+
+  display.setTextSize(1);
+  char vbuf[8];
+  dtostrf(voltage, 4, 2, vbuf);
+  display.setCursor(40, 56);
+  display.print(vbuf);
+  display.print(F("V"));
+
+  safeDisplayUpdate();
+}
+#endif
 
 ///////////////////////////////////////////
 void displayCrossing() {

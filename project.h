@@ -29,12 +29,20 @@ inline void dummy_debug(...) {
 // These were previously in BirdsEye.ino — moved here for
 // visibility in project-wide types.
 ///////////////////////////////////////////
-#define MAX_LOCATIONS 1000
+#define MAX_LOCATIONS 200
 #define MAX_LOCATION_LENGTH 13  // 13 is old DOS format for FAT16
 #define MAX_LAYOUTS 10
 #define MAX_LAYOUT_LENGTH 15
-#define DOVEX_HEADER_SIZE 8192  // Reserved header bytes in .dovex files (8 KB)
+#define DOVEX_HEADER_SIZE 1024  // Reserved header bytes in .dovex files (1 KB)
 #define TRACK_DETECT_RADIUS_MILES 5.0  // Haversine threshold for live track detection
+
+// Sleep mode constants (ENABLE_NEW_UI only)
+#define SLEEP_IDLE_TIMEOUT_MS     300000   // 5 min menu idle -> auto-sleep
+#define SLEEP_LONG_PRESS_MS       5000     // 5s hold for sleep/reboot combos
+#define SLEEP_GPS_WAKE_INTERVAL   86400000 // 24 hours between GPS fix attempts
+#define SLEEP_GPS_FIX_TIMEOUT     120000   // 2 min max for GPS fix attempt
+#define SLEEP_RPM_WAKE_THRESHOLD  100      // RPM above this wakes from sleep
+#define SLEEP_CHARGING_CHECK_MS   5000     // Check charging status every 5s
 
 ///////////////////////////////////////////
 // STRUCT DEFINITIONS

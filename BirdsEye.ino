@@ -60,7 +60,7 @@ float getBatteryVoltage() {
   #else
   unsigned int adcCount = analogRead(PIN_VBAT);
   float adcVoltage = adcCount * VREF / ADC_MAX;
-  return adcVoltage * 1510 / 510;
+  return adcVoltage * (1000 + 510) / 510;  // 1M / 510K voltage divider on XIAO PCB
   #endif
 }
 
@@ -108,6 +108,23 @@ char dovexReplayCourseName[32];
 char dovexReplayShortName[16];
 char dovexReplayBestLap[16];
 char dovexReplayOptimal[16];
+
+// Sleep mode state
+bool sleepModeActive = false;
+bool sleepGpsWakeActive = false;         // GPS periodic fix in progress
+unsigned long sleepEnteredAt = 0;
+unsigned long sleepLastGpsWake = 0;
+unsigned long sleepGpsWakeStartedAt = 0;
+unsigned long menuIdleStartTime = 0;     // For 5-min auto-sleep
+bool menuIdleTimerRunning = false;
+
+// Button hold tracking (for long-press combos)
+unsigned long btn1HoldStart = 0;
+unsigned long btn2HoldStart = 0;
+unsigned long btn3HoldStart = 0;
+bool btn1Held = false;
+bool btn2Held = false;
+bool btn3Held = false;
 #endif
 
 ///////////////////////////////////////////
@@ -416,8 +433,8 @@ int numOfLocations = 0;
 #ifdef WOKWI
 #define JSON_BUFFER_SIZE 1024
 #else
-// might need to make bigger for more layouts, test and expiriment
-#define JSON_BUFFER_SIZE 2048
+// 4 KB handles tracks with up to 10 courses with full sector data
+#define JSON_BUFFER_SIZE 4096
 #endif
 
 const int PARSE_STATUS_GOOD = 0;
@@ -965,9 +982,13 @@ void checkAutoIdle() {
  */
 void autoRaceModeCheck() {
   if (currentPage != PAGE_MAIN_MENU) return;
+  if (currentPage == PAGE_BLUETOOTH || bleConnected) return;
 
-  if (tachLastReported > 500 || gps_speed_mph >= 10.0) {
-    debugln(F("Auto-entering race mode (speed/RPM detected)"));
+  bool rpmTriggered = tachLastReported > 500;
+  bool speedTriggered = gps_speed_mph >= 10.0;
+
+  if (rpmTriggered || speedTriggered) {
+    debugln(F("Auto-entering race mode"));
     newUiRaceActive = true;
     enableLogging = true;
     trackSelected = true;  // Allow GPS_LOOP to feed timer + log
@@ -975,12 +996,13 @@ void autoRaceModeCheck() {
     // Create a minimal CourseManager if none exists yet (no track detected)
     createLapAnythingCourseManager();
 
-    switchToDisplayPage(GPS_SPEED);
+    // Show tach page if RPM triggered first, otherwise speed page
+    switchToDisplayPage(rpmTriggered ? TACHOMETER : GPS_SPEED);
   }
 }
 
 /**
- * @brief Write DOVEX header metadata into reserved 4KB area at file start
+ * @brief Write DOVEX header metadata into reserved 1KB area at file start
  */
 void writeDovexHeader() {
   if (!dataFile.isOpen()) return;
@@ -1016,8 +1038,8 @@ void writeDovexHeader() {
            bestLapStr, optimalStr);
 
   // Build line 4: comma-separated lap times
-  // 8 KB header fits ~1000 laps at ~8 chars each
-  static char lapLine[7800];
+  // 1 KB header fits ~100 laps at ~8 chars each
+  static char lapLine[800];
   int lapLineLen = 0;
   for (int i = 0; i < lapHistoryCount && lapLineLen < (int)sizeof(lapLine) - 16; i++) {
     if (i > 0) {
@@ -1045,6 +1067,66 @@ void writeDovexHeader() {
   debugln(F("DOVEX header written"));
 }
 
+///////////////////////////////////////////
+// SLEEP MODE
+///////////////////////////////////////////
+
+bool isUsbConnected() {
+  return (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+}
+
+void enterSleepMode() {
+  // 1. End race session if active (safety net)
+  if (newUiRaceActive) endRaceSession();
+
+  // 2. Stop BLE if active (prevents SoftDevice power waste during sleep)
+  if (bleActive) BLE_STOP();
+
+  // 3. Turn off display (I2C command, ~10uA sleep current)
+  DISPLAY_SLEEP();
+
+  // 3. Put GPS to backup mode
+  GPS_SLEEP();
+
+  // 4. Power down IMU (~1mA savings)
+  if (accelAvailable) {
+    pinMode(PIN_LSM6DS3TR_C_POWER, OUTPUT);
+    digitalWrite(PIN_LSM6DS3TR_C_POWER, HIGH);  // HIGH = disable power
+  }
+
+  // 5. Set state
+  sleepModeActive = true;
+  sleepEnteredAt = millis();
+  sleepLastGpsWake = millis();
+  // Tach ISR stays attached -- RPM pulses will wake via tachHavePeriod
+}
+
+void exitSleepMode() {
+  // 1. Re-enable IMU
+  if (accelAvailable) {
+    digitalWrite(PIN_LSM6DS3TR_C_POWER, LOW);
+    delay(50);
+    if (accelIMU.begin() != 0) {
+      debugln(F("IMU failed to reinitialize after sleep"));
+      accelAvailable = false;
+    }
+  }
+
+  // 2. Wake GPS
+  GPS_WAKE();
+
+  // 3. Wake display
+  DISPLAY_WAKE();
+
+  // 4. Reset state
+  sleepModeActive = false;
+  sleepGpsWakeActive = false;
+  menuIdleTimerRunning = false;
+
+  // 5. Return to main menu
+  switchToDisplayPage(PAGE_MAIN_MENU);
+}
+
 #endif // ENABLE_NEW_UI
 
 ///////////////////////////////////////////
@@ -1058,6 +1140,61 @@ unsigned long loopMaxTime = 0;
 void loop() {
   #ifndef WOKWI
   wdtPet();
+  #endif
+
+  #ifdef ENABLE_NEW_UI
+  if (sleepModeActive) {
+    // Check wake triggers
+    bool wakeButton = anyButtonPressed();
+    bool wakeRpm = tachHavePeriod;  // ISR sets this directly on any valid pulse
+
+    if (wakeButton || wakeRpm) {
+      exitSleepMode();
+      return;
+    }
+
+    // Charging display: stay on while USB connected, sleep when unplugged
+    if (isUsbConnected()) {
+      DISPLAY_WAKE();
+      while (isUsbConnected()) {
+        displayPage_sleep_charging();
+        // WDT-safe delay with button check every second
+        for (int i = 0; i < 5; i++) {
+          delay(1000);
+          #ifndef WOKWI
+          wdtPet();
+          #endif
+          if (anyButtonPressed()) {
+            exitSleepMode();
+            return;
+          }
+        }
+      }
+      // USB unplugged — back to sleep
+      DISPLAY_SLEEP();
+    }
+
+    // Periodic GPS fix (every SLEEP_GPS_WAKE_INTERVAL)
+    if (!sleepGpsWakeActive &&
+        (millis() - sleepLastGpsWake >= SLEEP_GPS_WAKE_INTERVAL)) {
+      GPS_SLEEP_PERIODIC_CHECK();
+    }
+
+    // GPS periodic wake: check for fix or timeout
+    if (sleepGpsWakeActive) {
+      myGNSS.checkUblox();
+      myGNSS.checkCallbacks();
+      if (gpsData.fix || (millis() - sleepGpsWakeStartedAt >= SLEEP_GPS_FIX_TIMEOUT)) {
+        GPS_SLEEP();
+        sleepGpsWakeActive = false;
+        sleepLastGpsWake = millis();
+      }
+    }
+
+    // CPU idle (SoftDevice-safe WFE — any interrupt wakes CPU)
+    sd_app_evt_wait();
+    return;  // Skip entire normal loop
+  }
   #endif
 
   #ifdef HAS_DEBUG
@@ -1116,6 +1253,39 @@ void loop() {
     checkForNewLapData();
     checkAutoIdle();
     autoRaceModeCheck();
+
+    // Button hold detection for sleep/reboot combos
+    updateButtonHoldState();
+
+    // Long-press left+right (5s) on main menu -> sleep
+    if (currentPage == PAGE_MAIN_MENU &&
+        isButtonHeld(1, SLEEP_LONG_PRESS_MS) &&
+        isButtonHeld(3, SLEEP_LONG_PRESS_MS)) {
+      enterSleepMode();
+      return;
+    }
+
+    // Reboot combo: select + either side button held 5s (any page)
+    if (isButtonHeld(2, SLEEP_LONG_PRESS_MS) &&
+        (isButtonHeld(1, SLEEP_LONG_PRESS_MS) || isButtonHeld(3, SLEEP_LONG_PRESS_MS))) {
+      NVIC_SystemReset();
+    }
+
+    // 5-minute menu idle -> auto-sleep
+    if (currentPage == PAGE_MAIN_MENU) {
+      if (!menuIdleTimerRunning) {
+        menuIdleTimerRunning = true;
+        menuIdleStartTime = millis();
+      } else if (millis() - menuIdleStartTime >= SLEEP_IDLE_TIMEOUT_MS) {
+        enterSleepMode();
+        return;
+      }
+      if (btn1->pressed || btn2->pressed || btn3->pressed) {
+        menuIdleStartTime = millis();  // Reset on any button
+      }
+    } else {
+      menuIdleTimerRunning = false;
+    }
   #else
     #ifndef ENDURANCE_MODE
       checkForNewLapData();

@@ -400,8 +400,14 @@ void GPS_LOOP() {
         } else {
           #ifdef ENABLE_NEW_UI
           if (!settingUseLegacyCsv) {
-            // DOVEX: reserve header, write CSV column header after reserved area
-            dataFile.seekSet(DOVEX_HEADER_SIZE);
+            // DOVEX: pre-fill header region with newlines (ensures FAT clusters are allocated)
+            char padBuf[64];
+            memset(padBuf, '\n', sizeof(padBuf));
+            for (uint32_t i = 0; i < DOVEX_HEADER_SIZE; i += sizeof(padBuf)) {
+              uint32_t toWrite = min((uint32_t)sizeof(padBuf), DOVEX_HEADER_SIZE - i);
+              dataFile.write(padBuf, toWrite);
+            }
+            // Cursor is now at exactly DOVEX_HEADER_SIZE
           }
           #endif
           dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z"));
@@ -416,6 +422,27 @@ void GPS_LOOP() {
     gps_speed_mph = gpsData.speed * 1.15078;
   } // end if (gpsDataFresh)
 }
+
+#ifdef ENABLE_NEW_UI
+void GPS_SLEEP() {
+  if (!gpsInitialized) return;
+  myGNSS.powerOff(0);  // 0 = indefinite sleep until woken
+}
+
+void GPS_WAKE() {
+  if (!gpsInitialized) return;
+  // Any UART activity on RX wakes u-blox from powerOff backup mode
+  GPS_SERIAL.write(0xFF);
+  delay(100);
+  myGNSS.checkUblox();
+}
+
+void GPS_SLEEP_PERIODIC_CHECK() {
+  GPS_WAKE();
+  sleepGpsWakeActive = true;
+  sleepGpsWakeStartedAt = millis();
+}
+#endif
 
 void calculateGPSFrameRate() {
   // calculate actual GPS fix frequency

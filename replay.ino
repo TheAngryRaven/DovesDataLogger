@@ -650,7 +650,7 @@ void processReplayFile() {
 // dovexReplay* globals are declared in BirdsEye.ino (must be visible to display_pages.ino)
 
 /**
- * @brief Parse a DOVEX file's header (first 4KB) for instant replay results.
+ * @brief Parse a DOVEX file's header (first 1KB) for instant replay results.
  * Line 1: datetime, driver, course, short_name, best_lap_ms, optimal_ms
  * Line 2: lap1_ms,lap2_ms,lap3_ms,...
  * @return true if header parsed successfully
@@ -699,7 +699,7 @@ bool parseDovexHeader(const char* filename) {
   if (tok) { strncpy(dovexReplayOptimal, tok, sizeof(dovexReplayOptimal) - 1); dovexReplayOptimal[sizeof(dovexReplayOptimal) - 1] = '\0'; }
 
   // Skip line 3 (lap column header)
-  static char lapBuf[7800];
+  static char lapBuf[800];
   readReplayLine(replayDovex, lapBuf, sizeof(lapBuf));
 
   // Read line 4 (lap times)

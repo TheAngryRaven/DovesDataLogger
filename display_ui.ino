@@ -104,6 +104,42 @@ void resetButtons() {
   resetButton(btn3);
 }
 
+#ifdef ENABLE_NEW_UI
+void updateButtonHoldState() {
+  bool b1 = readButtonMultiSample(btn1->pin);
+  bool b2 = readButtonMultiSample(btn2->pin);
+  bool b3 = readButtonMultiSample(btn3->pin);
+
+  // Track continuous hold duration per button
+  if (b1) { if (!btn1Held) { btn1HoldStart = millis(); btn1Held = true; } }
+  else { btn1Held = false; }
+
+  if (b2) { if (!btn2Held) { btn2HoldStart = millis(); btn2Held = true; } }
+  else { btn2Held = false; }
+
+  if (b3) { if (!btn3Held) { btn3HoldStart = millis(); btn3Held = true; } }
+  else { btn3Held = false; }
+}
+
+bool isButtonHeld(int btnNum, unsigned long durationMs) {
+  unsigned long start;
+  bool held;
+  switch(btnNum) {
+    case 1: start = btn1HoldStart; held = btn1Held; break;
+    case 2: start = btn2HoldStart; held = btn2Held; break;
+    case 3: start = btn3HoldStart; held = btn3Held; break;
+    default: return false;
+  }
+  return held && start > 0 && (millis() - start >= durationMs);
+}
+
+bool anyButtonPressed() {
+  return readButtonMultiSample(btn1->pin) ||
+         readButtonMultiSample(btn2->pin) ||
+         readButtonMultiSample(btn3->pin);
+}
+#endif
+
 void resetButton(ButtonState* button) {
   button->pressed = false;
 }
