@@ -380,9 +380,12 @@ void BLE_SETUP() {
   Bluefruit.setTxPower(4);
   char bleName[32];
   if (getSetting("bluetooth_name", bleName, sizeof(bleName))) {
+    debug(F("BLE: Name from settings: "));
+    debugln(bleName);
     Bluefruit.setName(bleName);
   } else {
-    Bluefruit.setName("DovesLapTimer");
+    debugln(F("BLE: WARNING - bluetooth_name not found, using fallback"));
+    Bluefruit.setName("DovesDataLogger");
   }
 
   // Enable connection LED

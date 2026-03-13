@@ -81,6 +81,18 @@ static void ensureDefaultSettings() {
       setSetting(defaults[i].key, defaults[i].defaultValue);
     }
   }
+
+  // BLE keys need random generation, not static defaults
+  if (!getSetting("bluetooth_name", buf, sizeof(buf))) {
+    char name[32];
+    snprintf(name, sizeof(name), "DovesDataLogger-%03d", (int)random(0, 1000));
+    setSetting("bluetooth_name", name);
+  }
+  if (!getSetting("bluetooth_pin", buf, sizeof(buf))) {
+    char pin[5];
+    snprintf(pin, sizeof(pin), "%04d", (int)random(1000, 10000));
+    setSetting("bluetooth_pin", pin);
+  }
 }
 
 /**
@@ -192,7 +204,13 @@ bool setSetting(const char* key, const char* value) {
     settingsFile.close();
     if (bytesRead > 0) {
       settingsFileBuffer[bytesRead] = '\0';
-      deserializeJson(settingsJson, settingsFileBuffer);
+      DeserializationError err = deserializeJson(settingsJson, settingsFileBuffer);
+      if (err != DeserializationError::Ok) {
+        debug(F("Settings: Parse error on read-modify-write, aborting: "));
+        debugln(err.c_str());
+        releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+        return false;
+      }
     }
   }
 

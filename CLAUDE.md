@@ -233,7 +233,7 @@ loop()  ~250 Hz
 - `setSetting(key, value)` does read-modify-write to update a single key.
 - Uses `SD_ACCESS_TRACK_PARSE` mode for brief SD access.
 - Separate `StaticJsonDocument<512>` — does not share the track parser's
-  2048-byte buffer.
+  4096-byte buffer.
 - Total RAM cost: ~1 KB (512-byte file buffer + 512-byte JSON document).
 
 ### 9. CourseManager Integration (`ENABLE_NEW_UI`)
