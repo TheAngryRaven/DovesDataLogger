@@ -845,25 +845,18 @@ void trackDetectionLoop() {
 
     detectedTrackIndex = bestIndex;
 
-    // Find matching location index
-    int locIndex = -1;
-    for (int i = 0; i < numOfLocations; i++) {
-      if (strcmp(locations[i], trackManifest[bestIndex].filename) == 0) {
-        locIndex = i;
-        break;
-      }
-    }
-
-    if (locIndex >= 0) {
-      selectedLocation = locIndex;
+    // Use manifest filename directly to build filepath — locations[] may
+    // truncate names longer than MAX_LOCATION_LENGTH (12 chars, old FAT16
+    // 8.3 limit), causing strcmp mismatches that silently skip real tracks.
+    {
       char filepath[FILEPATH_MAX];
-      makeFullTrackPath(locations[locIndex], filepath);
+      makeFullTrackPath(trackManifest[bestIndex].filename, filepath);
       int parseStatus = parseTrackFile(filepath);
 
       if (parseStatus == PARSE_STATUS_GOOD && numOfTracks > 0) {
         // Build TrackConfig from parsed data
-        activeTrackConfig.longName = activeTrackMetadata.longName[0] ? activeTrackMetadata.longName : locations[locIndex];
-        activeTrackConfig.shortName = activeTrackMetadata.shortName[0] ? activeTrackMetadata.shortName : locations[locIndex];
+        activeTrackConfig.longName = activeTrackMetadata.longName[0] ? activeTrackMetadata.longName : trackManifest[bestIndex].filename;
+        activeTrackConfig.shortName = activeTrackMetadata.shortName[0] ? activeTrackMetadata.shortName : trackManifest[bestIndex].filename;
 
         // Populate CourseConfig entries
         // Always pass real courseCount — CourseDetector uses crossing lines
