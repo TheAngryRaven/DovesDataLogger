@@ -859,9 +859,11 @@ void trackDetectionLoop() {
         activeTrackConfig.shortName = activeTrackMetadata.shortName[0] ? activeTrackMetadata.shortName : trackManifest[bestIndex].filename;
 
         // Populate CourseConfig entries
-        // Always pass real courseCount — CourseDetector uses crossing lines
-        // regardless of lengthFt. Without lengthFt it just can't rank by
-        // distance, but crossing detection still works.
+        // Check if any course has lengthFt > 0. CourseDetector uses
+        // distance matching to identify which course the driver is on.
+        // Without lengthFt, distance can never match and detection gets
+        // stuck permanently — no candidates, no rejections, no fallback.
+        bool anyHasLength = false;
         activeTrackConfig.courseCount = numOfTracks;
         for (int i = 0; i < numOfTracks && i < MAX_COURSES; i++) {
           activeTrackConfig.courses[i].name = tracks[i];
@@ -880,6 +882,16 @@ void trackDetectionLoop() {
           activeTrackConfig.courses[i].sector3BLng = trackLayouts[i].sector_3_b_lng;
           activeTrackConfig.courses[i].hasSector2 = trackLayouts[i].hasSector2;
           activeTrackConfig.courses[i].hasSector3 = trackLayouts[i].hasSector3;
+          if (activeTrackMetadata.courseLengthFt[i] > 0) anyHasLength = true;
+        }
+
+        // If no courses have lengthFt, CourseDetector cannot match by
+        // distance and will be stuck forever. Force courseCount=0 so
+        // CourseManager activates Lap Anything immediately. Track name
+        // metadata is preserved so the display still shows which track.
+        if (!anyHasLength) {
+          debugln(F("WARNING: No courses have lengthFt — forcing Lap Anything"));
+          activeTrackConfig.courseCount = 0;
         }
 
         // Create CourseManager
