@@ -27,4 +27,14 @@
     #define OLED_RESET -1
     Adafruit_SH1106G display = Adafruit_SH1106G(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
   #endif
+
+  // Display sleep/wake macros (~10uA sleep vs 10-30mA active)
+  // Framebuffer stays in controller RAM — no re-render needed on wake
+  #ifdef USE_1306_DISPLAY
+    #define DISPLAY_SLEEP() display.ssd1306_command(SSD1306_DISPLAYOFF)
+    #define DISPLAY_WAKE()  display.ssd1306_command(SSD1306_DISPLAYON)
+  #else
+    #define DISPLAY_SLEEP() display.oled_command(SH110X_DISPLAYOFF)
+    #define DISPLAY_WAKE()  display.oled_command(SH110X_DISPLAYON)
+  #endif
 #endif

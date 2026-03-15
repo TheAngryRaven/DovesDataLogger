@@ -34,6 +34,13 @@ static bool createDefaultSettings() {
   snprintf(defaultPin, sizeof(defaultPin), "%04d", (int)random(1000, 10000));
   settingsJson["bluetooth_pin"] = defaultPin;
 
+  // New default settings
+  settingsJson["driver_name"] = "Driver";
+  settingsJson["lap_detection_distance"] = "7";
+  settingsJson["waypoint_detection_distance"] = "30";
+  settingsJson["use_legacy_csv"] = "false";
+  settingsJson["waypoint_speed"] = "30";
+
   File settingsFile;
   settingsFile.open(SETTINGS_FILE_PATH, O_WRITE | O_CREAT | O_TRUNC);
   if (!settingsFile) {
@@ -55,6 +62,40 @@ static bool createDefaultSettings() {
 }
 
 /**
+ * @brief Ensure all expected settings keys exist, adding missing ones with defaults.
+ * Called when settings file already exists to handle firmware upgrades that add new keys.
+ */
+static void ensureDefaultSettings() {
+  // Table of all expected settings with their defaults
+  static const struct { const char* key; const char* defaultValue; } defaults[] = {
+    { "driver_name", "Driver" },
+    { "lap_detection_distance", "7" },
+    { "waypoint_detection_distance", "30" },
+    { "use_legacy_csv", "false" },
+    { "waypoint_speed", "30" },
+  };
+
+  char buf[48];
+  for (int i = 0; i < (int)(sizeof(defaults) / sizeof(defaults[0])); i++) {
+    if (!getSetting(defaults[i].key, buf, sizeof(buf))) {
+      setSetting(defaults[i].key, defaults[i].defaultValue);
+    }
+  }
+
+  // BLE keys need random generation, not static defaults
+  if (!getSetting("bluetooth_name", buf, sizeof(buf))) {
+    char name[32];
+    snprintf(name, sizeof(name), "DovesDataLogger-%03d", (int)random(0, 1000));
+    setSetting("bluetooth_name", name);
+  }
+  if (!getSetting("bluetooth_pin", buf, sizeof(buf))) {
+    char pin[5];
+    snprintf(pin, sizeof(pin), "%04d", (int)random(1000, 10000));
+    setSetting("bluetooth_pin", pin);
+  }
+}
+
+/**
  * @brief Initialize settings subsystem. Creates default file on first boot.
  * Call once from setup() after SD is initialized.
  * @return true if settings file exists (or was created)
@@ -72,13 +113,14 @@ bool SETTINGS_SETUP() {
     return false;
   }
 
-  if (SD.exists(SETTINGS_FILE_PATH)) {
-    debugln(F("Settings: File exists"));
-    return true;
+  if (!SD.exists(SETTINGS_FILE_PATH)) {
+    debugln(F("Settings: First boot, creating defaults"));
+    return createDefaultSettings();
   }
 
-  debugln(F("Settings: First boot, creating defaults"));
-  return createDefaultSettings();
+  debugln(F("Settings: File exists, checking for missing keys"));
+  ensureDefaultSettings();
+  return true;
 }
 
 /**
@@ -162,7 +204,13 @@ bool setSetting(const char* key, const char* value) {
     settingsFile.close();
     if (bytesRead > 0) {
       settingsFileBuffer[bytesRead] = '\0';
-      deserializeJson(settingsJson, settingsFileBuffer);
+      DeserializationError err = deserializeJson(settingsJson, settingsFileBuffer);
+      if (err != DeserializationError::Ok) {
+        debug(F("Settings: Parse error on read-modify-write, aborting: "));
+        debugln(err.c_str());
+        releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+        return false;
+      }
     }
   }
 

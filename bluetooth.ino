@@ -13,8 +13,12 @@ static volatile bool trackUploadReady = false;      // signals main loop to send
 static volatile bool trackUploadComplete = false;    // signals main loop to write file
 static volatile bool trackUploadError = false;
 static char trackUploadFilename[25];                 // just the filename (e.g. "OKC.json")
-static char trackUploadBuffer[2048];
+static char trackUploadBuffer[4096];
 static volatile uint16_t trackUploadOffset = 0;
+
+// Track delete state (BLE callback -> main loop)
+static volatile bool trackDeletePending = false;
+static char trackDeleteFilename[25];
 
 void bleConnectCallback(uint16_t conn_handle) {
   debugln(F("BLE: Device connected!"));
@@ -52,11 +56,25 @@ void bleDisconnectCallback(uint16_t conn_handle, uint8_t reason) {
     releaseSDAccess(SD_ACCESS_BLE_TRANSFER);  // Release SD access on disconnect
   }
   bleTransferInProgress = false;
-  // Reset track upload state on disconnect
+  // Reset track upload/delete state on disconnect
   trackUploadActive = false;
   trackUploadReady = false;
   trackUploadComplete = false;
   trackUploadError = false;
+  trackDeletePending = false;
+
+  // Auto-reboot after BLE disconnect to apply any changed settings —
+  // but only if the phone disconnected (not us calling BLE_STOP()).
+  // BLE_STOP() sets bleActive=false before triggering async disconnect.
+  if (!bleActive) {
+    debugln(F("BLE: Local disconnect (BLE_STOP), skipping reboot"));
+  } else if (enableLogging) {
+    debugln(F("BLE: Skipping reboot (logging active)"));
+  } else {
+    debugln(F("BLE: Rebooting to apply settings..."));
+    delay(100);  // Brief delay for debug output to flush
+    NVIC_SystemReset();
+  }
 }
 
 // Forward declaration for callback
@@ -333,6 +351,23 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
     trackUploadReady = true;
     trackUploadActive = true;
     debugln(F("BLE: Track upload started"));
+  } else if (strncmp(buffer, "TDEL:", 5) == 0) {
+    if (trackDeletePending) {
+      fileStatusChar.notify((uint8_t*)"TERR:BUSY", 9);
+      return;
+    }
+    strncpy(trackDeleteFilename, buffer + 5, sizeof(trackDeleteFilename) - 1);
+    trackDeleteFilename[sizeof(trackDeleteFilename) - 1] = '\0';
+    trackDeletePending = true;
+
+  // Battery query — no SD access needed, uses cached voltage
+  } else if (strcmp(buffer, "BATT") == 0) {
+    int pct = getBatteryPercent(lastBatteryVoltage);
+    char vbuf[8];
+    dtostrf(lastBatteryVoltage, 4, 2, vbuf);
+    char response[24];
+    snprintf(response, sizeof(response), "BATT:%d,%s", pct, vbuf);
+    fileStatusChar.notify((uint8_t*)response, strlen(response));
   }
 }
 
@@ -354,9 +389,12 @@ void BLE_SETUP() {
   Bluefruit.setTxPower(4);
   char bleName[32];
   if (getSetting("bluetooth_name", bleName, sizeof(bleName))) {
+    debug(F("BLE: Name from settings: "));
+    debugln(bleName);
     Bluefruit.setName(bleName);
   } else {
-    Bluefruit.setName("DovesLapTimer");
+    debugln(F("BLE: WARNING - bluetooth_name not found, using fallback"));
+    Bluefruit.setName("DovesDataLogger");
   }
 
   // Enable connection LED
@@ -383,6 +421,10 @@ void BLE_STOP() {
 
   debugln(F("BLE: Stopping Bluetooth..."));
 
+  // Mark inactive BEFORE disconnect so the async bleDisconnectCallback
+  // knows this was a local stop (not a phone disconnect) and skips reboot.
+  bleActive = false;
+
   // Close any open file and release SD access
   if (bleCurrentFile) {
     bleCurrentFile.close();
@@ -405,7 +447,7 @@ void BLE_STOP() {
   digitalWrite(LED_BLUE, HIGH);
 
   bleConnected = false;
-  bleActive = false;
+  // bleActive already set false at top of BLE_STOP()
 
   debugln(F("BLE: Bluetooth stopped"));
 }
@@ -586,6 +628,43 @@ void processTrackUpload() {
   trackUploadError = false;
 }
 
+void processTrackDelete() {
+  debug(F("BLE: Deleting track file: ["));
+  debug(trackDeleteFilename);
+  debugln(F("]"));
+
+  if (!acquireSDAccess(SD_ACCESS_BLE_TRANSFER)) {
+    debugln(F("BLE: SD busy, cannot delete track"));
+    fileStatusChar.notify((uint8_t*)"TERR:SD_BUSY", 12);
+    trackDeletePending = false;
+    return;
+  }
+
+  char filepath[FILEPATH_MAX];
+  snprintf(filepath, sizeof(filepath), "/TRACKS/%s", trackDeleteFilename);
+
+  if (!SD.exists(filepath)) {
+    debugln(F("BLE: Track file not found"));
+    releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
+    fileStatusChar.notify((uint8_t*)"TERR:NO_FILE", 12);
+    trackDeletePending = false;
+    return;
+  }
+
+  if (SD.remove(filepath)) {
+    debugln(F("BLE: Track file deleted successfully"));
+    releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
+    fileStatusChar.notify((uint8_t*)"TOK", 3);
+    buildTrackList();
+  } else {
+    debugln(F("BLE: Failed to delete track file"));
+    releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
+    fileStatusChar.notify((uint8_t*)"TERR:WRITE_FAIL", 15);
+  }
+
+  trackDeletePending = false;
+}
+
 void BLUETOOTH_LOOP() {
   if (!bleActive) return;
 
@@ -603,6 +682,10 @@ void BLUETOOTH_LOOP() {
 
   if (trackUploadComplete) {
     processTrackUpload();
+  }
+
+  if (trackDeletePending) {
+    processTrackDelete();
   }
 
   // Deferred MTU negotiation - read result 500ms after request

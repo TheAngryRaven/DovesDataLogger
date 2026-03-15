@@ -193,7 +193,11 @@ void displayPage_replay_file_select() {
 
   if (numReplayFiles == 0) {
     display.println();
+    #ifdef ENABLE_NEW_UI
+    display.println(F("No .dovex files"));
+    #else
     display.println(F("No .dove or .nmea"));
+    #endif
     display.println(F("files found!"));
     display.println();
     display.println(F("Press any key"));
@@ -384,10 +388,14 @@ void displayPage_replay_processing() {
 
   display.setTextSize(1);
   display.println();
+  #ifdef ENABLE_NEW_UI
+  // Not used in new UI (DOVEX replay is instant)
+  #else
   if (lapTimer.getLaps() > 0) {
     display.print(F("Laps found: "));
     display.println(lapTimer.getLaps());
   }
+  #endif
 
   safeDisplayUpdate();
 }
@@ -398,20 +406,74 @@ void displayPage_replay_results() {
   display.setTextSize(1);
   display.println(F("   Replay Results"));
 
+  #ifdef ENABLE_NEW_UI
+  // DOVEX replay: display from parsed header data
+  display.print(F("Laps: "));
+  display.println(lapHistoryCount);
+
+  if (lapHistoryCount > 0) {
+    // Find best lap from history
+    unsigned long bestTime = lapHistory[0];
+    int bestNum = 1;
+    for (int i = 1; i < lapHistoryCount; i++) {
+      if (lapHistory[i] < bestTime) {
+        bestTime = lapHistory[i];
+        bestNum = i + 1;
+      }
+    }
+
+    display.print(F("Best: "));
+    unsigned long minutes = bestTime / 60000;
+    unsigned long seconds = (bestTime % 60000) / 1000;
+    unsigned long milliseconds = bestTime % 1000;
+    if (minutes > 0) { display.print(minutes); display.print(F(":")); }
+    if (seconds < 10 && minutes > 0) display.print(F("0"));
+    display.print(seconds);
+    display.print(F("."));
+    if (milliseconds < 100) display.print(F("0"));
+    if (milliseconds < 10) display.print(F("0"));
+    display.print(milliseconds);
+    display.print(F(" (L"));
+    display.print(bestNum);
+    display.println(F(")"));
+
+    // Show optimal if available
+    if (strcmp(dovexReplayOptimal, "N/A") != 0 && dovexReplayOptimal[0] != '\0') {
+      display.print(F("Opt: "));
+      unsigned long optMs = strtoul(dovexReplayOptimal, NULL, 10);
+      minutes = optMs / 60000;
+      seconds = (optMs % 60000) / 1000;
+      milliseconds = optMs % 1000;
+      if (minutes > 0) { display.print(minutes); display.print(F(":")); }
+      if (seconds < 10 && minutes > 0) display.print(F("0"));
+      display.print(seconds);
+      display.print(F("."));
+      if (milliseconds < 100) display.print(F("0"));
+      if (milliseconds < 10) display.print(F("0"));
+      display.println(milliseconds);
+    }
+  }
+
+  display.print(F("Driver: "));
+  display.println(dovexReplayDriver);
+  display.print(F("Course: "));
+  display.println(dovexReplayCourseName);
+
+  display.println();
+  display.println(F("<- Laps       Exit ->"));
+
+  #else
+  // Legacy replay results
   display.print(F("Laps: "));
   display.println(lapTimer.getLaps());
 
   if (lapTimer.getLaps() > 0) {
-    // Best lap with lap number
     display.print(F("Best: "));
     unsigned long bestTime = lapTimer.getBestLapTime();
     unsigned long minutes = bestTime / 60000;
     unsigned long seconds = (bestTime % 60000) / 1000;
     unsigned long milliseconds = bestTime % 1000;
-    if (minutes > 0) {
-      display.print(minutes);
-      display.print(F(":"));
-    }
+    if (minutes > 0) { display.print(minutes); display.print(F(":")); }
     if (seconds < 10 && minutes > 0) display.print(F("0"));
     display.print(seconds);
     display.print(F("."));
@@ -422,17 +484,13 @@ void displayPage_replay_results() {
     display.print(lapTimer.getBestLapNumber());
     display.println(F(")"));
 
-    // Optimal lap with sector numbers (only if track has sectors)
-    if (trackLayouts[selectedTrack].hasSector2 || trackLayouts[selectedTrack].hasSector3) {
+    if (selectedTrack >= 0 && (trackLayouts[selectedTrack].hasSector2 || trackLayouts[selectedTrack].hasSector3)) {
       display.print(F("Opt: "));
       unsigned long optTime = lapTimer.getOptimalLapTime();
       minutes = optTime / 60000;
       seconds = (optTime % 60000) / 1000;
       milliseconds = optTime % 1000;
-      if (minutes > 0) {
-        display.print(minutes);
-        display.print(F(":"));
-      }
+      if (minutes > 0) { display.print(minutes); display.print(F(":")); }
       if (seconds < 10 && minutes > 0) display.print(F("0"));
       display.print(seconds);
       display.print(F("."));
@@ -462,6 +520,7 @@ void displayPage_replay_results() {
 
   display.println();
   display.println(F("<- Laps       Exit ->"));
+  #endif
 
   safeDisplayUpdate();
 }
@@ -497,34 +556,14 @@ void displayPage_gps_stats() {
     lastBatteryCheck = millis();
     lastBatteryVoltage = getBatteryVoltage();
   }
-  display.print(F("Battery  : "));
-  display.print("[");
-  if (lastBatteryVoltage > 3.7) {
-    display.print("#");
-  } else {
-    display.print(" ");
+  {
+    int battPct = getBatteryPercent(lastBatteryVoltage);
+    display.print(F("Battery  : "));
+    display.print(battPct);
+    display.print(F("% "));
+    display.print(lastBatteryVoltage, 2);
+    display.println(F("V"));
   }
-  if (lastBatteryVoltage >= 3.8) {
-    display.print("#");
-  } else {
-    display.print(" ");
-  }
-  if (lastBatteryVoltage >= 3.9) {
-    display.print("#");
-  } else {
-    display.print(" ");
-  }
-  if (lastBatteryVoltage >= 4.0) {
-    display.print("#");
-  } else {
-    display.print(" ");
-  }
-  if (lastBatteryVoltage >= 4.1) {
-    display.print("#");
-  } else {
-    display.print(" ");
-  }
-  display.println("]");
 
 
   display.print(F("Sats     : "));
@@ -558,6 +597,17 @@ void displayPage_gps_stats() {
 
   display.println();
 
+  #ifdef ENABLE_NEW_UI
+  if (courseManager != nullptr) {
+    display.print(F("Track: "));
+    display.println(courseManager->getShortName());
+    display.print(F("Mode : "));
+    const char* cn = courseManager->getActiveCourseName();
+    display.println(cn ? cn : "Detecting...");
+  } else {
+    display.print(F("Waiting for GPS..."));
+  }
+  #else
   if (sdSetupSuccess && sdTrackSuccess) {
     display.print(F("Track : "));
     display.println(locations[selectedLocation]);
@@ -568,6 +618,7 @@ void displayPage_gps_stats() {
   } else {
     display.print(F("Autologging\nShut off to stop"));
   }
+  #endif
 
   safeDisplayUpdate();
 }
@@ -577,6 +628,20 @@ void displayPage_gps_speed() {
 
   display.println(F("SPEED"));
 
+  #ifdef ENABLE_NEW_UI
+  {
+    int currentLap = activeTimerLaps() + (activeTimerRaceStarted() ? 1 : 0);
+    if (currentLap > 0) {
+      display.println(F("\nLAP"));
+      if (currentLap < 100) {
+        display.setTextSize(3);
+      } else {
+        display.setTextSize(2);
+      }
+      display.print(currentLap);
+    }
+  }
+  #else
   if (sdSetupSuccess && sdTrackSuccess) {
     int currentLap = lapTimer.getLaps() + (lapTimer.getRaceStarted() ? 1 : 0);
     if (currentLap > 0) {
@@ -589,6 +654,7 @@ void displayPage_gps_speed() {
       display.print(currentLap);
     }
   }
+  #endif
 
   display.setCursor(40, 5);
   display.setTextSize(7);
@@ -609,10 +675,19 @@ void displayPage_gps_lap_time() {
 
   display.print(F("\n\n"));
   display.setTextSize(3);
-  if (lapTimer.getRaceStarted()) {
-    unsigned long minutes = lapTimer.getCurrentLapTime() / 60000;
-    unsigned long seconds = (lapTimer.getCurrentLapTime() % 60000) / 1000;
-    unsigned long milliseconds = lapTimer.getCurrentLapTime() % 1000;
+
+  #ifdef ENABLE_NEW_UI
+  bool raceStarted = activeTimerRaceStarted();
+  unsigned long currentLapTimeMs = activeTimerCurrentLapTime();
+  #else
+  bool raceStarted = lapTimer.getRaceStarted();
+  unsigned long currentLapTimeMs = lapTimer.getCurrentLapTime();
+  #endif
+
+  if (raceStarted) {
+    unsigned long minutes = currentLapTimeMs / 60000;
+    unsigned long seconds = (currentLapTimeMs % 60000) / 1000;
+    unsigned long milliseconds = currentLapTimeMs % 1000;
     if (minutes > 0) {
       display.print(minutes);
       display.print(":");
@@ -643,8 +718,18 @@ void displayPage_gps_pace() {
 
   display.println(F("  Current Lap Pace"));
 
+  #ifdef ENABLE_NEW_UI
+  int paceLaps = activeTimerLaps();
+  float paceDiff = activeTimerPaceDifference();
+  bool paceRaceStarted = activeTimerRaceStarted();
+  #else
+  int paceLaps = lapTimer.getLaps();
+  float paceDiff = lapTimer.getPaceDifference();
+  bool paceRaceStarted = lapTimer.getRaceStarted();
+  #endif
+
   // animation
-  if (lapTimer.getLaps() >= 1 && lapTimer.getPaceDifference() < (-1)) {
+  if (paceLaps >= 1 && paceDiff < (-1)) {
     if (paceFlashStatus) {
       paceFlashStatus = false;
       display.setTextColor(DISPLAY_TEXT_BLACK, DISPLAY_TEXT_WHITE);
@@ -663,13 +748,13 @@ void displayPage_gps_pace() {
   // main page into
   display.setTextColor(DISPLAY_TEXT_WHITE);
   const int lineHeight = 21;
-  if (lapTimer.getRaceStarted() && lapTimer.getLaps() >= 1) {
+  if (paceRaceStarted && paceLaps >= 1) {
     display.setCursor(0, lineHeight);
     display.setTextSize(4);
-    if (lapTimer.getPaceDifference() > 0) {
+    if (paceDiff > 0) {
       display.print(F("+"));
     }
-    display.print(lapTimer.getPaceDifference());
+    display.print(paceDiff);
   } else {
     display.setTextSize(2);
     display.println();
@@ -681,7 +766,7 @@ void displayPage_gps_pace() {
   display.println();
   display.setTextSize(1);
 
-  if (lapTimer.getLaps() >= 1 && lapTimer.getPaceDifference() < (-1)) {
+  if (paceLaps >= 1 && paceDiff < (-1)) {
     if (paceFlashStatus) {
       display.setTextColor(DISPLAY_TEXT_BLACK, DISPLAY_TEXT_WHITE);
       display.print(F("           "));
@@ -704,13 +789,23 @@ void displayPage_gps_best_lap() {
 
   display.println(F("      Best Lap"));
   display.print(F("\n"));
-  if (
-    lapTimer.getRaceStarted() &&
-    lapTimer.getLaps() > 0
-  ) {
-    unsigned long minutes = lapTimer.getBestLapTime() / 60000;
-    unsigned long seconds = (lapTimer.getBestLapTime() % 60000) / 1000;
-    unsigned long milliseconds = lapTimer.getBestLapTime() % 1000;
+
+  #ifdef ENABLE_NEW_UI
+  bool bestRaceStarted = activeTimerRaceStarted();
+  int bestLaps = activeTimerLaps();
+  unsigned long bestLapTimeMs = activeTimerBestLapTime();
+  int bestLapNum = activeTimerBestLapNumber();
+  #else
+  bool bestRaceStarted = lapTimer.getRaceStarted();
+  int bestLaps = lapTimer.getLaps();
+  unsigned long bestLapTimeMs = lapTimer.getBestLapTime();
+  int bestLapNum = lapTimer.getBestLapNumber();
+  #endif
+
+  if (bestRaceStarted && bestLaps > 0) {
+    unsigned long minutes = bestLapTimeMs / 60000;
+    unsigned long seconds = (bestLapTimeMs % 60000) / 1000;
+    unsigned long milliseconds = bestLapTimeMs % 1000;
     display.setTextSize(3);
     if (minutes > 0) {
       display.print(minutes);
@@ -734,7 +829,7 @@ void displayPage_gps_best_lap() {
     display.setTextSize(2);
     display.print(F("\n\n"));
     display.print(F("Lap: "));
-    display.print(lapTimer.getBestLapNumber());
+    display.print(bestLapNum);
   } else {
     display.print(F("\n"));
     display.setTextSize(3);
@@ -781,18 +876,38 @@ void displayPage_tachometer() {
 void displayPage_optimal_lap() {
   resetDisplay();
 
+  #ifdef ENABLE_NEW_UI
+  // Hide optimal lap when no sectors configured (Lap Anything mode)
+  if (!activeTimerSectorsConfigured()) {
+    display.println(F("     Optimal Lap"));
+    display.print(F("\n\n"));
+    display.setTextSize(2);
+    display.println(F("No sectors"));
+    safeDisplayUpdate();
+    return;
+  }
+  #endif
+
   display.println(F("     Optimal Lap"));
-  if (
-    lapTimer.getRaceStarted() &&
-    lapTimer.getLaps() > 0
-  ) {
+
+  #ifdef ENABLE_NEW_UI
+  bool optRaceStarted = activeTimerRaceStarted();
+  int optLaps = activeTimerLaps();
+  unsigned long optLapTimeMs = activeTimerOptimalLapTime();
+  #else
+  bool optRaceStarted = lapTimer.getRaceStarted();
+  int optLaps = lapTimer.getLaps();
+  unsigned long optLapTimeMs = lapTimer.getOptimalLapTime();
+  #endif
+
+  if (optRaceStarted && optLaps > 0) {
     const int lineHeight = 15;
     display.setCursor(0, lineHeight);
     display.setTextSize(2);
 
-    unsigned long minutes = lapTimer.getOptimalLapTime() / 60000;
-    unsigned long seconds = (lapTimer.getOptimalLapTime() % 60000) / 1000;
-    unsigned long milliseconds = lapTimer.getOptimalLapTime() % 1000;
+    unsigned long minutes = optLapTimeMs / 60000;
+    unsigned long seconds = (optLapTimeMs % 60000) / 1000;
+    unsigned long milliseconds = optLapTimeMs % 1000;
 
     if (minutes > 0) {
       display.print(minutes);
@@ -819,11 +934,24 @@ void displayPage_optimal_lap() {
     display.setCursor(0, lineHeight+35);
     display.setTextSize(2);
     display.print(F("  "));
+    #ifdef ENABLE_NEW_UI
+    {
+      DovesLapTimer* dlt = getActiveTimerDLT();
+      if (dlt) {
+        display.print(dlt->getBestSector1LapNumber());
+        display.print(F("  "));
+        display.print(dlt->getBestSector2LapNumber());
+        display.print(F("  "));
+        display.print(dlt->getBestSector3LapNumber());
+      }
+    }
+    #else
     display.print(lapTimer.getBestSector1LapNumber());
     display.print(F("  "));
     display.print(lapTimer.getBestSector2LapNumber());
     display.print(F("  "));
     display.print(lapTimer.getBestSector3LapNumber());
+    #endif
   } else {
     display.print(F("\n\n"));
     display.setTextSize(3);
@@ -924,10 +1052,34 @@ void displayPage_gps_debug() {
     return;
   }
 
+  #ifdef ENABLE_NEW_UI
+  display.print(F("Laps: "));
+  display.print(activeTimerLaps());
+  display.print(F(" | od:"));
+  display.println(activeTimerTotalDistance());
+  display.print(F("Strt: "));
+  display.print(activeTimerRaceStarted() ? F("T") : F("F"));
+  display.print(F(" | Xing: "));
+  display.println(activeTimerCrossing() ? F("T") : F("F"));
+  display.print(F("Current: "));
+  display.println(activeTimerCurrentLapTime());
+  display.print(F("Last   : "));
+  display.println(activeTimerLastLapTime());
+  display.print(F("Best: "));
+  display.print(activeTimerBestLapNumber());
+  display.print(F(": "));
+  display.println(activeTimerBestLapTime());
+  display.print(F("Pace   : "));
+  display.println(activeTimerPaceDifference());
+  if (courseManager) {
+    display.print(F("Course: "));
+    const char* cn = courseManager->getActiveCourseName();
+    display.println(cn ? cn : "...");
+  }
+  #else
   double dist2Line = lapTimer.pointLineSegmentDistance(gpsData.latitudeDegrees, gpsData.longitudeDegrees, crossingPointALat, crossingPointALng, crossingPointBLat, crossingPointBLng);
   display.print(F("DistToLine: "));
   display.println(dist2Line, 2);
-
   display.print(F("Laps: "));
   display.print(lapTimer.getLaps());
   display.print(F(" | od:"));
@@ -936,7 +1088,6 @@ void displayPage_gps_debug() {
   display.print(lapTimer.getRaceStarted() ? F("T") : F("F"));
   display.print(F(" | Xing: "));
   display.println(lapTimer.getCrossing() ? F("T") : F("F"));
-
   display.print(F("Current: "));
   display.println(lapTimer.getCurrentLapTime());
   display.print(F("Last   : "));
@@ -947,6 +1098,7 @@ void displayPage_gps_debug() {
   display.println(lapTimer.getBestLapTime());
   display.print(F("Pace   : "));
   display.println(lapTimer.getPaceDifference());
+  #endif
 
   safeDisplayUpdate();
 }
@@ -987,6 +1139,37 @@ void displayPage_internal_warning() {
   display.println(internalNotification);
   safeDisplayUpdate();
 }
+
+#ifdef ENABLE_NEW_UI
+void displayPage_sleep_charging() {
+  resetDisplay();
+
+  float voltage = getBatteryVoltage();
+  int percent = getBatteryPercent(voltage);
+
+  display.setTextSize(1);
+  display.setCursor(32, 10);
+  display.print(F("Charging"));
+
+  display.setTextSize(3);
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%d%%", percent);
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(buf, 0, 0, &x1, &y1, &w, &h);
+  display.setCursor((128 - w) / 2, 28);
+  display.print(buf);
+
+  display.setTextSize(1);
+  char vbuf[8];
+  dtostrf(voltage, 4, 2, vbuf);
+  display.setCursor(40, 56);
+  display.print(vbuf);
+  display.print(F("V"));
+
+  safeDisplayUpdate();
+}
+#endif
 
 ///////////////////////////////////////////
 void displayCrossing() {
