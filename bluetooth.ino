@@ -359,6 +359,15 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
     strncpy(trackDeleteFilename, buffer + 5, sizeof(trackDeleteFilename) - 1);
     trackDeleteFilename[sizeof(trackDeleteFilename) - 1] = '\0';
     trackDeletePending = true;
+
+  // Battery query — no SD access needed, uses cached voltage
+  } else if (strcmp(buffer, "BATT") == 0) {
+    int pct = getBatteryPercent(lastBatteryVoltage);
+    char vbuf[8];
+    dtostrf(lastBatteryVoltage, 4, 2, vbuf);
+    char response[24];
+    snprintf(response, sizeof(response), "BATT:%d,%s", pct, vbuf);
+    fileStatusChar.notify((uint8_t*)response, strlen(response));
   }
 }
 

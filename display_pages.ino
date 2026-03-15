@@ -557,7 +557,7 @@ void displayPage_gps_stats() {
     lastBatteryVoltage = getBatteryVoltage();
   }
   {
-    int battPct = constrain((int)((lastBatteryVoltage - 3.3) / 0.9 * 100), 0, 100);
+    int battPct = getBatteryPercent(lastBatteryVoltage);
     display.print(F("Battery  : "));
     display.print(battPct);
     display.print(F("% "));
@@ -1145,7 +1145,7 @@ void displayPage_sleep_charging() {
   resetDisplay();
 
   float voltage = getBatteryVoltage();
-  int percent = constrain((int)((voltage - 3.3) / 0.9 * 100), 0, 100);
+  int percent = getBatteryPercent(voltage);
 
   display.setTextSize(1);
   display.setCursor(32, 10);

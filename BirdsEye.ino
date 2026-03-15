@@ -60,8 +60,16 @@ float getBatteryVoltage() {
   #else
   unsigned int adcCount = analogRead(PIN_VBAT);
   float adcVoltage = adcCount * VREF / ADC_MAX;
-  return adcVoltage * (1000 + 510) / 510;  // 1M / 510K voltage divider on XIAO PCB
+  // Nominal divider: (1000+510)/510 = 2.9608, but reads ~2% low due to
+  // resistor/VREF tolerances (4.11V observed at true 4.20V full charge).
+  // Calibrated: 2.9608 * (4.20/4.11) = 3.024
+  return adcVoltage * 3.024;
   #endif
+}
+
+int getBatteryPercent(float voltage) {
+  // LiPo range: 3.3V (cutoff) to 4.2V (full charge)
+  return constrain((int)((voltage - 3.3) / 0.9 * 100), 0, 100);
 }
 
 ///////////////////////////////////////////
@@ -603,6 +611,10 @@ void setup() {
     pinMode(PIN_VBAT, INPUT);
     pinMode(VBAT_ENABLE, OUTPUT);
     digitalWrite(VBAT_ENABLE, LOW);
+    // Enable fast charging (~100mA vs default ~50mA)
+    // PIN_CHARGING_CURRENT = P0.13 = HICHG pin on BQ25100 charge IC
+    pinMode(PIN_CHARGING_CURRENT, OUTPUT);
+    digitalWrite(PIN_CHARGING_CURRENT, HIGH);
     lastBatteryCheck = millis();
     lastBatteryVoltage = getBatteryVoltage();
   #endif
@@ -1101,7 +1113,7 @@ void enterSleepMode() {
   // Tach ISR stays attached -- RPM pulses will wake via tachHavePeriod
 }
 
-void exitSleepMode() {
+void exitSleepMode(bool rpmWake = false) {
   // 1. Re-enable IMU
   if (accelAvailable) {
     digitalWrite(PIN_LSM6DS3TR_C_POWER, LOW);
@@ -1123,8 +1135,17 @@ void exitSleepMode() {
   sleepGpsWakeActive = false;
   menuIdleTimerRunning = false;
 
-  // 5. Return to main menu
-  switchToDisplayPage(PAGE_MAIN_MENU);
+  // 5. RPM wake → skip main menu, go straight to race mode
+  if (rpmWake) {
+    debugln(F("RPM wake — entering race mode directly"));
+    newUiRaceActive = true;
+    enableLogging = true;
+    trackSelected = true;
+    createLapAnythingCourseManager();
+    switchToDisplayPage(TACHOMETER);
+  } else {
+    switchToDisplayPage(PAGE_MAIN_MENU);
+  }
 }
 
 #endif // ENABLE_NEW_UI
@@ -1149,7 +1170,7 @@ void loop() {
     bool wakeRpm = tachHavePeriod;  // ISR sets this directly on any valid pulse
 
     if (wakeButton || wakeRpm) {
-      exitSleepMode();
+      exitSleepMode(wakeRpm);
       return;
     }
 
@@ -1204,6 +1225,12 @@ void loop() {
   // When BLE is active, skip GPS/tach/lap processing for better throughput
   if (bleActive) {
     BLUETOOTH_LOOP();
+
+    // Keep battery voltage fresh for BLE BATT command and display
+    if (millis() - lastBatteryCheck > batteryUpdateInterval) {
+      lastBatteryCheck = millis();
+      lastBatteryVoltage = getBatteryVoltage();
+    }
 
     // Minimal button check for exit
     readButtons();
