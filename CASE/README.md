@@ -19,9 +19,12 @@ This will be slowly updated with more information
  - metal rod or such for pins on battery and sd card doors
 
 ## Mounting Options
+option one
  - 1x 5/8ths carriage bolt
  - bolt to kart with washers and such
- OR
+
+
+option two
  - 2x 1/4 carriage bolt
  - 1/16th thick rubber sheet 2in wide
  - 1/4in thich rubber 2in wide
