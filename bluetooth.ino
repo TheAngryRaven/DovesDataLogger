@@ -37,6 +37,11 @@ void bleConnectCallback(uint16_t conn_handle) {
     debugln(F("BLE: MTU exchange request failed!"));
   }
 
+  // Request 2M PHY for double raw throughput (BLE 5.0, both sides must support)
+  connection->requestPHY(BLE_GAP_PHY_2MBPS);
+  // Request Data Length Extension (max PDU size, reduces L2CAP overhead)
+  connection->requestDataLengthUpdate();
+
   // Defer MTU read to main loop instead of blocking here with delay(500)
   bleWaitingForMTU = true;
   bleMTURequestTime = millis();
@@ -384,7 +389,11 @@ void BLE_SETUP() {
 
   debugln(F("BLE: Initializing Bluetooth..."));
 
-  Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
+  // Custom BLE config for max file transfer throughput:
+  // MTU 247, event_len 100 (125ms max radio time per event),
+  // HVN TX queue 10 (up from BANDWIDTH_MAX's 3 — deeper notification pipeline),
+  // WrCmd queue 1 (default, we don't use write commands).
+  Bluefruit.configPrphConn(247, 100, 10, 1);
   Bluefruit.begin();
   Bluefruit.setTxPower(4);
   char bleName[32];
@@ -702,36 +711,31 @@ void BLUETOOTH_LOOP() {
   if (bleTransferInProgress && bleCurrentFile && Bluefruit.connected()) {
     // Use actual negotiated MTU
     uint16_t maxChunk = bleNegotiatedMtu - 3;
-
     uint8_t buffer[524];
-
     size_t chunkSize = min(maxChunk, (uint16_t)244);
-    size_t bytesRead = bleCurrentFile.read(buffer, chunkSize);
 
-    if (bytesRead > 0) {
-      if (fileDataChar.notify(buffer, bytesRead)) {
-        bleBytesTransferred += bytesRead;
+    // Burst send: read + notify multiple chunks per loop iteration.
+    // notify() blocks via semaphore when the SoftDevice TX queue is full,
+    // providing natural flow control. This keeps the pipeline fed instead
+    // of sending 1 lonely chunk then wasting time on button checks.
+    for (int burst = 0; burst < 10 && bleTransferInProgress; burst++) {
+      size_t bytesRead = bleCurrentFile.read(buffer, chunkSize);
 
-        // Progress update every 10KB
-        if (bleBytesTransferred % 10000 == 0) {
-          debug(F("BLE: Progress: "));
-          debug(bleBytesTransferred);
-          debug(F(" / "));
-          debug(bleFileSize);
-          debug(F(" ("));
-          debug((bleBytesTransferred * 100) / bleFileSize);
-          debugln(F("%)"));
+      if (bytesRead > 0) {
+        if (!fileDataChar.notify(buffer, bytesRead)) {
+          break;  // Disconnected or error
         }
+        bleBytesTransferred += bytesRead;
+      } else {
+        // Transfer complete
+        bleCurrentFile.close();
+        bleTransferInProgress = false;
+        releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
+
+        debugln(F("BLE: Transfer complete!"));
+        fileStatusChar.notify((uint8_t*)"DONE", 4);
+        break;
       }
-    } else {
-      // Transfer complete
-      bleCurrentFile.close();
-      bleTransferInProgress = false;
-      releaseSDAccess(SD_ACCESS_BLE_TRANSFER);  // Release SD access when transfer completes
-
-      debugln(F("BLE: Transfer complete!"));
-
-      fileStatusChar.notify((uint8_t*)"DONE", 4);
     }
   }
 }

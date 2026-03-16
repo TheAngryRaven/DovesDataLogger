@@ -65,7 +65,7 @@ Core capabilities:
 | Serial1 RX/TX | GPS UART | u-blox SAM-M10Q, 57600 baud |
 | I2C SDA/SCL | OLED display | 128x64, address 0x3C, 400 kHz |
 | I2C SDA/SCL | LSM6DS3 IMU | Onboard accelerometer/gyro (Sense variant), address 0x6A |
-| SPI MOSI/SCK/MISO | SD card | 1 MHz SPI clock (EMI hardened), CS grounded on PCB |
+| SPI MOSI/SCK/MISO | SD card | 2 MHz SPI clock (EMI hardened), CS grounded on PCB |
 | D1 | Button 1 (Left) | INPUT_PULLUP, RC filter recommended |
 | D2 | Button 2 (Select) | INPUT_PULLUP, RC filter recommended |
 | D3 | Button 3 (Right) | INPUT_PULLUP, RC filter recommended |
@@ -415,7 +415,7 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | Tach stop timeout | 500 ms | `tachometer.ino` |
 | Display refresh | 3 Hz | `display_ui.ino` |
 | Button debounce | 200 ms | `display_ui.ino` |
-| SD SPI clock | 1 MHz | `BirdsEye.ino` |
+| SD SPI clock | 2 MHz | `BirdsEye.ino` |
 | Battery check interval | 5 s | `BirdsEye.ino` |
 | BLE default MTU | 23 | `bluetooth.ino` |
 | JSON buffer | 4096 (1024 on Wokwi) | `sd_functions.ino` |
@@ -452,7 +452,7 @@ This device operates in ignition-noise environments. Three layers of defense:
 2. **ISR design**: Volatile flag gating (never `noInterrupts()` in ISR);
    3 ms minimum pulse gap in tachometer.
 3. **Software**: Multi-sample button reads (3x at 500 us), 200 ms refire
-   lockout, EMA filtering on RPM, 1 MHz SPI clock for SD stability.
+   lockout, EMA filtering on RPM, 2 MHz SPI clock for SD stability.
 4. **GPS serial buffer**: TIMER3 ISR drains Serial1 into a 4 KB RAM ring
    buffer every 10 ms, preventing GPS data loss during SD card GC pauses
    that can block writes for 100 ms–2 s.

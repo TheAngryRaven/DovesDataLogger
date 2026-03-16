@@ -379,9 +379,11 @@ char replayLineBuffer[REPLAY_LINE_BUFFER_SIZE];
 // #define PIN_SPI_CS 3 // todo: ground out for A0/battery voltage...
 #endif
 
-// Reduced from 25MHz to 1MHz for better EMI resistance
-// Slower speed = more robust against ignition noise
-#define SPI_SPEED SD_SCK_MHZ(1)
+// Reduced from 25MHz for EMI resistance in ignition environments.
+// 2 MHz is the minimum for 125+ kBps BLE file transfer throughput
+// (1 MHz SD reads cap at ~122 kBps, just under the BLE 2M PHY ceiling).
+// Still 12.5x below the original 25 MHz — very conservative.
+#define SPI_SPEED SD_SCK_MHZ(2)
 
 #include "SdFat.h"
 #include "sdios.h"
