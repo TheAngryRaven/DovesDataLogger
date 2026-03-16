@@ -2,7 +2,7 @@
 This will be slowly updated with more information
 
 <p align="center">
-  <img src="sample.png" />
+  <img src="CASE/sample.png" />
 </p>
 
 ## Materials List
