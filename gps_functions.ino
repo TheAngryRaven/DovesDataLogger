@@ -4,6 +4,113 @@
 // Uses SparkFun u-blox GNSS v3 library with UBX PVT binary protocol
 ///////////////////////////////////////////
 
+///////////////////////////////////////////
+// GPS SERIAL BUFFER
+// Timer ISR drains Serial1 into a 4KB RAM buffer every 10ms,
+// preventing data loss during SD card write stalls (GC pauses).
+// SparkFun library reads from this buffer via GpsBufferedStream.
+//
+// At 25Hz PVT (~2500 bytes/sec), the hardware serial buffer
+// (64-256 bytes) overflows in 25-100ms of blocking. SD card
+// garbage collection can block writes for 100ms-2s.
+// This 4KB buffer survives up to 1.6 seconds of stalls.
+///////////////////////////////////////////
+
+// Forward-declare ISR with C linkage BEFORE Arduino's preprocessor
+// auto-generates a C++ prototype (which would conflict with extern "C").
+extern "C" void TIMER3_IRQHandler(void);
+
+#define GPS_RX_BUF_SIZE 4096
+static uint8_t gpsRxBuf[GPS_RX_BUF_SIZE];
+static volatile uint16_t gpsRxHead = 0;  // Written by ISR only
+static volatile uint16_t gpsRxTail = 0;  // Read by main loop only (via gpsStream)
+static volatile bool gpsTimerActive = false;
+
+// Stream wrapper: SparkFun library reads from our 4KB buffer instead of Serial1.
+// Before the timer ISR is started (during GPS_SETUP), reads pass through to
+// GPS_SERIAL directly so that myGNSS.begin() can communicate with the module.
+class GpsBufferedStream : public Stream {
+public:
+  int available() override {
+    if (!gpsTimerActive) return GPS_SERIAL.available();
+    return (GPS_RX_BUF_SIZE + gpsRxHead - gpsRxTail) % GPS_RX_BUF_SIZE;
+  }
+  int read() override {
+    if (!gpsTimerActive) return GPS_SERIAL.read();
+    if (gpsRxHead == gpsRxTail) return -1;
+    uint8_t c = gpsRxBuf[gpsRxTail];
+    gpsRxTail = (gpsRxTail + 1) % GPS_RX_BUF_SIZE;
+    return c;
+  }
+  int peek() override {
+    if (!gpsTimerActive) return GPS_SERIAL.peek();
+    if (gpsRxHead == gpsRxTail) return -1;
+    return gpsRxBuf[gpsRxTail];
+  }
+  size_t write(uint8_t c) override {
+    return GPS_SERIAL.write(c);
+  }
+  size_t write(const uint8_t *buffer, size_t size) override {
+    return GPS_SERIAL.write(buffer, size);
+  }
+  void flush() override {
+    GPS_SERIAL.flush();
+  }
+};
+
+static GpsBufferedStream gpsStream;
+
+// Timer3 ISR: drains Serial1 into our 4KB buffer every ~10ms.
+// Single-producer (ISR writes gpsRxHead), single-consumer (main loop
+// reads gpsRxTail via gpsStream) — lock-free ring buffer.
+//
+// Brief __disable_irq() around each GPS_SERIAL read protects the UART
+// driver's internal FIFO from concurrent access by the UART DMA ISR
+// (which can preempt us at higher priority). Each critical section is
+// ~0.3µs — well within SoftDevice's 6µs safe window.
+void TIMER3_IRQHandler(void) {
+  if (NRF_TIMER3->EVENTS_COMPARE[0]) {
+    NRF_TIMER3->EVENTS_COMPARE[0] = 0;
+    while (true) {
+      __disable_irq();
+      int c = GPS_SERIAL.available() ? GPS_SERIAL.read() : -1;
+      __enable_irq();
+      if (c < 0) break;
+
+      uint16_t nextHead = (gpsRxHead + 1) % GPS_RX_BUF_SIZE;
+      if (nextHead == gpsRxTail) break;  // Buffer full, drop bytes
+      gpsRxBuf[gpsRxHead] = (uint8_t)c;
+      gpsRxHead = nextHead;
+    }
+  }
+}
+
+void startGpsSerialTimer() {
+  NRF_TIMER3->TASKS_STOP = 1;
+  NRF_TIMER3->TASKS_CLEAR = 1;
+  NRF_TIMER3->MODE = TIMER_MODE_MODE_Timer;
+  NRF_TIMER3->BITMODE = TIMER_BITMODE_BITMODE_32Bit;
+  NRF_TIMER3->PRESCALER = 4;              // 16MHz / 2^4 = 1MHz tick
+  NRF_TIMER3->CC[0] = 10000;              // 10ms interval
+  NRF_TIMER3->SHORTS = TIMER_SHORTS_COMPARE0_CLEAR_Msk;
+  NRF_TIMER3->INTENSET = TIMER_INTENSET_COMPARE0_Msk;
+  NVIC_SetPriority(TIMER3_IRQn, 3);       // Below SoftDevice (0-2), above main loop
+  NVIC_ClearPendingIRQ(TIMER3_IRQn);      // Clear stale pending interrupt from prior session
+  NVIC_EnableIRQ(TIMER3_IRQn);
+  gpsTimerActive = true;
+  NRF_TIMER3->TASKS_START = 1;
+  debugln(F("GPS serial buffer timer started"));
+}
+
+void stopGpsSerialTimer() {
+  NRF_TIMER3->TASKS_STOP = 1;
+  NRF_TIMER3->INTENCLR = TIMER_INTENCLR_COMPARE0_Msk;
+  NVIC_DisableIRQ(TIMER3_IRQn);
+  NVIC_ClearPendingIRQ(TIMER3_IRQn);      // Ensure no stale ISR fires after disable
+  __DSB();                                 // ARM barrier: NVIC ops complete before flag update
+  gpsTimerActive = false;
+}
+
 /**
   * @brief Returns the GPS time since midnight in milliseconds
   *
@@ -124,7 +231,9 @@ void GPS_SETUP() {
 
     if (GPS_SERIAL) {
       // Connect to GPS at default baud
-      if (!myGNSS.begin(GPS_SERIAL)) {
+      // gpsStream wraps GPS_SERIAL: before timer starts, reads pass
+      // through directly so myGNSS.begin() can communicate with module.
+      if (!myGNSS.begin(gpsStream)) {
         debugln(F("GPS not detected at 9600 baud, trying 57600..."));
         GPS_SERIAL.end();
         delay(100);
@@ -132,7 +241,7 @@ void GPS_SETUP() {
         // Module may already be configured to 57600 from a previous session
         GPS_SERIAL.begin(GPS_BAUD_RATE);
         delay(100);
-        if (!myGNSS.begin(GPS_SERIAL)) {
+        if (!myGNSS.begin(gpsStream)) {
           debugln(F("ERROR: GPS not detected at any baud rate!"));
           return;  // Leave gpsInitialized = false
         }
@@ -147,7 +256,7 @@ void GPS_SETUP() {
         GPS_SERIAL.begin(GPS_BAUD_RATE);
         delay(100);
 
-        if (!myGNSS.begin(GPS_SERIAL)) {
+        if (!myGNSS.begin(gpsStream)) {
           debugln(F("ERROR: GPS lost after baud switch!"));
           return;
         }
@@ -171,15 +280,26 @@ void GPS_SETUP() {
 
       gpsInitialized = true;
       debugln(F("GPS initialized successfully (SparkFun UBX PVT)"));
+
+      // Drain any remaining bytes from Serial1 into our buffer, then
+      // start the timer ISR for continuous background serial drain.
+      while (GPS_SERIAL.available()) {
+        uint16_t nextHead = (gpsRxHead + 1) % GPS_RX_BUF_SIZE;
+        if (nextHead == gpsRxTail) break;
+        gpsRxBuf[gpsRxHead] = GPS_SERIAL.read();
+        gpsRxHead = nextHead;
+      }
+      startGpsSerialTimer();
     } else {
       debugln(F("ERROR: GPS Serial not available!"));
     }
   #else
     debugln(F("WOKWI GPS SETUP"));
     GPS_SERIAL.begin(19200);
-    if (myGNSS.begin(GPS_SERIAL)) {
+    if (myGNSS.begin(gpsStream)) {
       myGNSS.setAutoPVTcallbackPtr(&onPVTReceived);
       gpsInitialized = true;
+      startGpsSerialTimer();
     } else {
       debugln(F("ERROR: WOKWI GPS not detected!"));
     }
@@ -225,14 +345,21 @@ void GPS_LOOP() {
     #endif
 
   #ifdef SD_CARD_LOGGING_ENABLED
-    // Determine if logging conditions are met
+    // Determine if logging conditions are met.
+    // ENABLE_NEW_UI: File creation does NOT require GPS fix — the file opens
+    // as soon as date is available (from RTC even before fix). This eliminates
+    // the delay between GPS reacquisition and first logged row after sleep wake.
+    // Data writing still requires gpsData.fix for valid coordinates.
     #ifdef ENABLE_NEW_UI
-    bool loggingCondition = gpsData.fix && sdSetupSuccess && enableLogging;
+    bool canWriteData = gpsData.fix && sdSetupSuccess && enableLogging && sdDataLogInitComplete;
+    bool canCreateFile = sdSetupSuccess && enableLogging && !sdDataLogInitComplete && gpsData.day > 0;
     #else
     bool loggingCondition = trackSelected && gpsData.fix && sdSetupSuccess && enableLogging;
+    bool canWriteData = loggingCondition && sdDataLogInitComplete;
+    bool canCreateFile = loggingCondition && !sdDataLogInitComplete && gpsData.day > 0;
     #endif
 
-    if (loggingCondition && sdDataLogInitComplete) {
+    if (canWriteData) {
 
       /////////////////////////////////////////////////////////////////
       // Log every PVT update (~25Hz)
@@ -345,7 +472,7 @@ void GPS_LOOP() {
         lastCardFlush = millis();
         dataFile.flush();
       }
-    } else if (loggingCondition && !sdDataLogInitComplete && gpsData.day > 0) {
+    } else if (canCreateFile) {
       debugln(F("Attempt to initialize logfile"));
 
       if (!acquireSDAccess(SD_ACCESS_LOGGING)) {
@@ -426,7 +553,8 @@ void GPS_LOOP() {
 #ifdef ENABLE_NEW_UI
 void GPS_SLEEP() {
   if (!gpsInitialized) return;
-  myGNSS.powerOff(0);  // 0 = indefinite sleep until woken
+  stopGpsSerialTimer();  // Stop serial drain ISR during sleep (saves power)
+  myGNSS.powerOff(0);   // 0 = indefinite sleep until woken
 }
 
 void GPS_WAKE() {
@@ -434,6 +562,10 @@ void GPS_WAKE() {
   // Any UART activity on RX wakes u-blox from powerOff backup mode
   GPS_SERIAL.write(0xFF);
   delay(100);
+  // Reset buffer pointers (stale data from before sleep is useless)
+  gpsRxHead = 0;
+  gpsRxTail = 0;
+  startGpsSerialTimer();  // Resume serial drain ISR
   myGNSS.checkUblox();
 }
 

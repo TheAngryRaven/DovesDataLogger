@@ -40,6 +40,7 @@ void i2cBusRecover() {
 
   // Re-init Wire
   Wire.begin();
+  Wire.setClock(400000);  // Must re-set after begin() (resets to 100kHz)
 
   // Re-init display
   #ifdef USE_1306_DISPLAY
@@ -52,14 +53,14 @@ void i2cBusRecover() {
 }
 
 // Safe wrapper around display.display() - detects hung I2C and recovers.
-// A normal 1024-byte I2C transfer at 100kHz takes ~100ms.
-// If it takes >250ms, something is wrong.
+// A normal 1024-byte I2C transfer at 400kHz takes ~25ms.
+// If it takes >100ms, something is wrong (EMI glitch or bus hang).
 void safeDisplayUpdate() {
   unsigned long start = millis();
   display.display();
   unsigned long elapsed = millis() - start;
 
-  if (elapsed > 250) {
+  if (elapsed > 100) {
     debugln(F("I2C: display.display() took too long, scheduling recovery"));
     i2cRecoveryNeeded = true;
   }
@@ -236,6 +237,14 @@ void displaySetup() {
 #else
   display.begin(I2C_DISPLAY_ADDRESS, true);
 #endif
+
+  // 400kHz I2C: reduces display.display() from ~100ms to ~25ms.
+  // At 100kHz, the 1024-byte framebuffer transfer blocks long enough
+  // for 2-3 GPS PVT messages (40ms each) to arrive, but the SparkFun
+  // library's auto-PVT buffer only keeps the latest — losing ~2 samples
+  // every display refresh (3Hz). At 400kHz the transfer completes within
+  // a single PVT interval, eliminating the loss.
+  Wire.setClock(400000);
 
   display.setTextColor(DISPLAY_TEXT_WHITE);
   display.setTextWrap(false);

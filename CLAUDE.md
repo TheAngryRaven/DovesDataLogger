@@ -37,7 +37,7 @@ Core capabilities:
 | `display_ui.ino` | Display init, button reading (multi-sample debounce), menu navigation |
 | `display_pages.ino` | All page rendering functions (`displayPage_*()`) |
 | `gps_config.h` | GPS configuration constants (baud rate, nav rate, serial port) |
-| `gps_functions.ino` | GPS init (SparkFun UBX PVT), time conversion, DOVEX/CSV logging pipeline |
+| `gps_functions.ino` | GPS init (SparkFun UBX PVT), time conversion, DOVEX/CSV logging pipeline, TIMER3 serial buffer ISR |
 | `sd_functions.ino` | SD init, track list/JSON parsing (dual format), track manifest, SD access arbitration |
 | `accelerometer.ino` | LSM6DS3 IMU init and g-force reads (onboard XIAO Sense) |
 | `tachometer.ino` | Falling-edge ISR on D0, EMA-filtered RPM calculation |
@@ -62,10 +62,10 @@ Core capabilities:
 
 | Pin | Function | Detail |
 |---|---|---|
-| Serial1 RX/TX | GPS UART | u-blox SAM-M10Q, 115200 baud |
-| I2C SDA/SCL | OLED display | 128x64, address 0x3C |
+| Serial1 RX/TX | GPS UART | u-blox SAM-M10Q, 57600 baud |
+| I2C SDA/SCL | OLED display | 128x64, address 0x3C, 400 kHz |
 | I2C SDA/SCL | LSM6DS3 IMU | Onboard accelerometer/gyro (Sense variant), address 0x6A |
-| SPI MOSI/SCK/MISO | SD card | 4 MHz SPI clock, CS grounded on PCB |
+| SPI MOSI/SCK/MISO | SD card | 1 MHz SPI clock (EMI hardened), CS grounded on PCB |
 | D1 | Button 1 (Left) | INPUT_PULLUP, RC filter recommended |
 | D2 | Button 2 (Select) | INPUT_PULLUP, RC filter recommended |
 | D3 | Button 3 (Right) | INPUT_PULLUP, RC filter recommended |
@@ -113,8 +113,15 @@ loop()  ~250 Hz
 
 - Uses SparkFun u-blox GNSS v3 library with UBX binary protocol.
 - `myGNSS` (SFE_UBLOX_GNSS_SERIAL) is stack-allocated in `BirdsEye.ino`.
-- `GPS_SETUP()` configures module via VALSET API: 115200 baud, 25 Hz nav,
+- `GPS_SETUP()` configures module via VALSET API: 57600 baud, 25 Hz nav,
   GPS-only constellation, automotive dynamic model, PVT callback registered.
+- **GPS serial buffer**: A 4 KB RAM ring buffer (`gpsRxBuf`) sits between
+  Serial1 and the SparkFun library. A TIMER3 ISR drains Serial1 into this
+  buffer every 10 ms, independent of the main loop. This prevents GPS data
+  loss during SD card write stalls (GC pauses can block 100 ms–2 s).
+  The SparkFun library reads from the buffer via `GpsBufferedStream` (a
+  `Stream` wrapper). During `GPS_SETUP()` (before timer starts), reads pass
+  through to Serial1 directly. Timer stopped during sleep, restarted on wake.
 - `GPS_LOOP()` calls `checkUblox()` + `checkCallbacks()`. The registered
   `onPVTReceived()` callback fires with the full `UBX_NAV_PVT_data_t` struct,
   populates `gpsData`, and sets `gpsDataFresh` flag for downstream processing.
@@ -150,7 +157,7 @@ loop()  ~250 Hz
 
 ### 4. SD Card & Logging (`sd_functions.ino`)
 
-- SdFat library, FAT16/32, 4 MHz SPI.
+- SdFat library, FAT16/32, 1 MHz SPI (reduced from default for EMI hardening).
 - Track files live under `/TRACKS/*.json` (ArduinoJson 6 parsing).
 - **Dual JSON format**: `parseTrackFile()` auto-detects root type:
   - **Object** (new HackTheTrack format): `longName`, `shortName`,
@@ -260,6 +267,27 @@ loop()  ~250 Hz
 - **Auto-idle** (`checkAutoIdle()`): if speed < 2 mph for 60 seconds
   continuously, writes DOVEX header, closes file, cleans up CourseManager,
   and returns to main menu.
+
+### 10. Sleep Mode (`ENABLE_NEW_UI`)
+
+- **Entry**: long-press left+right (5 s) on main menu, 5-min menu idle,
+  or USB connected on main menu.
+- **`enterSleepMode()`**: ends active race session, stops BLE, display off
+  (I2C `DISPLAYOFF`), GPS backup mode (`powerOff(0)`), IMU power off,
+  GPS serial timer stopped.
+- **Wake triggers** (checked every loop in sleep):
+  - **RPM wake**: tach ISR fires → `exitSleepMode(true)` → straight into
+    race mode with logging enabled, Lap Anything CourseManager created.
+  - **Button wake**: any button → `exitSleepMode(false)` → main menu.
+- **`exitSleepMode()`**: re-enables IMU, GPS wake (0xFF + 100 ms), display
+  on, GPS serial timer restarted. RPM wake skips menu and goes directly
+  to race mode.
+- **Charging mode**: USB detected during sleep → show battery screen for
+  10 s, then display off. Button re-shows for another 10 s. GPS periodic
+  checks and WFE skipped while charging.
+- **Periodic GPS fix**: `SLEEP_GPS_WAKE_INTERVAL` (24 h) — rarely fires
+  in practice. Wakes GPS briefly, checks fix, re-sleeps.
+- CPU idle via `sd_app_evt_wait()` (SoftDevice-safe WFE).
 
 ---
 
@@ -372,14 +400,14 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 
 | Constant | Value | Location |
 |---|---|---|
-| GPS baud | 115 200 | `gps_config.h` |
+| GPS baud | 57 600 | `gps_config.h` |
 | GPS nav rate | 25 Hz | `gps_config.h` |
 | Crossing threshold | 7.0 m | `BirdsEye.ino` |
 | Max laps/session | 1 000 | `BirdsEye.ino` |
 | Max locations | 200 | `project.h` |
 | Max layouts/track | 10 | `project.h` |
 | Max replay files | 20 | `replay.ino` |
-| DOVEX header size | 1 024 bytes | `gps_functions.ino` |
+| DOVEX header size | 1 024 bytes | `project.h` |
 | Auto-idle timeout | 60 s at <2 mph | `BirdsEye.ino` |
 | Track detect radius | 5 miles | `BirdsEye.ino` |
 | Tach min pulse gap | 3 ms | `tachometer.ino` |
@@ -387,13 +415,15 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | Tach stop timeout | 500 ms | `tachometer.ino` |
 | Display refresh | 3 Hz | `display_ui.ino` |
 | Button debounce | 200 ms | `display_ui.ino` |
-| SD SPI clock | 4 MHz | `sd_functions.ino` |
+| SD SPI clock | 1 MHz | `BirdsEye.ino` |
 | Battery check interval | 5 s | `BirdsEye.ino` |
 | BLE default MTU | 23 | `bluetooth.ino` |
 | JSON buffer | 4096 (1024 on Wokwi) | `sd_functions.ino` |
 | Settings JSON buffer | 512 | `settings.ino` |
 | Settings file path | `/SETTINGS.json` | `settings.ino` |
 | Track upload buffer | 4096 | `bluetooth.ino` |
+| GPS serial buffer | 4096 | `gps_functions.ino` |
+| GPS serial timer | TIMER3, 10 ms | `gps_functions.ino` |
 
 ---
 
@@ -422,7 +452,10 @@ This device operates in ignition-noise environments. Three layers of defense:
 2. **ISR design**: Volatile flag gating (never `noInterrupts()` in ISR);
    3 ms minimum pulse gap in tachometer.
 3. **Software**: Multi-sample button reads (3x at 500 us), 200 ms refire
-   lockout, EMA filtering on RPM, 4 MHz SPI clock for SD stability.
+   lockout, EMA filtering on RPM, 1 MHz SPI clock for SD stability.
+4. **GPS serial buffer**: TIMER3 ISR drains Serial1 into a 4 KB RAM ring
+   buffer every 10 ms, preventing GPS data loss during SD card GC pauses
+   that can block writes for 100 ms–2 s.
 
 ---
 
@@ -438,6 +471,9 @@ This device operates in ignition-noise environments. Three layers of defense:
 - `#define ENABLE_NEW_UI` activates CourseManager integration, auto-detection,
   DOVEX logging, auto-race/auto-idle, and instant DOVEX replay. When not
   defined, the entire legacy flow is preserved unchanged.
+- **TIMER3 is reserved** for the GPS serial buffer ISR. Use TIMER4 if another
+  hardware timer is needed. TIMER0 is reserved by SoftDevice; TIMER1/2 may
+  be used by PWM/tone.
 - **CRITICAL: NEVER use `analogRead()` on any GPIO pin.** On the nRF52840,
   `analogRead()` permanently disables the digital input buffer on the target
   pin for the remainder of the session. Every analog-capable pin on the XIAO
