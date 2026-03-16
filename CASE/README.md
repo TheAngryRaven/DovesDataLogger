@@ -17,6 +17,8 @@ This will be slowly updated with more information
  - 4x m3 30mm + nylock nuts
  - 2mm heat inserts, 4mm long
  - metal rod or such for pins on battery and sd card doors
+
+## Mounting Options
  - 1x 5/8ths carriage bolt
  - bolt to kart with washers and such
  OR
