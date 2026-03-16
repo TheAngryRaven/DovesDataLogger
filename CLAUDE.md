@@ -12,12 +12,16 @@ Built on the **Seeed XIAO nRF52840 Sense** (ARM Cortex-M4, 256 KB RAM, BLE 5.0, 
 
 Core capabilities:
 - 25 Hz GPS lap timing with sector support (DovesLapTimer library)
+- **"Just Drive" auto-detection** via CourseManager (`ENABLE_NEW_UI`): automatic
+  track proximity matching, course detection, and Lap Anything fallback
 - RPM monitoring via inductive tachometer pickup
 - Accelerometer logging (g-force X/Y/Z) via onboard LSM6DS3 IMU
-- CSV data logging to SD card at full GPS rate
+- DOVEX data logging with reserved 1 KB header (crash-safe GPS data)
+- Legacy CSV (`.dove`) logging still supported via `use_legacy_csv` setting
 - 8+ display pages on a 128x64 OLED (3 Hz refresh)
 - Bluetooth LE file download to companion apps / HackTheTrack.net
-- On-device session replay with automatic track detection
+- On-device session replay: instant DOVEX header replay (new) or streamed
+  DOVE/NMEA replay (legacy)
 
 ---
 
@@ -27,18 +31,18 @@ Core capabilities:
 
 | File | Purpose |
 |---|---|
-| `BirdsEye.ino` | Entry point: globals, `setup()`, `loop()`, state machine |
-| `project.h` | Shared types (`ButtonState`, `TrackLayout`, `ReplaySample`), debug macros |
+| `BirdsEye.ino` | Entry point: globals, `setup()`, `loop()`, state machine, `ENABLE_NEW_UI` helpers |
+| `project.h` | Shared types (`ButtonState`, `TrackLayout`, `ReplaySample`, `TrackManifestEntry`, `TrackMetadata`), debug macros, `MAX_*` constants |
 | `display_config.h` | Display driver abstraction (SH110X vs SSD1306 toggle) |
 | `display_ui.ino` | Display init, button reading (multi-sample debounce), menu navigation |
 | `display_pages.ino` | All page rendering functions (`displayPage_*()`) |
 | `gps_config.h` | GPS configuration constants (baud rate, nav rate, serial port) |
-| `gps_functions.ino` | GPS init (SparkFun UBX PVT), time conversion, SD logging pipeline |
-| `sd_functions.ino` | SD init, track list/JSON parsing, SD access arbitration |
+| `gps_functions.ino` | GPS init (SparkFun UBX PVT), time conversion, DOVEX/CSV logging pipeline, TIMER3 serial buffer ISR |
+| `sd_functions.ino` | SD init, track list/JSON parsing (dual format), track manifest, SD access arbitration |
 | `accelerometer.ino` | LSM6DS3 IMU init and g-force reads (onboard XIAO Sense) |
 | `tachometer.ino` | Falling-edge ISR on D0, EMA-filtered RPM calculation |
-| `bluetooth.ino` | BLE service (file listing, transfer, status characteristics) |
-| `replay.ino` | Session replay: file parsing (DOVE/NMEA), track auto-detection |
+| `bluetooth.ino` | BLE service (file listing, transfer, status characteristics), auto-reboot on disconnect |
+| `replay.ino` | Session replay: DOVEX header replay (new UI), DOVE/NMEA streamed replay (legacy) |
 | `settings.ino` | Persistent JSON settings on SD (`/SETTINGS.json`), `getSetting()`/`setSetting()` |
 | `images.h` | PROGMEM bitmap data (splash screen, animations) |
 
@@ -58,10 +62,10 @@ Core capabilities:
 
 | Pin | Function | Detail |
 |---|---|---|
-| Serial1 RX/TX | GPS UART | u-blox SAM-M10Q, 115200 baud |
-| I2C SDA/SCL | OLED display | 128x64, address 0x3C |
+| Serial1 RX/TX | GPS UART | u-blox SAM-M10Q, 57600 baud |
+| I2C SDA/SCL | OLED display | 128x64, address 0x3C, 400 kHz |
 | I2C SDA/SCL | LSM6DS3 IMU | Onboard accelerometer/gyro (Sense variant), address 0x6A |
-| SPI MOSI/SCK/MISO | SD card | 4 MHz SPI clock, CS grounded on PCB |
+| SPI MOSI/SCK/MISO | SD card | 2 MHz SPI clock (EMI hardened), CS grounded on PCB |
 | D1 | Button 1 (Left) | INPUT_PULLUP, RC filter recommended |
 | D2 | Button 2 (Select) | INPUT_PULLUP, RC filter recommended |
 | D3 | Button 3 (Right) | INPUT_PULLUP, RC filter recommended |
@@ -74,33 +78,62 @@ Core capabilities:
 
 ### Main Loop Flow (`loop()`)
 
+**Legacy mode** (without `ENABLE_NEW_UI`):
 ```
 loop()  ~250 Hz
- ├─ GPS_LOOP()          checkUblox, checkCallbacks, feed DovesLapTimer, log CSV
- ├─ TACH_LOOP()         re-enable ISR after debounce, apply EMA filter
- ├─ ACCEL_LOOP()        read LSM6DS3 accelerometer X/Y/Z (g-force)
- ├─ BLUETOOTH_LOOP()    stream file chunks if transfer active
- ├─ checkForNewLapData()  append completed laps to lapHistory[]
- ├─ calculateGPSFrameRate()  1-second PVT counter
- ├─ readButtons()       multi-sample debounce + edge detection
- ├─ displayLoop()       render current page at 3 Hz
- └─ resetButtons()      clear pressed flags
+ ├─ GPS_LOOP()              checkUblox, checkCallbacks, feed DovesLapTimer, log CSV
+ ├─ TACH_LOOP()             re-enable ISR after debounce, apply EMA filter
+ ├─ ACCEL_LOOP()            read LSM6DS3 accelerometer X/Y/Z (g-force)
+ ├─ BLUETOOTH_LOOP()        stream file chunks if transfer active
+ ├─ checkForNewLapData()    append completed laps to lapHistory[]
+ ├─ calculateGPSFrameRate() 1-second PVT counter
+ ├─ readButtons()           multi-sample debounce + edge detection
+ ├─ displayLoop()           render current page at 3 Hz
+ └─ resetButtons()          clear pressed flags
+```
+
+**New UI mode** (with `ENABLE_NEW_UI`):
+```
+loop()  ~250 Hz
+ ├─ GPS_LOOP()              checkUblox, feed CourseManager, log DOVEX
+ ├─ TACH_LOOP()             re-enable ISR after debounce, apply EMA filter
+ ├─ ACCEL_LOOP()            read LSM6DS3 accelerometer X/Y/Z (g-force)
+ ├─ BLUETOOTH_LOOP()        stream file chunks if transfer active
+ ├─ trackDetectionLoop()    haversine scan → create CourseManager on match
+ ├─ checkForNewLapData()    reads from active timer (CourseManager or lapTimer)
+ ├─ checkAutoIdle()         60s at <2mph → end session, write DOVEX header
+ ├─ calculateGPSFrameRate() 1-second PVT counter
+ ├─ readButtons()           multi-sample debounce + edge detection
+ ├─ displayLoop()           pages read from active timer helpers
+ ├─ autoRaceModeCheck()     RPM>500 or speed>=10 → enter race from menu
+ └─ resetButtons()          clear pressed flags
 ```
 
 ### 1. GPS & Lap Timing (`gps_functions.ino`, `gps_config.h`)
 
 - Uses SparkFun u-blox GNSS v3 library with UBX binary protocol.
 - `myGNSS` (SFE_UBLOX_GNSS_SERIAL) is stack-allocated in `BirdsEye.ino`.
-- `GPS_SETUP()` configures module via VALSET API: 115200 baud, 25 Hz nav,
+- `GPS_SETUP()` configures module via VALSET API: 57600 baud, 25 Hz nav,
   GPS-only constellation, automotive dynamic model, PVT callback registered.
+- **GPS serial buffer**: A 4 KB RAM ring buffer (`gpsRxBuf`) sits between
+  Serial1 and the SparkFun library. A TIMER3 ISR drains Serial1 into this
+  buffer every 10 ms, independent of the main loop. This prevents GPS data
+  loss during SD card write stalls (GC pauses can block 100 ms–2 s).
+  The SparkFun library reads from the buffer via `GpsBufferedStream` (a
+  `Stream` wrapper). During `GPS_SETUP()` (before timer starts), reads pass
+  through to Serial1 directly. Timer stopped during sleep, restarted on wake.
 - `GPS_LOOP()` calls `checkUblox()` + `checkCallbacks()`. The registered
   `onPVTReceived()` callback fires with the full `UBX_NAV_PVT_data_t` struct,
   populates `gpsData`, and sets `gpsDataFresh` flag for downstream processing.
 - PVT data is cached in `gpsData` struct (GpsData) for access by display
   pages and other subsystems.
-- Feeds lat/lng/alt/speed into `DovesLapTimer.loop()` for line-crossing
-  and sector detection.
-- Logs validated CSV rows to SD (9-check validation pipeline).
+- **Legacy mode**: Feeds lat/lng/alt/speed into `DovesLapTimer.loop()` for
+  line-crossing and sector detection.
+- **New UI mode**: Feeds into `CourseManager.loop()` which handles course
+  detection, Lap Anything fallback, and sector timing internally.
+- Logs validated data rows to SD (9-check validation pipeline).
+  - **DOVEX** (new UI default): reserved 1 KB header + CSV data after byte 1024.
+  - **Legacy CSV** (`.dove`): flat CSV with track/layout/direction in filename.
 - Time helpers: `getGpsTimeInMilliseconds()`, `getGpsUnixTimestampMillis()`.
 - 64-bit timestamps are manually converted to strings (Arduino lacks `%llu`).
 
@@ -124,8 +157,16 @@ loop()  ~250 Hz
 
 ### 4. SD Card & Logging (`sd_functions.ino`)
 
-- SdFat library, FAT16/32, 4 MHz SPI.
+- SdFat library, FAT16/32, 1 MHz SPI (reduced from default for EMI hardening).
 - Track files live under `/TRACKS/*.json` (ArduinoJson 6 parsing).
+- **Dual JSON format**: `parseTrackFile()` auto-detects root type:
+  - **Object** (new HackTheTrack format): `longName`, `shortName`,
+    `defaultCourse`, `courses[]` with `lengthFt`.
+  - **Array** (legacy): bare array of course objects, metadata derived from
+    filename, `lengthFt = 0`.
+- **Track manifest** (`ENABLE_NEW_UI`): `buildTrackList()` also builds an
+  in-RAM `trackManifest[]` (up to 200 entries) with first lat/lon per track
+  for haversine proximity matching. ~10 KB RAM.
 - **SD access arbitration** prevents concurrent access:
   - `acquireSDAccess(mode)` / `releaseSDAccess(mode)`
   - Modes: `SD_ACCESS_NONE` (0), `LOGGING` (1), `REPLAY` (2),
@@ -164,38 +205,114 @@ loop()  ~250 Hz
   - `TLIST` → `TFILE:name.json` per file, then `TEND`
   - `TGET:name.json` → reuses existing file transfer (`SIZE:N` → data chunks → `DONE`)
   - `TPUT:name.json` → `TREADY` → app sends data chunks → `TDONE` → `TOK`
-  - Upload uses a 2048-byte static RAM buffer; `TERR:TOO_LARGE` if exceeded.
+  - `TDEL:name.json` → `TOK` or `TERR:NO_FILE`
+  - Upload uses a 4096-byte static RAM buffer; `TERR:TOO_LARGE` if exceeded.
   - Error responses: `TERR:SD_BUSY`, `TERR:BUSY`, `TERR:WRITE_FAIL`, `TERR:NO_FILE`.
-  - Upload state machine: BLE callback accumulates data + sets flags,
-    `BLUETOOTH_LOOP()` sends `TREADY` and calls `processTrackUpload()`
-    for thread-safe SD writes. Calls `buildTrackList()` after successful upload.
+  - Upload/delete state machines: BLE callback sets flags, `BLUETOOTH_LOOP()`
+    calls `processTrackUpload()` / `processTrackDelete()` for thread-safe SD
+    access. Both call `buildTrackList()` after success.
+- **Auto-reboot on BLE disconnect**: `bleDisconnectCallback()` calls
+  `NVIC_SystemReset()` after 100 ms delay, ensuring new settings take
+  effect without manual power cycle.
 
 ### 7. Replay (`replay.ino`)
 
-- Reads `.dove` (CSV) and `.nmea` files from SD root.
-- Auto-detects track via haversine distance (< 20 miles threshold).
-- Streams file line-by-line (128-byte buffer) through DovesLapTimer.
-- Shows max speed, max RPM, lap times, and optimal lap.
+- **DOVEX replay** (`ENABLE_NEW_UI`): instant header-only replay.
+  `parseDovexHeader()` reads line 1 (metadata) and line 2 (lap times CSV)
+  from the first 1 KB. Populates `dovexReplay*` globals and `lapHistory[]`.
+  No file streaming needed — jumps straight to results page.
+  Only `.dovex` files shown in file browser.
+- **Legacy replay** (without `ENABLE_NEW_UI`): reads `.dove`/`.nmea` files.
+  Auto-detects track via haversine distance (< 20 miles threshold).
+  Streams file line-by-line (128-byte buffer) through DovesLapTimer.
+  Shows max speed, max RPM, lap times, and optimal lap.
 
 ### 8. Settings (`settings.ino`)
 
 - Persistent JSON key-value store at `/SETTINGS.json` on SD card.
 - `SETTINGS_SETUP()` called once from `setup()` after SD init; creates
   default file on first boot (random BLE name + PIN).
+- **Auto-populate**: `ensureDefaultSettings()` checks for missing keys on
+  boot and adds them with defaults. Existing values are never overwritten.
 - `getSetting(key, buf, bufSize)` reads a value into a caller-provided
   buffer. Returns `true` if found, `false` on any failure (buf set empty).
   Always reads fresh from disk (no cache).
 - `setSetting(key, value)` does read-modify-write to update a single key.
 - Uses `SD_ACCESS_TRACK_PARSE` mode for brief SD access.
 - Separate `StaticJsonDocument<512>` — does not share the track parser's
-  2048-byte buffer.
+  4096-byte buffer.
 - Total RAM cost: ~1 KB (512-byte file buffer + 512-byte JSON document).
+
+### 9. CourseManager Integration (`ENABLE_NEW_UI`)
+
+- **Compile-time flag**: `#define ENABLE_NEW_UI` in `BirdsEye.ino`. When
+  not defined, the entire legacy flow (manual track/course/direction
+  selection) is preserved unchanged.
+- **CourseManager** (`courseManager` global pointer): created when a track
+  is detected via haversine proximity match, or with `courseCount=0` for
+  immediate Lap Anything activation.
+- **Track detection flow** (`trackDetectionLoop()`):
+  1. GPS fix acquired → DOVEX logging starts immediately.
+  2. Every GPS fix, scans `trackManifest[]` via haversine.
+  3. Closest match within 5 miles → parse full JSON, build `TrackConfig`.
+  4. Create `CourseManager` with settings-configurable thresholds.
+  5. CourseManager handles course detection + Lap Anything fallback.
+  6. No tracks / no match → `CourseManager(courseCount=0)` → Lap Anything.
+- **Active timer abstraction**: helper functions (`activeTimerLaps()`,
+  `activeTimerBestLapTime()`, etc.) provide a unified interface for display
+  pages. They check CourseManager's active timer (DovesLapTimer or
+  WaypointLapTimer) and return appropriate values.
+- **Auto-race** (`autoRaceModeCheck()`): from main menu, if RPM > 500 or
+  speed >= 10 mph, jumps directly to race mode.
+- **Auto-idle** (`checkAutoIdle()`): if speed < 2 mph for 60 seconds
+  continuously, writes DOVEX header, closes file, cleans up CourseManager,
+  and returns to main menu.
+
+### 10. Sleep Mode (`ENABLE_NEW_UI`)
+
+- **Entry**: long-press left+right (5 s) on main menu, 5-min menu idle,
+  or USB connected on main menu.
+- **`enterSleepMode()`**: ends active race session, stops BLE, display off
+  (I2C `DISPLAYOFF`), GPS backup mode (`powerOff(0)`), IMU power off,
+  GPS serial timer stopped.
+- **Wake triggers** (checked every loop in sleep):
+  - **RPM wake**: tach ISR fires → `exitSleepMode(true)` → straight into
+    race mode with logging enabled, Lap Anything CourseManager created.
+  - **Button wake**: any button → `exitSleepMode(false)` → main menu.
+- **`exitSleepMode()`**: re-enables IMU, GPS wake (0xFF + 100 ms), display
+  on, GPS serial timer restarted. RPM wake skips menu and goes directly
+  to race mode.
+- **Charging mode**: USB detected during sleep → show battery screen for
+  10 s, then display off. Button re-shows for another 10 s. GPS periodic
+  checks and WFE skipped while charging.
+- **Periodic GPS fix**: `SLEEP_GPS_WAKE_INTERVAL` (24 h) — rarely fires
+  in practice. Wakes GPS briefly, checks fix, re-sleeps.
+- CPU idle via `sd_app_evt_wait()` (SoftDevice-safe WFE).
 
 ---
 
 ## Data Formats
 
-### CSV Log Row (`.dove` files)
+### DOVEX Log (`.dovex` files) — New UI default
+
+```
+datetime,driver_name,course_name,short_name,best_lap_ms,optimal_lap_ms
+lap1_ms,lap2_ms,lap3_ms,...
+\n padding to byte 1024
+timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z
+1710512400123,12,0.8,35.12345678,-97.12345678,65.32,234.56,...
+```
+
+- **Reserved header** (bytes 0–1023): Line 1 = session metadata, Line 2 =
+  all lap times (comma-separated ms values), padded with `\n` to 1024 bytes.
+- **GPS data** (byte 1024+): CSV column header then streaming GPS rows.
+- **Crash safety**: file created with pre-filled newlines to 1024 bytes
+  before any data. Header written on session end. If header is empty
+  (crash), GPS data after 1024 is still valid.
+- **Filename**: `20YYMMDD_HHMM.dovex`
+- 1 KB handles ~100 laps (8 chars per lap time). Extremely unlikely to exceed.
+
+### CSV Log Row (`.dove` files) — Legacy format
 
 ```
 timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z
@@ -208,23 +325,73 @@ timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x
 - `h_acc_m`: horizontal accuracy estimate in meters, 2 decimals. From UBX `hAcc`.
 - `accel_x`/`accel_y`/`accel_z`: accelerometer g-force, 3 decimal places. From LSM6DS3.
   Logs `0.000` if IMU not available (non-Sense board).
+- **Filename**: `{location}_{track}_{dir}_20{yy}_{mmdd}_{hhmm}.dove`
+- Selected when `use_legacy_csv` setting is `true`.
 
 ### Track JSON (`/TRACKS/*.json`)
 
-Array of layout objects, each with a start/finish line (two GPS points)
-and optional sector lines. Stored in `trackLayouts[MAX_LAYOUTS]` (max 10).
+**New format** (HackTheTrack / web simulator):
+```json
+{
+  "longName": "Orlando Kart Center",
+  "shortName": "OKC",
+  "defaultCourse": "Normal",
+  "courses": [
+    {
+      "name": "Normal",
+      "lengthFt": 3383,
+      "start_a_lat": 28.4127081705638,
+      ...
+    }
+  ]
+}
+```
+
+**Legacy format** (bare array, still supported):
+```json
+[
+  {
+    "name": "Full Course",
+    "start_a_lat": 28.41270817,
+    ...
+  }
+]
+```
+
+Auto-detected by JSON root type (object vs array). Legacy format sets
+`lengthFt = 0` for all courses, which means CourseDetector cannot rank
+by distance — CourseManager falls back to Lap Anything immediately.
+
+Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 
 ### Settings JSON (`/SETTINGS.json`)
 
 ```json
 {
   "bluetooth_name": "DovesDataLogger-042",
-  "bluetooth_pin": "7391"
+  "bluetooth_pin": "7391",
+  "driver_name": "Driver",
+  "lap_detection_distance": "7",
+  "waypoint_detection_distance": "30",
+  "use_legacy_csv": "false",
+  "waypoint_speed": "30"
 }
 ```
 
-- Created automatically on first boot with random values.
-- Editable on a computer — changes take effect on next reboot.
+| Key | Type | Default | Purpose |
+|-----|------|---------|---------|
+| `bluetooth_name` | string | Random | BLE device name |
+| `bluetooth_pin` | string | Random 4-digit | BLE pairing PIN |
+| `driver_name` | string | `"Driver"` | Logged in DOVEX header |
+| `lap_detection_distance` | int | `7` | DovesLapTimer crossing threshold (meters) |
+| `waypoint_detection_distance` | int | `30` | WaypointLapTimer proximity zone (meters) |
+| `use_legacy_csv` | bool | `false` | When true, save `.dove` instead of `.dovex` |
+| `waypoint_speed` | int | `30` | Speed threshold (mph) for waypoint/detection |
+
+- Created automatically on first boot with random BLE values.
+- Missing keys auto-populated on boot via `ensureDefaultSettings()`.
+- Editable on a computer or via BLE `SSET` command — changes take effect
+  on next reboot (BLE disconnect triggers auto-reboot).
 - Read on-demand via `getSetting()`, written via `setSetting()`.
 
 ---
@@ -233,25 +400,30 @@ and optional sector lines. Stored in `trackLayouts[MAX_LAYOUTS]` (max 10).
 
 | Constant | Value | Location |
 |---|---|---|
-| GPS baud | 115 200 | `gps_config.h` |
+| GPS baud | 57 600 | `gps_config.h` |
 | GPS nav rate | 25 Hz | `gps_config.h` |
 | Crossing threshold | 7.0 m | `BirdsEye.ino` |
 | Max laps/session | 1 000 | `BirdsEye.ino` |
-| Max locations | 100 | `BirdsEye.ino` |
-| Max layouts/track | 10 | `BirdsEye.ino` |
+| Max locations | 200 | `project.h` |
+| Max layouts/track | 10 | `project.h` |
 | Max replay files | 20 | `replay.ino` |
+| DOVEX header size | 1 024 bytes | `project.h` |
+| Auto-idle timeout | 60 s at <2 mph | `BirdsEye.ino` |
+| Track detect radius | 5 miles | `BirdsEye.ino` |
 | Tach min pulse gap | 3 ms | `tachometer.ino` |
 | Tach EMA alpha | 0.20 | `tachometer.ino` |
 | Tach stop timeout | 500 ms | `tachometer.ino` |
 | Display refresh | 3 Hz | `display_ui.ino` |
 | Button debounce | 200 ms | `display_ui.ino` |
-| SD SPI clock | 4 MHz | `sd_functions.ino` |
+| SD SPI clock | 2 MHz | `BirdsEye.ino` |
 | Battery check interval | 5 s | `BirdsEye.ino` |
 | BLE default MTU | 23 | `bluetooth.ino` |
-| JSON buffer | 2048 (1024 on Wokwi) | `sd_functions.ino` |
+| JSON buffer | 4096 (1024 on Wokwi) | `sd_functions.ino` |
 | Settings JSON buffer | 512 | `settings.ino` |
 | Settings file path | `/SETTINGS.json` | `settings.ino` |
-| Track upload buffer | 2048 | `bluetooth.ino` |
+| Track upload buffer | 4096 | `bluetooth.ino` |
+| GPS serial buffer | 4096 | `gps_functions.ino` |
+| GPS serial timer | TIMER3, 10 ms | `gps_functions.ino` |
 
 ---
 
@@ -280,7 +452,10 @@ This device operates in ignition-noise environments. Three layers of defense:
 2. **ISR design**: Volatile flag gating (never `noInterrupts()` in ISR);
    3 ms minimum pulse gap in tachometer.
 3. **Software**: Multi-sample button reads (3x at 500 us), 200 ms refire
-   lockout, EMA filtering on RPM, 4 MHz SPI clock for SD stability.
+   lockout, EMA filtering on RPM, 2 MHz SPI clock for SD stability.
+4. **GPS serial buffer**: TIMER3 ISR drains Serial1 into a 4 KB RAM ring
+   buffer every 10 ms, preventing GPS data loss during SD card GC pauses
+   that can block writes for 100 ms–2 s.
 
 ---
 
@@ -293,6 +468,12 @@ This device operates in ignition-noise environments. Three layers of defense:
 - Avoid Arduino `String` in hot paths (heap fragmentation risk on 256 KB).
 - SD chip-select is hardwired to GND; pass `-1` to SdFat.
 - `#define WOKWI` enables simulator-specific tweaks (smaller JSON buffer).
+- `#define ENABLE_NEW_UI` activates CourseManager integration, auto-detection,
+  DOVEX logging, auto-race/auto-idle, and instant DOVEX replay. When not
+  defined, the entire legacy flow is preserved unchanged.
+- **TIMER3 is reserved** for the GPS serial buffer ISR. Use TIMER4 if another
+  hardware timer is needed. TIMER0 is reserved by SoftDevice; TIMER1/2 may
+  be used by PWM/tone.
 - **CRITICAL: NEVER use `analogRead()` on any GPIO pin.** On the nRF52840,
   `analogRead()` permanently disables the digital input buffer on the target
   pin for the remainder of the session. Every analog-capable pin on the XIAO
@@ -311,3 +492,10 @@ This device operates in ignition-noise environments. Three layers of defense:
 - GPS data validation (9 checks) must pass before any CSV row is written.
 - Display pages are rendered by `displayPage_*()` functions routed via
   `currentPage` in `displayLoop()`.
+- All new UI code is gated behind `#ifdef ENABLE_NEW_UI` / `#else` / `#endif`.
+  Globals that must be visible across `.ino` files (e.g. `dovexReplay*`,
+  `trackManifest[]`) are declared in `BirdsEye.ino` (first in concatenation
+  order) inside the `ENABLE_NEW_UI` guard.
+- Library includes that define return types used in auto-prototyped functions
+  (`DovesLapTimer.h`, `CourseManager.h`) must be in the top include block
+  of `BirdsEye.ino` (before Arduino generates prototypes).

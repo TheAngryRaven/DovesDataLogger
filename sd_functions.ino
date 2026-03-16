@@ -62,14 +62,23 @@ bool SD_SETUP() {
   return false;
 }
 
+// Static buffers for JSON parsing — saves ~4KB of stack per call.
+// Only one parseTrackFile() call can be active at a time (single-threaded).
+// Also reused by buildTrackList() for manifest extraction.
+static char jsonFileBuffer[JSON_BUFFER_SIZE];
+static StaticJsonDocument<JSON_BUFFER_SIZE> trackJson;
+
 bool buildTrackList() {
   if (!SD.exists(trackFolder)) {
     debugln(F("TRACKS folder does not exist."));
     return false;
   }
 
-  // reset list
+  // reset lists
   numOfLocations = 0;
+  #ifdef ENABLE_NEW_UI
+  trackManifestCount = 0;
+  #endif
 
   // If the TRACKS directory exists, open it
   trackDir.open(trackFolder);
@@ -79,6 +88,11 @@ bool buildTrackList() {
 
   // Loop through each file in the directory
   while (file.openNext(&trackDir, O_READ)) {
+    if (numOfLocations >= MAX_LOCATIONS) {
+      file.close();
+      break;
+    }
+
     // Create a buffer to store the filename
     char filename[25];
 
@@ -95,6 +109,44 @@ bool buildTrackList() {
     strncpy(locations[numOfLocations], filename, MAX_LOCATION_LENGTH - 1);
     locations[numOfLocations][MAX_LOCATION_LENGTH - 1] = '\0';  // Ensure null-termination
 
+    // Build track manifest entry — extract first lat/lon from JSON
+    // Reuses the static JSON buffer (safe: single-threaded, one file at a time)
+    #ifdef ENABLE_NEW_UI
+    if (trackManifestCount < MAX_LOCATIONS) {
+      int bytesRead = file.read(jsonFileBuffer, sizeof(jsonFileBuffer) - 1);
+      if (bytesRead > 0) {
+        jsonFileBuffer[bytesRead] = '\0';
+        trackJson.clear();
+        DeserializationError err = deserializeJson(trackJson, jsonFileBuffer);
+        if (err == DeserializationError::Ok) {
+          double firstLat = 0, firstLon = 0;
+          if (trackJson.is<JsonObject>()) {
+            // New format: object with "courses" array
+            JsonArray courses = trackJson["courses"];
+            if (courses.size() > 0) {
+              firstLat = courses[0]["start_a_lat"];
+              firstLon = courses[0]["start_a_lng"];
+            }
+          } else if (trackJson.is<JsonArray>()) {
+            // Legacy format: bare array of courses
+            JsonArray arr = trackJson.as<JsonArray>();
+            if (arr.size() > 0) {
+              firstLat = arr[0]["start_a_lat"];
+              firstLon = arr[0]["start_a_lng"];
+            }
+          }
+          if (firstLat != 0 || firstLon != 0) {
+            strncpy(trackManifest[trackManifestCount].filename, filename, sizeof(trackManifest[0].filename) - 1);
+            trackManifest[trackManifestCount].filename[sizeof(trackManifest[0].filename) - 1] = '\0';
+            trackManifest[trackManifestCount].lat = firstLat;
+            trackManifest[trackManifestCount].lon = firstLon;
+            trackManifestCount++;
+          }
+        }
+      }
+    }
+    #endif
+
     // Increment the numOfLocations
     numOfLocations++;
 
@@ -105,17 +157,22 @@ bool buildTrackList() {
   // Close the directory to free up any memory it's using
   trackDir.close();
 
+  debug(F("Tracks found: "));
+  debugln(numOfLocations);
+  #ifdef ENABLE_NEW_UI
+  debug(F("Manifest entries: "));
+  debugln(trackManifestCount);
+  #endif
+
   return true;
 }
-
-// Static buffers for JSON parsing — saves ~4KB of stack per call.
-// Only one parseTrackFile() call can be active at a time (single-threaded).
-static char jsonFileBuffer[JSON_BUFFER_SIZE];
-static StaticJsonDocument<JSON_BUFFER_SIZE> trackJson;
 
 int parseTrackFile(char* filepath) {
   debug(F("ParseTrackFile:"));
   debugln(filepath);
+
+  // Reset track count so we don't accumulate stale entries from prior calls
+  numOfTracks = 0;
 
   // double check the SD is active
   if (!sdSetupSuccess) {
@@ -123,10 +180,17 @@ int parseTrackFile(char* filepath) {
     return PARSE_STATUS_LOAD_FAILED;
   }
 
+  // Acquire SD access for track parsing
+  if (!acquireSDAccess(SD_ACCESS_TRACK_PARSE)) {
+    debugln(F("ParseTrackFile: SD busy"));
+    return PARSE_STATUS_LOAD_FAILED;
+  }
+
   // load file
   trackFile.open(filepath, O_READ);
   if (!trackFile) {
     debugln(F("ParseTrackFile: failed to LOAD file"));
+    releaseSDAccess(SD_ACCESS_TRACK_PARSE);
     return PARSE_STATUS_LOAD_FAILED;
   }
 
@@ -136,6 +200,8 @@ int parseTrackFile(char* filepath) {
   // Check if read was successful
   if (bytesRead == -1) {
     debugln(F("ParseTrackFile: failed to READ file"));
+    trackFile.close();
+    releaseSDAccess(SD_ACCESS_TRACK_PARSE);
     return PARSE_STATUS_LOAD_FAILED;
   }
 
@@ -166,14 +232,52 @@ int parseTrackFile(char* filepath) {
     }
 
     trackFile.close();
+    releaseSDAccess(SD_ACCESS_TRACK_PARSE);
     return PARSE_STATUS_PARSE_FAILED;
   }
 
-  // handle parsed data
-  JsonArray array = trackJson.as<JsonArray>();
+  // Detect JSON root type: object (new format) or array (legacy format)
+  JsonArray coursesArray;
+  if (trackJson.is<JsonObject>()) {
+    // New format: { "longName": "...", "shortName": "...", "courses": [...] }
+    debugln(F("ParseTrackFile: New object format detected"));
+
+    const char* longName = trackJson["longName"] | "";
+    const char* shortName = trackJson["shortName"] | "";
+    const char* defaultCourse = trackJson["defaultCourse"] | "";
+
+    strncpy(activeTrackMetadata.longName, longName, sizeof(activeTrackMetadata.longName) - 1);
+    activeTrackMetadata.longName[sizeof(activeTrackMetadata.longName) - 1] = '\0';
+    strncpy(activeTrackMetadata.shortName, shortName, sizeof(activeTrackMetadata.shortName) - 1);
+    activeTrackMetadata.shortName[sizeof(activeTrackMetadata.shortName) - 1] = '\0';
+    strncpy(activeTrackMetadata.defaultCourse, defaultCourse, sizeof(activeTrackMetadata.defaultCourse) - 1);
+    activeTrackMetadata.defaultCourse[sizeof(activeTrackMetadata.defaultCourse) - 1] = '\0';
+
+    coursesArray = trackJson["courses"];
+
+    debug(F("  longName: "));
+    debugln(longName);
+    debug(F("  shortName: "));
+    debugln(shortName);
+  } else if (trackJson.is<JsonArray>()) {
+    // Legacy format: bare array of course objects
+    debugln(F("ParseTrackFile: Legacy array format detected"));
+    coursesArray = trackJson.as<JsonArray>();
+
+    // Derive metadata from filename (already stored in locations[selectedLocation])
+    activeTrackMetadata.longName[0] = '\0';
+    activeTrackMetadata.shortName[0] = '\0';
+    activeTrackMetadata.defaultCourse[0] = '\0';
+  } else {
+    debugln(F("ParseTrackFile: Unknown JSON format"));
+    trackFile.close();
+    releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+    return PARSE_STATUS_PARSE_FAILED;
+  }
+
+  // Parse courses array (common to both formats)
   debugln(F("Generating Layout List..."));
-  for(JsonVariant layout : array) {
-    // debug is bugged lol
+  for(JsonVariant layout : coursesArray) {
     #ifdef HAS_DEBUG
     const char* layoutName = layout["name"];
     debug(F("Layout Name: "));
@@ -183,7 +287,10 @@ int parseTrackFile(char* filepath) {
     if(numOfTracks < MAX_LAYOUTS) {
       // add name to array of strings to display to the user
       strncpy(tracks[numOfTracks], layout["name"], sizeof(tracks[numOfTracks]) - 1);
-      tracks[numOfTracks][sizeof(tracks[numOfTracks]) - 1] = '\0'; // Ensure null-termination
+      tracks[numOfTracks][sizeof(tracks[numOfTracks]) - 1] = '\0';
+
+      // Store lengthFt per course (new format field, defaults to 0)
+      activeTrackMetadata.courseLengthFt[numOfTracks] = layout["lengthFt"] | 0.0f;
 
       // add data to array of layouts for later use
       trackLayouts[numOfTracks].start_a_lat = layout["start_a_lat"];
@@ -228,5 +335,6 @@ int parseTrackFile(char* filepath) {
   // make sure to close before logging
   debugln(F("ParseTrackFile: SUCCESS"));
   trackFile.close();
+  releaseSDAccess(SD_ACCESS_TRACK_PARSE);
   return PARSE_STATUS_GOOD;
 }

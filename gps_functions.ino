@@ -4,6 +4,113 @@
 // Uses SparkFun u-blox GNSS v3 library with UBX PVT binary protocol
 ///////////////////////////////////////////
 
+///////////////////////////////////////////
+// GPS SERIAL BUFFER
+// Timer ISR drains Serial1 into a 4KB RAM buffer every 10ms,
+// preventing data loss during SD card write stalls (GC pauses).
+// SparkFun library reads from this buffer via GpsBufferedStream.
+//
+// At 25Hz PVT (~2500 bytes/sec), the hardware serial buffer
+// (64-256 bytes) overflows in 25-100ms of blocking. SD card
+// garbage collection can block writes for 100ms-2s.
+// This 4KB buffer survives up to 1.6 seconds of stalls.
+///////////////////////////////////////////
+
+// Forward-declare ISR with C linkage BEFORE Arduino's preprocessor
+// auto-generates a C++ prototype (which would conflict with extern "C").
+extern "C" void TIMER3_IRQHandler(void);
+
+#define GPS_RX_BUF_SIZE 4096
+static uint8_t gpsRxBuf[GPS_RX_BUF_SIZE];
+static volatile uint16_t gpsRxHead = 0;  // Written by ISR only
+static volatile uint16_t gpsRxTail = 0;  // Read by main loop only (via gpsStream)
+static volatile bool gpsTimerActive = false;
+
+// Stream wrapper: SparkFun library reads from our 4KB buffer instead of Serial1.
+// Before the timer ISR is started (during GPS_SETUP), reads pass through to
+// GPS_SERIAL directly so that myGNSS.begin() can communicate with the module.
+class GpsBufferedStream : public Stream {
+public:
+  int available() override {
+    if (!gpsTimerActive) return GPS_SERIAL.available();
+    return (GPS_RX_BUF_SIZE + gpsRxHead - gpsRxTail) % GPS_RX_BUF_SIZE;
+  }
+  int read() override {
+    if (!gpsTimerActive) return GPS_SERIAL.read();
+    if (gpsRxHead == gpsRxTail) return -1;
+    uint8_t c = gpsRxBuf[gpsRxTail];
+    gpsRxTail = (gpsRxTail + 1) % GPS_RX_BUF_SIZE;
+    return c;
+  }
+  int peek() override {
+    if (!gpsTimerActive) return GPS_SERIAL.peek();
+    if (gpsRxHead == gpsRxTail) return -1;
+    return gpsRxBuf[gpsRxTail];
+  }
+  size_t write(uint8_t c) override {
+    return GPS_SERIAL.write(c);
+  }
+  size_t write(const uint8_t *buffer, size_t size) override {
+    return GPS_SERIAL.write(buffer, size);
+  }
+  void flush() override {
+    GPS_SERIAL.flush();
+  }
+};
+
+static GpsBufferedStream gpsStream;
+
+// Timer3 ISR: drains Serial1 into our 4KB buffer every ~10ms.
+// Single-producer (ISR writes gpsRxHead), single-consumer (main loop
+// reads gpsRxTail via gpsStream) — lock-free ring buffer.
+//
+// Brief __disable_irq() around each GPS_SERIAL read protects the UART
+// driver's internal FIFO from concurrent access by the UART DMA ISR
+// (which can preempt us at higher priority). Each critical section is
+// ~0.3µs — well within SoftDevice's 6µs safe window.
+void TIMER3_IRQHandler(void) {
+  if (NRF_TIMER3->EVENTS_COMPARE[0]) {
+    NRF_TIMER3->EVENTS_COMPARE[0] = 0;
+    while (true) {
+      __disable_irq();
+      int c = GPS_SERIAL.available() ? GPS_SERIAL.read() : -1;
+      __enable_irq();
+      if (c < 0) break;
+
+      uint16_t nextHead = (gpsRxHead + 1) % GPS_RX_BUF_SIZE;
+      if (nextHead == gpsRxTail) break;  // Buffer full, drop bytes
+      gpsRxBuf[gpsRxHead] = (uint8_t)c;
+      gpsRxHead = nextHead;
+    }
+  }
+}
+
+void startGpsSerialTimer() {
+  NRF_TIMER3->TASKS_STOP = 1;
+  NRF_TIMER3->TASKS_CLEAR = 1;
+  NRF_TIMER3->MODE = TIMER_MODE_MODE_Timer;
+  NRF_TIMER3->BITMODE = TIMER_BITMODE_BITMODE_32Bit;
+  NRF_TIMER3->PRESCALER = 4;              // 16MHz / 2^4 = 1MHz tick
+  NRF_TIMER3->CC[0] = 10000;              // 10ms interval
+  NRF_TIMER3->SHORTS = TIMER_SHORTS_COMPARE0_CLEAR_Msk;
+  NRF_TIMER3->INTENSET = TIMER_INTENSET_COMPARE0_Msk;
+  NVIC_SetPriority(TIMER3_IRQn, 3);       // Below SoftDevice (0-2), above main loop
+  NVIC_ClearPendingIRQ(TIMER3_IRQn);      // Clear stale pending interrupt from prior session
+  NVIC_EnableIRQ(TIMER3_IRQn);
+  gpsTimerActive = true;
+  NRF_TIMER3->TASKS_START = 1;
+  debugln(F("GPS serial buffer timer started"));
+}
+
+void stopGpsSerialTimer() {
+  NRF_TIMER3->TASKS_STOP = 1;
+  NRF_TIMER3->INTENCLR = TIMER_INTENCLR_COMPARE0_Msk;
+  NVIC_DisableIRQ(TIMER3_IRQn);
+  NVIC_ClearPendingIRQ(TIMER3_IRQn);      // Ensure no stale ISR fires after disable
+  __DSB();                                 // ARM barrier: NVIC ops complete before flag update
+  gpsTimerActive = false;
+}
+
 /**
   * @brief Returns the GPS time since midnight in milliseconds
   *
@@ -124,7 +231,9 @@ void GPS_SETUP() {
 
     if (GPS_SERIAL) {
       // Connect to GPS at default baud
-      if (!myGNSS.begin(GPS_SERIAL)) {
+      // gpsStream wraps GPS_SERIAL: before timer starts, reads pass
+      // through directly so myGNSS.begin() can communicate with module.
+      if (!myGNSS.begin(gpsStream)) {
         debugln(F("GPS not detected at 9600 baud, trying 57600..."));
         GPS_SERIAL.end();
         delay(100);
@@ -132,7 +241,7 @@ void GPS_SETUP() {
         // Module may already be configured to 57600 from a previous session
         GPS_SERIAL.begin(GPS_BAUD_RATE);
         delay(100);
-        if (!myGNSS.begin(GPS_SERIAL)) {
+        if (!myGNSS.begin(gpsStream)) {
           debugln(F("ERROR: GPS not detected at any baud rate!"));
           return;  // Leave gpsInitialized = false
         }
@@ -147,7 +256,7 @@ void GPS_SETUP() {
         GPS_SERIAL.begin(GPS_BAUD_RATE);
         delay(100);
 
-        if (!myGNSS.begin(GPS_SERIAL)) {
+        if (!myGNSS.begin(gpsStream)) {
           debugln(F("ERROR: GPS lost after baud switch!"));
           return;
         }
@@ -171,15 +280,26 @@ void GPS_SETUP() {
 
       gpsInitialized = true;
       debugln(F("GPS initialized successfully (SparkFun UBX PVT)"));
+
+      // Drain any remaining bytes from Serial1 into our buffer, then
+      // start the timer ISR for continuous background serial drain.
+      while (GPS_SERIAL.available()) {
+        uint16_t nextHead = (gpsRxHead + 1) % GPS_RX_BUF_SIZE;
+        if (nextHead == gpsRxTail) break;
+        gpsRxBuf[gpsRxHead] = GPS_SERIAL.read();
+        gpsRxHead = nextHead;
+      }
+      startGpsSerialTimer();
     } else {
       debugln(F("ERROR: GPS Serial not available!"));
     }
   #else
     debugln(F("WOKWI GPS SETUP"));
     GPS_SERIAL.begin(19200);
-    if (myGNSS.begin(GPS_SERIAL)) {
+    if (myGNSS.begin(gpsStream)) {
       myGNSS.setAutoPVTcallbackPtr(&onPVTReceived);
       gpsInitialized = true;
+      startGpsSerialTimer();
     } else {
       debugln(F("ERROR: WOKWI GPS not detected!"));
     }
@@ -202,6 +322,17 @@ void GPS_LOOP() {
     gpsDataFresh = false;
 
     // Update the lap timer with fresh GPS data
+    #ifdef ENABLE_NEW_UI
+    if (gpsData.fix && courseManager != nullptr) {
+      double ltLat = gpsData.latitudeDegrees;
+      double ltLng = gpsData.longitudeDegrees;
+      double ltAlt = gpsData.altitude;
+      double ltSpeed = gpsData.speed;
+
+      courseManager->updateCurrentTime(getGpsTimeInMilliseconds());
+      courseManager->loop(ltLat, ltLng, ltAlt, ltSpeed);
+    }
+    #else
     if (trackSelected && gpsData.fix) {
       double ltLat = gpsData.latitudeDegrees;
       double ltLng = gpsData.longitudeDegrees;
@@ -211,9 +342,24 @@ void GPS_LOOP() {
       lapTimer.updateCurrentTime(getGpsTimeInMilliseconds());
       lapTimer.loop(ltLat, ltLng, ltAlt, ltSpeed);
     }
+    #endif
 
   #ifdef SD_CARD_LOGGING_ENABLED
-    if (trackSelected && gpsData.fix && sdSetupSuccess && sdDataLogInitComplete && enableLogging) {
+    // Determine if logging conditions are met.
+    // ENABLE_NEW_UI: File creation does NOT require GPS fix — the file opens
+    // as soon as date is available (from RTC even before fix). This eliminates
+    // the delay between GPS reacquisition and first logged row after sleep wake.
+    // Data writing still requires gpsData.fix for valid coordinates.
+    #ifdef ENABLE_NEW_UI
+    bool canWriteData = gpsData.fix && sdSetupSuccess && enableLogging && sdDataLogInitComplete;
+    bool canCreateFile = sdSetupSuccess && enableLogging && !sdDataLogInitComplete && gpsData.day > 0;
+    #else
+    bool loggingCondition = trackSelected && gpsData.fix && sdSetupSuccess && enableLogging;
+    bool canWriteData = loggingCondition && sdDataLogInitComplete;
+    bool canCreateFile = loggingCondition && !sdDataLogInitComplete && gpsData.day > 0;
+    #endif
+
+    if (canWriteData) {
 
       /////////////////////////////////////////////////////////////////
       // Log every PVT update (~25Hz)
@@ -230,17 +376,14 @@ void GPS_LOOP() {
       double snapSpeedMph = snapSpeed * 1.15078;
 
       // VALIDATE: Minimal checks to prevent genuinely corrupt data from being logged
-      // Philosophy: log everything possible, HDOP/sats are in the CSV for post-filtering
-      // Only reject data that would be file-corrupting garbage or clearly unfixed
-      bool hasActualFix = (snapSats > 0);  // Must have satellites, not just fix flag
-      bool validCoords = !(snapLat == 0.0 && snapLng == 0.0);  // Both zero = no position computed
+      bool hasActualFix = (snapSats > 0);
+      bool validCoords = !(snapLat == 0.0 && snapLng == 0.0);
       bool validLat = (snapLat >= -90.0 && snapLat <= 90.0);
       bool validLng = (snapLng >= -180.0 && snapLng <= 180.0);
       bool validAlt = (snapAlt >= -1000.0 && snapAlt <= 50000.0);
-      bool validHdop = (snapHdop > 0.0);  // HDOP 0 = no fix, any positive value gets logged
+      bool validHdop = (snapHdop > 0.0);
       bool validSpeed = (snapSpeedMph >= 0.0 && snapSpeedMph <= 500.0);
 
-      // Check for NaN/Inf which can slip through range checks
       bool noNaN = !isnan(snapLat) && !isnan(snapLng) && !isnan(snapAlt) &&
                    !isnan(snapHdop) && !isnan(snapSpeed);
       bool noInf = !isinf(snapLat) && !isinf(snapLng) && !isinf(snapAlt) &&
@@ -249,48 +392,34 @@ void GPS_LOOP() {
       if (!hasActualFix || !validCoords || !validLat || !validLng || !validAlt ||
           !validHdop || !validSpeed || !noNaN || !noInf) {
         // Skip this sample - data is not trustworthy
-        // Don't spam debug output - this can happen frequently during GPS acquisition
       } else {
-        // Build CSV line: timestamp,sats,hdop,lat,lng,speed_mph,alt_m,rpm,...
         char csvLine[256];
-
-        // Convert floats to strings with proper precision
         char latStr[24], lngStr[24], hdopStr[12], speedStr[16], altStr[16];
         char headingStr[12], hAccStr[12];
 
-        // 8 decimals for lat/lng (racing precision)
         dtostrf(snapLat, 1, 8, latStr);
         dtostrf(snapLng, 1, 8, lngStr);
-
-        // 1 decimal for HDOP
         dtostrf(snapHdop, 1, 1, hdopStr);
-
-        // 2 decimals for speed and altitude
         dtostrf(snapSpeedMph, 1, 2, speedStr);
         dtostrf(snapAlt, 1, 2, altStr);
-
-        // 2 decimals for heading and horizontal accuracy
         dtostrf(gpsData.heading, 1, 2, headingStr);
         dtostrf(gpsData.horizontalAccuracy, 1, 2, hAccStr);
 
-        // 3 decimals for accelerometer (g-force)
         char accelXStr[12], accelYStr[12], accelZStr[12];
         dtostrf(accelX, 1, 3, accelXStr);
         dtostrf(accelY, 1, 3, accelYStr);
         dtostrf(accelZ, 1, 3, accelZStr);
 
-        // FINAL SAFETY CHECK: Verify strings are valid ASCII numbers
-        // Catches any remaining garbage that slipped through numeric validation
+        // String validation
         bool stringsValid = true;
         const char* strs[] = {latStr, lngStr, hdopStr, speedStr, altStr, headingStr, hAccStr, accelXStr, accelYStr, accelZStr};
         for (int i = 0; i < 10 && stringsValid; i++) {
           int len = strlen(strs[i]);
           if (len == 0 || len > 20) {
-            stringsValid = false;  // Empty or suspiciously long
+            stringsValid = false;
           }
           for (int j = 0; j < len && stringsValid; j++) {
             char c = strs[i][j];
-            // Valid: digits, decimal point, minus sign
             if (!((c >= '0' && c <= '9') || c == '.' || c == '-')) {
               stringsValid = false;
             }
@@ -300,15 +429,11 @@ void GPS_LOOP() {
         if (!stringsValid) {
           // dtostrf produced garbage - skip this entry silently
         } else {
-          // Convert timestamp to string manually - Arduino's snprintf doesn't support %llu
-          // This was causing "lu,0,," garbage in the CSV output
           unsigned long long timestamp = getGpsUnixTimestampMillis();
           char timestampStr[24];
-          // Convert 64-bit integer to string (Arduino lacks %llu support)
           if (timestamp == 0) {
             strcpy(timestampStr, "0");
           } else {
-            // Build string from right to left
             char temp[24];
             int i = 0;
             unsigned long long t = timestamp;
@@ -316,31 +441,17 @@ void GPS_LOOP() {
               temp[i++] = '0' + (t % 10);
               t /= 10;
             }
-            // Reverse into timestampStr
             for (int j = 0; j < i; j++) {
               timestampStr[j] = temp[i - 1 - j];
             }
             timestampStr[i] = '\0';
           }
 
-          // Build the complete CSV line (using %s for timestamp now)
           snprintf(csvLine, sizeof(csvLine), "%s,%d,%s,%s,%s,%s,%s,%s,%s,%d,%s,%s,%s",
-                   timestampStr,
-                   snapSats,
-                   hdopStr,
-                   latStr,
-                   lngStr,
-                   speedStr,
-                   altStr,
-                   headingStr,
-                   hAccStr,
-                   tachLastReported,
-                   accelXStr,
-                   accelYStr,
-                   accelZStr
-          );
+                   timestampStr, snapSats, hdopStr, latStr, lngStr,
+                   speedStr, altStr, headingStr, hAccStr,
+                   tachLastReported, accelXStr, accelYStr, accelZStr);
 
-          // Write with error checking
           size_t written = dataFile.println(csvLine);
           if (written == 0) {
             debugln(F("SD write failed - disabling logging"));
@@ -361,10 +472,9 @@ void GPS_LOOP() {
         lastCardFlush = millis();
         dataFile.flush();
       }
-    } else if (trackSelected && gpsData.fix && sdSetupSuccess && !sdDataLogInitComplete && enableLogging && gpsData.day > 0) {
+    } else if (canCreateFile) {
       debugln(F("Attempt to initialize logfile"));
 
-      // Check if we can acquire SD access for logging
       if (!acquireSDAccess(SD_ACCESS_LOGGING)) {
         debugln(F("Cannot start logging - SD card busy"));
         enableLogging = false;
@@ -372,8 +482,26 @@ void GPS_LOOP() {
         internalNotification[sizeof(internalNotification) - 1] = '\0';
         switchToDisplayPage(PAGE_INTERNAL_FAULT);
       } else {
-        // Build filename from GPS date/time using snprintf (no heap allocation)
         char dataFileName[80];
+
+        #ifdef ENABLE_NEW_UI
+        if (settingUseLegacyCsv && selectedLocation >= 0 && selectedTrack >= 0) {
+          // Legacy .dove filename
+          snprintf(dataFileName, sizeof(dataFileName),
+                   "%s_%s_%s_20%02d_%02d%02d_%02d%02d%02d.dove",
+                   locations[selectedLocation],
+                   tracks[selectedTrack],
+                   selectedDirection == RACE_DIRECTION_FORWARD ? "fwd" : "rev",
+                   gpsData.year, gpsData.month, gpsData.day,
+                   gpsData.hour, gpsData.minute, gpsData.seconds);
+        } else {
+          // DOVEX filename: 20YYMMDD_HHMM.dovex
+          snprintf(dataFileName, sizeof(dataFileName),
+                   "20%02d%02d%02d_%02d%02d.dovex",
+                   gpsData.year, gpsData.month, gpsData.day,
+                   gpsData.hour, gpsData.minute);
+        }
+        #else
         snprintf(dataFileName, sizeof(dataFileName),
                  "%s_%s_%s_20%02d_%02d%02d_%02d%02d%02d.dove",
                  locations[selectedLocation],
@@ -381,32 +509,39 @@ void GPS_LOOP() {
                  selectedDirection == RACE_DIRECTION_FORWARD ? "fwd" : "rev",
                  gpsData.year, gpsData.month, gpsData.day,
                  gpsData.hour, gpsData.minute, gpsData.seconds);
+        #endif
 
         debug(F("dataFileName: ["));
         debug(dataFileName);
         debugln(F("]"));
 
-        // Open for writing - O_TRUNC ensures clean file if name collision occurs
         dataFile.open(dataFileName, O_CREAT | O_WRITE | O_TRUNC);
 
         if (!dataFile) {
           debugln(F("Error opening log file"));
-          releaseSDAccess(SD_ACCESS_LOGGING);  // Release on failure
-
+          releaseSDAccess(SD_ACCESS_LOGGING);
           snprintf(internalNotification, sizeof(internalNotification),
                    "Error saving log:\n%s", dataFileName);
           switchToDisplayPage(PAGE_INTERNAL_FAULT);
           enableLogging = false;
         } else {
-          // Write CSV header as first line
+          #ifdef ENABLE_NEW_UI
+          if (!settingUseLegacyCsv) {
+            // DOVEX: pre-fill header region with newlines (ensures FAT clusters are allocated)
+            char padBuf[64];
+            memset(padBuf, '\n', sizeof(padBuf));
+            for (uint32_t i = 0; i < DOVEX_HEADER_SIZE; i += sizeof(padBuf)) {
+              uint32_t toWrite = min((uint32_t)sizeof(padBuf), DOVEX_HEADER_SIZE - i);
+              dataFile.write(padBuf, toWrite);
+            }
+            // Cursor is now at exactly DOVEX_HEADER_SIZE
+          }
+          #endif
           dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z"));
           debugln(F("CSV header written"));
           sdDataLogInitComplete = true;
         }
       }
-    }
-    if (gpsData.fix) {
-      // debug(lastNMEA);
     }
   #endif
 
@@ -414,6 +549,32 @@ void GPS_LOOP() {
     gps_speed_mph = gpsData.speed * 1.15078;
   } // end if (gpsDataFresh)
 }
+
+#ifdef ENABLE_NEW_UI
+void GPS_SLEEP() {
+  if (!gpsInitialized) return;
+  stopGpsSerialTimer();  // Stop serial drain ISR during sleep (saves power)
+  myGNSS.powerOff(0);   // 0 = indefinite sleep until woken
+}
+
+void GPS_WAKE() {
+  if (!gpsInitialized) return;
+  // Any UART activity on RX wakes u-blox from powerOff backup mode
+  GPS_SERIAL.write(0xFF);
+  delay(100);
+  // Reset buffer pointers (stale data from before sleep is useless)
+  gpsRxHead = 0;
+  gpsRxTail = 0;
+  startGpsSerialTimer();  // Resume serial drain ISR
+  myGNSS.checkUblox();
+}
+
+void GPS_SLEEP_PERIODIC_CHECK() {
+  GPS_WAKE();
+  sleepGpsWakeActive = true;
+  sleepGpsWakeStartedAt = millis();
+}
+#endif
 
 void calculateGPSFrameRate() {
   // calculate actual GPS fix frequency

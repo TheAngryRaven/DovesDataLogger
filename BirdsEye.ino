@@ -39,6 +39,8 @@
 // function prototypes for the onPVTReceived() callback.
 #include <SparkFun_u-blox_GNSS_v3.h>
 #include "gps_config.h"
+#include <DovesLapTimer.h>
+#include <CourseManager.h>
 
 ///////////////////////////////////////////
 // BATTERY CONFIGURATION
@@ -58,15 +60,22 @@ float getBatteryVoltage() {
   #else
   unsigned int adcCount = analogRead(PIN_VBAT);
   float adcVoltage = adcCount * VREF / ADC_MAX;
-  return adcVoltage * 1510 / 510;
+  // Nominal divider: (1000+510)/510 = 2.9608, but reads ~2% low due to
+  // resistor/VREF tolerances (4.11V observed at true 4.20V full charge).
+  // Calibrated: 2.9608 * (4.20/4.11) = 3.024
+  return adcVoltage * 3.024;
   #endif
+}
+
+int getBatteryPercent(float voltage) {
+  // LiPo range: 3.3V (cutoff) to 4.2V (full charge)
+  return constrain((int)((voltage - 3.3) / 0.9 * 100), 0, 100);
 }
 
 ///////////////////////////////////////////
 // LAP TIMER
 ///////////////////////////////////////////
 
-#include <DovesLapTimer.h>
 double crossingThresholdMeters = 7.0;
 DovesLapTimer lapTimer(crossingThresholdMeters);
 unsigned long gpsFrameStartTime;
@@ -76,14 +85,65 @@ float gpsFrameRate = 0.0;
 bool trackSelected = false;
 
 ///////////////////////////////////////////
+// NEW UI: CourseManager + auto-detection
+///////////////////////////////////////////
+#define ENABLE_NEW_UI
+
+#ifdef ENABLE_NEW_UI
+CourseManager* courseManager = nullptr;
+TrackConfig activeTrackConfig;
+bool trackDetected = false;
+int detectedTrackIndex = -1;
+unsigned long idleStartTime = 0;
+bool idleTimerRunning = false;
+bool newUiRaceActive = false;
+
+// Runtime settings (loaded from SD in setup)
+float settingLapDetectionDistance = 7.0;
+float settingWaypointDetectionDistance = 30.0;
+float settingWaypointSpeed = 30.0;
+bool settingUseLegacyCsv = false;
+char settingDriverName[32] = "Driver";
+
+// Track manifest for proximity detection
+TrackManifestEntry trackManifest[MAX_LOCATIONS];
+int trackManifestCount = 0;
+
+// DOVEX replay globals (populated by parseDovexHeader in replay.ino)
+char dovexReplayDatetime[24];
+char dovexReplayDriver[32];
+char dovexReplayCourseName[32];
+char dovexReplayShortName[16];
+char dovexReplayBestLap[16];
+char dovexReplayOptimal[16];
+
+// Sleep mode state
+bool sleepModeActive = false;
+bool sleepGpsWakeActive = false;         // GPS periodic fix in progress
+unsigned long sleepEnteredAt = 0;
+unsigned long sleepLastGpsWake = 0;
+unsigned long sleepGpsWakeStartedAt = 0;
+unsigned long menuIdleStartTime = 0;     // For 5-min auto-sleep
+bool menuIdleTimerRunning = false;
+bool chargingModeActive = false;           // USB connected during sleep
+unsigned long chargeDisplayOnAt = 0;       // 0 = display off, >0 = millis() when turned on
+
+// Button hold tracking (for long-press combos)
+unsigned long btn1HoldStart = 0;
+unsigned long btn2HoldStart = 0;
+unsigned long btn3HoldStart = 0;
+bool btn1Held = false;
+bool btn2Held = false;
+bool btn3Held = false;
+#endif
+
+///////////////////////////////////////////
 // PROJECT DEFINES
 ///////////////////////////////////////////
 
 #define SD_CARD_LOGGING_ENABLED
-#define MAX_LOCATIONS 100
-#define MAX_LOCATION_LENGTH 13 // 13 is old dos format for fat16
-#define MAX_LAYOUTS 10
-#define MAX_LAYOUT_LENGTH 15
+// MAX_LOCATIONS, MAX_LOCATION_LENGTH, MAX_LAYOUTS, MAX_LAYOUT_LENGTH
+// are now defined in project.h for use by project-wide structs
 #define FILEPATH_MAX 50        // "/TRACKS/" (8) + name (13) + ".json" (5) + null = 27, using 50 for safety
 #include <string.h>
 
@@ -235,14 +295,41 @@ unsigned long lastLap = 0;
 unsigned long lapHistory[lapHistoryMaxLaps];
 int lapHistoryCount = 0;
 
+// Forward declaration — replayModeActive is in the replay globals section below,
+// but checkForNewLapData() needs it when ENABLE_NEW_UI is defined.
+extern bool replayModeActive;
+
 void checkForNewLapData() {
-  if (lapHistoryCount < lapHistoryMaxLaps && lapTimer.getLastLapTime() != lastLap) {
-    lastLap = lapTimer.getLastLapTime();
+  #ifdef ENABLE_NEW_UI
+  // New UI: read from active timer (CourseManager), with fallback to
+  // lapTimer for legacy replay mode which feeds lapTimer directly.
+  unsigned long activeLapTime = 0;
+  if (courseManager != nullptr) {
+    if (courseManager->isLapAnythingActive()) {
+      activeLapTime = courseManager->getLapAnythingTimer()->getLastLapTime();
+    } else if (courseManager->getActiveTimer() != nullptr) {
+      activeLapTime = courseManager->getActiveTimer()->getLastLapTime();
+    }
+  }
+  if (activeLapTime == 0 && replayModeActive) {
+    // Replay mode feeds lapTimer, not courseManager
+    activeLapTime = lapTimer.getLastLapTime();
+  }
+  if (lapHistoryCount < lapHistoryMaxLaps && activeLapTime != 0 && activeLapTime != lastLap) {
+    lastLap = activeLapTime;
     lapHistory[lapHistoryCount] = lastLap;
-    // todo: watdo when too many?
     lapHistoryCount++;
     debugln(F("New lap added to history..."));
   }
+  #else
+  // Legacy: read from direct lapTimer
+  if (lapHistoryCount < lapHistoryMaxLaps && lapTimer.getLastLapTime() != lastLap) {
+    lastLap = lapTimer.getLastLapTime();
+    lapHistory[lapHistoryCount] = lastLap;
+    lapHistoryCount++;
+    debugln(F("New lap added to history..."));
+  }
+  #endif
 }
 
 ///////////////////////////////////////////
@@ -292,9 +379,11 @@ char replayLineBuffer[REPLAY_LINE_BUFFER_SIZE];
 // #define PIN_SPI_CS 3 // todo: ground out for A0/battery voltage...
 #endif
 
-// Reduced from 25MHz to 1MHz for better EMI resistance
-// Slower speed = more robust against ignition noise
-#define SPI_SPEED SD_SCK_MHZ(1)
+// Reduced from 25MHz for EMI resistance in ignition environments.
+// 2 MHz is the minimum for 125+ kBps BLE file transfer throughput
+// (1 MHz SD reads cap at ~122 kBps, just under the BLE 2M PHY ceiling).
+// Still 12.5x below the original 25 MHz — very conservative.
+#define SPI_SPEED SD_SCK_MHZ(2)
 
 #include "SdFat.h"
 #include "sdios.h"
@@ -356,8 +445,8 @@ int numOfLocations = 0;
 #ifdef WOKWI
 #define JSON_BUFFER_SIZE 1024
 #else
-// might need to make bigger for more layouts, test and expiriment
-#define JSON_BUFFER_SIZE 2048
+// 4 KB handles tracks with up to 10 courses with full sector data
+#define JSON_BUFFER_SIZE 4096
 #endif
 
 const int PARSE_STATUS_GOOD = 0;
@@ -367,6 +456,11 @@ const int PARSE_STATUS_PARSE_FAILED = 10;
 char tracks[MAX_LAYOUTS][MAX_LAYOUT_LENGTH];
 TrackLayout trackLayouts[MAX_LAYOUTS];
 int numOfTracks = 0;
+
+// Track metadata (parsed from new JSON object format)
+TrackMetadata activeTrackMetadata;
+
+// Track manifest is declared in the ENABLE_NEW_UI globals block above
 
 ///////////////////////////////////////////
 // BLE FILE HANDLE (after SdFat include)
@@ -521,6 +615,10 @@ void setup() {
     pinMode(PIN_VBAT, INPUT);
     pinMode(VBAT_ENABLE, OUTPUT);
     digitalWrite(VBAT_ENABLE, LOW);
+    // Enable fast charging (~100mA vs default ~50mA)
+    // PIN_CHARGING_CURRENT = P0.13 = HICHG pin on BQ25100 charge IC
+    pinMode(PIN_CHARGING_CURRENT, OUTPUT);
+    digitalWrite(PIN_CHARGING_CURRENT, HIGH);
     lastBatteryCheck = millis();
     lastBatteryVoltage = getBatteryVoltage();
   #endif
@@ -546,14 +644,57 @@ void setup() {
 
   GPS_SETUP();
 
+  // Read settings into runtime variables
+  #ifdef ENABLE_NEW_UI
+  {
+    char buf[48];
+    if (getSetting("lap_detection_distance", buf, sizeof(buf))) {
+      settingLapDetectionDistance = atof(buf);
+      if (settingLapDetectionDistance <= 0) settingLapDetectionDistance = 7.0;
+    }
+    if (getSetting("waypoint_detection_distance", buf, sizeof(buf))) {
+      settingWaypointDetectionDistance = atof(buf);
+      if (settingWaypointDetectionDistance <= 0) settingWaypointDetectionDistance = 30.0;
+    }
+    if (getSetting("waypoint_speed", buf, sizeof(buf))) {
+      settingWaypointSpeed = atof(buf);
+      if (settingWaypointSpeed <= 0) settingWaypointSpeed = 30.0;
+    }
+    if (getSetting("use_legacy_csv", buf, sizeof(buf))) {
+      settingUseLegacyCsv = (strcmp(buf, "true") == 0);
+    }
+    if (getSetting("driver_name", buf, sizeof(buf))) {
+      strncpy(settingDriverName, buf, sizeof(settingDriverName) - 1);
+      settingDriverName[sizeof(settingDriverName) - 1] = '\0';
+    }
+    crossingThresholdMeters = settingLapDetectionDistance;
+    debug(F("Settings loaded: lap_dist="));
+    debug(settingLapDetectionDistance);
+    debug(F(" wp_dist="));
+    debug(settingWaypointDetectionDistance);
+    debug(F(" wp_speed="));
+    debug(settingWaypointSpeed);
+    debug(F(" legacy="));
+    debug(settingUseLegacyCsv);
+    debug(F(" driver="));
+    debugln(settingDriverName);
+  }
+  #endif
+
   if (!sdSetupSuccess) {
     strncpy(internalNotification, "SD Init failed!\n\nlogging not possible!", sizeof(internalNotification) - 1);
     internalNotification[sizeof(internalNotification) - 1] = '\0';
     switchToDisplayPage(PAGE_INTERNAL_FAULT);
   } else if (sdSetupSuccess && !sdTrackSuccess) {
+    #ifdef ENABLE_NEW_UI
+    // New UI: no TRACKS folder is OK — Lap Anything will handle it
+    debugln(F("No TRACKS folder — Lap Anything will activate"));
+    switchToDisplayPage(PAGE_MAIN_MENU);
+    #else
     strncpy(internalNotification, "sd:/TRACKS not found!\n\nlogging not possible!", sizeof(internalNotification) - 1);
     internalNotification[sizeof(internalNotification) - 1] = '\0';
     switchToDisplayPage(PAGE_INTERNAL_FAULT);
+    #endif
   } else {
     switchToDisplayPage(PAGE_MAIN_MENU);
   }
@@ -572,6 +713,455 @@ void setup() {
 }
 
 ///////////////////////////////////////////
+// NEW UI HELPER FUNCTIONS
+///////////////////////////////////////////
+
+#ifdef ENABLE_NEW_UI
+
+/**
+ * @brief Get the active timer pointer for display/lap-history reads.
+ * Returns whichever timer is active: course timer, lap anything, or nullptr.
+ */
+DovesLapTimer* getActiveTimerDLT() {
+  if (courseManager == nullptr) return nullptr;
+  if (courseManager->isLapAnythingActive()) return nullptr;
+  return courseManager->getActiveTimer();
+}
+
+WaypointLapTimer* getActiveTimerWLT() {
+  if (courseManager == nullptr) return nullptr;
+  if (courseManager->isLapAnythingActive()) return courseManager->getLapAnythingTimer();
+  return nullptr;
+}
+
+// Unified getter helpers for display pages
+bool activeTimerRaceStarted() {
+  DovesLapTimer* dlt = getActiveTimerDLT();
+  if (dlt) return dlt->getRaceStarted();
+  WaypointLapTimer* wlt = getActiveTimerWLT();
+  if (wlt) return wlt->getRaceStarted();
+  return false;
+}
+
+bool activeTimerCrossing() {
+  DovesLapTimer* dlt = getActiveTimerDLT();
+  if (dlt) return dlt->getCrossing();
+  WaypointLapTimer* wlt = getActiveTimerWLT();
+  if (wlt) return wlt->getCrossing();
+  return false;
+}
+
+int activeTimerLaps() {
+  DovesLapTimer* dlt = getActiveTimerDLT();
+  if (dlt) return dlt->getLaps();
+  WaypointLapTimer* wlt = getActiveTimerWLT();
+  if (wlt) return wlt->getLaps();
+  return 0;
+}
+
+unsigned long activeTimerCurrentLapTime() {
+  DovesLapTimer* dlt = getActiveTimerDLT();
+  if (dlt) return dlt->getCurrentLapTime();
+  WaypointLapTimer* wlt = getActiveTimerWLT();
+  if (wlt) return wlt->getCurrentLapTime();
+  return 0;
+}
+
+unsigned long activeTimerLastLapTime() {
+  DovesLapTimer* dlt = getActiveTimerDLT();
+  if (dlt) return dlt->getLastLapTime();
+  WaypointLapTimer* wlt = getActiveTimerWLT();
+  if (wlt) return wlt->getLastLapTime();
+  return 0;
+}
+
+unsigned long activeTimerBestLapTime() {
+  DovesLapTimer* dlt = getActiveTimerDLT();
+  if (dlt) return dlt->getBestLapTime();
+  WaypointLapTimer* wlt = getActiveTimerWLT();
+  if (wlt) return wlt->getBestLapTime();
+  return 0;
+}
+
+int activeTimerBestLapNumber() {
+  DovesLapTimer* dlt = getActiveTimerDLT();
+  if (dlt) return dlt->getBestLapNumber();
+  WaypointLapTimer* wlt = getActiveTimerWLT();
+  if (wlt) return wlt->getBestLapNumber();
+  return 0;
+}
+
+float activeTimerPaceDifference() {
+  DovesLapTimer* dlt = getActiveTimerDLT();
+  if (dlt) return dlt->getPaceDifference();
+  WaypointLapTimer* wlt = getActiveTimerWLT();
+  if (wlt) return wlt->getPaceDifference();
+  return 0.0;
+}
+
+float activeTimerTotalDistance() {
+  DovesLapTimer* dlt = getActiveTimerDLT();
+  if (dlt) return dlt->getTotalDistanceTraveled();
+  WaypointLapTimer* wlt = getActiveTimerWLT();
+  if (wlt) return wlt->getTotalDistanceTraveled();
+  return 0.0;
+}
+
+unsigned long activeTimerOptimalLapTime() {
+  DovesLapTimer* dlt = getActiveTimerDLT();
+  if (dlt) return dlt->getOptimalLapTime();
+  return 0;
+}
+
+bool activeTimerSectorsConfigured() {
+  DovesLapTimer* dlt = getActiveTimerDLT();
+  if (dlt) return dlt->areSectorLinesConfigured();
+  return false;
+}
+
+/**
+ * @brief Scan track manifest for closest match to current GPS position
+ * Creates CourseManager when a match is found within 5 miles
+ */
+void trackDetectionLoop() {
+  if (trackDetected || !gpsData.fix || trackManifestCount == 0) return;
+
+  double bestDist = 999999.0;
+  int bestIndex = -1;
+
+  for (int i = 0; i < trackManifestCount; i++) {
+    double dist = haversineDistanceMiles(
+      gpsData.latitudeDegrees, gpsData.longitudeDegrees,
+      trackManifest[i].lat, trackManifest[i].lon
+    );
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestIndex = i;
+    }
+  }
+
+  if (bestIndex >= 0 && bestDist <= TRACK_DETECT_RADIUS_MILES) {
+    debug(F("Track detected: "));
+    debug(trackManifest[bestIndex].filename);
+    debug(F(" ("));
+    debug(bestDist, 2);
+    debugln(F(" miles)"));
+
+    detectedTrackIndex = bestIndex;
+
+    // Use manifest filename directly to build filepath — locations[] may
+    // truncate names longer than MAX_LOCATION_LENGTH (12 chars, old FAT16
+    // 8.3 limit), causing strcmp mismatches that silently skip real tracks.
+    {
+      char filepath[FILEPATH_MAX];
+      makeFullTrackPath(trackManifest[bestIndex].filename, filepath);
+      int parseStatus = parseTrackFile(filepath);
+
+      if (parseStatus == PARSE_STATUS_GOOD && numOfTracks > 0) {
+        // Build TrackConfig from parsed data
+        activeTrackConfig.longName = activeTrackMetadata.longName[0] ? activeTrackMetadata.longName : trackManifest[bestIndex].filename;
+        activeTrackConfig.shortName = activeTrackMetadata.shortName[0] ? activeTrackMetadata.shortName : trackManifest[bestIndex].filename;
+
+        // Populate CourseConfig entries
+        // Check if any course has lengthFt > 0. CourseDetector uses
+        // distance matching to identify which course the driver is on.
+        // Without lengthFt, distance can never match and detection gets
+        // stuck permanently — no candidates, no rejections, no fallback.
+        bool anyHasLength = false;
+        activeTrackConfig.courseCount = numOfTracks;
+        for (int i = 0; i < numOfTracks && i < MAX_COURSES; i++) {
+          activeTrackConfig.courses[i].name = tracks[i];
+          activeTrackConfig.courses[i].lengthFt = activeTrackMetadata.courseLengthFt[i];
+          activeTrackConfig.courses[i].startALat = trackLayouts[i].start_a_lat;
+          activeTrackConfig.courses[i].startALng = trackLayouts[i].start_a_lng;
+          activeTrackConfig.courses[i].startBLat = trackLayouts[i].start_b_lat;
+          activeTrackConfig.courses[i].startBLng = trackLayouts[i].start_b_lng;
+          activeTrackConfig.courses[i].sector2ALat = trackLayouts[i].sector_2_a_lat;
+          activeTrackConfig.courses[i].sector2ALng = trackLayouts[i].sector_2_a_lng;
+          activeTrackConfig.courses[i].sector2BLat = trackLayouts[i].sector_2_b_lat;
+          activeTrackConfig.courses[i].sector2BLng = trackLayouts[i].sector_2_b_lng;
+          activeTrackConfig.courses[i].sector3ALat = trackLayouts[i].sector_3_a_lat;
+          activeTrackConfig.courses[i].sector3ALng = trackLayouts[i].sector_3_a_lng;
+          activeTrackConfig.courses[i].sector3BLat = trackLayouts[i].sector_3_b_lat;
+          activeTrackConfig.courses[i].sector3BLng = trackLayouts[i].sector_3_b_lng;
+          activeTrackConfig.courses[i].hasSector2 = trackLayouts[i].hasSector2;
+          activeTrackConfig.courses[i].hasSector3 = trackLayouts[i].hasSector3;
+          if (activeTrackMetadata.courseLengthFt[i] > 0) anyHasLength = true;
+        }
+
+        // If no courses have lengthFt, CourseDetector cannot match by
+        // distance and will be stuck forever. Force courseCount=0 so
+        // CourseManager activates Lap Anything immediately. Track name
+        // metadata is preserved so the display still shows which track.
+        if (!anyHasLength) {
+          debugln(F("WARNING: No courses have lengthFt — forcing Lap Anything"));
+          activeTrackConfig.courseCount = 0;
+        }
+
+        // Create CourseManager
+        courseManager = new CourseManager(activeTrackConfig, crossingThresholdMeters);
+        courseManager->setSpeedThresholdMph(settingWaypointSpeed);
+        courseManager->setWaypointProximityMeters(settingWaypointDetectionDistance);
+        courseManager->setDetectionProximityMeters(settingWaypointDetectionDistance);
+
+        trackDetected = true;
+        debugln(F("CourseManager created with track data"));
+      }
+    }
+
+    // If parsing failed or no tracks, create Lap Anything fallback
+    if (!trackDetected) {
+      createLapAnythingCourseManager();
+      trackDetected = true;
+    }
+  }
+}
+
+/**
+ * @brief End the current race session: write DOVEX header, close file,
+ * clean up CourseManager, reset state. Used by both checkAutoIdle()
+ * and LOGGING_STOP_CONFIRM in display_ui.ino.
+ */
+void endRaceSession() {
+  // Write DOVEX metadata header if using new format
+  if (!settingUseLegacyCsv && sdDataLogInitComplete && dataFile.isOpen()) {
+    writeDovexHeader();
+  }
+
+  // Close log file
+  if (dataFile.isOpen()) {
+    dataFile.flush();
+    dataFile.close();
+  }
+  releaseSDAccess(SD_ACCESS_LOGGING);
+  enableLogging = false;
+  sdDataLogInitComplete = false;
+  trackSelected = false;
+
+  // Clean up CourseManager
+  if (courseManager != nullptr) {
+    delete courseManager;
+    courseManager = nullptr;
+  }
+  trackDetected = false;
+  detectedTrackIndex = -1;
+  newUiRaceActive = false;
+  idleTimerRunning = false;
+  idleStartTime = 0;
+
+  // Reset lap history
+  lapHistoryCount = 0;
+  lastLap = 0;
+  memset(lapHistory, 0, sizeof(lapHistory));
+  topTachReported = 0;
+
+  debugln(F("Race session ended"));
+}
+
+/**
+ * @brief Create a fallback CourseManager with no courses (Lap Anything mode).
+ * Used when no track is detected, parsing fails, or user enters race manually.
+ */
+void createLapAnythingCourseManager() {
+  if (courseManager != nullptr) return;  // Already exists
+  activeTrackConfig.longName = "Unknown";
+  activeTrackConfig.shortName = "";
+  activeTrackConfig.courseCount = 0;
+  courseManager = new CourseManager(activeTrackConfig, crossingThresholdMeters);
+  courseManager->setSpeedThresholdMph(settingWaypointSpeed);
+  courseManager->setWaypointProximityMeters(settingWaypointDetectionDistance);
+  debugln(F("CourseManager created (Lap Anything)"));
+}
+
+/**
+ * @brief Check for auto-idle: 60s at <2mph ends the session
+ */
+void checkAutoIdle() {
+  if (!newUiRaceActive) return;
+
+  if (gps_speed_mph >= 2.0) {
+    idleTimerRunning = false;
+    idleStartTime = 0;
+    return;
+  }
+
+  if (!idleTimerRunning) {
+    idleTimerRunning = true;
+    idleStartTime = millis();
+    return;
+  }
+
+  if (millis() - idleStartTime >= 60000) {
+    debugln(F("Auto-idle: 60s at <2mph — ending session"));
+    endRaceSession();
+    switchToDisplayPage(PAGE_MAIN_MENU);
+  }
+}
+
+/**
+ * @brief Auto-enter race mode from main menu when driving
+ */
+void autoRaceModeCheck() {
+  if (currentPage != PAGE_MAIN_MENU) return;
+  if (currentPage == PAGE_BLUETOOTH || bleConnected) return;
+
+  bool rpmTriggered = tachLastReported > 500;
+  bool speedTriggered = gps_speed_mph >= 10.0;
+
+  if (rpmTriggered || speedTriggered) {
+    debugln(F("Auto-entering race mode"));
+    newUiRaceActive = true;
+    enableLogging = true;
+    trackSelected = true;  // Allow GPS_LOOP to feed timer + log
+
+    // Create a minimal CourseManager if none exists yet (no track detected)
+    createLapAnythingCourseManager();
+
+    // Show tach page if RPM triggered first, otherwise speed page
+    switchToDisplayPage(rpmTriggered ? TACHOMETER : GPS_SPEED);
+  }
+}
+
+/**
+ * @brief Write DOVEX header metadata into reserved 1KB area at file start
+ */
+void writeDovexHeader() {
+  if (!dataFile.isOpen()) return;
+
+  // Build line 1: datetime, driver_name, course_name, short_name, best_lap_time, optimal_lap_time
+  char headerLine[256];
+  char bestLapStr[16] = "N/A";
+  char optimalStr[16] = "N/A";
+
+  unsigned long bestLap = activeTimerBestLapTime();
+  if (bestLap > 0) {
+    snprintf(bestLapStr, sizeof(bestLapStr), "%lu", bestLap);
+  }
+
+  unsigned long optimalLap = activeTimerOptimalLapTime();
+  if (optimalLap > 0) {
+    snprintf(optimalStr, sizeof(optimalStr), "%lu", optimalLap);
+  }
+
+  const char* courseName = "Lap Anything";
+  const char* shortName = "";
+  if (courseManager != nullptr) {
+    const char* cn = courseManager->getActiveCourseName();
+    if (cn) courseName = cn;
+    shortName = courseManager->getShortName();
+  }
+
+  // Format: datetime, driver, course, short_name, best_lap_ms, optimal_ms
+  snprintf(headerLine, sizeof(headerLine), "20%02d-%02d-%02d %02d:%02d:%02d,%s,%s,%s,%s,%s",
+           gpsData.year, gpsData.month, gpsData.day,
+           gpsData.hour, gpsData.minute, gpsData.seconds,
+           settingDriverName, courseName, shortName,
+           bestLapStr, optimalStr);
+
+  // Build line 4: comma-separated lap times
+  // 1 KB header fits ~100 laps at ~8 chars each
+  static char lapLine[800];
+  int lapLineLen = 0;
+  for (int i = 0; i < lapHistoryCount && lapLineLen < (int)sizeof(lapLine) - 16; i++) {
+    if (i > 0) {
+      lapLine[lapLineLen++] = ',';
+    }
+    lapLineLen += snprintf(lapLine + lapLineLen, sizeof(lapLine) - lapLineLen, "%lu", lapHistory[i]);
+  }
+  lapLine[lapLineLen] = '\0';
+
+  // Seek to beginning and write header (with column labels for readability)
+  dataFile.seekSet(0);
+  dataFile.println(F("datetime,driver,course,short_name,best_lap_ms,optimal_ms"));
+  dataFile.println(headerLine);
+  dataFile.println(F("laps_ms"));
+  dataFile.println(lapLine);
+
+  // Pad remaining bytes to DOVEX_HEADER_SIZE with newlines
+  uint32_t currentPos = dataFile.curPosition();
+  while (currentPos < DOVEX_HEADER_SIZE) {
+    dataFile.write('\n');
+    currentPos++;
+  }
+
+  dataFile.flush();
+  debugln(F("DOVEX header written"));
+}
+
+///////////////////////////////////////////
+// SLEEP MODE
+///////////////////////////////////////////
+
+bool isUsbConnected() {
+  return (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+}
+
+void enterSleepMode() {
+  // 1. End race session if active (safety net)
+  if (newUiRaceActive) endRaceSession();
+
+  // 2. Stop BLE if active (prevents SoftDevice power waste during sleep)
+  if (bleActive) BLE_STOP();
+
+  // 3. Turn off display (I2C command, ~10uA sleep current)
+  DISPLAY_SLEEP();
+
+  // 3. Put GPS to backup mode
+  GPS_SLEEP();
+
+  // 4. Power down IMU (~1mA savings)
+  if (accelAvailable) {
+    pinMode(PIN_LSM6DS3TR_C_POWER, OUTPUT);
+    digitalWrite(PIN_LSM6DS3TR_C_POWER, HIGH);  // HIGH = disable power
+  }
+
+  // 5. Set state
+  sleepModeActive = true;
+  sleepEnteredAt = millis();
+  sleepLastGpsWake = millis();
+  // Tach ISR stays attached -- RPM pulses will wake via tachHavePeriod
+}
+
+void exitSleepMode(bool rpmWake = false) {
+  // 1. Re-enable IMU
+  if (accelAvailable) {
+    digitalWrite(PIN_LSM6DS3TR_C_POWER, LOW);
+    delay(50);
+    if (accelIMU.begin() != 0) {
+      debugln(F("IMU failed to reinitialize after sleep"));
+      accelAvailable = false;
+    }
+  }
+
+  // 2. Wake GPS
+  GPS_WAKE();
+
+  // 3. Wake display
+  DISPLAY_WAKE();
+
+  // 4. Reset state
+  sleepModeActive = false;
+  sleepGpsWakeActive = false;
+  menuIdleTimerRunning = false;
+  chargingModeActive = false;
+  chargeDisplayOnAt = 0;
+
+  // 5. RPM wake → skip main menu, go straight to race mode
+  if (rpmWake) {
+    debugln(F("RPM wake — entering race mode directly"));
+    newUiRaceActive = true;
+    enableLogging = true;
+    trackSelected = true;
+    createLapAnythingCourseManager();
+    switchToDisplayPage(TACHOMETER);
+  } else {
+    switchToDisplayPage(PAGE_MAIN_MENU);
+  }
+}
+
+#endif // ENABLE_NEW_UI
+
+///////////////////////////////////////////
 // MAIN LOOP
 ///////////////////////////////////////////
 
@@ -584,6 +1174,85 @@ void loop() {
   wdtPet();
   #endif
 
+  #ifdef ENABLE_NEW_UI
+  if (sleepModeActive) {
+    // Check wake triggers
+    bool wakeButton = anyButtonPressed();
+    bool wakeRpm = tachHavePeriod;  // ISR sets this directly on any valid pulse
+
+    if (wakeRpm) {
+      exitSleepMode(true);
+      return;
+    }
+    if (wakeButton && !chargingModeActive) {
+      exitSleepMode(false);
+      return;
+    }
+
+    // ---- CHARGE MODE (USB connected during sleep) ----
+    if (isUsbConnected()) {
+      if (!chargingModeActive) {
+        // First detection of USB: show charging screen for 10s
+        chargingModeActive = true;
+        DISPLAY_WAKE();
+        chargeDisplayOnAt = millis();
+        if (chargeDisplayOnAt == 0) chargeDisplayOnAt = 1; // avoid 0 sentinel
+      }
+
+      // Button press: re-show display for another 10s
+      if (wakeButton && chargeDisplayOnAt == 0) {
+        DISPLAY_WAKE();
+        chargeDisplayOnAt = millis();
+        if (chargeDisplayOnAt == 0) chargeDisplayOnAt = 1;
+      }
+
+      // Display management
+      if (chargeDisplayOnAt != 0) {
+        if (millis() - chargeDisplayOnAt >= CHARGE_DISPLAY_TIMEOUT_MS) {
+          DISPLAY_SLEEP();
+          chargeDisplayOnAt = 0;
+        } else if (millis() - displayLastUpdate > (1000 / displayUpdateRateHz)) {
+          displayLastUpdate = millis();
+          displayPage_sleep_charging();
+        }
+      }
+
+      // Skip GPS periodic checks and WFE while charging — just loop
+      return;
+    }
+
+    // USB disconnected: clean up charge mode
+    if (chargingModeActive) {
+      chargingModeActive = false;
+      if (chargeDisplayOnAt != 0) {
+        DISPLAY_SLEEP();
+      }
+      chargeDisplayOnAt = 0;
+    }
+
+    // Periodic GPS fix (every SLEEP_GPS_WAKE_INTERVAL)
+    if (!sleepGpsWakeActive &&
+        (millis() - sleepLastGpsWake >= SLEEP_GPS_WAKE_INTERVAL)) {
+      GPS_SLEEP_PERIODIC_CHECK();
+    }
+
+    // GPS periodic wake: check for fix or timeout
+    if (sleepGpsWakeActive) {
+      myGNSS.checkUblox();
+      myGNSS.checkCallbacks();
+      if (gpsData.fix || (millis() - sleepGpsWakeStartedAt >= SLEEP_GPS_FIX_TIMEOUT)) {
+        GPS_SLEEP();
+        sleepGpsWakeActive = false;
+        sleepLastGpsWake = millis();
+      }
+    }
+
+    // CPU idle (SoftDevice-safe WFE — any interrupt wakes CPU)
+    sd_app_evt_wait();
+    return;  // Skip entire normal loop
+  }
+  #endif
+
   #ifdef HAS_DEBUG
   unsigned long loopStart = millis();
   #endif
@@ -591,6 +1260,12 @@ void loop() {
   // When BLE is active, skip GPS/tach/lap processing for better throughput
   if (bleActive) {
     BLUETOOTH_LOOP();
+
+    // Keep battery voltage fresh for BLE BATT command and display
+    if (millis() - lastBatteryCheck > batteryUpdateInterval) {
+      lastBatteryCheck = millis();
+      lastBatteryVoltage = getBatteryVoltage();
+    }
 
     // Minimal button check for exit
     readButtons();
@@ -635,16 +1310,62 @@ void loop() {
   ACCEL_LOOP();
   BLUETOOTH_LOOP();
 
-  #ifndef ENDURANCE_MODE
+  #ifdef ENABLE_NEW_UI
+    trackDetectionLoop();
     checkForNewLapData();
-  #endif
-  calculateGPSFrameRate();
+    checkAutoIdle();
+    autoRaceModeCheck();
 
-  // Auto-select Race mode if RPM detected on main menu
-  if (currentPage == PAGE_MAIN_MENU && tachLastReported > 500) {
-    debugln(F("RPM detected on main menu - auto-selecting Race"));
-    switchToDisplayPage(PAGE_SELECT_LOCATION);
-  }
+    // Button hold detection for sleep/reboot combos
+    updateButtonHoldState();
+
+    // Long-press left+right (5s) on main menu -> sleep
+    if (currentPage == PAGE_MAIN_MENU &&
+        isButtonHeld(1, SLEEP_LONG_PRESS_MS) &&
+        isButtonHeld(3, SLEEP_LONG_PRESS_MS)) {
+      enterSleepMode();
+      return;
+    }
+
+    // Reboot combo: select + either side button held 5s (any page)
+    if (isButtonHeld(2, SLEEP_LONG_PRESS_MS) &&
+        (isButtonHeld(1, SLEEP_LONG_PRESS_MS) || isButtonHeld(3, SLEEP_LONG_PRESS_MS))) {
+      NVIC_SystemReset();
+    }
+
+    // USB connected on main menu -> auto-sleep for efficient charging
+    if (currentPage == PAGE_MAIN_MENU && isUsbConnected()) {
+      enterSleepMode();
+      return;
+    }
+
+    // 5-minute menu idle -> auto-sleep
+    if (currentPage == PAGE_MAIN_MENU) {
+      if (!menuIdleTimerRunning) {
+        menuIdleTimerRunning = true;
+        menuIdleStartTime = millis();
+      } else if (millis() - menuIdleStartTime >= SLEEP_IDLE_TIMEOUT_MS) {
+        enterSleepMode();
+        return;
+      }
+      if (btn1->pressed || btn2->pressed || btn3->pressed) {
+        menuIdleStartTime = millis();  // Reset on any button
+      }
+    } else {
+      menuIdleTimerRunning = false;
+    }
+  #else
+    #ifndef ENDURANCE_MODE
+      checkForNewLapData();
+    #endif
+    // Auto-select Race mode if RPM detected on main menu
+    if (currentPage == PAGE_MAIN_MENU && tachLastReported > 500) {
+      debugln(F("RPM detected on main menu - auto-selecting Race"));
+      switchToDisplayPage(PAGE_SELECT_LOCATION);
+    }
+  #endif
+
+  calculateGPSFrameRate();
 
   readButtons();
   displayLoop();

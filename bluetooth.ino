@@ -13,8 +13,12 @@ static volatile bool trackUploadReady = false;      // signals main loop to send
 static volatile bool trackUploadComplete = false;    // signals main loop to write file
 static volatile bool trackUploadError = false;
 static char trackUploadFilename[25];                 // just the filename (e.g. "OKC.json")
-static char trackUploadBuffer[2048];
+static char trackUploadBuffer[4096];
 static volatile uint16_t trackUploadOffset = 0;
+
+// Track delete state (BLE callback -> main loop)
+static volatile bool trackDeletePending = false;
+static char trackDeleteFilename[25];
 
 void bleConnectCallback(uint16_t conn_handle) {
   debugln(F("BLE: Device connected!"));
@@ -32,6 +36,11 @@ void bleConnectCallback(uint16_t conn_handle) {
   } else {
     debugln(F("BLE: MTU exchange request failed!"));
   }
+
+  // Request 2M PHY for double raw throughput (BLE 5.0, both sides must support)
+  connection->requestPHY(BLE_GAP_PHY_2MBPS);
+  // Request Data Length Extension (max PDU size, reduces L2CAP overhead)
+  connection->requestDataLengthUpdate();
 
   // Defer MTU read to main loop instead of blocking here with delay(500)
   bleWaitingForMTU = true;
@@ -52,11 +61,25 @@ void bleDisconnectCallback(uint16_t conn_handle, uint8_t reason) {
     releaseSDAccess(SD_ACCESS_BLE_TRANSFER);  // Release SD access on disconnect
   }
   bleTransferInProgress = false;
-  // Reset track upload state on disconnect
+  // Reset track upload/delete state on disconnect
   trackUploadActive = false;
   trackUploadReady = false;
   trackUploadComplete = false;
   trackUploadError = false;
+  trackDeletePending = false;
+
+  // Auto-reboot after BLE disconnect to apply any changed settings —
+  // but only if the phone disconnected (not us calling BLE_STOP()).
+  // BLE_STOP() sets bleActive=false before triggering async disconnect.
+  if (!bleActive) {
+    debugln(F("BLE: Local disconnect (BLE_STOP), skipping reboot"));
+  } else if (enableLogging) {
+    debugln(F("BLE: Skipping reboot (logging active)"));
+  } else {
+    debugln(F("BLE: Rebooting to apply settings..."));
+    delay(100);  // Brief delay for debug output to flush
+    NVIC_SystemReset();
+  }
 }
 
 // Forward declaration for callback
@@ -303,7 +326,8 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
     bleDeleteFile(filename);
   } else if (strcmp(buffer, "SLIST") == 0 ||
              strncmp(buffer, "SGET:", 5) == 0 ||
-             strncmp(buffer, "SSET:", 5) == 0) {
+             strncmp(buffer, "SSET:", 5) == 0 ||
+             strcmp(buffer, "SRESET") == 0) {
     // Settings commands — defer to main loop for thread-safe SD access
     if (settingsCmdPending) {
       fileStatusChar.notify((uint8_t*)"SBUSY", 5);
@@ -333,6 +357,23 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
     trackUploadReady = true;
     trackUploadActive = true;
     debugln(F("BLE: Track upload started"));
+  } else if (strncmp(buffer, "TDEL:", 5) == 0) {
+    if (trackDeletePending) {
+      fileStatusChar.notify((uint8_t*)"TERR:BUSY", 9);
+      return;
+    }
+    strncpy(trackDeleteFilename, buffer + 5, sizeof(trackDeleteFilename) - 1);
+    trackDeleteFilename[sizeof(trackDeleteFilename) - 1] = '\0';
+    trackDeletePending = true;
+
+  // Battery query — no SD access needed, uses cached voltage
+  } else if (strcmp(buffer, "BATT") == 0) {
+    int pct = getBatteryPercent(lastBatteryVoltage);
+    char vbuf[8];
+    dtostrf(lastBatteryVoltage, 4, 2, vbuf);
+    char response[24];
+    snprintf(response, sizeof(response), "BATT:%d,%s", pct, vbuf);
+    fileStatusChar.notify((uint8_t*)response, strlen(response));
   }
 }
 
@@ -349,14 +390,21 @@ void BLE_SETUP() {
 
   debugln(F("BLE: Initializing Bluetooth..."));
 
-  Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
+  // Custom BLE config for max file transfer throughput:
+  // MTU 247, event_len 100 (125ms max radio time per event),
+  // HVN TX queue 10 (up from BANDWIDTH_MAX's 3 — deeper notification pipeline),
+  // WrCmd queue 1 (default, we don't use write commands).
+  Bluefruit.configPrphConn(247, 100, 10, 1);
   Bluefruit.begin();
   Bluefruit.setTxPower(4);
   char bleName[32];
   if (getSetting("bluetooth_name", bleName, sizeof(bleName))) {
+    debug(F("BLE: Name from settings: "));
+    debugln(bleName);
     Bluefruit.setName(bleName);
   } else {
-    Bluefruit.setName("DovesLapTimer");
+    debugln(F("BLE: WARNING - bluetooth_name not found, using fallback"));
+    Bluefruit.setName("DovesDataLogger");
   }
 
   // Enable connection LED
@@ -383,6 +431,10 @@ void BLE_STOP() {
 
   debugln(F("BLE: Stopping Bluetooth..."));
 
+  // Mark inactive BEFORE disconnect so the async bleDisconnectCallback
+  // knows this was a local stop (not a phone disconnect) and skips reboot.
+  bleActive = false;
+
   // Close any open file and release SD access
   if (bleCurrentFile) {
     bleCurrentFile.close();
@@ -405,7 +457,7 @@ void BLE_STOP() {
   digitalWrite(LED_BLUE, HIGH);
 
   bleConnected = false;
-  bleActive = false;
+  // bleActive already set false at top of BLE_STOP()
 
   debugln(F("BLE: Bluetooth stopped"));
 }
@@ -519,6 +571,16 @@ void processSettingsCommand() {
       debugln(F("BLE: SSET - write failed"));
       fileStatusChar.notify((uint8_t*)"SERR:WRITE_FAIL", 15);
     }
+  } else if (strcmp(settingsCmdBuffer, "SRESET") == 0) {
+    debugln(F("BLE: SRESET - resetting all settings to defaults"));
+    if (resetSettings()) {
+      fileStatusChar.notify((uint8_t*)"SOK:RESET", 9);
+      debugln(F("BLE: Settings reset, rebooting in 200ms..."));
+      delay(200);  // Let the notification reach the phone
+      NVIC_SystemReset();
+    } else {
+      fileStatusChar.notify((uint8_t*)"SERR:RESET_FAIL", 15);
+    }
   } else {
     debug(F("BLE: Unknown settings cmd: ["));
     debug(settingsCmdBuffer);
@@ -586,6 +648,43 @@ void processTrackUpload() {
   trackUploadError = false;
 }
 
+void processTrackDelete() {
+  debug(F("BLE: Deleting track file: ["));
+  debug(trackDeleteFilename);
+  debugln(F("]"));
+
+  if (!acquireSDAccess(SD_ACCESS_BLE_TRANSFER)) {
+    debugln(F("BLE: SD busy, cannot delete track"));
+    fileStatusChar.notify((uint8_t*)"TERR:SD_BUSY", 12);
+    trackDeletePending = false;
+    return;
+  }
+
+  char filepath[FILEPATH_MAX];
+  snprintf(filepath, sizeof(filepath), "/TRACKS/%s", trackDeleteFilename);
+
+  if (!SD.exists(filepath)) {
+    debugln(F("BLE: Track file not found"));
+    releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
+    fileStatusChar.notify((uint8_t*)"TERR:NO_FILE", 12);
+    trackDeletePending = false;
+    return;
+  }
+
+  if (SD.remove(filepath)) {
+    debugln(F("BLE: Track file deleted successfully"));
+    releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
+    fileStatusChar.notify((uint8_t*)"TOK", 3);
+    buildTrackList();
+  } else {
+    debugln(F("BLE: Failed to delete track file"));
+    releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
+    fileStatusChar.notify((uint8_t*)"TERR:WRITE_FAIL", 15);
+  }
+
+  trackDeletePending = false;
+}
+
 void BLUETOOTH_LOOP() {
   if (!bleActive) return;
 
@@ -605,6 +704,10 @@ void BLUETOOTH_LOOP() {
     processTrackUpload();
   }
 
+  if (trackDeletePending) {
+    processTrackDelete();
+  }
+
   // Deferred MTU negotiation - read result 500ms after request
   if (bleWaitingForMTU && millis() - bleMTURequestTime >= 500) {
     bleWaitingForMTU = false;
@@ -619,36 +722,31 @@ void BLUETOOTH_LOOP() {
   if (bleTransferInProgress && bleCurrentFile && Bluefruit.connected()) {
     // Use actual negotiated MTU
     uint16_t maxChunk = bleNegotiatedMtu - 3;
-
     uint8_t buffer[524];
-
     size_t chunkSize = min(maxChunk, (uint16_t)244);
-    size_t bytesRead = bleCurrentFile.read(buffer, chunkSize);
 
-    if (bytesRead > 0) {
-      if (fileDataChar.notify(buffer, bytesRead)) {
-        bleBytesTransferred += bytesRead;
+    // Burst send: read + notify multiple chunks per loop iteration.
+    // notify() blocks via semaphore when the SoftDevice TX queue is full,
+    // providing natural flow control. This keeps the pipeline fed instead
+    // of sending 1 lonely chunk then wasting time on button checks.
+    for (int burst = 0; burst < 10 && bleTransferInProgress; burst++) {
+      size_t bytesRead = bleCurrentFile.read(buffer, chunkSize);
 
-        // Progress update every 10KB
-        if (bleBytesTransferred % 10000 == 0) {
-          debug(F("BLE: Progress: "));
-          debug(bleBytesTransferred);
-          debug(F(" / "));
-          debug(bleFileSize);
-          debug(F(" ("));
-          debug((bleBytesTransferred * 100) / bleFileSize);
-          debugln(F("%)"));
+      if (bytesRead > 0) {
+        if (!fileDataChar.notify(buffer, bytesRead)) {
+          break;  // Disconnected or error
         }
+        bleBytesTransferred += bytesRead;
+      } else {
+        // Transfer complete
+        bleCurrentFile.close();
+        bleTransferInProgress = false;
+        releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
+
+        debugln(F("BLE: Transfer complete!"));
+        fileStatusChar.notify((uint8_t*)"DONE", 4);
+        break;
       }
-    } else {
-      // Transfer complete
-      bleCurrentFile.close();
-      bleTransferInProgress = false;
-      releaseSDAccess(SD_ACCESS_BLE_TRANSFER);  // Release SD access when transfer completes
-
-      debugln(F("BLE: Transfer complete!"));
-
-      fileStatusChar.notify((uint8_t*)"DONE", 4);
     }
   }
 }
