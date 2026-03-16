@@ -42,7 +42,7 @@ inline void dummy_debug(...) {
 #define SLEEP_GPS_WAKE_INTERVAL   86400000 // 24 hours between GPS fix attempts
 #define SLEEP_GPS_FIX_TIMEOUT     120000   // 2 min max for GPS fix attempt
 #define SLEEP_RPM_WAKE_THRESHOLD  100      // RPM above this wakes from sleep
-#define SLEEP_CHARGING_CHECK_MS   5000     // Check charging status every 5s
+#define CHARGE_DISPLAY_TIMEOUT_MS 10000    // Show charging screen for 10s then display off
 
 ///////////////////////////////////////////
 // STRUCT DEFINITIONS

@@ -775,6 +775,11 @@ void displayLoop() {
       debugln(menuSelectionIndex);
       forceDisplayRefresh();
     }
+  } else if (currentPage == PAGE_INTERNAL_WARNING) {
+    // Warning page: any button returns to main menu
+    if (btn1->pressed || btn2->pressed || btn3->pressed) {
+      switchToDisplayPage(PAGE_MAIN_MENU);
+    }
   } else if (!buttonsDisabled){
     // page up/down/enter
     // BUTTON LEFT

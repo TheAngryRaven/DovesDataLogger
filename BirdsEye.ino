@@ -125,6 +125,8 @@ unsigned long sleepLastGpsWake = 0;
 unsigned long sleepGpsWakeStartedAt = 0;
 unsigned long menuIdleStartTime = 0;     // For 5-min auto-sleep
 bool menuIdleTimerRunning = false;
+bool chargingModeActive = false;           // USB connected during sleep
+unsigned long chargeDisplayOnAt = 0;       // 0 = display off, >0 = millis() when turned on
 
 // Button hold tracking (for long-press combos)
 unsigned long btn1HoldStart = 0;
@@ -1134,6 +1136,8 @@ void exitSleepMode(bool rpmWake = false) {
   sleepModeActive = false;
   sleepGpsWakeActive = false;
   menuIdleTimerRunning = false;
+  chargingModeActive = false;
+  chargeDisplayOnAt = 0;
 
   // 5. RPM wake → skip main menu, go straight to race mode
   if (rpmWake) {
@@ -1169,30 +1173,54 @@ void loop() {
     bool wakeButton = anyButtonPressed();
     bool wakeRpm = tachHavePeriod;  // ISR sets this directly on any valid pulse
 
-    if (wakeButton || wakeRpm) {
-      exitSleepMode(wakeRpm);
+    if (wakeRpm) {
+      exitSleepMode(true);
+      return;
+    }
+    if (wakeButton && !chargingModeActive) {
+      exitSleepMode(false);
       return;
     }
 
-    // Charging display: stay on while USB connected, sleep when unplugged
+    // ---- CHARGE MODE (USB connected during sleep) ----
     if (isUsbConnected()) {
-      DISPLAY_WAKE();
-      while (isUsbConnected()) {
-        displayPage_sleep_charging();
-        // WDT-safe delay with button check every second
-        for (int i = 0; i < 5; i++) {
-          delay(1000);
-          #ifndef WOKWI
-          wdtPet();
-          #endif
-          if (anyButtonPressed()) {
-            exitSleepMode();
-            return;
-          }
+      if (!chargingModeActive) {
+        // First detection of USB: show charging screen for 10s
+        chargingModeActive = true;
+        DISPLAY_WAKE();
+        chargeDisplayOnAt = millis();
+        if (chargeDisplayOnAt == 0) chargeDisplayOnAt = 1; // avoid 0 sentinel
+      }
+
+      // Button press: re-show display for another 10s
+      if (wakeButton && chargeDisplayOnAt == 0) {
+        DISPLAY_WAKE();
+        chargeDisplayOnAt = millis();
+        if (chargeDisplayOnAt == 0) chargeDisplayOnAt = 1;
+      }
+
+      // Display management
+      if (chargeDisplayOnAt != 0) {
+        if (millis() - chargeDisplayOnAt >= CHARGE_DISPLAY_TIMEOUT_MS) {
+          DISPLAY_SLEEP();
+          chargeDisplayOnAt = 0;
+        } else if (millis() - displayLastUpdate > (1000 / displayUpdateRateHz)) {
+          displayLastUpdate = millis();
+          displayPage_sleep_charging();
         }
       }
-      // USB unplugged — back to sleep
-      DISPLAY_SLEEP();
+
+      // Skip GPS periodic checks and WFE while charging — just loop
+      return;
+    }
+
+    // USB disconnected: clean up charge mode
+    if (chargingModeActive) {
+      chargingModeActive = false;
+      if (chargeDisplayOnAt != 0) {
+        DISPLAY_SLEEP();
+      }
+      chargeDisplayOnAt = 0;
     }
 
     // Periodic GPS fix (every SLEEP_GPS_WAKE_INTERVAL)
@@ -1296,6 +1324,12 @@ void loop() {
     if (isButtonHeld(2, SLEEP_LONG_PRESS_MS) &&
         (isButtonHeld(1, SLEEP_LONG_PRESS_MS) || isButtonHeld(3, SLEEP_LONG_PRESS_MS))) {
       NVIC_SystemReset();
+    }
+
+    // USB connected on main menu -> auto-sleep for efficient charging
+    if (currentPage == PAGE_MAIN_MENU && isUsbConnected()) {
+      enterSleepMode();
+      return;
     }
 
     // 5-minute menu idle -> auto-sleep
