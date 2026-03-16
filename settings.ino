@@ -12,7 +12,7 @@ static StaticJsonDocument<512> settingsJson;
  * @brief Generate default settings file on first boot
  * @return true if file created successfully
  */
-static bool createDefaultSettings() {
+bool createDefaultSettings() {
   if (!acquireSDAccess(SD_ACCESS_TRACK_PARSE)) {
     debugln(F("Settings: Cannot acquire SD access for defaults"));
     return false;
@@ -186,6 +186,27 @@ bool getSetting(const char* key, char* buf, size_t bufSize) {
  * @param value String value to store
  * @return true on success, false on failure
  */
+/**
+ * @brief Delete settings file and recreate with fresh defaults (new random BLE name/PIN).
+ * @return true on success
+ */
+bool resetSettings() {
+  if (!sdSetupSuccess) return false;
+
+  if (!acquireSDAccess(SD_ACCESS_TRACK_PARSE)) {
+    debugln(F("Settings: Cannot acquire SD for reset"));
+    return false;
+  }
+
+  if (SD.exists(SETTINGS_FILE_PATH)) {
+    SD.remove(SETTINGS_FILE_PATH);
+  }
+  releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+
+  debugln(F("Settings: Deleted, recreating defaults"));
+  return createDefaultSettings();
+}
+
 bool setSetting(const char* key, const char* value) {
   if (!sdSetupSuccess) return false;
 

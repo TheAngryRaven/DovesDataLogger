@@ -326,7 +326,8 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
     bleDeleteFile(filename);
   } else if (strcmp(buffer, "SLIST") == 0 ||
              strncmp(buffer, "SGET:", 5) == 0 ||
-             strncmp(buffer, "SSET:", 5) == 0) {
+             strncmp(buffer, "SSET:", 5) == 0 ||
+             strcmp(buffer, "SRESET") == 0) {
     // Settings commands — defer to main loop for thread-safe SD access
     if (settingsCmdPending) {
       fileStatusChar.notify((uint8_t*)"SBUSY", 5);
@@ -569,6 +570,16 @@ void processSettingsCommand() {
     } else {
       debugln(F("BLE: SSET - write failed"));
       fileStatusChar.notify((uint8_t*)"SERR:WRITE_FAIL", 15);
+    }
+  } else if (strcmp(settingsCmdBuffer, "SRESET") == 0) {
+    debugln(F("BLE: SRESET - resetting all settings to defaults"));
+    if (resetSettings()) {
+      fileStatusChar.notify((uint8_t*)"SOK:RESET", 9);
+      debugln(F("BLE: Settings reset, rebooting in 200ms..."));
+      delay(200);  // Let the notification reach the phone
+      NVIC_SystemReset();
+    } else {
+      fileStatusChar.notify((uint8_t*)"SERR:RESET_FAIL", 15);
     }
   } else {
     debug(F("BLE: Unknown settings cmd: ["));
