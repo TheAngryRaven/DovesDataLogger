@@ -18,10 +18,16 @@ This will be slowly updated with more information
  - 2mm heat inserts, 4mm long
  - metal rod or such for pins on battery and sd card doors
  - 1x 5/8ths carriage bolt
+ - bolt to kart with washers and such
  OR
  - 2x 1/4 carriage bolt
  - 1/16th thick rubber sheet 2in wide
  - 1/4in thich rubber 2in wide
+ - cut thin rubber strip same width as device
+ - cut thick spray a thumbs width longer
+ - >punch holes in straps to match the two outer bolt holes
+ - bolt one cariage bolt tight with nylon nut
+ - use chunky hand turn nut on other side to allow to quick release/attachment
 
 
 ### Build guide (very much todo)
@@ -33,8 +39,10 @@ This will be slowly updated with more information
 - glue mcu tower to baseplate with the SD door facing outwards
 - repeat process for power switch
 - SOLDER WIRES FOR SD CARD BEFORE GLUING BATTERY TRAY
+- add heat insert to battery box
 - screw on display
 - finish soldering everything else
+- be fuckin careful with the wiring 
 - [tachometer comming soon, need to hand solder SMD components]
 
 
