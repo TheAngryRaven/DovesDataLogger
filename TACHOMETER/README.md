@@ -12,14 +12,17 @@ Currently If you want a tachometer you will need to source and hand solder SMD c
 
 ##### SERIOUSLY
 
-If you decide to build EITHER circuit, if you do not connect an isolated dc-dc converter, you will suffer from serious issues as the powerline swings -10v+
+If you decide to build EITHER circuit, if you do not connect an isolated dc-dc converter, you will suffer from serious issues as the powerline swings -+10v+ from the magneto driven ignition
 
-
-This is the dc-dc converter i used, it can "convert" 3v to 3v
+This is the dc-dc converter I used, it can "convert" 3v to 3v. 
 
 
 Actual Part Number: MIE1W0505BGLVH
+
 Prototyping part: [https://www.pololu.com/product/5384](https://www.pololu.com/product/5384)
+
+And then a schmidt trigger+optocoupler to send the signal out.
+The Schmitt Trigger I used is a HEX inverter... you only need one... but the only ICS with one trigger, are super duper small. Both of these are standard cheap parts nothing fancy.
 
 ---
 
@@ -29,3 +32,11 @@ Example of the mess I am currently dealing with, I even had a board made for the
   <img src="proto.jpg" />
 </p>
 
+---
+<p align="center">
+  <img src="tach_test_1.jpg" />
+</p>
+---
+<p align="center">
+  <img src="tach_test_2.jpg" />
+</p>
