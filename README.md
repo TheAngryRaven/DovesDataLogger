@@ -2,6 +2,10 @@
 
 A high-precision GPS-based lap timer and data logger designed for motorsports and track day enthusiasts. Features 25Hz logging, sector timing, RPM monitoring via tachometer, and multiple customizable display pages.
 
+<p align="center">
+  <img src="realworld_1.jpg" />
+</p>
+
 ## Features
 
 ### Core Functionality
@@ -19,17 +23,18 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
 - **Sleep Mode** - Low-power sleep with display/GPS/IMU off (~2-4 mA), instant wake on button press or engine start
 - **DOVEX Format** - Crash-safe logging with reserved header for instant replay
 - **Simple CSV Format** - Legacy `.dove` data files with millisecond-precision timestamps
+- **Review Data** - Instant replay of DOVEX session headers (new UI), or streamed replay of legacy logs (slower)
 
 #### WebApp Features (no login)
 - **Bluetooth Downloads** - Can now download files directly to [HackTheTrack.net](http://HackTheTrack.net)
 - **Configure settings** - none of us want to fill in text with three buttons
 - **Track Sync** - Update on-device track library via the webapp
 
-#### To-Do Features
+#### To-Do
+- **Update GPS Tray** - Matek now wants $50 per module, when they are $15 from digikey, doesn't require any supporting circuitry
+- **External Sensors** - Add thermocouple sensor / m8 circle connector
+- **Tachometer** - **I** have a working tachometer... it's not easy to replicate, I need to fix that
 - **Pin Lock** - require pin to pull logs from device
-
-#### Experimental Features
-- **Review Data** - Instant replay of DOVEX session headers (new UI), or streamed replay of legacy logs (slower)
 
 ### Display Pages
 - GPS Statistics (battery, satellites, HDOP, logging status)
@@ -57,6 +62,7 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
 - **GPS**: u-blox SAM-M10Q (Matek SAM-M10Q recommended, found from most RC hobby shops)
   - Configured for 25Hz UBX binary (PVT) update rate
   - GPS-only constellation for maximum nav rate
+  - **TODO** Update GPS tray to use bare $15 GPS module, battery backup is optional
 - **Display**: 2.45" 128x64 OLED (SH110X or SSD1306 compatible)
   - I2C interface (address: 0x3C)
   - Software sleep/wake via I2C commands (~10uA when off)

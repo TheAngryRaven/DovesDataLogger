@@ -4,6 +4,12 @@ This will be slowly updated with more information
 <p align="center">
   <img src="preview.png" />
 </p>
+<p align="center">
+  <img src="realworld_1.jpg" />
+</p>
+<p align="center">
+  <img src="realworld_2.jpg" />
+</p>
 
 ## Materials List
  - bunch of wires
