@@ -12,13 +12,14 @@ Currently If you want a tachometer you will need to source and hand solder SMD c
 
 ##### SERIOUSLY
 
-If you decide to build EITHER circuit, if you do not connect an isolated dc-dc converter, you will suffer from serious issues as the powerline swings -10v+
+If you decide to build EITHER circuit, if you do not connect an isolated dc-dc converter, you will suffer from serious issues as the powerline swings -+10v+ from the magneto driven ignition
 
 
-This is the dc-dc converter i used, it can "convert" 3v to 3v
+This is the dc-dc converter i used, it can "convert" 3v to 3v, any normal optocoupler will do, nothing fancy.
 
 
 Actual Part Number: MIE1W0505BGLVH
+
 Prototyping part: [https://www.pololu.com/product/5384](https://www.pololu.com/product/5384)
 
 ---
