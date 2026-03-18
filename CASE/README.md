@@ -1,5 +1,8 @@
 # Datalogger case "build guide"
-This will be slowly updated with more information
+This is an advance level build, in a very tight case, that i designed on a computer screen where things look much bigger.
+I built this, you can too, stay strong.
+
+The build guide is still a to-do... but with a couple of pictures and a pin guide, I think yall got it.... maybe do a dry run on a bench to make sure its wired right :^)
 
 <p align="center">
   <img src="preview.png" />
@@ -13,9 +16,9 @@ This will be slowly updated with more information
 
 ## Materials List
  - bunch of wires
- - Seeed XIAO NRF52840
+ - Seeed XIAO NRF52840 (sense optional but cooler if you did)
  - sd card slot
- - MATEK SAM-m10Q GPS
+ - MATEK SAM-m10Q GPS, super easy to solder up and has a backup battery
  - 2.45" 128x64 OLED LCD (SH110X or SSD1306 compatible)
  - 1500mAh 103050 LiPo
  - 3X 7mm panel mount buttons
@@ -33,7 +36,7 @@ option one
 option two
  - 2x 1/4 carriage bolt
  - 1/16th thick rubber sheet 2in wide
- - 1/4in thich rubber 2in wide
+ - 1/4in thick rubber 2in wide
  - cut thin rubber strip same width as device
  - cut thick spray a thumbs width longer
  - >punch holes in straps to match the two outer bolt holes
@@ -48,13 +51,18 @@ option two
 - melt heat insert for sd card tray
 - line up front/back case with the baseplate between them, mark case holes on baseplate
 - glue mcu tower to baseplate with the SD door facing outwards
+  - the panel to cover the MCU is screwed on with 4 tiny jewelers screws, don't glue it on unless you hate yourself
 - repeat process for power switch
 - SOLDER WIRES FOR SD CARD BEFORE GLUING BATTERY TRAY
 - add heat insert to battery box
-- screw on display
+- setup and glue battery to baseplate
+  - battery tray might stick out a smidge, sorry
+- screw on/solder display
 - finish soldering everything else
 - be fuckin careful with the wiring 
-- [tachometer comming soon, need to hand solder SMD components]
+- [tachometer coming soon, need to hand solder SMD components]
+
+**Note:** Battery ground goes to battery ground on the XIAO, the battery positive goes to the switch, the switch then goes to the battery positive pad on the XIAO
 
 
 #### Tips
