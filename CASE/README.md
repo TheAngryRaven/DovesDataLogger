@@ -105,3 +105,21 @@ The Seeed XIAO nRF52840 (Sense) has limited pins — almost every one is used. R
 - Keep tach wire (D0) physically separated from button wires to reduce EMI coupling
 - Use shielded cable for tach if possible, ground shield at MCU end only
 - RC filters on buttons and tach are strongly recommended for track/racing environments — ignition noise will cause phantom inputs without them
+
+---
+
+## Worst Case Scenario
+
+If you don't have a printer. you can get the 1.25in screen and shove it in a tiny project box with whatever battery will fit, this is how i did the originally software proof of concept, and exactly why the display has two build options.
+
+
+
+I placed a magnet in the back to attach to the rental kart steering wheels, and used a drone battery strap wrapped around it to make sure it stayed.
+
+
+
+It should be more than obvious you cant fit a tachometer in here but you will have every other feature, anything is possible.
+
+<p align="center">
+  <img src="projectbox.jpg" />
+</p>
