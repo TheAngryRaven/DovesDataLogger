@@ -141,9 +141,19 @@ loop()  ~250 Hz
 
 - ISR `TACH_COUNT_PULSE()` fires on falling edge of D0.
 - 3 ms minimum pulse gap (supports up to ~20 000 RPM).
-- Uses volatile flag gating instead of `noInterrupts()` to avoid deadlock.
-- `TACH_LOOP()` applies EMA filter (alpha 0.20) and updates at 3 Hz.
-- 500 ms timeout sets RPM to 0 (engine stopped).
+- **Ring buffer architecture**: ISR timestamps every valid pulse into a
+  16-entry ring buffer (`tachRingBuf`). `TACH_LOOP()` drains the buffer
+  each main-loop iteration, computes mean inter-pulse period from ALL
+  accumulated pulses, and feeds the result through a 1D Kalman filter.
+- **Kalman filter** replaces the old median-of-3 + EMA. Two floats of
+  state (RPM estimate `kalmanX` + uncertainty `kalmanP`). Process noise
+  Q = 800 (tuned for kart engine inertia). Measurement noise R scales
+  inversely with pulse count (more pulses = more confident).
+- Time-based debounce only (3 ms). Old volatile flag gate removed — ISR
+  body is trivially fast (<1 µs) and cannot cause interrupt storms.
+- `tachLastReported` updates every main-loop call (~250 Hz). Consumers
+  (display at 3 Hz, logging at 25 Hz) rate-limit themselves.
+- 500 ms timeout sets RPM to 0 (engine stopped), resets Kalman state.
 
 ### 3. Accelerometer (`accelerometer.ino`)
 
@@ -410,9 +420,11 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | DOVEX header size | 1 024 bytes | `project.h` |
 | Auto-idle timeout | 60 s at <2 mph | `BirdsEye.ino` |
 | Track detect radius | 5 miles | `BirdsEye.ino` |
-| Tach min pulse gap | 3 ms | `tachometer.ino` |
-| Tach EMA alpha | 0.20 | `tachometer.ino` |
-| Tach stop timeout | 500 ms | `tachometer.ino` |
+| Tach min pulse gap | 3 ms | `BirdsEye.ino` |
+| Tach ring buffer | 16 entries | `BirdsEye.ino` |
+| Tach Kalman Q | 800 RPM² | `tachometer.ino` |
+| Tach Kalman R_BASE | 2500 RPM² | `tachometer.ino` |
+| Tach stop timeout | 500 ms | `BirdsEye.ino` |
 | Display refresh | 3 Hz | `display_ui.ino` |
 | Button debounce | 200 ms | `display_ui.ino` |
 | SD SPI clock | 2 MHz | `BirdsEye.ino` |
@@ -452,7 +464,8 @@ This device operates in ignition-noise environments. Three layers of defense:
 2. **ISR design**: Volatile flag gating (never `noInterrupts()` in ISR);
    3 ms minimum pulse gap in tachometer.
 3. **Software**: Multi-sample button reads (3x at 500 us), 200 ms refire
-   lockout, EMA filtering on RPM, 2 MHz SPI clock for SD stability.
+   lockout, Kalman-filtered RPM (absorbs ISR jitter), 2 MHz SPI clock for
+   SD stability.
 4. **GPS serial buffer**: TIMER3 ISR drains Serial1 into a 4 KB RAM ring
    buffer every 10 ms, preventing GPS data loss during SD card GC pauses
    that can block writes for 100 ms–2 s.

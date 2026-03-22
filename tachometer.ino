@@ -1,129 +1,164 @@
 ///////////////////////////////////////////
 // TACHOMETER MODULE
-// ISR and main loop processing for tachometer input
+// Ring buffer ISR + Kalman-filtered RPM from mean inter-pulse period
+//
+// Architecture: The ISR timestamps every valid falling edge into a 16-entry
+// ring buffer. TACH_LOOP() drains the buffer, computes mean inter-pulse
+// period from all accumulated pulses, and feeds the result through a 1D
+// Kalman filter. This gives microsecond-resolution RPM from ALL pulses
+// between reads, not just the most recent pair.
+//
+// At 5000 RPM (12ms period), 1us timestamp resolution gives ~0.008% RPM
+// error. Mean of ~3 periods per 25Hz window further reduces noise. The
+// Kalman filter smooths mechanical variation while tracking real RPM changes
+// bounded by crankshaft inertia.
 ///////////////////////////////////////////
 
-// After engine-stopped timeout, the first pulse period is garbage (it's the
-// time since the last pulse before stopping, not a real RPM measurement).
-// This flag tells TACH_LOOP to discard that first period.
+// ---- Kalman filter state ----
+static float kalmanX = 0.0f;       // RPM estimate
+static float kalmanP = 10000.0f;   // Estimate uncertainty (RPM^2)
+
+// Process noise Q: how much RPM^2 can change between Kalman updates.
+// A kart engine with light flywheel can shift ~200 RPM per pulse at 5k RPM.
+// Q=800 is conservative-smooth. Increase to 1500-2000 if tracking feels sluggish.
+static const float KALMAN_Q = 800.0f;
+
+// Measurement noise R_BASE: uncertainty of a single-period RPM measurement.
+// ~50 RPM std dev from combustion variation + ISR latency jitter = variance 2500.
+// Scales inversely with number of periods: more pulses → lower noise.
+static const float KALMAN_R_BASE = 2500.0f;
+
+// After engine-stopped timeout, the first period is garbage (it spans the
+// entire stopped duration). This flag discards it.
 static volatile bool tachNeedFirstPulseDiscard = true;
 
-// Median-of-3 filter: rejects single-pulse noise spikes from ignition
-// ringing that slip past the debounce window. Two out of three readings
-// must agree for a value to pass through to the EMA.
-static uint32_t tachPeriodBuf[3];
-static uint8_t tachPeriodIdx = 0;
-static uint8_t tachPeriodCount = 0;
+// Previous timestamp carried across TACH_LOOP calls for period calculation.
+// When timestamp T_n is read in one call and T_{n+1} in the next, we need
+// T_n to compute the period.
+static uint32_t tachPrevTimestamp = 0;
+static bool tachHavePrevTimestamp = false;
 
 /**
- * Tachometer ISR - called on falling edge of tach signal
+ * Tachometer ISR - called on falling edge of tach signal (D0)
  *
- * CRITICAL: This ISR must be fast and must NOT call noInterrupts().
- * Calling noInterrupts() here would disable ALL system interrupts,
- * and if the main loop is delayed (e.g., SD write), interrupts would
- * stay disabled forever, freezing button input and causing system lockup.
- *
- * Instead, we use a volatile flag gate (tachInterruptShouldProcess) that
- * the main loop re-enables after the debounce period.
+ * Timestamps every valid pulse into a ring buffer. The 3ms time-based
+ * debounce is the sole protection against ignition ringing — the old
+ * volatile flag gate is removed because this ISR body is trivially fast
+ * (<1us, ~10 ARM instructions) and cannot cause interrupt-storm CPU issues.
  */
 void TACH_COUNT_PULSE() {
-  // Exit immediately if we're in the debounce window
-  if (!tachInterruptShouldProcess) return;
-
   uint32_t now = micros();
   uint32_t dt = now - tachLastPulseUs;
 
-  // Secondary debounce check (belt and suspenders with the flag)
+  // Time-based debounce: reject ignition ringing within 3ms of last valid pulse
   if (dt < tachMinPulseGapUs) return;
 
-  // Record this pulse
+  // Record timestamp
   tachLastPulseUs = now;
-  tachLastPeriodUs = dt;
-  tachHavePeriod = true;
+  tachRingBuf[tachRingHead] = now;
+  // ARM Cortex-M4: single-byte write is atomic. Data is visible before head
+  // advances because stores are observed in program order on same processor.
+  tachRingHead = (tachRingHead + 1) % TACH_RING_SIZE;
 
-  // Gate off further interrupts until main loop re-enables
-  // DO NOT call noInterrupts() here - that causes system-wide deadlock!
-  tachInterruptShouldProcess = false;
+  // Wake trigger for sleep mode (BirdsEye.ino reads this)
+  tachHavePeriod = true;
 }
 
 /**
  * Tachometer main loop processing
  *
- * Re-enables the ISR gate after debounce period, reads pulse data,
- * applies exponential moving average filter, and handles timeout.
+ * Drains the ring buffer, computes mean inter-pulse period from all
+ * accumulated timestamps, and updates the Kalman filter. Called every
+ * main loop iteration (~250Hz). No rate limiter — consumers (display
+ * at 3Hz, logging at 25Hz) rate-limit themselves.
  */
 void TACH_LOOP() {
-  // Re-enable interrupt processing after debounce window expires
-  if (!tachInterruptShouldProcess) {
-    uint32_t elapsed = micros() - tachLastPulseUs;
-    if (elapsed >= tachMinPulseGapUs) {
-      tachInterruptShouldProcess = true;
-      // Note: We don't call interrupts() here anymore - they were never disabled!
+  // ---- Step 1: Read new timestamps from ring buffer ----
+  uint8_t head = tachRingHead;  // Atomic byte read
+
+  uint8_t available;
+  if (head >= tachRingTail) {
+    available = head - tachRingTail;
+  } else {
+    available = TACH_RING_SIZE - tachRingTail + head;
+  }
+
+  if (available > 0) {
+    // Copy timestamps to local array
+    uint32_t ts[TACH_RING_SIZE];
+    for (uint8_t i = 0; i < available; i++) {
+      ts[i] = tachRingBuf[(tachRingTail + i) % TACH_RING_SIZE];
     }
-  }
+    tachRingTail = head;  // Consume all entries
 
-  // CRITICAL SECTION: Read-modify-clear of ISR shared data
-  // This DOES need noInterrupts() because:
-  // 1. Read tachHavePeriod
-  // 2. Read tachLastPeriodUs
-  // 3. Clear tachHavePeriod
-  // Without protection, ISR could fire between 2 and 3, writing a new
-  // period value that we'd then lose when we clear the flag.
-  uint32_t periodUs = 0;
-  bool havePeriod = false;
+    // ---- Step 2: Compute periods from consecutive timestamps ----
+    uint32_t periods[TACH_RING_SIZE];
+    uint8_t periodCount = 0;
 
-  noInterrupts();
-  havePeriod = tachHavePeriod;
-  if (havePeriod) {
-    periodUs = tachLastPeriodUs;
-    tachHavePeriod = false;
-  }
-  interrupts();
+    for (uint8_t i = 0; i < available; i++) {
+      if (tachHavePrevTimestamp) {
+        uint32_t dt = ts[i] - tachPrevTimestamp;  // unsigned handles micros() wrap
 
-  // Apply median-of-3 filter then EMA to smooth RPM
-  if (havePeriod && periodUs > 0) {
-    // Discard first period after engine-stopped state. That period is
-    // the gap since the last pulse before stopping — not a real RPM.
-    if (tachNeedFirstPulseDiscard) {
-      tachNeedFirstPulseDiscard = false;
-      // Still update tachLastPulseUs (already done in ISR) so the NEXT
-      // period is measured from this pulse. Just don't feed filters.
-    } else {
-      // Feed period into median-of-3 ring buffer
-      tachPeriodBuf[tachPeriodIdx] = periodUs;
-      tachPeriodIdx = (tachPeriodIdx + 1) % 3;
-      if (tachPeriodCount < 3) tachPeriodCount++;
-
-      // Need at least 3 samples for median
-      if (tachPeriodCount >= 3) {
-        // Median of 3 values (branchless-ish sort)
-        uint32_t a = tachPeriodBuf[0], b = tachPeriodBuf[1], c = tachPeriodBuf[2];
-        uint32_t median;
-        if (a <= b) {
-          median = (b <= c) ? b : ((a <= c) ? c : a);
-        } else {
-          median = (a <= c) ? a : ((b <= c) ? c : b);
+        // First-pulse discard: after engine stop, the period from the last
+        // pre-stop pulse to the first new pulse spans the entire stopped
+        // duration — not a real RPM measurement. Discard it.
+        if (tachNeedFirstPulseDiscard) {
+          tachNeedFirstPulseDiscard = false;
+          tachPrevTimestamp = ts[i];
+          continue;
         }
 
-        float rpmInst = (60.0e6f * tachRevsPerPulse) / (float)median;
-        tachRpmFiltered += tachFilterAlpha * (rpmInst - tachRpmFiltered);
+        // Sanity bounds: 3ms (20k RPM) to 2s (30 RPM)
+        if (dt >= tachMinPulseGapUs && dt <= 2000000) {
+          periods[periodCount++] = dt;
+        }
+      } else {
+        // First timestamp ever — no period to compute yet
+        tachHavePrevTimestamp = true;
+        if (tachNeedFirstPulseDiscard) {
+          tachNeedFirstPulseDiscard = false;
+        }
       }
+      tachPrevTimestamp = ts[i];
+    }
+
+    // ---- Step 3: Kalman filter update with all new periods ----
+    if (periodCount > 0) {
+      // Mean period
+      uint32_t periodSum = 0;
+      for (uint8_t i = 0; i < periodCount; i++) {
+        periodSum += periods[i];
+      }
+      float meanPeriodUs = (float)periodSum / (float)periodCount;
+      float rpmMeasured = (60.0e6f * tachRevsPerPulse) / meanPeriodUs;
+
+      // Predict step: constant-RPM model, uncertainty grows
+      kalmanP += KALMAN_Q;
+
+      // Measurement noise scales inversely with number of periods
+      float R = KALMAN_R_BASE / (float)periodCount;
+
+      // Update step
+      float K = kalmanP / (kalmanP + R);
+      kalmanX += K * (rpmMeasured - kalmanX);
+      kalmanP *= (1.0f - K);
+
+      // Uncertainty floor to prevent numerical collapse
+      if (kalmanP < 1.0f) kalmanP = 1.0f;
     }
   }
 
-  // Timeout: if no pulses for tachStopTimeoutUs, engine is stopped
-  // Note: 32-bit reads are atomic on ARM Cortex-M4, no noInterrupts() needed
+  // ---- Step 4: Engine-stopped timeout ----
+  // 32-bit reads are atomic on ARM Cortex-M4, no noInterrupts() needed
   uint32_t lastPulseUs = tachLastPulseUs;
-
   if ((uint32_t)(micros() - lastPulseUs) > tachStopTimeoutUs) {
-    tachRpmFiltered = 0.0f;
+    kalmanX = 0.0f;
+    kalmanP = 10000.0f;           // High uncertainty for next startup
     tachNeedFirstPulseDiscard = true;
-    tachPeriodCount = 0;  // Reset median buffer for next startup
+    tachHavePrevTimestamp = false;
+    tachRingTail = tachRingHead;  // Flush ring buffer
   }
 
-  // Update display/log value at configured rate
-  if (millis() - tachLastUpdate > (1000 / tachUpdateRateHz)) {
-    tachLastUpdate = millis();
-    tachLastReported = (int)(tachRpmFiltered + 0.5f);
-  }
+  // ---- Step 5: Update reported value ----
+  tachLastReported = (int)(kalmanX + 0.5f);
 }
