@@ -274,6 +274,7 @@ void handleMenuPageSelection() {
       newUiRaceActive = true;
       enableLogging = true;
       trackSelected = true;
+      raceSessionStartedAt = millis();
       // Create CourseManager if not already created by track detection
       createLapAnythingCourseManager();
       switchToDisplayPage(GPS_SPEED);

@@ -97,6 +97,7 @@ int detectedTrackIndex = -1;
 unsigned long idleStartTime = 0;
 bool idleTimerRunning = false;
 bool newUiRaceActive = false;
+unsigned long raceSessionStartedAt = 0;  // For auto-idle grace period after RPM wake
 
 // Runtime settings (loaded from SD in setup)
 float settingLapDetectionDistance = 7.0;
@@ -215,8 +216,7 @@ uint16_t bleMTUConnHandle = 0;        // Connection handle for deferred MTU read
 ///////////////////////////////////////////
 
 const int tachInputPin = D0;
-unsigned long tachLastUpdate = 0;
-volatile int tachLastReported = 0;  // Volatile for ISR/main-loop sharing
+volatile int tachLastReported = 0;  // Volatile: written by TACH_LOOP, read by display/logging/sleep
 int topTachReported = 0;
 
 // Debounce timing: ignore pulses faster than this (filters ignition ringing)
@@ -224,24 +224,20 @@ int topTachReported = 0;
 static const uint32_t tachMinPulseGapUs = 3000;
 volatile uint32_t tachLastPulseUs = 0;
 
-// Pulse period capture for RPM calculation (written by ISR, read by loop)
-volatile uint32_t tachLastPeriodUs = 0;
+// Sleep wake detection: set true by ISR on any valid pulse
 volatile bool tachHavePeriod = false;
 
-// Software gate to prevent interrupt storm from noisy inductive pickup.
-// After accepting a pulse, we ignore subsequent ISR calls for tachMinPulseGapUs.
-// This is PURELY a volatile flag - we do NOT use noInterrupts() in the ISR
-// because that would disable ALL system interrupts and cause deadlocks.
-volatile bool tachInterruptShouldProcess = true;
+// Ring buffer: ISR writes pulse timestamps, TACH_LOOP reads and computes periods.
+// Single-producer (ISR writes head), single-consumer (TACH_LOOP reads tail).
+// 16 entries handles up to 20k RPM with 48ms of main-loop stall margin.
+static const uint8_t TACH_RING_SIZE = 16;
+volatile uint32_t tachRingBuf[TACH_RING_SIZE];
+volatile uint8_t  tachRingHead = 0;  // ISR write index (only ISR writes)
+static uint8_t    tachRingTail = 0;  // Main-loop read index (only TACH_LOOP writes)
 
-// Filtered RPM state (updated in main loop, not ISR)
-float tachRpmFiltered = 0.0f;
-
-// Tunable settings
-const int tachUpdateRateHz = 3;
-static const float tachRevsPerPulse = 1.0f;     // Magneto 4T single: wasted spark = 1 pulse/rev
-static const float tachFilterAlpha = 0.20f;     // EMA filter: 0=smooth, 1=instant
-static const uint32_t tachStopTimeoutUs = 500000; // 500ms with no pulse = engine stopped
+// Tunable constants
+static const float tachRevsPerPulse = 1.0f;          // Wasted spark = 1 pulse/rev
+static const uint32_t tachStopTimeoutUs = 500000;    // 500ms = engine stopped
 
 ///////////////////////////////////////////
 // ACCELEROMETER GLOBALS
@@ -898,7 +894,11 @@ void trackDetectionLoop() {
           activeTrackConfig.courseCount = 0;
         }
 
-        // Create CourseManager
+        // Create CourseManager (delete existing Lap Anything one if RPM-wake created it)
+        if (courseManager != nullptr) {
+          delete courseManager;
+          courseManager = nullptr;
+        }
         courseManager = new CourseManager(activeTrackConfig, crossingThresholdMeters);
         courseManager->setSpeedThresholdMph(settingWaypointSpeed);
         courseManager->setWaypointProximityMeters(settingWaypointDetectionDistance);
@@ -979,6 +979,12 @@ void createLapAnythingCourseManager() {
 void checkAutoIdle() {
   if (!newUiRaceActive) return;
 
+  // Grace period: don't auto-idle within first 3 minutes of a session.
+  // After RPM wake the car is often stationary (warming up, waiting for
+  // track session) and GPS needs time to reacquire. Without this, the
+  // 60s idle timer kills the session before the driver even moves.
+  if (millis() - raceSessionStartedAt < 180000UL) return;
+
   if (gps_speed_mph >= 2.0) {
     idleTimerRunning = false;
     idleStartTime = 0;
@@ -1013,6 +1019,7 @@ void autoRaceModeCheck() {
     newUiRaceActive = true;
     enableLogging = true;
     trackSelected = true;  // Allow GPS_LOOP to feed timer + log
+    raceSessionStartedAt = millis();
 
     // Create a minimal CourseManager if none exists yet (no track detected)
     createLapAnythingCourseManager();
@@ -1152,6 +1159,7 @@ void exitSleepMode(bool rpmWake = false) {
     newUiRaceActive = true;
     enableLogging = true;
     trackSelected = true;
+    raceSessionStartedAt = millis();
     createLapAnythingCourseManager();
     switchToDisplayPage(TACHOMETER);
   } else {
