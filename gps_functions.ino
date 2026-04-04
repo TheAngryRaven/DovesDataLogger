@@ -565,6 +565,7 @@ void GPS_WAKE() {
   // Reset buffer pointers (stale data from before sleep is useless)
   gpsRxHead = 0;
   gpsRxTail = 0;
+
   startGpsSerialTimer();  // Resume serial drain ISR
   myGNSS.checkUblox();
 }
