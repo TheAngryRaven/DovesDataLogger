@@ -1012,7 +1012,7 @@ void autoRaceModeCheck() {
   if (currentPage == PAGE_BLUETOOTH || bleConnected) return;
 
   bool rpmTriggered = tachLastReported > 500;
-  bool speedTriggered = gps_speed_mph >= 10.0;
+  bool speedTriggered = gps_speed_mph >= 10.0 && gpsData.HDOP > 0.0 && gpsData.HDOP < 3.0;
 
   if (rpmTriggered || speedTriggered) {
     debugln(F("Auto-entering race mode"));
