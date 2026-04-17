@@ -318,6 +318,30 @@ void GPS_LOOP() {
   myGNSS.checkUblox();
   myGNSS.checkCallbacks();
 
+  #ifdef ENABLE_NEW_UI
+  // PVT arrival watchdog: after GPS_WAKE(), if no PVT data arrives within
+  // 5 seconds, the module likely lost its config during backup (V_BCKP
+  // dropped → reverted to 9600 baud NMEA). Attempt baud recovery.
+  if (!gpsWakeValidated) {
+    if (gpsDataFresh) {
+      // PVT arrived — module is alive and configured correctly
+      gpsWakeValidated = true;
+      debugln(F("GPS wake validated: PVT received"));
+    } else if (millis() - gpsWakeTime >= 5000) {
+      debugln(F("GPS wake FAILED: no PVT after 5s, attempting recovery"));
+      if (GPS_BAUD_RECOVERY()) {
+        // Recovery succeeded — restart the watchdog for validation
+        gpsWakeTime = millis();
+        debugln(F("GPS recovery succeeded, waiting for PVT..."));
+      } else {
+        // Recovery failed — give up, mark validated to stop retrying
+        gpsWakeValidated = true;
+        debugln(F("GPS recovery FAILED — GPS unavailable this session"));
+      }
+    }
+  }
+  #endif
+
   if (gpsDataFresh) {
     gpsDataFresh = false;
 
@@ -557,17 +581,126 @@ void GPS_SLEEP() {
   myGNSS.powerOff(0);   // 0 = indefinite sleep until woken
 }
 
+/**
+ * @brief Re-apply all GPS module configuration via VALSET.
+ *
+ * The SAM-M10Q has no flash — all config lives in volatile RAM. If V_BCKP
+ * drops during backup mode (battery sag, loose connector, cranking brownout),
+ * the module reverts to factory defaults (9600 baud, NMEA, 1Hz). This
+ * function re-applies the full configuration. It's fast (~50ms total) and
+ * idempotent — safe to call even if config was retained.
+ */
+void GPS_RECONFIGURE() {
+  myGNSS.setUART1Output(COM_TYPE_UBX);
+  myGNSS.setNavigationFrequency(GPS_NAV_RATE_HZ);
+  myGNSS.setDynamicModel(DYN_MODEL_AUTOMOTIVE);
+  myGNSS.enableGNSS(true, SFE_UBLOX_GNSS_ID_GPS);
+  myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_SBAS);
+  myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_GALILEO);
+  myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_BEIDOU);
+  myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_GLONASS);
+  debugln(F("GPS config re-applied (VALSET)"));
+}
+
+/**
+ * @brief Attempt to recover GPS communication when module has reverted to 9600 baud.
+ *
+ * If V_BCKP was lost during backup, the module reverts to 9600 baud.
+ * Our UART is at 57600 so communication is broken. This function:
+ * 1. Stops the serial timer (switch to direct Serial1 mode)
+ * 2. Tries to talk at 57600 first (maybe module is fine)
+ * 3. If that fails, switches to 9600, sends baud change command, switches back
+ * 4. Re-applies full config and restarts the serial timer
+ *
+ * @return true if communication was recovered, false if unrecoverable
+ */
+bool GPS_BAUD_RECOVERY() {
+  debugln(F("GPS baud recovery: attempting..."));
+
+  // Stop timer so GpsBufferedStream passes through to Serial1 directly.
+  // The SparkFun library needs direct serial access for begin()/setSerialRate().
+  stopGpsSerialTimer();
+
+  // First: try at current baud — module might be fine, just slow to start
+  if (myGNSS.begin(gpsStream)) {
+    debugln(F("GPS baud recovery: module responding at 57600"));
+    GPS_RECONFIGURE();
+    myGNSS.setAutoPVTcallbackPtr(&onPVTReceived);  // begin() resets library state
+    gpsRxHead = 0;
+    gpsRxTail = 0;
+    startGpsSerialTimer();
+    return true;
+  }
+
+  // Module not responding at 57600 — try 9600 (factory default)
+  debugln(F("GPS baud recovery: trying 9600..."));
+  GPS_SERIAL.end();
+  delay(50);
+  GPS_SERIAL.begin(9600);
+  delay(100);
+
+  if (myGNSS.begin(gpsStream)) {
+    // Found at 9600 — switch it back to 57600
+    debugln(F("GPS baud recovery: found at 9600, switching to 57600"));
+    myGNSS.setSerialRate(GPS_BAUD_RATE);
+    delay(100);
+    GPS_SERIAL.end();
+    delay(50);
+    GPS_SERIAL.begin(GPS_BAUD_RATE);
+    delay(100);
+
+    if (myGNSS.begin(gpsStream)) {
+      debugln(F("GPS baud recovery: reconnected at 57600"));
+      GPS_RECONFIGURE();
+      myGNSS.setAutoPVTcallbackPtr(&onPVTReceived);
+      gpsRxHead = 0;
+      gpsRxTail = 0;
+      startGpsSerialTimer();
+      return true;
+    }
+    debugln(F("GPS baud recovery: lost after baud switch!"));
+  } else {
+    debugln(F("GPS baud recovery: not found at 9600 either"));
+  }
+
+  // Restore 57600 even on failure so other code doesn't break
+  GPS_SERIAL.end();
+  delay(50);
+  GPS_SERIAL.begin(GPS_BAUD_RATE);
+  delay(50);
+  gpsRxHead = 0;
+  gpsRxTail = 0;
+  startGpsSerialTimer();
+  return false;
+}
+
 void GPS_WAKE() {
   if (!gpsInitialized) return;
+
+  // Clear stale state from before sleep / periodic checks
+  gpsDataFresh = false;
+  gpsData.fix = false;
+
   // Any UART activity on RX wakes u-blox from powerOff backup mode
   GPS_SERIAL.write(0xFF);
   delay(100);
+
   // Reset buffer pointers (stale data from before sleep is useless)
   gpsRxHead = 0;
   gpsRxTail = 0;
 
   startGpsSerialTimer();  // Resume serial drain ISR
+
+  // Re-apply configuration in case module lost RAM during backup.
+  // This is idempotent — if config was retained, these are no-ops.
+  GPS_RECONFIGURE();
+
   myGNSS.checkUblox();
+
+  // Start PVT arrival watchdog. GPS_LOOP() will validate within 5 seconds,
+  // and trigger baud recovery if no PVT data arrives.
+  gpsWakeTime = millis();
+  gpsWakeValidated = false;
 }
 
 void GPS_SLEEP_PERIODIC_CHECK() {

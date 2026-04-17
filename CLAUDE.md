@@ -136,6 +136,10 @@ loop()  ~250 Hz
   - **Legacy CSV** (`.dove`): flat CSV with track/layout/direction in filename.
 - Time helpers: `getGpsTimeInMilliseconds()`, `getGpsUnixTimestampMillis()`.
 - 64-bit timestamps are manually converted to strings (Arduino lacks `%llu`).
+- **Sleep wake hardening**: `GPS_WAKE()` clears stale `gpsDataFresh`/`gpsData.fix`,
+  re-applies VALSET config via `GPS_RECONFIGURE()`, and arms a 5 s PVT watchdog.
+  If no PVT arrives, `GPS_BAUD_RECOVERY()` re-negotiates baud (9600→57600) and
+  reconfigures. The SAM-M10Q has no flash; all config is volatile RAM only.
 
 ### 2. Tachometer (`tachometer.ino`)
 
@@ -289,9 +293,16 @@ loop()  ~250 Hz
   - **RPM wake**: tach ISR fires → `exitSleepMode(true)` → straight into
     race mode with logging enabled, Lap Anything CourseManager created.
   - **Button wake**: any button → `exitSleepMode(false)` → main menu.
-- **`exitSleepMode()`**: re-enables IMU, GPS wake (0xFF + 100 ms), display
-  on, GPS serial timer restarted. RPM wake skips menu and goes directly
-  to race mode.
+- **`exitSleepMode()`**: re-enables IMU, GPS wake, display on, GPS serial
+  timer restarted. RPM wake skips menu and goes directly to race mode.
+- **GPS wake hardening** (`GPS_WAKE()`): clears stale `gpsDataFresh` and
+  `gpsData.fix`, wakes module (0xFF + 100 ms), re-applies full VALSET
+  config via `GPS_RECONFIGURE()` (idempotent), starts PVT watchdog.
+  The SAM-M10Q has no flash — all config is volatile RAM. If V_BCKP drops
+  during backup (cranking brownout, loose connector), module reverts to
+  9600 baud NMEA. The watchdog in `GPS_LOOP()` detects missing PVT after
+  5 s and triggers `GPS_BAUD_RECOVERY()` which re-negotiates baud rate
+  (tries 57600, falls back to 9600 → switch → reconfigure).
 - **Charging mode**: USB detected during sleep → show battery screen for
   10 s, then display off. Button re-shows for another 10 s. GPS periodic
   checks and WFE skipped while charging.
