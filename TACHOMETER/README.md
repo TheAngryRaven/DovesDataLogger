@@ -10,7 +10,17 @@ Currently If you want a tachometer you will need to source and hand solder SMD c
 * the second circuit would work at drastically higher RPMs but I need to make sure the coil ringing isn't causing higher than should-be reads
 
 
-##### SERIOUSLY
+### Paid Circuits
+
+Well i gave up, i want to build a much better datalogger, and this damn circuit is holding me up.
+
+Not yet tested, this was designed by a professional RF engineer, and should work drastically better than the ones i managed to hobble together.
+
+<p align="center">
+  <img src="tach_test_3.jpg" />
+</p>
+
+### My Circuits
 
 If you decide to build EITHER circuit, if you do not connect an isolated dc-dc converter, you will suffer from serious issues as the powerline swings -+10v+ from the magneto driven ignition
 
