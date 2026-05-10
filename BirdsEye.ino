@@ -277,6 +277,13 @@ struct GpsData {
 
 volatile bool gpsDataFresh = false;  // Set by PVT callback, cleared by GPS_LOOP()
 
+// GPS wake validation: tracks whether GPS is producing data after wake from sleep.
+// GPS_WAKE() sets gpsWakeTime and clears gpsWakeValidated. GPS_LOOP() sets
+// gpsWakeValidated=true on first PVT arrival. If 5 seconds pass without PVT,
+// GPS_LOOP() triggers baud recovery and reconfiguration.
+unsigned long gpsWakeTime = 0;
+bool gpsWakeValidated = true;  // Start true (validated at boot by GPS_SETUP)
+
 double crossingPointALat = 0.00;
 double crossingPointALng = 0.00;
 double crossingPointBLat = 0.00;
