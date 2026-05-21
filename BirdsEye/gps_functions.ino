@@ -5,6 +5,8 @@
 ///////////////////////////////////////////
 
 #include "gps_functions.h"
+#include "gps_time.h"
+#include "gps_validation.h"
 
 ///////////////////////////////////////////
 // GPS SERIAL BUFFER
@@ -114,85 +116,35 @@ void stopGpsSerialTimer() {
 }
 
 /**
-  * @brief Returns the GPS time since midnight in milliseconds
-  *
-  * @return unsigned long The time since midnight in milliseconds, or 0 if GPS unavailable
+  * @brief Returns the GPS time since midnight in milliseconds, or 0 if GPS unavailable.
+  *        The pure math lives in gps_time::timeOfDayMs — this just plumbs through gpsData.
   */
 unsigned long getGpsTimeInMilliseconds() {
   if (!gpsInitialized) return 0;
-
-  unsigned long timeInMillis = 0;
-  timeInMillis += gpsData.hour * 3600000ULL;   // Convert hours to milliseconds
-  timeInMillis += gpsData.minute * 60000ULL;   // Convert minutes to milliseconds
-  timeInMillis += gpsData.seconds * 1000ULL;   // Convert seconds to milliseconds
-  timeInMillis += gpsData.milliseconds;        // Add the milliseconds part
-
-  return timeInMillis;
+  return gps_time::timeOfDayMs(gpsData.hour, gpsData.minute,
+                               gpsData.seconds, gpsData.milliseconds);
 }
 
 /**
-  * @brief Converts GPS date/time to Unix timestamp (seconds since Jan 1, 1970)
-  *
-  * @return unsigned long Unix timestamp in seconds, or 0 if GPS unavailable
+  * @brief Converts GPS date/time to Unix timestamp in seconds. 0 if GPS unavailable.
+  *        gpsData.year is the 2-digit year offset from 2000.
   */
 unsigned long getGpsUnixTimestamp() {
   if (!gpsInitialized) return 0;
-
-  // Days in each month (non-leap year)
-  const uint8_t daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-
-  uint16_t year = 2000 + gpsData.year;
-  uint8_t month = gpsData.month;
-  uint8_t day = gpsData.day;
-
-  // Calculate days since Unix epoch (Jan 1, 1970)
-  unsigned long days = 0;
-
-  // Add days for complete years since 1970
-  for (uint16_t y = 1970; y < year; y++) {
-    if ((y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)) {
-      days += 366; // Leap year
-    } else {
-      days += 365;
-    }
-  }
-
-  // Add days for complete months this year
-  for (uint8_t m = 1; m < month; m++) {
-    days += daysInMonth[m - 1];
-    // Add leap day if February and leap year
-    if (m == 2 && ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0))) {
-      days++;
-    }
-  }
-
-  // Add remaining days
-  days += day - 1;
-
-  // Convert to seconds and add time of day
-  unsigned long timestamp = days * 86400UL;
-  timestamp += gpsData.hour * 3600UL;
-  timestamp += gpsData.minute * 60UL;
-  timestamp += gpsData.seconds;
-
-  return timestamp;
+  return static_cast<unsigned long>(gps_time::unixTimestampSeconds(
+      2000 + gpsData.year, gpsData.month, gpsData.day,
+      gpsData.hour, gpsData.minute, gpsData.seconds));
 }
 
 /**
-  * @brief Converts GPS date/time to Unix timestamp with millisecond precision
-  *
-  * @return unsigned long long Unix timestamp in milliseconds since Jan 1, 1970
+  * @brief Converts GPS date/time to Unix timestamp with millisecond precision.
+  *        0 if GPS unavailable.
   */
 unsigned long long getGpsUnixTimestampMillis() {
   if (!gpsInitialized) return 0;
-
-  // Get the Unix timestamp in seconds
-  unsigned long long timestampMillis = (unsigned long long)getGpsUnixTimestamp() * 1000ULL;
-
-  // Add the milliseconds from GPS
-  timestampMillis += gpsData.milliseconds;
-
-  return timestampMillis;
+  return gps_time::unixTimestampMillis(
+      2000 + gpsData.year, gpsData.month, gpsData.day,
+      gpsData.hour, gpsData.minute, gpsData.seconds, gpsData.milliseconds);
 }
 
 // PVT callback — called synchronously from checkCallbacks() when a new
@@ -371,32 +323,20 @@ void GPS_LOOP() {
       // Log every PVT update (~25Hz)
 
       // Snapshot GPS values for logging
-      double snapLat = gpsData.latitudeDegrees;
-      double snapLng = gpsData.longitudeDegrees;
-      double snapAlt = gpsData.altitude;
-      double snapHdop = gpsData.HDOP;
-      double snapSpeed = gpsData.speed;
-      int snapSats = gpsData.satellites;
+      const double snapLat   = gpsData.latitudeDegrees;
+      const double snapLng   = gpsData.longitudeDegrees;
+      const double snapAlt   = gpsData.altitude;
+      const double snapHdop  = gpsData.HDOP;
+      const double snapSpeed = gpsData.speed;            // knots, for sanity
+      const int    snapSats  = gpsData.satellites;
+      const double snapSpeedMph = snapSpeed * 1.15078;
 
-      // Convert speed to mph
-      double snapSpeedMph = snapSpeed * 1.15078;
-
-      // VALIDATE: Minimal checks to prevent genuinely corrupt data from being logged
-      bool hasActualFix = (snapSats > 0);
-      bool validCoords = !(snapLat == 0.0 && snapLng == 0.0);
-      bool validLat = (snapLat >= -90.0 && snapLat <= 90.0);
-      bool validLng = (snapLng >= -180.0 && snapLng <= 180.0);
-      bool validAlt = (snapAlt >= -1000.0 && snapAlt <= 50000.0);
-      bool validHdop = (snapHdop > 0.0);
-      bool validSpeed = (snapSpeedMph >= 0.0 && snapSpeedMph <= 500.0);
-
-      bool noNaN = !isnan(snapLat) && !isnan(snapLng) && !isnan(snapAlt) &&
-                   !isnan(snapHdop) && !isnan(snapSpeed);
-      bool noInf = !isinf(snapLat) && !isinf(snapLng) && !isinf(snapAlt) &&
-                   !isinf(snapHdop) && !isinf(snapSpeed);
-
-      if (!hasActualFix || !validCoords || !validLat || !validLng || !validAlt ||
-          !validHdop || !validSpeed || !noNaN || !noInf) {
+      // Reject obviously-corrupt samples (sats=0, Null Island, NaN/Inf,
+      // out-of-range lat/lng/alt/hdop/speed). The rule set lives in
+      // gps_validation::isSampleValid and is exercised by host tests.
+      const gps_validation::GpsSample snapForCheck = {
+          snapLat, snapLng, snapAlt, snapHdop, snapSpeedMph, snapSats};
+      if (!gps_validation::isSampleValid(snapForCheck)) {
         // Skip this sample - data is not trustworthy
       } else {
         char csvLine[256];
@@ -416,42 +356,27 @@ void GPS_LOOP() {
         dtostrf(accelY, 1, 3, accelYStr);
         dtostrf(accelZ, 1, 3, accelZStr);
 
-        // String validation
+        // dtostrf() can produce garbage (empty, too-long, non-numeric) on
+        // some BSPs when given NaN/Inf even though the sample passed
+        // validation. Walk every formatted string and reject the row if
+        // any look wrong.
         bool stringsValid = true;
-        const char* strs[] = {latStr, lngStr, hdopStr, speedStr, altStr, headingStr, hAccStr, accelXStr, accelYStr, accelZStr};
-        for (int i = 0; i < 10 && stringsValid; i++) {
-          int len = strlen(strs[i]);
-          if (len == 0 || len > 20) {
+        const char* strs[] = {latStr, lngStr, hdopStr, speedStr, altStr,
+                              headingStr, hAccStr, accelXStr, accelYStr, accelZStr};
+        for (size_t i = 0; i < sizeof(strs)/sizeof(strs[0]) && stringsValid; i++) {
+          if (!gps_validation::isNumericString(strs[i], 20)) {
             stringsValid = false;
-          }
-          for (int j = 0; j < len && stringsValid; j++) {
-            char c = strs[i][j];
-            if (!((c >= '0' && c <= '9') || c == '.' || c == '-')) {
-              stringsValid = false;
-            }
           }
         }
 
         if (!stringsValid) {
           // dtostrf produced garbage - skip this entry silently
         } else {
-          unsigned long long timestamp = getGpsUnixTimestampMillis();
+          // Arduino lacks %llu in printf; format the 64-bit timestamp
+          // ourselves into a stack buffer, then splice via %s.
           char timestampStr[24];
-          if (timestamp == 0) {
-            strcpy(timestampStr, "0");
-          } else {
-            char temp[24];
-            int i = 0;
-            unsigned long long t = timestamp;
-            while (t > 0) {
-              temp[i++] = '0' + (t % 10);
-              t /= 10;
-            }
-            for (int j = 0; j < i; j++) {
-              timestampStr[j] = temp[i - 1 - j];
-            }
-            timestampStr[i] = '\0';
-          }
+          gps_time::u64ToDecimalString(getGpsUnixTimestampMillis(),
+                                        timestampStr, sizeof(timestampStr));
 
           snprintf(csvLine, sizeof(csvLine), "%s,%d,%s,%s,%s,%s,%s,%s,%s,%d,%s,%s,%s",
                    timestampStr, snapSats, hdopStr, latStr, lngStr,

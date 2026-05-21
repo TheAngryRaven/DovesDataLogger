@@ -3,12 +3,10 @@
 // Instant DOVEX session replay: parses the reserved header at the
 // start of a .dovex file (datetime, driver, course, lap times) and
 // populates lapHistory[] for the results page.
-//
-// haversineDistanceMiles() also lives here — used by the auto-track
-// detection loop in BirdsEye.ino.
 ///////////////////////////////////////////
 
 #include "replay.h"
+#include "dovex_header.h"
 
 /**
  * @brief Reset replay state to initial values
@@ -165,25 +163,6 @@ bool readReplayLine(File& file, char* buffer, int bufferSize) {
   return true;
 }
 
-/**
- * @brief Calculate haversine distance between two GPS points in miles
- */
-double haversineDistanceMiles(double lat1, double lng1, double lat2, double lng2) {
-  const double R = 3958.8; // Earth radius in miles
-  // Note: DEG_TO_RAD is already defined by Arduino
-
-  double dLat = (lat2 - lat1) * DEG_TO_RAD;
-  double dLng = (lng2 - lng1) * DEG_TO_RAD;
-
-  double a = sin(dLat / 2) * sin(dLat / 2) +
-             cos(lat1 * DEG_TO_RAD) * cos(lat2 * DEG_TO_RAD) *
-             sin(dLng / 2) * sin(dLng / 2);
-
-  double c = 2 * atan2(sqrt(a), sqrt(1 - a));
-
-  return R * c;
-}
-
 ///////////////////////////////////////////
 // DOVEX REPLAY (header-only, instant)
 ///////////////////////////////////////////
@@ -192,10 +171,12 @@ double haversineDistanceMiles(double lat1, double lng1, double lat2, double lng2
 
 /**
  * @brief Parse a DOVEX file's header (first 1KB) for instant replay results.
- * Line 1: column labels (datetime,driver,course,short_name,best_lap_ms,optimal_ms)
- * Line 2: metadata values
- * Line 3: column label (laps_ms)
- * Line 4: lap1_ms,lap2_ms,lap3_ms,...
+ *
+ * Reads the reserved 1KB region into a stack buffer, then hands it to
+ * dovex_header::parse() (the testable pure function). On success, copies
+ * the parsed strings into the dovexReplay* globals and writes the lap
+ * times directly into lapHistory[].
+ *
  * @return true if header parsed successfully
  */
 bool parseDovexHeader(const char* filename) {
@@ -205,68 +186,39 @@ bool parseDovexHeader(const char* filename) {
     return false;
   }
 
-  // Line 1 is the column header label — skip it
-  char headerBuf[256];
-  if (!readReplayLine(replayDovex, headerBuf, sizeof(headerBuf))) {
-    replayDovex.close();
-    debugln(F("DOVEX Replay: Cannot read line 1"));
-    return false;
-  }
-
-  // Check for empty/null header (crash recovery — metadata never written)
-  if (headerBuf[0] == '\0' || headerBuf[0] == '\n' || headerBuf[0] == '\r') {
-    replayDovex.close();
-    debugln(F("DOVEX Replay: Empty header (incomplete session)"));
-    return false;
-  }
-
-  // Read line 2 (metadata values)
-  if (!readReplayLine(replayDovex, headerBuf, sizeof(headerBuf))) {
-    replayDovex.close();
-    debugln(F("DOVEX Replay: Cannot read line 2"));
-    return false;
-  }
-
-  // Parse line 2: datetime, driver, course, short_name, best_lap, optimal
-  char* tok = strtok(headerBuf, ",");
-  if (tok) { strncpy(dovexReplayDatetime, tok, sizeof(dovexReplayDatetime) - 1); dovexReplayDatetime[sizeof(dovexReplayDatetime) - 1] = '\0'; }
-  tok = strtok(NULL, ",");
-  if (tok) { strncpy(dovexReplayDriver, tok, sizeof(dovexReplayDriver) - 1); dovexReplayDriver[sizeof(dovexReplayDriver) - 1] = '\0'; }
-  tok = strtok(NULL, ",");
-  if (tok) { strncpy(dovexReplayCourseName, tok, sizeof(dovexReplayCourseName) - 1); dovexReplayCourseName[sizeof(dovexReplayCourseName) - 1] = '\0'; }
-  tok = strtok(NULL, ",");
-  if (tok) { strncpy(dovexReplayShortName, tok, sizeof(dovexReplayShortName) - 1); dovexReplayShortName[sizeof(dovexReplayShortName) - 1] = '\0'; }
-  tok = strtok(NULL, ",");
-  if (tok) { strncpy(dovexReplayBestLap, tok, sizeof(dovexReplayBestLap) - 1); dovexReplayBestLap[sizeof(dovexReplayBestLap) - 1] = '\0'; }
-  tok = strtok(NULL, ",");
-  if (tok) { strncpy(dovexReplayOptimal, tok, sizeof(dovexReplayOptimal) - 1); dovexReplayOptimal[sizeof(dovexReplayOptimal) - 1] = '\0'; }
-
-  // Skip line 3 (lap column header)
-  static char lapBuf[800];
-  readReplayLine(replayDovex, lapBuf, sizeof(lapBuf));
-
-  // Read line 4 (lap times)
-  if (!readReplayLine(replayDovex, lapBuf, sizeof(lapBuf))) {
-    // No lap times — session with no laps
-    replayDovex.close();
-    lapHistoryCount = 0;
-    return true;
-  }
-
+  static char buf[dovex_header::kHeaderSize];
+  const int bytesRead = replayDovex.read(buf, sizeof(buf));
   replayDovex.close();
 
-  // Parse comma-separated lap times
-  lapHistoryCount = 0;
-  lastLap = 0;
-  tok = strtok(lapBuf, ",");
-  while (tok != NULL && lapHistoryCount < lapHistoryMaxLaps) {
-    unsigned long lapMs = strtoul(tok, NULL, 10);
-    if (lapMs > 0) {
-      lapHistory[lapHistoryCount++] = lapMs;
-      lastLap = lapMs;
-    }
-    tok = strtok(NULL, ",");
+  if (bytesRead < (int)sizeof(buf)) {
+    debugln(F("DOVEX Replay: Header too short"));
+    return false;
   }
+
+  dovex_header::ParsedHeader meta;
+  size_t lapCount = 0;
+  if (!dovex_header::parse(buf, sizeof(buf), meta,
+                           lapHistory, lapHistoryMaxLaps, lapCount)) {
+    debugln(F("DOVEX Replay: Empty/incomplete header"));
+    return false;
+  }
+
+  // Copy parsed metadata into module globals consumed by the display pages.
+  strncpy(dovexReplayDatetime,   meta.datetime,  sizeof(dovexReplayDatetime)   - 1);
+  dovexReplayDatetime[sizeof(dovexReplayDatetime)   - 1] = '\0';
+  strncpy(dovexReplayDriver,     meta.driver,    sizeof(dovexReplayDriver)     - 1);
+  dovexReplayDriver[sizeof(dovexReplayDriver)       - 1] = '\0';
+  strncpy(dovexReplayCourseName, meta.course,    sizeof(dovexReplayCourseName) - 1);
+  dovexReplayCourseName[sizeof(dovexReplayCourseName) - 1] = '\0';
+  strncpy(dovexReplayShortName,  meta.shortName, sizeof(dovexReplayShortName)  - 1);
+  dovexReplayShortName[sizeof(dovexReplayShortName)   - 1] = '\0';
+  strncpy(dovexReplayBestLap,    meta.bestLap,   sizeof(dovexReplayBestLap)    - 1);
+  dovexReplayBestLap[sizeof(dovexReplayBestLap)     - 1] = '\0';
+  strncpy(dovexReplayOptimal,    meta.optimal,   sizeof(dovexReplayOptimal)    - 1);
+  dovexReplayOptimal[sizeof(dovexReplayOptimal)     - 1] = '\0';
+
+  lapHistoryCount = (int)lapCount;
+  lastLap = (lapCount > 0) ? lapHistory[lapCount - 1] : 0;
 
   debug(F("DOVEX Replay: Parsed "));
   debug(lapHistoryCount);
