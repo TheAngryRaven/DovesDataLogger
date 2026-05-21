@@ -16,15 +16,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # The sketch file is BirdsEye.ino but the repo directory is
-      # DovesDataLogger. arduino-cli requires the sketch folder name to
-      # match the .ino filename, so stage a BirdsEye/ folder containing
-      # all the sketch sources and headers for the compiler.
-      - name: Stage sketch directory
-        run: |
-          mkdir -p sketch/BirdsEye
-          cp *.ino *.h sketch/BirdsEye/
-
       # Seeed nRF52 BSP shells out to adafruit-nrfutil during link to
       # package the .hex into a .zip, even when only compiling — install
       # it before the compile step.
@@ -49,7 +40,7 @@ jobs:
             - name: ArxTypeTraits
             - source-url: https://github.com/TheAngryRaven/DovesLapTimer.git
           sketch-paths: |
-            - sketch/BirdsEye
+            - BirdsEye
           enable-deltas-report: true
 
       - name: Upload size deltas report

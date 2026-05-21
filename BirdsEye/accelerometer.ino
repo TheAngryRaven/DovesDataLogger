@@ -5,6 +5,8 @@
 // Gyroscope data is available but not used in this version
 ///////////////////////////////////////////
 
+#include "accelerometer.h"
+
 static unsigned long accelLastReadMs = 0;
 static const unsigned long ACCEL_READ_INTERVAL_MS = 20;  // 50 Hz — plenty for motorsports logging
 

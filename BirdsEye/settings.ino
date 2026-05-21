@@ -4,6 +4,8 @@
 // Provides getSetting() and setSetting() for any subsystem.
 ///////////////////////////////////////////
 
+#include "settings.h"
+
 static const char SETTINGS_FILE_PATH[] = "/SETTINGS.json";
 static char settingsFileBuffer[512];
 static StaticJsonDocument<512> settingsJson;
@@ -38,7 +40,6 @@ bool createDefaultSettings() {
   settingsJson["driver_name"] = "Driver";
   settingsJson["lap_detection_distance"] = "7";
   settingsJson["waypoint_detection_distance"] = "30";
-  settingsJson["use_legacy_csv"] = "false";
   settingsJson["waypoint_speed"] = "30";
 
   File settingsFile;
@@ -71,7 +72,6 @@ static void ensureDefaultSettings() {
     { "driver_name", "Driver" },
     { "lap_detection_distance", "7" },
     { "waypoint_detection_distance", "30" },
-    { "use_legacy_csv", "false" },
     { "waypoint_speed", "30" },
   };
 

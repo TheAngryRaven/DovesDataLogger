@@ -30,7 +30,7 @@
 
 // Project-wide types and macros - MUST be included before Arduino
 // auto-generates function prototypes from the other .ino files,
-// otherwise custom types (ButtonState, ReplaySample, etc.) won't
+// otherwise custom types (ButtonState, TrackLayout, etc.) won't
 // be resolved in function signatures.
 #include "project.h"
 
@@ -41,6 +41,40 @@
 #include "gps_config.h"
 #include <DovesLapTimer.h>
 #include <CourseManager.h>
+
+// SdFat configuration. SD_FAT_TYPE must be defined BEFORE SdFat.h is
+// processed for the first time, which means before any module header
+// that pulls it in (e.g. replay.h).
+//   0 = bare SdFat/File   (Wokwi only)
+//   1 = SdFat32/File32    (real hardware — FAT16/FAT32)
+//   2 = SdExFat/ExFile
+//   3 = SdFs/FsFile
+#ifdef WOKWI
+#define SD_FAT_TYPE 0
+#define PIN_SPI_CS -1
+#else
+#define SD_FAT_TYPE 1
+#define PIN_SPI_CS -1  // CS is grounded on the gry-box revision
+#endif
+// 2 MHz SPI for EMI tolerance in ignition environments — 12.5x below
+// the SdFat default (25 MHz) but still fast enough for 25 Hz logging
+// and the BLE-2M file transfer ceiling.
+#define SPI_SPEED SD_SCK_MHZ(2)
+
+#include "SdFat.h"
+#include "sdios.h"
+
+// Module interfaces. Each header documents its module's public
+// surface and pulls in any library types those signatures need.
+#include "accelerometer.h"
+#include "bluetooth.h"
+#include "display_pages.h"
+#include "display_ui.h"
+#include "gps_functions.h"
+#include "replay.h"
+#include "sd_functions.h"
+#include "settings.h"
+#include "tachometer.h"
 
 ///////////////////////////////////////////
 // BATTERY CONFIGURATION
@@ -73,37 +107,28 @@ int getBatteryPercent(float voltage) {
 }
 
 ///////////////////////////////////////////
-// LAP TIMER
+// LAP TIMER / SESSION STATE
 ///////////////////////////////////////////
 
 double crossingThresholdMeters = 7.0;
-DovesLapTimer lapTimer(crossingThresholdMeters);
 unsigned long gpsFrameStartTime;
 unsigned long gpsFrameEndTime;
 unsigned long gpsFrameCounter;
 float gpsFrameRate = 0.0;
-bool trackSelected = false;
 
-///////////////////////////////////////////
-// NEW UI: CourseManager + auto-detection
-///////////////////////////////////////////
-#define ENABLE_NEW_UI
-
-#ifdef ENABLE_NEW_UI
 CourseManager* courseManager = nullptr;
 TrackConfig activeTrackConfig;
 bool trackDetected = false;
 int detectedTrackIndex = -1;
 unsigned long idleStartTime = 0;
 bool idleTimerRunning = false;
-bool newUiRaceActive = false;
+bool raceActive = false;
 unsigned long raceSessionStartedAt = 0;  // For auto-idle grace period after RPM wake
 
 // Runtime settings (loaded from SD in setup)
 float settingLapDetectionDistance = 7.0;
 float settingWaypointDetectionDistance = 30.0;
 float settingWaypointSpeed = 30.0;
-bool settingUseLegacyCsv = false;
 char settingDriverName[32] = "Driver";
 
 // Track manifest for proximity detection
@@ -136,7 +161,6 @@ unsigned long btn3HoldStart = 0;
 bool btn1Held = false;
 bool btn2Held = false;
 bool btn3Held = false;
-#endif
 
 ///////////////////////////////////////////
 // PROJECT DEFINES
@@ -165,11 +189,7 @@ bool btn3Held = false;
 // transient noise spikes that get through hardware filtering.
 ///////////////////////////////////////////
 
-// ButtonState, TrackLayout, ReplaySample structs defined in project.h
-
-const int RACE_DIRECTION_FORWARD  = 0;
-const int RACE_DIRECTION_REVERSE  = 1;
-
+// ButtonState, TrackLayout structs defined in project.h
 // debug/debugln macros defined in project.h
 
 ///////////////////////////////////////////
@@ -284,10 +304,6 @@ volatile bool gpsDataFresh = false;  // Set by PVT callback, cleared by GPS_LOOP
 unsigned long gpsWakeTime = 0;
 bool gpsWakeValidated = true;  // Start true (validated at boot by GPS_SETUP)
 
-double crossingPointALat = 0.00;
-double crossingPointALng = 0.00;
-double crossingPointBLat = 0.00;
-double crossingPointBLng = 0.00;
 float gps_speed_mph = 0.0;
 
 ///////////////////////////////////////////
@@ -298,14 +314,9 @@ unsigned long lastLap = 0;
 unsigned long lapHistory[lapHistoryMaxLaps];
 int lapHistoryCount = 0;
 
-// Forward declaration — replayModeActive is in the replay globals section below,
-// but checkForNewLapData() needs it when ENABLE_NEW_UI is defined.
-extern bool replayModeActive;
-
 void checkForNewLapData() {
-  #ifdef ENABLE_NEW_UI
-  // New UI: read from active timer (CourseManager), with fallback to
-  // lapTimer for legacy replay mode which feeds lapTimer directly.
+  // Read from active timer (CourseManager owns either the course timer
+  // or the Lap Anything waypoint timer).
   unsigned long activeLapTime = 0;
   if (courseManager != nullptr) {
     if (courseManager->isLapAnythingActive()) {
@@ -314,90 +325,39 @@ void checkForNewLapData() {
       activeLapTime = courseManager->getActiveTimer()->getLastLapTime();
     }
   }
-  if (activeLapTime == 0 && replayModeActive) {
-    // Replay mode feeds lapTimer, not courseManager
-    activeLapTime = lapTimer.getLastLapTime();
-  }
   if (lapHistoryCount < lapHistoryMaxLaps && activeLapTime != 0 && activeLapTime != lastLap) {
     lastLap = activeLapTime;
     lapHistory[lapHistoryCount] = lastLap;
     lapHistoryCount++;
     debugln(F("New lap added to history..."));
   }
-  #else
-  // Legacy: read from direct lapTimer
-  if (lapHistoryCount < lapHistoryMaxLaps && lapTimer.getLastLapTime() != lastLap) {
-    lastLap = lapTimer.getLastLapTime();
-    lapHistory[lapHistoryCount] = lastLap;
-    lapHistoryCount++;
-    debugln(F("New lap added to history..."));
-  }
-  #endif
 }
 
 ///////////////////////////////////////////
 // REPLAY SYSTEM GLOBALS
 ///////////////////////////////////////////
 
-// Track detection threshold in miles (configurable)
-const float REPLAY_TRACK_DETECTION_THRESHOLD_MILES = 20.0;
-
 // Replay file list - reduced sizes for memory constraints
 #define MAX_REPLAY_FILES 20
-#define MAX_REPLAY_FILENAME_LENGTH 48  // Must fit longest filename (e.g. OKC_Normal_fwd_2025_1123_1459.nmea = 36 chars)
+#define MAX_REPLAY_FILENAME_LENGTH 48
 char replayFiles[MAX_REPLAY_FILES][MAX_REPLAY_FILENAME_LENGTH];
 int numReplayFiles = 0;
 int selectedReplayFile = -1;
 
-// Replay state
-bool replayModeActive = false;
+// Replay state (DOVEX instant-replay; populated by parseDovexHeader)
 bool replayProcessingComplete = false;
-int replayDetectedTrackIndex = -1;
-
-// Replay statistics
-float replayMaxSpeed = 0.0;
-int replayMaxRpm = 0;
-unsigned long replayTotalSamples = 0;
-unsigned long replayProcessedSamples = 0;
-
-// Line buffer for streaming file reads (bounded memory)
-// NMEA max is 82 chars, DOVE CSV lines ~100 chars, 128 is plenty
-#define REPLAY_LINE_BUFFER_SIZE 128
-char replayLineBuffer[REPLAY_LINE_BUFFER_SIZE];
-
-// ReplaySample struct defined in project.h
 
 ///////////////////////////////////////////
 // SD CARD GLOBALS
+// SD_FAT_TYPE / PIN_SPI_CS / SPI_SPEED and the SdFat.h include moved
+// to the top of this file so module headers (replay.h) see them.
 ///////////////////////////////////////////
-
-// SD_FAT_TYPE = 0 for SdFat/File as defined in SdFatConfig.h,
-// 1 for FAT16/FAT32, 2 for exFAT, 3 for FAT16/FAT32 and exFAT.
-#ifdef WOKWI
-#define SD_FAT_TYPE 0
-#define PIN_SPI_CS -1 //53
-#else
-#define SD_FAT_TYPE 1
-#define PIN_SPI_CS -1 // grounded on gry box
-// #define PIN_SPI_CS 3 // todo: ground out for A0/battery voltage...
-#endif
-
-// Reduced from 25MHz for EMI resistance in ignition environments.
-// 2 MHz is the minimum for 125+ kBps BLE file transfer throughput
-// (1 MHz SD reads cap at ~122 kBps, just under the BLE 2M PHY ceiling).
-// Still 12.5x below the original 25 MHz — very conservative.
-#define SPI_SPEED SD_SCK_MHZ(2)
-
-#include "SdFat.h"
-#include "sdios.h"
 
 SdFat SD;
 File file; //buffer
 File trackDir;
 File trackFile;
 File dataFile;
-
-// Replay file handle (must be after SdFat include)
 File replayFile;
 
 ///////////////////////////////////////////
@@ -417,17 +377,11 @@ volatile int currentSDAccess = SD_ACCESS_NONE;
 // Replay function prototypes (must be after SdFat include for File type)
 bool buildReplayFileList();
 bool readReplayLine(File& file, char* buffer, int bufferSize);
-bool parseDoveLine(char* line, ReplaySample& sample);  // non-const, parses in-place
-bool parseNmeaSentence(char* line, ReplaySample& sample);  // non-const, parses in-place
-bool extractGpsPointFromReplayFile(const char* filename, double& lat, double& lng);
-bool extractGpsPointFromTrackFile(int trackIndex, double& lat, double& lng);
 double haversineDistanceMiles(double lat1, double lng1, double lat2, double lng2);
-int detectTrackForReplayFile(const char* filename);
-void processReplayFile();
 void resetReplayState();
+bool parseDovexHeader(const char* filename);
 
 // SD state flags
-// do we really need all of these flags
 bool sdSetupSuccess = false;
 bool sdTrackSuccess = false;
 bool sdDataLogInitComplete = false;
@@ -436,9 +390,7 @@ bool enableLogging = false;
 unsigned long lastCardFlush = 0;
 const char trackFolder[8] = "/TRACKS";
 
-// could probably do all of this better
-int selectedLocation = -1;
-char locations[MAX_LOCATIONS][MAX_LOCATION_LENGTH]; // 13 is old dos format for fat16
+char locations[MAX_LOCATIONS][MAX_LOCATION_LENGTH]; // 13-char FAT16 name limit
 int numOfLocations = 0;
 
 ///////////////////////////////////////////
@@ -452,9 +404,12 @@ int numOfLocations = 0;
 #define JSON_BUFFER_SIZE 4096
 #endif
 
-const int PARSE_STATUS_GOOD = 0;
-const int PARSE_STATUS_LOAD_FAILED = 5;
-const int PARSE_STATUS_PARSE_FAILED = 10;
+// extern matches the forward declaration in sd_functions.h so the
+// constants have external linkage; otherwise their default internal
+// linkage would mismatch the header.
+extern const int PARSE_STATUS_GOOD = 0;
+extern const int PARSE_STATUS_LOAD_FAILED = 5;
+extern const int PARSE_STATUS_PARSE_FAILED = 10;
 
 char tracks[MAX_LAYOUTS][MAX_LAYOUT_LENGTH];
 TrackLayout trackLayouts[MAX_LAYOUTS];
@@ -463,7 +418,7 @@ int numOfTracks = 0;
 // Track metadata (parsed from new JSON object format)
 TrackMetadata activeTrackMetadata;
 
-// Track manifest is declared in the ENABLE_NEW_UI globals block above
+// trackManifest is declared with the session-state globals above
 
 ///////////////////////////////////////////
 // BLE FILE HANDLE (after SdFat include)
@@ -519,17 +474,8 @@ const int PAGE_RC_ERROR = 990;
 const int PAGE_MAIN_MENU = -1;
 const int PAGE_BLUETOOTH = -2;
 const int PAGE_REPLAY_FILE_SELECT = -3;
-const int PAGE_REPLAY_DETECTING = -4;
-const int PAGE_REPLAY_SELECT_TRACK = -5;
-const int PAGE_REPLAY_SELECT_DIRECTION = -6;
-const int PAGE_REPLAY_PROCESSING = -7;
 const int PAGE_REPLAY_RESULTS = -8;
 const int PAGE_REPLAY_EXIT = -9;
-
-// boot menu
-const int PAGE_SELECT_LOCATION = 0;
-const int PAGE_SELECT_TRACK = 1;
-const int PAGE_SELECT_DIRECTION = 2;
 
 // running menu (these must be in order)
 const int GPS_DEBUG = 3;
@@ -571,10 +517,6 @@ int lastPage = 0;
 #endif
 
 int runningPageEnd = LOGGING_STOP; // only changes if sd:/tracks not found
-
-// Track/direction selection
-int selectedTrack = -1;
-int selectedDirection = -1;
 
 // Display state
 int menuSelectionIndex = 0;
@@ -648,7 +590,6 @@ void setup() {
   GPS_SETUP();
 
   // Read settings into runtime variables
-  #ifdef ENABLE_NEW_UI
   {
     char buf[48];
     if (getSetting("lap_detection_distance", buf, sizeof(buf))) {
@@ -663,9 +604,6 @@ void setup() {
       settingWaypointSpeed = atof(buf);
       if (settingWaypointSpeed <= 0) settingWaypointSpeed = 30.0;
     }
-    if (getSetting("use_legacy_csv", buf, sizeof(buf))) {
-      settingUseLegacyCsv = (strcmp(buf, "true") == 0);
-    }
     if (getSetting("driver_name", buf, sizeof(buf))) {
       strncpy(settingDriverName, buf, sizeof(settingDriverName) - 1);
       settingDriverName[sizeof(settingDriverName) - 1] = '\0';
@@ -677,27 +615,18 @@ void setup() {
     debug(settingWaypointDetectionDistance);
     debug(F(" wp_speed="));
     debug(settingWaypointSpeed);
-    debug(F(" legacy="));
-    debug(settingUseLegacyCsv);
     debug(F(" driver="));
     debugln(settingDriverName);
   }
-  #endif
 
   if (!sdSetupSuccess) {
     strncpy(internalNotification, "SD Init failed!\n\nlogging not possible!", sizeof(internalNotification) - 1);
     internalNotification[sizeof(internalNotification) - 1] = '\0';
     switchToDisplayPage(PAGE_INTERNAL_FAULT);
   } else if (sdSetupSuccess && !sdTrackSuccess) {
-    #ifdef ENABLE_NEW_UI
-    // New UI: no TRACKS folder is OK — Lap Anything will handle it
+    // No TRACKS folder is fine — Lap Anything will handle it
     debugln(F("No TRACKS folder — Lap Anything will activate"));
     switchToDisplayPage(PAGE_MAIN_MENU);
-    #else
-    strncpy(internalNotification, "sd:/TRACKS not found!\n\nlogging not possible!", sizeof(internalNotification) - 1);
-    internalNotification[sizeof(internalNotification) - 1] = '\0';
-    switchToDisplayPage(PAGE_INTERNAL_FAULT);
-    #endif
   } else {
     switchToDisplayPage(PAGE_MAIN_MENU);
   }
@@ -716,10 +645,8 @@ void setup() {
 }
 
 ///////////////////////////////////////////
-// NEW UI HELPER FUNCTIONS
+// COURSE / TIMER HELPER FUNCTIONS
 ///////////////////////////////////////////
-
-#ifdef ENABLE_NEW_UI
 
 /**
  * @brief Get the active timer pointer for display/lap-history reads.
@@ -930,8 +857,8 @@ void trackDetectionLoop() {
  * and LOGGING_STOP_CONFIRM in display_ui.ino.
  */
 void endRaceSession() {
-  // Write DOVEX metadata header if using new format
-  if (!settingUseLegacyCsv && sdDataLogInitComplete && dataFile.isOpen()) {
+  // Write DOVEX metadata header into the reserved region
+  if (sdDataLogInitComplete && dataFile.isOpen()) {
     writeDovexHeader();
   }
 
@@ -943,7 +870,6 @@ void endRaceSession() {
   releaseSDAccess(SD_ACCESS_LOGGING);
   enableLogging = false;
   sdDataLogInitComplete = false;
-  trackSelected = false;
 
   // Clean up CourseManager
   if (courseManager != nullptr) {
@@ -952,7 +878,7 @@ void endRaceSession() {
   }
   trackDetected = false;
   detectedTrackIndex = -1;
-  newUiRaceActive = false;
+  raceActive = false;
   idleTimerRunning = false;
   idleStartTime = 0;
 
@@ -984,7 +910,7 @@ void createLapAnythingCourseManager() {
  * @brief Check for auto-idle: 60s at <2mph ends the session
  */
 void checkAutoIdle() {
-  if (!newUiRaceActive) return;
+  if (!raceActive) return;
 
   // Grace period: don't auto-idle within first 3 minutes of a session.
   // After RPM wake the car is often stationary (warming up, waiting for
@@ -1023,9 +949,8 @@ void autoRaceModeCheck() {
 
   if (rpmTriggered || speedTriggered) {
     debugln(F("Auto-entering race mode"));
-    newUiRaceActive = true;
+    raceActive = true;
     enableLogging = true;
-    trackSelected = true;  // Allow GPS_LOOP to feed timer + log
     raceSessionStartedAt = millis();
 
     // Create a minimal CourseManager if none exists yet (no track detected)
@@ -1112,7 +1037,7 @@ bool isUsbConnected() {
 
 void enterSleepMode() {
   // 1. End race session if active (safety net)
-  if (newUiRaceActive) endRaceSession();
+  if (raceActive) endRaceSession();
 
   // 2. Stop BLE if active (prevents SoftDevice power waste during sleep)
   if (bleActive) BLE_STOP();
@@ -1163,9 +1088,8 @@ void exitSleepMode(bool rpmWake = false) {
   // 5. RPM wake → skip main menu, go straight to race mode
   if (rpmWake) {
     debugln(F("RPM wake — entering race mode directly"));
-    newUiRaceActive = true;
+    raceActive = true;
     enableLogging = true;
-    trackSelected = true;
     raceSessionStartedAt = millis();
     createLapAnythingCourseManager();
     switchToDisplayPage(TACHOMETER);
@@ -1173,8 +1097,6 @@ void exitSleepMode(bool rpmWake = false) {
     switchToDisplayPage(PAGE_MAIN_MENU);
   }
 }
-
-#endif // ENABLE_NEW_UI
 
 ///////////////////////////////////////////
 // MAIN LOOP
@@ -1189,7 +1111,6 @@ void loop() {
   wdtPet();
   #endif
 
-  #ifdef ENABLE_NEW_UI
   if (sleepModeActive) {
     // Check wake triggers
     bool wakeButton = anyButtonPressed();
@@ -1266,7 +1187,6 @@ void loop() {
     sd_app_evt_wait();
     return;  // Skip entire normal loop
   }
-  #endif
 
   #ifdef HAS_DEBUG
   unsigned long loopStart = millis();
@@ -1300,85 +1220,54 @@ void loop() {
     return; // Skip GPS, tach, lap checks while BLE is active
   }
 
-  // Replay processing mode - tight loop for fast file processing
-  if (currentPage == PAGE_REPLAY_PROCESSING && replayModeActive && !replayProcessingComplete) {
-    // Process replay file
-    processReplayFile();
-
-    // Update display less frequently during processing
-    if (millis() - displayLastUpdate > 200) {
-      displayLastUpdate = millis();
-      displayPage_replay_processing();
-    }
-
-    // Check if processing complete
-    if (replayProcessingComplete) {
-      replayModeActive = false;
-      switchToDisplayPage(PAGE_REPLAY_RESULTS);
-    }
-
-    return; // Skip everything else during replay processing
-  }
-
   GPS_LOOP();
   TACH_LOOP();
   ACCEL_LOOP();
   BLUETOOTH_LOOP();
 
-  #ifdef ENABLE_NEW_UI
-    trackDetectionLoop();
-    checkForNewLapData();
-    checkAutoIdle();
-    autoRaceModeCheck();
+  trackDetectionLoop();
+  checkForNewLapData();
+  checkAutoIdle();
+  autoRaceModeCheck();
 
-    // Button hold detection for sleep/reboot combos
-    updateButtonHoldState();
+  // Button hold detection for sleep/reboot combos
+  updateButtonHoldState();
 
-    // Long-press left+right (5s) on main menu -> sleep
-    if (currentPage == PAGE_MAIN_MENU &&
-        isButtonHeld(1, SLEEP_LONG_PRESS_MS) &&
-        isButtonHeld(3, SLEEP_LONG_PRESS_MS)) {
+  // Long-press left+right (5s) on main menu -> sleep
+  if (currentPage == PAGE_MAIN_MENU &&
+      isButtonHeld(1, SLEEP_LONG_PRESS_MS) &&
+      isButtonHeld(3, SLEEP_LONG_PRESS_MS)) {
+    enterSleepMode();
+    return;
+  }
+
+  // Reboot combo: select + either side button held 5s (any page)
+  if (isButtonHeld(2, SLEEP_LONG_PRESS_MS) &&
+      (isButtonHeld(1, SLEEP_LONG_PRESS_MS) || isButtonHeld(3, SLEEP_LONG_PRESS_MS))) {
+    NVIC_SystemReset();
+  }
+
+  // USB connected on main menu -> auto-sleep for efficient charging
+  if (currentPage == PAGE_MAIN_MENU && isUsbConnected()) {
+    enterSleepMode();
+    return;
+  }
+
+  // 5-minute menu idle -> auto-sleep
+  if (currentPage == PAGE_MAIN_MENU) {
+    if (!menuIdleTimerRunning) {
+      menuIdleTimerRunning = true;
+      menuIdleStartTime = millis();
+    } else if (millis() - menuIdleStartTime >= SLEEP_IDLE_TIMEOUT_MS) {
       enterSleepMode();
       return;
     }
-
-    // Reboot combo: select + either side button held 5s (any page)
-    if (isButtonHeld(2, SLEEP_LONG_PRESS_MS) &&
-        (isButtonHeld(1, SLEEP_LONG_PRESS_MS) || isButtonHeld(3, SLEEP_LONG_PRESS_MS))) {
-      NVIC_SystemReset();
+    if (btn1->pressed || btn2->pressed || btn3->pressed) {
+      menuIdleStartTime = millis();  // Reset on any button
     }
-
-    // USB connected on main menu -> auto-sleep for efficient charging
-    if (currentPage == PAGE_MAIN_MENU && isUsbConnected()) {
-      enterSleepMode();
-      return;
-    }
-
-    // 5-minute menu idle -> auto-sleep
-    if (currentPage == PAGE_MAIN_MENU) {
-      if (!menuIdleTimerRunning) {
-        menuIdleTimerRunning = true;
-        menuIdleStartTime = millis();
-      } else if (millis() - menuIdleStartTime >= SLEEP_IDLE_TIMEOUT_MS) {
-        enterSleepMode();
-        return;
-      }
-      if (btn1->pressed || btn2->pressed || btn3->pressed) {
-        menuIdleStartTime = millis();  // Reset on any button
-      }
-    } else {
-      menuIdleTimerRunning = false;
-    }
-  #else
-    #ifndef ENDURANCE_MODE
-      checkForNewLapData();
-    #endif
-    // Auto-select Race mode if RPM detected on main menu
-    if (currentPage == PAGE_MAIN_MENU && tachLastReported > 500) {
-      debugln(F("RPM detected on main menu - auto-selecting Race"));
-      switchToDisplayPage(PAGE_SELECT_LOCATION);
-    }
-  #endif
+  } else {
+    menuIdleTimerRunning = false;
+  }
 
   calculateGPSFrameRate();
 

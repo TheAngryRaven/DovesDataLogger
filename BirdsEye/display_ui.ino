@@ -3,6 +3,8 @@
 // Display setup, button handling, menu navigation, and display loop
 ///////////////////////////////////////////
 
+#include "display_ui.h"
+
 ///////////////////////////////////////////
 // I2C BUS RECOVERY
 // EMI from ignition can glitch the I2C bus, leaving a slave holding SDA low.
@@ -105,7 +107,6 @@ void resetButtons() {
   resetButton(btn3);
 }
 
-#ifdef ENABLE_NEW_UI
 void updateButtonHoldState() {
   bool b1 = readButtonMultiSample(btn1->pin);
   bool b2 = readButtonMultiSample(btn2->pin);
@@ -139,7 +140,6 @@ bool anyButtonPressed() {
          readButtonMultiSample(btn2->pin) ||
          readButtonMultiSample(btn3->pin);
 }
-#endif
 
 void resetButton(ButtonState* button) {
   button->pressed = false;
@@ -267,25 +267,18 @@ void displaySetup() {
 void handleMenuPageSelection() {
   if (currentPage == PAGE_MAIN_MENU) {
     if (menuSelectionIndex == 0) {
-      // Race selected
+      // Race selected — go directly to race mode, start logging on GPS fix
       debugln(F("Main Menu: Race selected"));
-      #ifdef ENABLE_NEW_UI
-      // New UI: go directly to race mode, start logging on GPS fix
-      newUiRaceActive = true;
+      raceActive = true;
       enableLogging = true;
-      trackSelected = true;
       raceSessionStartedAt = millis();
       // Create CourseManager if not already created by track detection
       createLapAnythingCourseManager();
       switchToDisplayPage(GPS_SPEED);
-      #else
-      switchToDisplayPage(PAGE_SELECT_LOCATION);
-      #endif
     } else if (menuSelectionIndex == 1) {
       // Replay selected
       debugln(F("Main Menu: Replay selected"));
       resetReplayState();
-      #ifdef ENABLE_NEW_UI
       if (buildReplayFileList()) {
         switchToDisplayPage(PAGE_REPLAY_FILE_SELECT);
       } else {
@@ -293,15 +286,6 @@ void handleMenuPageSelection() {
         internalNotification[sizeof(internalNotification) - 1] = '\0';
         switchToDisplayPage(PAGE_INTERNAL_WARNING);
       }
-      #else
-      if (buildReplayFileList()) {
-        switchToDisplayPage(PAGE_REPLAY_FILE_SELECT);
-      } else {
-        strncpy(internalNotification, "No .dove or .nmea\nfiles found on SD!", sizeof(internalNotification) - 1);
-        internalNotification[sizeof(internalNotification) - 1] = '\0';
-        switchToDisplayPage(PAGE_INTERNAL_WARNING);
-      }
-      #endif
     } else {
       // Bluetooth selected
       debugln(F("Main Menu: Bluetooth selected"));
@@ -317,7 +301,6 @@ void handleMenuPageSelection() {
       debug(F("Replay: Selected file: "));
       debugln(replayFiles[selectedReplayFile]);
 
-      #ifdef ENABLE_NEW_UI
       // DOVEX instant replay: parse header and go straight to results
       if (parseDovexHeader(replayFiles[selectedReplayFile])) {
         replayProcessingComplete = true;
@@ -327,93 +310,6 @@ void handleMenuPageSelection() {
         internalNotification[sizeof(internalNotification) - 1] = '\0';
         switchToDisplayPage(PAGE_INTERNAL_WARNING);
       }
-      #else
-      // Show detecting page
-      switchToDisplayPage(PAGE_REPLAY_DETECTING);
-      forceDisplayRefresh();
-      displayPage_replay_detecting();
-
-      // Detect track
-      replayDetectedTrackIndex = detectTrackForReplayFile(replayFiles[selectedReplayFile]);
-
-      if (replayDetectedTrackIndex >= 0) {
-        // Track found - parse it and go to layout selection
-        selectedLocation = replayDetectedTrackIndex;
-        char filepath[FILEPATH_MAX];
-        makeFullTrackPath(locations[selectedLocation], filepath);
-        numOfTracks = 0; // Reset before parsing
-        int parseStatus = parseTrackFile(filepath);
-
-        if (parseStatus == PARSE_STATUS_GOOD) {
-          switchToDisplayPage(PAGE_REPLAY_SELECT_TRACK);
-        } else {
-          strncpy(internalNotification, "Failed to parse\ntrack file!", sizeof(internalNotification) - 1);
-          internalNotification[sizeof(internalNotification) - 1] = '\0';
-          switchToDisplayPage(PAGE_INTERNAL_FAULT);
-        }
-      } else {
-        // No track detected - let user select manually
-        strncpy(internalNotification, "Track not detected!\nSelect manually.", sizeof(internalNotification) - 1);
-        internalNotification[sizeof(internalNotification) - 1] = '\0';
-        // Go to normal track selection
-        switchToDisplayPage(PAGE_SELECT_LOCATION);
-        replayModeActive = true; // Set flag so we know we're in replay mode
-      }
-      #endif
-    }
-  } else if (currentPage == PAGE_REPLAY_SELECT_TRACK) {
-    selectedTrack = menuSelectionIndex;
-    switchToDisplayPage(PAGE_REPLAY_SELECT_DIRECTION);
-    debug(F("Replay: Selected layout: "));
-    debugln(tracks[selectedTrack]);
-
-    // Configure lap timer with selected track
-    crossingPointALat = trackLayouts[selectedTrack].start_a_lat;
-    crossingPointALng = trackLayouts[selectedTrack].start_a_lng;
-    crossingPointBLat = trackLayouts[selectedTrack].start_b_lat;
-    crossingPointBLng = trackLayouts[selectedTrack].start_b_lng;
-
-    lapTimer.setStartFinishLine(crossingPointALat, crossingPointALng, crossingPointBLat, crossingPointBLng);
-
-    if (trackLayouts[selectedTrack].hasSector2) {
-      lapTimer.setSector2Line(
-        trackLayouts[selectedTrack].sector_2_a_lat,
-        trackLayouts[selectedTrack].sector_2_a_lng,
-        trackLayouts[selectedTrack].sector_2_b_lat,
-        trackLayouts[selectedTrack].sector_2_b_lng
-      );
-    }
-
-    if (trackLayouts[selectedTrack].hasSector3) {
-      lapTimer.setSector3Line(
-        trackLayouts[selectedTrack].sector_3_a_lat,
-        trackLayouts[selectedTrack].sector_3_a_lng,
-        trackLayouts[selectedTrack].sector_3_b_lat,
-        trackLayouts[selectedTrack].sector_3_b_lng
-      );
-    }
-
-    lapTimer.forceLinearInterpolation();
-    lapTimer.reset();
-  } else if (currentPage == PAGE_REPLAY_SELECT_DIRECTION) {
-    selectedDirection = menuSelectionIndex;
-    debug(F("Replay: Selected direction: "));
-    debugln(selectedDirection == RACE_DIRECTION_FORWARD ? "Forward" : "Reverse");
-
-    // Acquire SD access for replay before opening file
-    if (!acquireSDAccess(SD_ACCESS_REPLAY)) {
-      strncpy(internalNotification, "SD card busy!\nCannot start replay", sizeof(internalNotification) - 1);
-      internalNotification[sizeof(internalNotification) - 1] = '\0';
-      switchToDisplayPage(PAGE_INTERNAL_FAULT);
-    } else if (replayFile.open(replayFiles[selectedReplayFile], O_READ)) {
-      replayModeActive = true;
-      replayProcessingComplete = false;
-      switchToDisplayPage(PAGE_REPLAY_PROCESSING);
-    } else {
-      releaseSDAccess(SD_ACCESS_REPLAY);  // Release on failure
-      strncpy(internalNotification, "Failed to open\nreplay file!", sizeof(internalNotification) - 1);
-      internalNotification[sizeof(internalNotification) - 1] = '\0';
-      switchToDisplayPage(PAGE_INTERNAL_FAULT);
     }
   } else if (currentPage == PAGE_REPLAY_EXIT) {
     if (menuSelectionIndex == 0) {
@@ -429,112 +325,13 @@ void handleMenuPageSelection() {
     debugln(F("Bluetooth: Exit selected"));
     BLE_STOP();
     switchToDisplayPage(PAGE_MAIN_MENU);
-  } else if (currentPage == PAGE_SELECT_LOCATION) {
-    selectedLocation = menuSelectionIndex;
-
-    char filepath[FILEPATH_MAX];
-    makeFullTrackPath(locations[selectedLocation], filepath);
-    int parseStatus = parseTrackFile(filepath);
-
-    if (parseStatus == PARSE_STATUS_GOOD) {
-      switchToDisplayPage(PAGE_SELECT_TRACK);
-    } else if (parseStatus == PARSE_STATUS_LOAD_FAILED) {
-      strncpy(internalNotification, "Could not load file!", sizeof(internalNotification) - 1);
-      internalNotification[sizeof(internalNotification) - 1] = '\0';
-      switchToDisplayPage(PAGE_INTERNAL_FAULT);
-    } else if (parseStatus == PARSE_STATUS_PARSE_FAILED) {
-      strncpy(internalNotification, "JSON Parsing Failed!", sizeof(internalNotification) - 1);
-      internalNotification[sizeof(internalNotification) - 1] = '\0';
-      switchToDisplayPage(PAGE_INTERNAL_FAULT);
-    }
-
-    debug(F("Selected Location: "));
-    debugln(locations[selectedLocation]);
-  } else if (currentPage == PAGE_SELECT_TRACK) {
-    selectedTrack = menuSelectionIndex;
-
-    // Check if we're in replay mode (manual track selection after auto-detect failed)
-    if (replayModeActive) {
-      switchToDisplayPage(PAGE_REPLAY_SELECT_DIRECTION);
-    } else {
-      switchToDisplayPage(PAGE_SELECT_DIRECTION);
-    }
-
-    debug(F("Selected Track: "));
-    debugln(tracks[selectedTrack]);
-    debug(F("start_a_lat: "));
-    debugln(trackLayouts[selectedTrack].start_a_lat, 8);
-    debug(F("start_a_lng: "));
-    debugln(trackLayouts[selectedTrack].start_a_lng, 8);
-    debug(F("start_b_lat: "));
-    debugln(trackLayouts[selectedTrack].start_b_lat, 8);
-    debug(F("start_b_lng: "));
-    debugln(trackLayouts[selectedTrack].start_b_lng, 8);
-
-    crossingPointALat = trackLayouts[selectedTrack].start_a_lat;
-    crossingPointALng = trackLayouts[selectedTrack].start_a_lng;
-    crossingPointBLat = trackLayouts[selectedTrack].start_b_lat;
-    crossingPointBLng = trackLayouts[selectedTrack].start_b_lng;
-
-    // initialize laptimer class
-    lapTimer.setStartFinishLine(crossingPointALat, crossingPointALng, crossingPointBLat, crossingPointBLng);
-
-    // Set sector lines if available
-    if (trackLayouts[selectedTrack].hasSector2) {
-      lapTimer.setSector2Line(
-        trackLayouts[selectedTrack].sector_2_a_lat,
-        trackLayouts[selectedTrack].sector_2_a_lng,
-        trackLayouts[selectedTrack].sector_2_b_lat,
-        trackLayouts[selectedTrack].sector_2_b_lng
-      );
-      #ifdef HAS_DEBUG
-      debugln(F("Sector 2 line configured"));
-      #endif
-    }
-
-    if (trackLayouts[selectedTrack].hasSector3) {
-      lapTimer.setSector3Line(
-        trackLayouts[selectedTrack].sector_3_a_lat,
-        trackLayouts[selectedTrack].sector_3_a_lng,
-        trackLayouts[selectedTrack].sector_3_b_lat,
-        trackLayouts[selectedTrack].sector_3_b_lng
-      );
-      #ifdef HAS_DEBUG
-      debugln(F("Sector 3 line configured"));
-      #endif
-    }
-
-    lapTimer.forceLinearInterpolation();
-    lapTimer.reset();
-  } else if (currentPage == PAGE_SELECT_DIRECTION) {
-    selectedDirection = menuSelectionIndex;
-    switchToDisplayPage(GPS_SPEED);
-    debug(F("Selected Direction: "));
-    debugln(selectedDirection == RACE_DIRECTION_FORWARD ? "Forward" : "Reverse");
-    enableLogging = true;
-    trackSelected = true;
   } else if (currentPage == LOGGING_STOP_CONFIRM) {
     if (menuSelectionIndex == 0) {
       switchToDisplayPage(GPS_SPEED);
     } else {
       // LOGGING STOP
-      #ifdef ENABLE_NEW_UI
       endRaceSession();
       switchToDisplayPage(PAGE_MAIN_MENU);
-      #else
-      switchToDisplayPage(PAGE_SELECT_TRACK);
-      enableLogging = false;
-      sdDataLogInitComplete = false;
-      trackSelected = false;
-      dataFile.flush();
-      dataFile.close();
-      releaseSDAccess(SD_ACCESS_LOGGING);
-      lapTimer.reset();
-
-      lapHistoryCount = 0;
-      lastLap = 0;
-      memset(lapHistory, 0, sizeof(lapHistory));
-      #endif
     }
     debug(F("Stop Logging?: "));
     debugln(menuSelectionIndex == 0 ? "NO" : "YES");
@@ -589,11 +386,7 @@ void displayLoop() {
       bool inEndurance = false;
     #endif
 
-    #ifdef ENABLE_NEW_UI
     bool isCrossing = activeTimerCrossing();
-    #else
-    bool isCrossing = lapTimer.getCrossing();
-    #endif
 
     if (
       currentPage != GPS_STATS &&
@@ -613,24 +406,10 @@ void displayLoop() {
       displayPage_bluetooth();
     } else if (currentPage == PAGE_REPLAY_FILE_SELECT) {
       displayPage_replay_file_select();
-    } else if (currentPage == PAGE_REPLAY_DETECTING) {
-      displayPage_replay_detecting();
-    } else if (currentPage == PAGE_REPLAY_SELECT_TRACK) {
-      displayPage_replay_select_track();
-    } else if (currentPage == PAGE_REPLAY_SELECT_DIRECTION) {
-      displayPage_replay_select_direction();
-    } else if (currentPage == PAGE_REPLAY_PROCESSING) {
-      displayPage_replay_processing();
     } else if (currentPage == PAGE_REPLAY_RESULTS) {
       displayPage_replay_results();
     } else if (currentPage == PAGE_REPLAY_EXIT) {
       displayPage_replay_exit();
-    } else if (currentPage == PAGE_SELECT_LOCATION) {
-      displayPage_select_location();
-    } else if (currentPage == PAGE_SELECT_TRACK) {
-      displayPage_select_track();
-    } else if (currentPage == PAGE_SELECT_DIRECTION) {
-      displayPage_select_direction();
     } else if (currentPage == GPS_STATS) {
       displayPage_gps_stats();
     } else if (currentPage == GPS_SPEED) {
@@ -692,13 +471,8 @@ void displayLoop() {
   if (
     currentPage == PAGE_MAIN_MENU ||
     currentPage == PAGE_BLUETOOTH ||
-    currentPage == PAGE_SELECT_LOCATION ||
-    currentPage == PAGE_SELECT_TRACK ||
-    currentPage == PAGE_SELECT_DIRECTION ||
     currentPage == LOGGING_STOP_CONFIRM ||
     currentPage == PAGE_REPLAY_FILE_SELECT ||
-    currentPage == PAGE_REPLAY_SELECT_TRACK ||
-    currentPage == PAGE_REPLAY_SELECT_DIRECTION ||
     currentPage == PAGE_REPLAY_EXIT
   ) {
     insideMenu = true;
@@ -706,30 +480,17 @@ void displayLoop() {
       menuLimit = 3; // Race, Replay, Download
     } else if (currentPage == PAGE_BLUETOOTH) {
       menuLimit = 1; // Only "Exit" option
-    } else if (currentPage == PAGE_SELECT_LOCATION) {
-      menuLimit = numOfLocations;
-    } else if (currentPage == PAGE_SELECT_TRACK) {
-      menuLimit = numOfTracks;
     } else if (
-      currentPage == PAGE_SELECT_DIRECTION ||
       currentPage == LOGGING_STOP_CONFIRM ||
       currentPage == PAGE_REPLAY_EXIT
     ) {
       menuLimit = 2;
     } else if (currentPage == PAGE_REPLAY_FILE_SELECT) {
       menuLimit = numReplayFiles > 0 ? numReplayFiles : 1;
-    } else if (currentPage == PAGE_REPLAY_SELECT_TRACK) {
-      menuLimit = numOfTracks;
-    } else if (currentPage == PAGE_REPLAY_SELECT_DIRECTION) {
-      menuLimit = 2;
     }
   }
 
-  if (
-    currentPage == PAGE_INTERNAL_FAULT ||
-    currentPage == PAGE_REPLAY_PROCESSING ||
-    currentPage == PAGE_REPLAY_DETECTING
-  ) {
+  if (currentPage == PAGE_INTERNAL_FAULT) {
     buttonsDisabled = true;
   }
 
@@ -797,11 +558,7 @@ void displayLoop() {
       debugln(F("Button Left"));
       // Special handling for replay results - left goes to lap list
       if (currentPage == PAGE_REPLAY_RESULTS) {
-        #ifdef ENABLE_NEW_UI
         if (lapHistoryCount > 0) {
-        #else
-        if (lapTimer.getLaps() > 0) {
-        #endif
           current_lap_list_page = 0;
           switchToDisplayPage(GPS_LAP_LIST);
         }
