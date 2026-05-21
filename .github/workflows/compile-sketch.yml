@@ -40,14 +40,13 @@ jobs:
               source-url: https://files.seeedstudio.com/arduino/package_seeeduino_boards_index.json
           libraries: |
             - name: ArduinoJson
-            - name: SdFat
+            - name: SdFat - Adafruit Fork
             - name: Adafruit GFX Library
             - name: Adafruit SH110X
             - name: Adafruit SSD1306
             - name: SparkFun u-blox GNSS v3
             - name: Seeed Arduino LSM6DS3
             - name: ArxTypeTraits
-            - name: Adafruit TinyUSB Library
             - source-url: https://github.com/TheAngryRaven/DovesLapTimer.git
           sketch-paths: |
             - sketch/BirdsEye
