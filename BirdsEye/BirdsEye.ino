@@ -71,6 +71,7 @@
 #include "display_pages.h"
 #include "display_ui.h"
 #include "gps_functions.h"
+#include "haversine.h"
 #include "replay.h"
 #include "sd_functions.h"
 #include "settings.h"

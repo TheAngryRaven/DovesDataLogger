@@ -7,9 +7,6 @@
 // lapHistory[] for the results page. No streaming, no parsing of
 // individual GPS rows — that's why the results screen pops up
 // instantly.
-//
-// haversineDistanceMiles() lives here too — used by the auto-track
-// detection loop in BirdsEye.ino.
 ///////////////////////////////////////////
 
 #include "SdFat.h"
@@ -24,9 +21,6 @@ bool buildReplayFileList();
 // Read one line from `file` into `buffer` (drops \r, stops at \n /
 // EOF). Returns false on EOF when nothing was buffered.
 bool readReplayLine(File& file, char* buffer, int bufferSize);
-
-// Great-circle distance between two lat/lng pairs in miles.
-double haversineDistanceMiles(double lat1, double lng1, double lat2, double lng2);
 
 // Parse the reserved 1KB header of a .dovex file (lines 1-4) and
 // populate dovexReplay* globals plus lapHistory[]. Returns false if

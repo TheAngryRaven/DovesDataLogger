@@ -3,9 +3,6 @@
 // Instant DOVEX session replay: parses the reserved header at the
 // start of a .dovex file (datetime, driver, course, lap times) and
 // populates lapHistory[] for the results page.
-//
-// haversineDistanceMiles() also lives here — used by the auto-track
-// detection loop in BirdsEye.ino.
 ///////////////////////////////////////////
 
 #include "replay.h"
@@ -163,25 +160,6 @@ bool readReplayLine(File& file, char* buffer, int bufferSize) {
   }
 
   return true;
-}
-
-/**
- * @brief Calculate haversine distance between two GPS points in miles
- */
-double haversineDistanceMiles(double lat1, double lng1, double lat2, double lng2) {
-  const double R = 3958.8; // Earth radius in miles
-  // Note: DEG_TO_RAD is already defined by Arduino
-
-  double dLat = (lat2 - lat1) * DEG_TO_RAD;
-  double dLng = (lng2 - lng1) * DEG_TO_RAD;
-
-  double a = sin(dLat / 2) * sin(dLat / 2) +
-             cos(lat1 * DEG_TO_RAD) * cos(lat2 * DEG_TO_RAD) *
-             sin(dLng / 2) * sin(dLng / 2);
-
-  double c = 2 * atan2(sqrt(a), sqrt(1 - a));
-
-  return R * c;
 }
 
 ///////////////////////////////////////////
