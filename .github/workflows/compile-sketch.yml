@@ -44,7 +44,7 @@ jobs:
             - name: Adafruit GFX Library
             - name: Adafruit SH110X
             - name: Adafruit SSD1306
-            - name: SparkFun u-blox GNSS v3 Arduino Library
+            - name: SparkFun u-blox GNSS v3
             - name: Seeed Arduino LSM6DS3
             - name: ArxTypeTraits
             - name: Adafruit TinyUSB Library
