@@ -6,6 +6,7 @@
 
 #include "gps_functions.h"
 #include "gps_time.h"
+#include "gps_validation.h"
 
 ///////////////////////////////////////////
 // GPS SERIAL BUFFER
@@ -322,32 +323,20 @@ void GPS_LOOP() {
       // Log every PVT update (~25Hz)
 
       // Snapshot GPS values for logging
-      double snapLat = gpsData.latitudeDegrees;
-      double snapLng = gpsData.longitudeDegrees;
-      double snapAlt = gpsData.altitude;
-      double snapHdop = gpsData.HDOP;
-      double snapSpeed = gpsData.speed;
-      int snapSats = gpsData.satellites;
+      const double snapLat   = gpsData.latitudeDegrees;
+      const double snapLng   = gpsData.longitudeDegrees;
+      const double snapAlt   = gpsData.altitude;
+      const double snapHdop  = gpsData.HDOP;
+      const double snapSpeed = gpsData.speed;            // knots, for sanity
+      const int    snapSats  = gpsData.satellites;
+      const double snapSpeedMph = snapSpeed * 1.15078;
 
-      // Convert speed to mph
-      double snapSpeedMph = snapSpeed * 1.15078;
-
-      // VALIDATE: Minimal checks to prevent genuinely corrupt data from being logged
-      bool hasActualFix = (snapSats > 0);
-      bool validCoords = !(snapLat == 0.0 && snapLng == 0.0);
-      bool validLat = (snapLat >= -90.0 && snapLat <= 90.0);
-      bool validLng = (snapLng >= -180.0 && snapLng <= 180.0);
-      bool validAlt = (snapAlt >= -1000.0 && snapAlt <= 50000.0);
-      bool validHdop = (snapHdop > 0.0);
-      bool validSpeed = (snapSpeedMph >= 0.0 && snapSpeedMph <= 500.0);
-
-      bool noNaN = !isnan(snapLat) && !isnan(snapLng) && !isnan(snapAlt) &&
-                   !isnan(snapHdop) && !isnan(snapSpeed);
-      bool noInf = !isinf(snapLat) && !isinf(snapLng) && !isinf(snapAlt) &&
-                   !isinf(snapHdop) && !isinf(snapSpeed);
-
-      if (!hasActualFix || !validCoords || !validLat || !validLng || !validAlt ||
-          !validHdop || !validSpeed || !noNaN || !noInf) {
+      // Reject obviously-corrupt samples (sats=0, Null Island, NaN/Inf,
+      // out-of-range lat/lng/alt/hdop/speed). The rule set lives in
+      // gps_validation::isSampleValid and is exercised by host tests.
+      const gps_validation::GpsSample snapForCheck = {
+          snapLat, snapLng, snapAlt, snapHdop, snapSpeedMph, snapSats};
+      if (!gps_validation::isSampleValid(snapForCheck)) {
         // Skip this sample - data is not trustworthy
       } else {
         char csvLine[256];
@@ -367,19 +356,16 @@ void GPS_LOOP() {
         dtostrf(accelY, 1, 3, accelYStr);
         dtostrf(accelZ, 1, 3, accelZStr);
 
-        // String validation
+        // dtostrf() can produce garbage (empty, too-long, non-numeric) on
+        // some BSPs when given NaN/Inf even though the sample passed
+        // validation. Walk every formatted string and reject the row if
+        // any look wrong.
         bool stringsValid = true;
-        const char* strs[] = {latStr, lngStr, hdopStr, speedStr, altStr, headingStr, hAccStr, accelXStr, accelYStr, accelZStr};
-        for (int i = 0; i < 10 && stringsValid; i++) {
-          int len = strlen(strs[i]);
-          if (len == 0 || len > 20) {
+        const char* strs[] = {latStr, lngStr, hdopStr, speedStr, altStr,
+                              headingStr, hAccStr, accelXStr, accelYStr, accelZStr};
+        for (size_t i = 0; i < sizeof(strs)/sizeof(strs[0]) && stringsValid; i++) {
+          if (!gps_validation::isNumericString(strs[i], 20)) {
             stringsValid = false;
-          }
-          for (int j = 0; j < len && stringsValid; j++) {
-            char c = strs[i][j];
-            if (!((c >= '0' && c <= '9') || c == '.' || c == '-')) {
-              stringsValid = false;
-            }
           }
         }
 
