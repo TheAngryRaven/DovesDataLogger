@@ -1,0 +1,34 @@
+name: unit-tests
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: host unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S tests -B tests/build
+
+      - name: Build
+        run: cmake --build tests/build --parallel
+
+      - name: Run tests
+        run: ctest --test-dir tests/build --output-on-failure
+
+      - name: Upload test binary on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: birdseye_tests-failed
+          path: tests/build/birdseye_tests
+          if-no-files-found: ignore
