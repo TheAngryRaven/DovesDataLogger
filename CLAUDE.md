@@ -68,7 +68,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 
 | Path | Contents |
 |---|---|
-| `.github/workflows/` | CI: compile-sketch (XIAO smoke test), arduino-lint, unit-tests |
+| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy |
 | `tests/` | Host doctest harness (CMake) for the pure-logic units |
 | `SDCARD/TRACKS/` | Example track JSON files |
 | `CASE/` | 3D-printable enclosure STLs |

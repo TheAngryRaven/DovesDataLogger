@@ -1,0 +1,25 @@
+# clang-tidy configuration for the host-buildable pure-logic units
+# (BirdsEye/*.cpp that compile without Arduino headers). The Arduino
+# .ino modules are NOT analyzed here — they need the full toolchain and
+# are covered by the compile-sketch job instead.
+#
+# Check selection favors high-signal correctness families and skips the
+# style/opinion checks that fight intentional embedded idioms (C arrays,
+# pointer math, fixed magic constants).
+Checks: >
+  bugprone-*,
+  performance-*,
+  portability-*,
+  misc-*,
+  clang-analyzer-*,
+  -bugprone-easily-swappable-parameters,
+  -misc-no-recursion,
+  -misc-include-cleaner,
+  -misc-use-anonymous-namespace
+
+WarningsAsErrors: '*'
+
+# Only diagnose our own headers, never third-party (doctest, SdFat, etc.).
+HeaderFilterRegex: 'BirdsEye/.*\.h$'
+
+FormatStyle: none

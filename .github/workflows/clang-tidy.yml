@@ -1,0 +1,38 @@
+name: clang-tidy
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  clang-tidy:
+    name: static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install clang-tidy
+        run: sudo apt-get update && sudo apt-get install -y clang-tidy
+
+      # The pure-logic units compile on a host toolchain; generating the
+      # test build's compile_commands.json gives clang-tidy the exact
+      # flags each .cpp is built with.
+      - name: Generate compile database
+        run: cmake -S tests -B tests/build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      # Analyze only our extracted units. Third-party headers (doctest,
+      # system) are filtered out by HeaderFilterRegex in .clang-tidy, and
+      # WarningsAsErrors makes any finding fail the job.
+      - name: Run clang-tidy
+        run: |
+          clang-tidy -p tests/build \
+            BirdsEye/haversine.cpp \
+            BirdsEye/gps_time.cpp \
+            BirdsEye/gps_validation.cpp \
+            BirdsEye/dovex_header.cpp \
+            BirdsEye/filename_validator.cpp

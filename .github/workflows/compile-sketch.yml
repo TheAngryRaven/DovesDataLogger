@@ -43,6 +43,43 @@ jobs:
             - BirdsEye
           enable-deltas-report: true
 
+      # Hard flash-size gate. The XIAO nRF52840's app flash is shared
+      # with the SoftDevice + bootloader; running it dry bricks OTA and
+      # leaves no room to grow. Fail the build if the sketch uses more
+      # than FLASH_BUDGET_PERCENT of the BSP-reported maximum. Uses the
+      # absolute usage from the compile report (no base-branch compare
+      # needed) and degrades to a warning if the report can't be parsed.
+      - name: Flash size budget gate
+        env:
+          FLASH_BUDGET_PERCENT: 90
+        run: |
+          report="$(find sketches-reports -name '*.json' | head -1)"
+          if [ -z "$report" ]; then
+            echo "::warning::No compile report found — skipping size gate"
+            exit 0
+          fi
+          echo "Reading $report"
+          flash_abs="$(jq -r '
+            [.boards[].sketches[].sizes[]
+             | select(.name=="flash")
+             | (if (.absolute|type)=="object" then .absolute.current else .absolute end)]
+            | first // empty' "$report")"
+          flash_max="$(jq -r '
+            [.boards[].sketches[].sizes[]
+             | select(.name=="flash") | .maximum]
+            | first // empty' "$report")"
+          if [ -z "$flash_abs" ] || [ -z "$flash_max" ] || [ "$flash_max" = "0" ]; then
+            echo "::warning::Could not read flash usage from report — skipping size gate"
+            exit 0
+          fi
+          pct="$(awk "BEGIN { printf \"%.1f\", ($flash_abs / $flash_max) * 100 }")"
+          echo "Flash: ${flash_abs} / ${flash_max} bytes (${pct}%), budget ${FLASH_BUDGET_PERCENT}%"
+          over="$(awk "BEGIN { print (($flash_abs / $flash_max) * 100 > ${FLASH_BUDGET_PERCENT}) ? 1 : 0 }")"
+          if [ "$over" = "1" ]; then
+            echo "::error::Flash usage ${pct}% exceeds budget ${FLASH_BUDGET_PERCENT}% — reduce footprint or raise the budget deliberately"
+            exit 1
+          fi
+
       - name: Upload size deltas report
         if: always()
         uses: actions/upload-artifact@v4
