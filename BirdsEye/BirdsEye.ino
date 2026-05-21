@@ -70,6 +70,7 @@
 #include "bluetooth.h"
 #include "display_pages.h"
 #include "display_ui.h"
+#include "dovex_header.h"
 #include "gps_functions.h"
 #include "haversine.h"
 #include "replay.h"
@@ -963,67 +964,41 @@ void autoRaceModeCheck() {
 }
 
 /**
- * @brief Write DOVEX header metadata into reserved 1KB area at file start
+ * @brief Write DOVEX header metadata into the reserved 1 KB at the
+ *        start of the open log file. Layout + padding live in
+ *        dovex_header::format(); this just wires up the I/O.
  */
 void writeDovexHeader() {
   if (!dataFile.isOpen()) return;
 
-  // Build line 1: datetime, driver_name, course_name, short_name, best_lap_time, optimal_lap_time
-  char headerLine[256];
-  char bestLapStr[16] = "N/A";
-  char optimalStr[16] = "N/A";
-
-  unsigned long bestLap = activeTimerBestLapTime();
-  if (bestLap > 0) {
-    snprintf(bestLapStr, sizeof(bestLapStr), "%lu", bestLap);
-  }
-
-  unsigned long optimalLap = activeTimerOptimalLapTime();
-  if (optimalLap > 0) {
-    snprintf(optimalStr, sizeof(optimalStr), "%lu", optimalLap);
-  }
+  char datetime[24];
+  snprintf(datetime, sizeof(datetime), "20%02d-%02d-%02d %02d:%02d:%02d",
+           gpsData.year, gpsData.month, gpsData.day,
+           gpsData.hour, gpsData.minute, gpsData.seconds);
 
   const char* courseName = "Lap Anything";
-  const char* shortName = "";
+  const char* shortName  = "";
   if (courseManager != nullptr) {
     const char* cn = courseManager->getActiveCourseName();
     if (cn) courseName = cn;
     shortName = courseManager->getShortName();
   }
 
-  // Format: datetime, driver, course, short_name, best_lap_ms, optimal_ms
-  snprintf(headerLine, sizeof(headerLine), "20%02d-%02d-%02d %02d:%02d:%02d,%s,%s,%s,%s,%s",
-           gpsData.year, gpsData.month, gpsData.day,
-           gpsData.hour, gpsData.minute, gpsData.seconds,
-           settingDriverName, courseName, shortName,
-           bestLapStr, optimalStr);
+  const dovex_header::Metadata meta = {
+      datetime,
+      settingDriverName,
+      courseName,
+      shortName,
+      activeTimerBestLapTime(),
+      activeTimerOptimalLapTime(),
+  };
 
-  // Build line 4: comma-separated lap times
-  // 1 KB header fits ~100 laps at ~8 chars each
-  static char lapLine[800];
-  int lapLineLen = 0;
-  for (int i = 0; i < lapHistoryCount && lapLineLen < (int)sizeof(lapLine) - 16; i++) {
-    if (i > 0) {
-      lapLine[lapLineLen++] = ',';
-    }
-    lapLineLen += snprintf(lapLine + lapLineLen, sizeof(lapLine) - lapLineLen, "%lu", lapHistory[i]);
-  }
-  lapLine[lapLineLen] = '\0';
+  static char headerBuf[dovex_header::kHeaderSize];
+  dovex_header::format(headerBuf, sizeof(headerBuf), meta,
+                        lapHistory, lapHistoryCount);
 
-  // Seek to beginning and write header (with column labels for readability)
   dataFile.seekSet(0);
-  dataFile.println(F("datetime,driver,course,short_name,best_lap_ms,optimal_ms"));
-  dataFile.println(headerLine);
-  dataFile.println(F("laps_ms"));
-  dataFile.println(lapLine);
-
-  // Pad remaining bytes to DOVEX_HEADER_SIZE with newlines
-  uint32_t currentPos = dataFile.curPosition();
-  while (currentPos < DOVEX_HEADER_SIZE) {
-    dataFile.write('\n');
-    currentPos++;
-  }
-
+  dataFile.write(reinterpret_cast<const uint8_t*>(headerBuf), sizeof(headerBuf));
   dataFile.flush();
   debugln(F("DOVEX header written"));
 }

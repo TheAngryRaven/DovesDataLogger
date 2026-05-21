@@ -14,9 +14,11 @@ add_executable(birdseye_tests
   haversine_test.cpp
   gps_time_test.cpp
   gps_validation_test.cpp
+  dovex_header_test.cpp
   ${BIRDSEYE_DIR}/haversine.cpp
   ${BIRDSEYE_DIR}/gps_time.cpp
   ${BIRDSEYE_DIR}/gps_validation.cpp
+  ${BIRDSEYE_DIR}/dovex_header.cpp
 )
 
 target_include_directories(birdseye_tests PRIVATE
