@@ -5,6 +5,7 @@
 ///////////////////////////////////////////
 
 #include "gps_functions.h"
+#include "gps_time.h"
 
 ///////////////////////////////////////////
 // GPS SERIAL BUFFER
@@ -114,85 +115,35 @@ void stopGpsSerialTimer() {
 }
 
 /**
-  * @brief Returns the GPS time since midnight in milliseconds
-  *
-  * @return unsigned long The time since midnight in milliseconds, or 0 if GPS unavailable
+  * @brief Returns the GPS time since midnight in milliseconds, or 0 if GPS unavailable.
+  *        The pure math lives in gps_time::timeOfDayMs — this just plumbs through gpsData.
   */
 unsigned long getGpsTimeInMilliseconds() {
   if (!gpsInitialized) return 0;
-
-  unsigned long timeInMillis = 0;
-  timeInMillis += gpsData.hour * 3600000ULL;   // Convert hours to milliseconds
-  timeInMillis += gpsData.minute * 60000ULL;   // Convert minutes to milliseconds
-  timeInMillis += gpsData.seconds * 1000ULL;   // Convert seconds to milliseconds
-  timeInMillis += gpsData.milliseconds;        // Add the milliseconds part
-
-  return timeInMillis;
+  return gps_time::timeOfDayMs(gpsData.hour, gpsData.minute,
+                               gpsData.seconds, gpsData.milliseconds);
 }
 
 /**
-  * @brief Converts GPS date/time to Unix timestamp (seconds since Jan 1, 1970)
-  *
-  * @return unsigned long Unix timestamp in seconds, or 0 if GPS unavailable
+  * @brief Converts GPS date/time to Unix timestamp in seconds. 0 if GPS unavailable.
+  *        gpsData.year is the 2-digit year offset from 2000.
   */
 unsigned long getGpsUnixTimestamp() {
   if (!gpsInitialized) return 0;
-
-  // Days in each month (non-leap year)
-  const uint8_t daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-
-  uint16_t year = 2000 + gpsData.year;
-  uint8_t month = gpsData.month;
-  uint8_t day = gpsData.day;
-
-  // Calculate days since Unix epoch (Jan 1, 1970)
-  unsigned long days = 0;
-
-  // Add days for complete years since 1970
-  for (uint16_t y = 1970; y < year; y++) {
-    if ((y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)) {
-      days += 366; // Leap year
-    } else {
-      days += 365;
-    }
-  }
-
-  // Add days for complete months this year
-  for (uint8_t m = 1; m < month; m++) {
-    days += daysInMonth[m - 1];
-    // Add leap day if February and leap year
-    if (m == 2 && ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0))) {
-      days++;
-    }
-  }
-
-  // Add remaining days
-  days += day - 1;
-
-  // Convert to seconds and add time of day
-  unsigned long timestamp = days * 86400UL;
-  timestamp += gpsData.hour * 3600UL;
-  timestamp += gpsData.minute * 60UL;
-  timestamp += gpsData.seconds;
-
-  return timestamp;
+  return static_cast<unsigned long>(gps_time::unixTimestampSeconds(
+      2000 + gpsData.year, gpsData.month, gpsData.day,
+      gpsData.hour, gpsData.minute, gpsData.seconds));
 }
 
 /**
-  * @brief Converts GPS date/time to Unix timestamp with millisecond precision
-  *
-  * @return unsigned long long Unix timestamp in milliseconds since Jan 1, 1970
+  * @brief Converts GPS date/time to Unix timestamp with millisecond precision.
+  *        0 if GPS unavailable.
   */
 unsigned long long getGpsUnixTimestampMillis() {
   if (!gpsInitialized) return 0;
-
-  // Get the Unix timestamp in seconds
-  unsigned long long timestampMillis = (unsigned long long)getGpsUnixTimestamp() * 1000ULL;
-
-  // Add the milliseconds from GPS
-  timestampMillis += gpsData.milliseconds;
-
-  return timestampMillis;
+  return gps_time::unixTimestampMillis(
+      2000 + gpsData.year, gpsData.month, gpsData.day,
+      gpsData.hour, gpsData.minute, gpsData.seconds, gpsData.milliseconds);
 }
 
 // PVT callback — called synchronously from checkCallbacks() when a new
@@ -435,23 +386,11 @@ void GPS_LOOP() {
         if (!stringsValid) {
           // dtostrf produced garbage - skip this entry silently
         } else {
-          unsigned long long timestamp = getGpsUnixTimestampMillis();
+          // Arduino lacks %llu in printf; format the 64-bit timestamp
+          // ourselves into a stack buffer, then splice via %s.
           char timestampStr[24];
-          if (timestamp == 0) {
-            strcpy(timestampStr, "0");
-          } else {
-            char temp[24];
-            int i = 0;
-            unsigned long long t = timestamp;
-            while (t > 0) {
-              temp[i++] = '0' + (t % 10);
-              t /= 10;
-            }
-            for (int j = 0; j < i; j++) {
-              timestampStr[j] = temp[i - 1 - j];
-            }
-            timestampStr[i] = '\0';
-          }
+          gps_time::u64ToDecimalString(getGpsUnixTimestampMillis(),
+                                        timestampStr, sizeof(timestampStr));
 
           snprintf(csvLine, sizeof(csvLine), "%s,%d,%s,%s,%s,%s,%s,%s,%s,%d,%s,%s,%s",
                    timestampStr, snapSats, hdopStr, latStr, lngStr,

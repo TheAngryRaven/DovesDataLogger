@@ -12,7 +12,9 @@ set(BIRDSEYE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../BirdsEye)
 add_executable(birdseye_tests
   test_main.cpp
   haversine_test.cpp
+  gps_time_test.cpp
   ${BIRDSEYE_DIR}/haversine.cpp
+  ${BIRDSEYE_DIR}/gps_time.cpp
 )
 
 target_include_directories(birdseye_tests PRIVATE
