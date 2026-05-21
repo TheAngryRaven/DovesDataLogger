@@ -15,8 +15,7 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
 - **25Hz GPS Logging** - High-frequency data capture straight to SD card
 - **Accelerometer** - On-board 6-axis IMU when using Seeed XIAO nRF52840 Sense, +/-16g
 - **RPM Monitoring** - Tachometer input with noise filtering for ignition systems
-- **"Just Drive" Mode** - Automatic track detection, course detection, and lap timing — no manual selection needed (`ENABLE_NEW_UI`)
-- **Track & Layout Selection** - Multiple tracks and configurations loaded from SD card (legacy mode)
+- **"Just Drive" Mode** - Automatic track detection, course detection, and lap timing — no manual selection needed
 - **Sector Timing** - Optional 2 and 3-sector support for detailed performance analysis
 - **Lap Anything** - Automatic waypoint-based lap timing when no track files match or no sectors configured
 - **Lap Timing** - Current lap, best lap, last lap, and optimal lap calculation
@@ -25,8 +24,7 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
 - **Speed Display** - Large, easy-to-read speed display
 - **Sleep Mode** - Low-power sleep with display/GPS/IMU off (~2-4 mA), instant wake on button press or engine start
 - **DOVEX Format** - Crash-safe logging with reserved header for instant replay
-- **Simple CSV Format** - Legacy `.dove` data files with millisecond-precision timestamps
-- **Review Data** - Instant replay of DOVEX session headers (new UI), or streamed replay of legacy logs (slower)
+- **Review Data** - Instant replay of DOVEX session headers on-device
 
 #### WebApp Features (no login)
 - **Bluetooth Downloads** - Can now download files directly to [HackTheTrack.net](http://HackTheTrack.net)
@@ -141,7 +139,7 @@ Two formats are supported. The device auto-detects which format is used.
 }
 ```
 
-**Legacy format** (still supported):
+**Older format** (still parsed, but the device falls back to Lap Anything because there's no `lengthFt` for course detection to rank by):
 
 ```json
 [
@@ -197,7 +195,6 @@ Settings are stored in `/SETTINGS.json` on the SD card. The file is created auto
   "driver_name": "Driver",
   "lap_detection_distance": "7",
   "waypoint_detection_distance": "30",
-  "use_legacy_csv": "false",
   "waypoint_speed": "30"
 }
 ```
@@ -209,43 +206,29 @@ Settings are stored in `/SETTINGS.json` on the SD card. The file is created auto
 | `driver_name` | Driver name logged in DOVEX session header | `Driver` |
 | `lap_detection_distance` | Crossing detection threshold in meters | `7` |
 | `waypoint_detection_distance` | Waypoint proximity zone in meters (Lap Anything) | `30` |
-| `use_legacy_csv` | Use legacy `.dove` CSV format instead of DOVEX | `false` |
 | `waypoint_speed` | Minimum speed in mph to activate lap timing | `30` |
 
-## Data Formats
+## Data Format
 
-### DOVEX Format (default)
-
-DOVEX files (`.dovex`) use a reserved 8 KB header for session metadata, with GPS data streaming after byte 8192. This enables crash-safe logging and instant on-device replay.
+DOVEX files (`.dovex`) use a reserved **1 KB** header for session metadata, with GPS data streaming after byte 1024. This enables crash-safe logging and instant on-device replay.
 
 **Structure:**
 ```
-Bytes 0-8191:    Session header (written when session ends)
+Bytes 0-1023:    Session header (written when session ends)
   Line 1:        datetime,driver,course,short_name,best_lap_ms,optimal_ms   (column labels)
   Line 2:        2025-03-11 14:30:00,Driver,Normal,OKC,62345,61890          (session metadata)
   Line 3:        laps_ms                                                     (column label)
   Line 4:        65432,63210,62345,64567,...                                 (all lap times in ms)
-  Remaining:     \n padding to byte 8192
+  Remaining:     \n padding to byte 1024
 
-Bytes 8192+:     GPS data
+Bytes 1024+:     GPS data
   Header row:    timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z
   Data rows:     1741128001234,12,0.8,28.41270817,-81.37973266,87.32,125.45,182.34,1.25,8450,0.123,-0.945,0.032
 ```
 
-The 8 KB header can store ~1000 lap times. If the device loses power mid-session, the header will be empty but all GPS data after byte 8192 is still valid and recoverable.
+The 1 KB header fits about 100 lap times at ~8 characters per entry. If the device loses power mid-session the header is left blank but all GPS data after byte 1024 is still valid and recoverable — the metadata write is the LAST thing a clean session does, so file integrity is independent of it.
 
 **File naming:** `20YYMMDD_HHMM.dovex` (e.g. `20240115_1430.dovex`)
-
-### Legacy CSV Format
-
-When `use_legacy_csv` is set to `true`, data is logged in flat CSV format (`.dove` files).
-
-```csv
-timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z
-1741128001234,12,0.8,28.41270817,-81.37973266,87.32,125.45,182.34,1.25,8450,0.123,-0.945,0.032
-```
-
-**File naming:** `[TRACK]_[LAYOUT]_[DIRECTION]_[YYYY]_[MMDD]_[HHMM].dove` (e.g. `OKC_Normal_fwd_2024_0115_1430.dove`)
 
 ### Column Reference
 
@@ -263,34 +246,32 @@ timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x
 ## File Structure
 
 ```
-BirdsEye/
-├── BirdsEye.ino              # Entry point: globals, setup(), loop(), state machine
-├── project.h                 # Shared types, debug macros, constants
-├── display_config.h          # Display driver abstraction (SH110X/SSD1306)
-├── gps_config.h              # GPS configuration constants (baud, nav rate)
-├── images.h                  # PROGMEM bitmap data (splash, animations)
+DovesDataLogger/                  # repo root
+├── BirdsEye/                     # sketch (folder name must match BirdsEye.ino)
+│   ├── BirdsEye.ino              # Entry point: globals, setup(), loop(), state machine
+│   ├── project.h                 # Shared types, debug macros, constants
+│   ├── display_config.h          # Display driver abstraction (SH110X/SSD1306)
+│   ├── gps_config.h              # GPS configuration constants (baud, nav rate)
+│   ├── images.h                  # PROGMEM bitmap data (splash, animations)
+│   ├── accelerometer.{h,ino}     # LSM6DS3 IMU init and g-force reads
+│   ├── bluetooth.{h,ino}         # BLE service (file transfer, settings, track sync)
+│   ├── display_pages.{h,ino}     # All page rendering functions (displayPage_*())
+│   ├── display_ui.{h,ino}        # Display init, button handling, menu navigation
+│   ├── gps_functions.{h,ino}     # GPS init, PVT callback, time conversion, logging
+│   ├── replay.{h,ino}            # Instant DOVEX header replay + haversine helper
+│   ├── sd_functions.{h,ino}      # SD init, track JSON parsing, track manifest
+│   ├── settings.{h,ino}          # Persistent JSON settings (/SETTINGS.json)
+│   ├── tachometer.{h,ino}        # Falling-edge ISR, Kalman-filtered RPM
+│   ├── diagram.json              # Wokwi simulator wiring
+│   └── libraries.txt             # Wokwi simulator library list
 │
-├── display_ui.ino            # Display init, button handling, menu navigation
-├── display_pages.ino         # All page rendering functions (displayPage_*())
-├── gps_functions.ino         # GPS init, PVT callback, time conversion, logging
-├── sd_functions.ino          # SD init, track JSON parsing, track manifest
-├── accelerometer.ino         # LSM6DS3 IMU init and g-force reads
-├── tachometer.ino            # Falling-edge ISR, EMA-filtered RPM
-├── bluetooth.ino             # BLE service (file transfer, settings, track sync)
-├── replay.ino                # Session replay (DOVEX header / legacy streaming)
-├── settings.ino              # Persistent JSON settings (/SETTINGS.json)
-│
-├── CASE/                     # 3D printable enclosure files
-│   └── *.STL
-│
-├── SDCARD/                   # Example SD card file structure
-│   └── TRACKS/
-│       ├── OKC.json
-│       ├── BMP.json
-│       └── ...
-│
-├── TACHOMETER/               # Tachometer circuit documentation
-└── README.md                 # This file
+├── .github/workflows/            # CI: compile-sketch + arduino-lint
+├── CASE/                         # 3D printable enclosure files (STL + STEP)
+├── SDCARD/TRACKS/                # Example track JSON files
+├── TACHOMETER/                   # Tachometer circuit documentation
+├── README.md                     # This file
+├── CLAUDE.md                     # AI-assistant project guide
+└── LICENSE                       # GPL v3
 ```
 
 ## Required Libraries
@@ -342,26 +323,19 @@ BirdsEye/
 - **Hold Left + Right (5s)**: Enter sleep mode (from main menu)
 - **Hold Select + Side (5s)**: Reboot device (from any page)
 
-**Startup Sequence (New UI / "Just Drive" mode):**
+**Startup Sequence ("Just Drive" mode):**
 1. Power on → Boot screen → Main menu
 2. Start driving — device auto-enters race mode at 10+ mph or 500+ RPM
 3. GPS fix acquired → DOVEX logging starts immediately
 4. Track auto-detected via GPS proximity → course detection begins
 5. Lap timing activates automatically (sector timing if configured, "Lap Anything" otherwise)
 
-**Startup Sequence (Legacy mode):**
-1. Power on → Boot screen
-2. Select Track location
-3. Select Track layout
-4. Select Direction (Forward/Reverse)
-5. Logging begins automatically when GPS fix is acquired
-
 **Ending Session:**
-- **Auto-idle** (new UI): stops automatically after 60 seconds below 2 mph
+- **Auto-idle**: stops automatically after 60 seconds below 2 mph
 - **Manual**: navigate to "END RACE" page (only accessible when speed < 2 mph), confirm to stop
 - Returns to main menu
 
-**Sleep Mode** (new UI):
+**Sleep Mode:**
 - Activates via 5-second left+right hold on main menu, or automatically after 5 minutes idle on main menu
 - Turns off display, GPS (backup mode), and IMU — draws ~2-4 mA vs ~120 mA active
 - Wakes instantly on any button press or tachometer pulse (engine start)
@@ -461,7 +435,6 @@ Look at existing pages like `displayPage_gps_speed()` or `displayPage_tachometer
 - Maximum layouts per track: 10
 - Maximum lap history: 1000 laps per session
 - GPS coordinates stored with 8 decimal places (~1.1mm precision)
-- `ENABLE_NEW_UI` compile flag controls new vs legacy behavior (defined in `BirdsEye.ino`)
 - BLE disconnect triggers automatic device reboot (ensures settings changes take effect)
 
 ## License
