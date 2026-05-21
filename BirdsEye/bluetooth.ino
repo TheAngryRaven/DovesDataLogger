@@ -4,6 +4,7 @@
 ///////////////////////////////////////////
 
 #include "bluetooth.h"
+#include "filename_validator.h"
 
 // Deferred settings command buffer (BLE callback -> main loop)
 static volatile bool settingsCmdPending = false;
@@ -320,11 +321,22 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
     // Skip "GET:" prefix and trim leading whitespace
     char* filename = buffer + 4;
     while (*filename == ' ') filename++;
+    // Reject path traversal / FAT-unsafe names before touching SD.
+    if (!filename_validator::isValidFilename(filename, filename_validator::kMaxBleFilenameLen)) {
+      debugln(F("BLE: GET rejected — bad filename"));
+      fileStatusChar.notify((uint8_t*)"ERROR", 5);
+      return;
+    }
     bleStartFileTransfer(filename);
   } else if (strncmp(buffer, "DELETE:", 7) == 0) {
     // Skip "DELETE:" prefix and trim leading whitespace
     char* filename = buffer + 7;
     while (*filename == ' ') filename++;
+    if (!filename_validator::isValidFilename(filename, filename_validator::kMaxBleFilenameLen)) {
+      debugln(F("BLE: DELETE rejected — bad filename"));
+      fileStatusChar.notify((uint8_t*)"NOT_FOUND", 9);
+      return;
+    }
     bleDeleteFile(filename);
   } else if (strcmp(buffer, "SLIST") == 0 ||
              strncmp(buffer, "SGET:", 5) == 0 ||
@@ -343,12 +355,24 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
   } else if (strcmp(buffer, "TLIST") == 0) {
     bleSendTrackList();
   } else if (strncmp(buffer, "TGET:", 5) == 0) {
+    // The name is spliced into "/TRACKS/%s"; validate it so it can't
+    // climb out of /TRACKS via ../ or carry FAT-unsafe characters.
+    if (!filename_validator::isValidFilename(buffer + 5, filename_validator::kMaxBleFilenameLen)) {
+      debugln(F("BLE: TGET rejected — bad filename"));
+      fileStatusChar.notify((uint8_t*)"TERR:BAD_NAME", 13);
+      return;
+    }
     char filepath[FILEPATH_MAX];
     snprintf(filepath, sizeof(filepath), "/TRACKS/%s", buffer + 5);
     bleStartFileTransfer(filepath);
   } else if (strncmp(buffer, "TPUT:", 5) == 0) {
     if (trackUploadActive || bleTransferInProgress) {
       fileStatusChar.notify((uint8_t*)"TERR:BUSY", 9);
+      return;
+    }
+    if (!filename_validator::isValidFilename(buffer + 5, filename_validator::kMaxBleFilenameLen)) {
+      debugln(F("BLE: TPUT rejected — bad filename"));
+      fileStatusChar.notify((uint8_t*)"TERR:BAD_NAME", 13);
       return;
     }
     strncpy(trackUploadFilename, buffer + 5, sizeof(trackUploadFilename) - 1);
@@ -362,6 +386,11 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
   } else if (strncmp(buffer, "TDEL:", 5) == 0) {
     if (trackDeletePending) {
       fileStatusChar.notify((uint8_t*)"TERR:BUSY", 9);
+      return;
+    }
+    if (!filename_validator::isValidFilename(buffer + 5, filename_validator::kMaxBleFilenameLen)) {
+      debugln(F("BLE: TDEL rejected — bad filename"));
+      fileStatusChar.notify((uint8_t*)"TERR:BAD_NAME", 13);
       return;
     }
     strncpy(trackDeleteFilename, buffer + 5, sizeof(trackDeleteFilename) - 1);
