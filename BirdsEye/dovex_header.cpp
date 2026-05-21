@@ -42,7 +42,9 @@ bool format(char* buf, size_t bufSize,
   auto append = [&](const char* s) -> bool {
     const size_t len = strlen(s);
     if (p + len > end) return false;
-    memcpy(p, s, len);
+    // Intentionally NOT null-terminated: we're building a fixed 1024-byte
+    // region that gets \n padding, not a C string.
+    memcpy(p, s, len);  // NOLINT(bugprone-not-null-terminated-result)
     p += len;
     return true;
   };
