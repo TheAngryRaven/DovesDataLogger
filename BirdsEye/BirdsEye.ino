@@ -42,6 +42,40 @@
 #include <DovesLapTimer.h>
 #include <CourseManager.h>
 
+// SdFat configuration. SD_FAT_TYPE must be defined BEFORE SdFat.h is
+// processed for the first time, which means before any module header
+// that pulls it in (e.g. replay.h).
+//   0 = bare SdFat/File   (Wokwi only)
+//   1 = SdFat32/File32    (real hardware — FAT16/FAT32)
+//   2 = SdExFat/ExFile
+//   3 = SdFs/FsFile
+#ifdef WOKWI
+#define SD_FAT_TYPE 0
+#define PIN_SPI_CS -1
+#else
+#define SD_FAT_TYPE 1
+#define PIN_SPI_CS -1  // CS is grounded on the gry-box revision
+#endif
+// 2 MHz SPI for EMI tolerance in ignition environments — 12.5x below
+// the SdFat default (25 MHz) but still fast enough for 25 Hz logging
+// and the BLE-2M file transfer ceiling.
+#define SPI_SPEED SD_SCK_MHZ(2)
+
+#include "SdFat.h"
+#include "sdios.h"
+
+// Module interfaces. Each header documents its module's public
+// surface and pulls in any library types those signatures need.
+#include "accelerometer.h"
+#include "bluetooth.h"
+#include "display_pages.h"
+#include "display_ui.h"
+#include "gps_functions.h"
+#include "replay.h"
+#include "sd_functions.h"
+#include "settings.h"
+#include "tachometer.h"
+
 ///////////////////////////////////////////
 // BATTERY CONFIGURATION
 ///////////////////////////////////////////
@@ -315,35 +349,15 @@ bool replayProcessingComplete = false;
 
 ///////////////////////////////////////////
 // SD CARD GLOBALS
+// SD_FAT_TYPE / PIN_SPI_CS / SPI_SPEED and the SdFat.h include moved
+// to the top of this file so module headers (replay.h) see them.
 ///////////////////////////////////////////
-
-// SD_FAT_TYPE = 0 for SdFat/File as defined in SdFatConfig.h,
-// 1 for FAT16/FAT32, 2 for exFAT, 3 for FAT16/FAT32 and exFAT.
-#ifdef WOKWI
-#define SD_FAT_TYPE 0
-#define PIN_SPI_CS -1 //53
-#else
-#define SD_FAT_TYPE 1
-#define PIN_SPI_CS -1 // grounded on gry box
-// #define PIN_SPI_CS 3 // todo: ground out for A0/battery voltage...
-#endif
-
-// Reduced from 25MHz for EMI resistance in ignition environments.
-// 2 MHz is the minimum for 125+ kBps BLE file transfer throughput
-// (1 MHz SD reads cap at ~122 kBps, just under the BLE 2M PHY ceiling).
-// Still 12.5x below the original 25 MHz — very conservative.
-#define SPI_SPEED SD_SCK_MHZ(2)
-
-#include "SdFat.h"
-#include "sdios.h"
 
 SdFat SD;
 File file; //buffer
 File trackDir;
 File trackFile;
 File dataFile;
-
-// Replay file handle (must be after SdFat include)
 File replayFile;
 
 ///////////////////////////////////////////
@@ -390,9 +404,12 @@ int numOfLocations = 0;
 #define JSON_BUFFER_SIZE 4096
 #endif
 
-const int PARSE_STATUS_GOOD = 0;
-const int PARSE_STATUS_LOAD_FAILED = 5;
-const int PARSE_STATUS_PARSE_FAILED = 10;
+// extern matches the forward declaration in sd_functions.h so the
+// constants have external linkage; otherwise their default internal
+// linkage would mismatch the header.
+extern const int PARSE_STATUS_GOOD = 0;
+extern const int PARSE_STATUS_LOAD_FAILED = 5;
+extern const int PARSE_STATUS_PARSE_FAILED = 10;
 
 char tracks[MAX_LAYOUTS][MAX_LAYOUT_LENGTH];
 TrackLayout trackLayouts[MAX_LAYOUTS];

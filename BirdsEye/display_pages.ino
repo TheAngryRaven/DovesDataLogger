@@ -3,6 +3,8 @@
 // All displayPage_*() rendering functions for each UI screen
 ///////////////////////////////////////////
 
+#include "display_pages.h"
+
 void displayPage_boot() {
   resetDisplay();
 

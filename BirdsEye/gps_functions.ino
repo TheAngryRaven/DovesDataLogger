@@ -4,6 +4,8 @@
 // Uses SparkFun u-blox GNSS v3 library with UBX PVT binary protocol
 ///////////////////////////////////////////
 
+#include "gps_functions.h"
+
 ///////////////////////////////////////////
 // GPS SERIAL BUFFER
 // Timer ISR drains Serial1 into a 4KB RAM buffer every 10ms,

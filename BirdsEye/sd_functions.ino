@@ -3,6 +3,8 @@
 // SD card setup, access management, track list building, and JSON track parsing
 ///////////////////////////////////////////
 
+#include "sd_functions.h"
+
 /**
  * @brief Attempt to acquire SD card access for a subsystem
  * @param mode The access mode being requested (SD_ACCESS_*)

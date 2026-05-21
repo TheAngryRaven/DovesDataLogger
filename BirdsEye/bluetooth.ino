@@ -3,6 +3,8 @@
 // All BLE-related functions: callbacks, setup, file transfer, loop
 ///////////////////////////////////////////
 
+#include "bluetooth.h"
+
 // Deferred settings command buffer (BLE callback -> main loop)
 static volatile bool settingsCmdPending = false;
 static char settingsCmdBuffer[65];  // 64 chars + null

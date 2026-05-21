@@ -3,6 +3,8 @@
 // Display setup, button handling, menu navigation, and display loop
 ///////////////////////////////////////////
 
+#include "display_ui.h"
+
 ///////////////////////////////////////////
 // I2C BUS RECOVERY
 // EMI from ignition can glitch the I2C bus, leaving a slave holding SDA low.

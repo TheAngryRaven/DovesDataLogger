@@ -14,6 +14,8 @@
 // bounded by crankshaft inertia.
 ///////////////////////////////////////////
 
+#include "tachometer.h"
+
 // ---- Kalman filter state ----
 static float kalmanX = 0.0f;       // RPM estimate
 static float kalmanP = 10000.0f;   // Estimate uncertainty (RPM^2)

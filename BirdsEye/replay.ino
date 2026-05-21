@@ -8,6 +8,8 @@
 // detection loop in BirdsEye.ino.
 ///////////////////////////////////////////
 
+#include "replay.h"
+
 /**
  * @brief Reset replay state to initial values
  */

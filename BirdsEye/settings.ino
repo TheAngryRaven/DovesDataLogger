@@ -4,6 +4,8 @@
 // Provides getSetting() and setSetting() for any subsystem.
 ///////////////////////////////////////////
 
+#include "settings.h"
+
 static const char SETTINGS_FILE_PATH[] = "/SETTINGS.json";
 static char settingsFileBuffer[512];
 static StaticJsonDocument<512> settingsJson;
