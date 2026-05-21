@@ -1,5 +1,8 @@
 # BirdsEye - GPS Lap Timer & Data Logger
 
+[![compile-sketch](https://github.com/TheAngryRaven/DovesDataLogger/actions/workflows/compile-sketch.yml/badge.svg)](https://github.com/TheAngryRaven/DovesDataLogger/actions/workflows/compile-sketch.yml)
+[![arduino-lint](https://github.com/TheAngryRaven/DovesDataLogger/actions/workflows/arduino-lint.yml/badge.svg)](https://github.com/TheAngryRaven/DovesDataLogger/actions/workflows/arduino-lint.yml)
+
 A high-precision GPS-based lap timer and data logger designed for motorsports and track day enthusiasts. Features 25Hz logging, sector timing, RPM monitoring via tachometer, and multiple customizable display pages.
 
 <p align="center">
