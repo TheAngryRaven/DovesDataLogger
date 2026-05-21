@@ -43,18 +43,33 @@ All sketch sources live in `BirdsEye/` so the folder name matches the
 | `display_pages.{h,ino}` | All page rendering functions (`displayPage_*()`) |
 | `display_ui.{h,ino}` | Display init, button reading (multi-sample debounce), menu navigation, I2C bus recovery |
 | `gps_functions.{h,ino}` | GPS init (SparkFun UBX PVT), time conversion, DOVEX logging pipeline, TIMER3 serial buffer ISR, V_BCKP recovery |
-| `replay.{h,ino}` | Instant DOVEX header replay + haversine helper |
+| `replay.{h,ino}` | Instant DOVEX header replay |
 | `sd_functions.{h,ino}` | SD init, track list/JSON parsing (dual format), track manifest, SD access arbitration |
 | `settings.{h,ino}` | Persistent JSON settings on SD (`/SETTINGS.json`), `getSetting()`/`setSetting()` |
 | `tachometer.{h,ino}` | Falling-edge ISR on D0, Kalman-filtered RPM calculation |
 | `diagram.json` | Wokwi simulator wiring |
 | `libraries.txt` | Wokwi simulator library list |
 
+### Pure-Logic Units (`BirdsEye/*.{h,cpp}`)
+
+Arduino-free `.cpp` files — compiled into the firmware AND into the
+host test harness (`tests/`). No Arduino headers, so they build on a
+desktop toolchain. This is where logic worth unit-testing lives.
+
+| File | Purpose |
+|---|---|
+| `haversine.{h,cpp}` | Great-circle distance in miles (track proximity) |
+| `gps_time.{h,cpp}` | Leap-year/Unix-epoch math, `u64ToDecimalString` |
+| `gps_validation.{h,cpp}` | PVT sample sanity gate + dtostrf-output check |
+| `dovex_header.{h,cpp}` | DOVEX 1 KB header `format()` / `parse()` |
+| `filename_validator.{h,cpp}` | FAT-safe / traversal-proof check for BLE filenames |
+
 ### Non-Source
 
 | Path | Contents |
 |---|---|
-| `.github/workflows/` | CI: compile-sketch (XIAO smoke test) + arduino-lint |
+| `.github/workflows/` | CI: compile-sketch (XIAO smoke test), arduino-lint, unit-tests |
+| `tests/` | Host doctest harness (CMake) for the pure-logic units |
 | `SDCARD/TRACKS/` | Example track JSON files |
 | `CASE/` | 3D-printable enclosure STLs |
 | `TACHOMETER/` | Tachometer circuit documentation |
@@ -195,6 +210,13 @@ loop()  ~250 Hz
   file data (0x2A3F), file status (0x2A40).
 - MTU negotiation (requests 247, default 23).
 - File listing does not require exclusive SD access; transfer does.
+- **Filename validation**: every BLE command carrying a filename
+  (`GET:`, `DELETE:`, `TGET:`, `TPUT:`, `TDEL:`) runs the name through
+  `filename_validator::isValidFilename()` BEFORE any `SD.open()` /
+  `SD.remove()` / `"/TRACKS/%s"` path build. Rejects path traversal
+  (`..`, leading `.`), separators (`/`, `\`), and FAT-unsafe bytes.
+  `GET`/`DELETE` reject with `ERROR` / `NOT_FOUND`; track commands
+  reject with `TERR:BAD_NAME`.
 - **Settings commands** (via `fileRequestChar` / `fileStatusChar`):
   - `SLIST` → `SVAL:key=value` per entry, then `SEND`
   - `SGET:key` → `SVAL:key=value` or `SERR:NOT_FOUND`
@@ -208,7 +230,7 @@ loop()  ~250 Hz
   - `TPUT:name.json` → `TREADY` → app sends data chunks → `TDONE` → `TOK`
   - `TDEL:name.json` → `TOK` or `TERR:NO_FILE`
   - Upload uses a 4096-byte static RAM buffer; `TERR:TOO_LARGE` if exceeded.
-  - Error responses: `TERR:SD_BUSY`, `TERR:BUSY`, `TERR:WRITE_FAIL`, `TERR:NO_FILE`.
+  - Error responses: `TERR:SD_BUSY`, `TERR:BUSY`, `TERR:WRITE_FAIL`, `TERR:NO_FILE`, `TERR:BAD_NAME`.
   - Upload/delete state machines: BLE callback sets flags, `BLUETOOTH_LOOP()`
     calls `processTrackUpload()` / `processTrackDelete()` for thread-safe SD
     access. Both call `buildTrackList()` after success.
