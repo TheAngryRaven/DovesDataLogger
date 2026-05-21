@@ -1,0 +1,61 @@
+name: compile-sketch
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  compile:
+    name: xiao-nrf52840
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The sketch file is BirdsEye.ino but the repo directory is
+      # DovesDataLogger. arduino-cli requires the sketch folder name to
+      # match the .ino filename, so stage a BirdsEye/ folder containing
+      # all the sketch sources and headers for the compiler.
+      - name: Stage sketch directory
+        run: |
+          mkdir -p sketch/BirdsEye
+          cp *.ino *.h sketch/BirdsEye/
+
+      # Seeed nRF52 BSP shells out to adafruit-nrfutil during link to
+      # package the .hex into a .zip, even when only compiling — install
+      # it before the compile step.
+      - name: Install adafruit-nrfutil
+        run: pip install --user adafruit-nrfutil
+
+      - name: Compile sketch
+        uses: arduino/compile-sketches@v1
+        with:
+          fqbn: Seeeduino:nrf52:xiaonRF52840Sense
+          platforms: |
+            - name: Seeeduino:nrf52
+              source-url: https://files.seeedstudio.com/arduino/package_seeeduino_boards_index.json
+          libraries: |
+            - name: ArduinoJson
+            - name: SdFat - Adafruit Fork
+            - name: Adafruit GFX Library
+            - name: Adafruit SH110X
+            - name: Adafruit SSD1306
+            - name: SparkFun u-blox GNSS v3
+            - name: Seeed Arduino LSM6DS3
+            - name: ArxTypeTraits
+            - source-url: https://github.com/TheAngryRaven/DovesLapTimer.git
+          sketch-paths: |
+            - sketch/BirdsEye
+          enable-deltas-report: true
+
+      - name: Upload size deltas report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: size-deltas-xiao-nrf52840
+          path: sketches-reports
+          if-no-files-found: ignore

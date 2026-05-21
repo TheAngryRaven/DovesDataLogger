@@ -1,0 +1,41 @@
+name: arduino-lint
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: arduino-lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # arduino-lint expects a sketch folder whose name matches the .ino
+      # filename. Our sketch is BirdsEye.ino but the repo dir is
+      # DovesDataLogger, so stage a BirdsEye/ folder for the linter.
+      - name: Stage sketch directory
+        run: |
+          mkdir -p sketch/BirdsEye
+          cp *.ino *.h sketch/BirdsEye/
+
+      - name: Arduino Lint
+        uses: arduino/arduino-lint-action@v2
+        with:
+          path: sketch/BirdsEye
+          project-type: sketch
+          compliance: specification
+          report-file: arduino-lint-report.json
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arduino-lint-report
+          path: arduino-lint-report.json
+          if-no-files-found: ignore
