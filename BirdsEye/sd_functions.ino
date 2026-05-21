@@ -76,9 +76,7 @@ bool buildTrackList() {
 
   // reset lists
   numOfLocations = 0;
-  #ifdef ENABLE_NEW_UI
   trackManifestCount = 0;
-  #endif
 
   // If the TRACKS directory exists, open it
   trackDir.open(trackFolder);
@@ -111,7 +109,6 @@ bool buildTrackList() {
 
     // Build track manifest entry — extract first lat/lon from JSON
     // Reuses the static JSON buffer (safe: single-threaded, one file at a time)
-    #ifdef ENABLE_NEW_UI
     if (trackManifestCount < MAX_LOCATIONS) {
       int bytesRead = file.read(jsonFileBuffer, sizeof(jsonFileBuffer) - 1);
       if (bytesRead > 0) {
@@ -145,7 +142,6 @@ bool buildTrackList() {
         }
       }
     }
-    #endif
 
     // Increment the numOfLocations
     numOfLocations++;
@@ -159,10 +155,8 @@ bool buildTrackList() {
 
   debug(F("Tracks found: "));
   debugln(numOfLocations);
-  #ifdef ENABLE_NEW_UI
   debug(F("Manifest entries: "));
   debugln(trackManifestCount);
-  #endif
 
   return true;
 }
@@ -264,7 +258,7 @@ int parseTrackFile(char* filepath) {
     debugln(F("ParseTrackFile: Legacy array format detected"));
     coursesArray = trackJson.as<JsonArray>();
 
-    // Derive metadata from filename (already stored in locations[selectedLocation])
+    // Derive metadata from filename — leave blank, caller knows the filename
     activeTrackMetadata.longName[0] = '\0';
     activeTrackMetadata.shortName[0] = '\0';
     activeTrackMetadata.defaultCourse[0] = '\0';

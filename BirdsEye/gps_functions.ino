@@ -318,7 +318,6 @@ void GPS_LOOP() {
   myGNSS.checkUblox();
   myGNSS.checkCallbacks();
 
-  #ifdef ENABLE_NEW_UI
   // PVT arrival watchdog: after GPS_WAKE(), if no PVT data arrives within
   // 5 seconds, the module likely lost its config during backup (V_BCKP
   // dropped → reverted to 9600 baud NMEA). Attempt baud recovery.
@@ -340,13 +339,11 @@ void GPS_LOOP() {
       }
     }
   }
-  #endif
 
   if (gpsDataFresh) {
     gpsDataFresh = false;
 
-    // Update the lap timer with fresh GPS data
-    #ifdef ENABLE_NEW_UI
+    // Feed fresh GPS data into the active course/timer
     if (gpsData.fix && courseManager != nullptr) {
       double ltLat = gpsData.latitudeDegrees;
       double ltLng = gpsData.longitudeDegrees;
@@ -356,32 +353,15 @@ void GPS_LOOP() {
       courseManager->updateCurrentTime(getGpsTimeInMilliseconds());
       courseManager->loop(ltLat, ltLng, ltAlt, ltSpeed);
     }
-    #else
-    if (trackSelected && gpsData.fix) {
-      double ltLat = gpsData.latitudeDegrees;
-      double ltLng = gpsData.longitudeDegrees;
-      double ltAlt = gpsData.altitude;
-      double ltSpeed = gpsData.speed;
-
-      lapTimer.updateCurrentTime(getGpsTimeInMilliseconds());
-      lapTimer.loop(ltLat, ltLng, ltAlt, ltSpeed);
-    }
-    #endif
 
   #ifdef SD_CARD_LOGGING_ENABLED
     // Determine if logging conditions are met.
-    // ENABLE_NEW_UI: File creation does NOT require GPS fix — the file opens
-    // as soon as date is available (from RTC even before fix). This eliminates
-    // the delay between GPS reacquisition and first logged row after sleep wake.
+    // File creation does NOT require GPS fix — the file opens as soon as
+    // date is available (from RTC even before fix). This eliminates the
+    // delay between GPS reacquisition and first logged row after sleep wake.
     // Data writing still requires gpsData.fix for valid coordinates.
-    #ifdef ENABLE_NEW_UI
     bool canWriteData = gpsData.fix && sdSetupSuccess && enableLogging && sdDataLogInitComplete;
     bool canCreateFile = sdSetupSuccess && enableLogging && !sdDataLogInitComplete && gpsData.day > 0;
-    #else
-    bool loggingCondition = trackSelected && gpsData.fix && sdSetupSuccess && enableLogging;
-    bool canWriteData = loggingCondition && sdDataLogInitComplete;
-    bool canCreateFile = loggingCondition && !sdDataLogInitComplete && gpsData.day > 0;
-    #endif
 
     if (canWriteData) {
 
@@ -508,32 +488,11 @@ void GPS_LOOP() {
       } else {
         char dataFileName[80];
 
-        #ifdef ENABLE_NEW_UI
-        if (settingUseLegacyCsv && selectedLocation >= 0 && selectedTrack >= 0) {
-          // Legacy .dove filename
-          snprintf(dataFileName, sizeof(dataFileName),
-                   "%s_%s_%s_20%02d_%02d%02d_%02d%02d%02d.dove",
-                   locations[selectedLocation],
-                   tracks[selectedTrack],
-                   selectedDirection == RACE_DIRECTION_FORWARD ? "fwd" : "rev",
-                   gpsData.year, gpsData.month, gpsData.day,
-                   gpsData.hour, gpsData.minute, gpsData.seconds);
-        } else {
-          // DOVEX filename: 20YYMMDD_HHMM.dovex
-          snprintf(dataFileName, sizeof(dataFileName),
-                   "20%02d%02d%02d_%02d%02d.dovex",
-                   gpsData.year, gpsData.month, gpsData.day,
-                   gpsData.hour, gpsData.minute);
-        }
-        #else
+        // DOVEX filename: 20YYMMDD_HHMM.dovex
         snprintf(dataFileName, sizeof(dataFileName),
-                 "%s_%s_%s_20%02d_%02d%02d_%02d%02d%02d.dove",
-                 locations[selectedLocation],
-                 tracks[selectedTrack],
-                 selectedDirection == RACE_DIRECTION_FORWARD ? "fwd" : "rev",
+                 "20%02d%02d%02d_%02d%02d.dovex",
                  gpsData.year, gpsData.month, gpsData.day,
-                 gpsData.hour, gpsData.minute, gpsData.seconds);
-        #endif
+                 gpsData.hour, gpsData.minute);
 
         debug(F("dataFileName: ["));
         debug(dataFileName);
@@ -549,18 +508,16 @@ void GPS_LOOP() {
           switchToDisplayPage(PAGE_INTERNAL_FAULT);
           enableLogging = false;
         } else {
-          #ifdef ENABLE_NEW_UI
-          if (!settingUseLegacyCsv) {
-            // DOVEX: pre-fill header region with newlines (ensures FAT clusters are allocated)
-            char padBuf[64];
-            memset(padBuf, '\n', sizeof(padBuf));
-            for (uint32_t i = 0; i < DOVEX_HEADER_SIZE; i += sizeof(padBuf)) {
-              uint32_t toWrite = min((uint32_t)sizeof(padBuf), DOVEX_HEADER_SIZE - i);
-              dataFile.write(padBuf, toWrite);
-            }
-            // Cursor is now at exactly DOVEX_HEADER_SIZE
+          // DOVEX: pre-fill header region with newlines so the FAT clusters
+          // for it are allocated up front; the metadata header is written
+          // back into this region at session end.
+          char padBuf[64];
+          memset(padBuf, '\n', sizeof(padBuf));
+          for (uint32_t i = 0; i < DOVEX_HEADER_SIZE; i += sizeof(padBuf)) {
+            uint32_t toWrite = min((uint32_t)sizeof(padBuf), DOVEX_HEADER_SIZE - i);
+            dataFile.write(padBuf, toWrite);
           }
-          #endif
+          // Cursor is now at exactly DOVEX_HEADER_SIZE
           dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z"));
           debugln(F("CSV header written"));
           sdDataLogInitComplete = true;
@@ -574,7 +531,6 @@ void GPS_LOOP() {
   } // end if (gpsDataFresh)
 }
 
-#ifdef ENABLE_NEW_UI
 void GPS_SLEEP() {
   if (!gpsInitialized) return;
   stopGpsSerialTimer();  // Stop serial drain ISR during sleep (saves power)
@@ -708,7 +664,6 @@ void GPS_SLEEP_PERIODIC_CHECK() {
   sleepGpsWakeActive = true;
   sleepGpsWakeStartedAt = millis();
 }
-#endif
 
 void calculateGPSFrameRate() {
   // calculate actual GPS fix frequency

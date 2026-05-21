@@ -36,7 +36,7 @@ inline void dummy_debug(...) {
 #define DOVEX_HEADER_SIZE 1024  // Reserved header bytes in .dovex files (1 KB)
 #define TRACK_DETECT_RADIUS_MILES 5.0  // Haversine threshold for live track detection
 
-// Sleep mode constants (ENABLE_NEW_UI only)
+// Sleep mode constants
 #define SLEEP_IDLE_TIMEOUT_MS     300000   // 5 min menu idle -> auto-sleep
 #define SLEEP_LONG_PRESS_MS       5000     // 5s hold for sleep/reboot combos
 #define SLEEP_GPS_WAKE_INTERVAL   86400000 // 24 hours between GPS fix attempts
@@ -76,17 +76,6 @@ struct TrackLayout {
   double sector_3_b_lat = 0.00;
   double sector_3_b_lng = 0.00;
   bool hasSector3 = false;
-};
-
-// Common sample struct for both DOVE and NMEA parsing
-struct ReplaySample {
-  unsigned long timestamp;  // milliseconds
-  double lat;
-  double lng;
-  float speed_mph;
-  float altitude;
-  int rpm;  // -1 if not available
-  bool valid;
 };
 
 ///////////////////////////////////////////

@@ -38,7 +38,6 @@ bool createDefaultSettings() {
   settingsJson["driver_name"] = "Driver";
   settingsJson["lap_detection_distance"] = "7";
   settingsJson["waypoint_detection_distance"] = "30";
-  settingsJson["use_legacy_csv"] = "false";
   settingsJson["waypoint_speed"] = "30";
 
   File settingsFile;
@@ -71,7 +70,6 @@ static void ensureDefaultSettings() {
     { "driver_name", "Driver" },
     { "lap_detection_distance", "7" },
     { "waypoint_detection_distance", "30" },
-    { "use_legacy_csv", "false" },
     { "waypoint_speed", "30" },
   };
 

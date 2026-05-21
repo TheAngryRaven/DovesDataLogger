@@ -1,23 +1,20 @@
 ///////////////////////////////////////////
 // REPLAY MODULE
-// Replay system: file list building, NMEA/DOVE parsing,
-// track detection, haversine distance, and replay processing
+// Instant DOVEX session replay: parses the reserved header at the
+// start of a .dovex file (datetime, driver, course, lap times) and
+// populates lapHistory[] for the results page.
+//
+// haversineDistanceMiles() also lives here — used by the auto-track
+// detection loop in BirdsEye.ino.
 ///////////////////////////////////////////
 
 /**
  * @brief Reset replay state to initial values
  */
 void resetReplayState() {
-  replayModeActive = false;
   replayProcessingComplete = false;
-  replayDetectedTrackIndex = -1;
-  replayMaxSpeed = 0.0;
-  replayMaxRpm = 0;
-  replayTotalSamples = 0;
-  replayProcessedSamples = 0;
 
-  // Reset lap timer and history for replay
-  lapTimer.reset();
+  // Reset lap history for replay
   lapHistoryCount = 0;
   lastLap = 0;
   memset(lapHistory, 0, sizeof(lapHistory));
@@ -31,8 +28,7 @@ void resetReplayState() {
 }
 
 /**
- * @brief Build list of replay files from SD card root
- * New UI: only .dovex files. Legacy: .dove and .nmea files.
+ * @brief Build list of .dovex replay files from SD card root
  * @return true if files found, false otherwise
  */
 bool buildReplayFileList() {
@@ -102,9 +98,6 @@ bool buildReplayFileList() {
 
     if (!entry.isDirectory()) {
       int len = strlen(name);
-
-      #ifdef ENABLE_NEW_UI
-      // New UI: only .dovex files
       if (len > 6) {
         char* ext = name + len - 6;
         if (strcasecmp(ext, ".dovex") == 0) {
@@ -115,22 +108,6 @@ bool buildReplayFileList() {
           debugln(name);
         }
       }
-      #else
-      // Legacy: .dove and .nmea files
-      if (len > 5) {
-        char* ext = name + len - 5;
-        bool isDove = (strcasecmp(ext, ".dove") == 0);
-        bool isNmea = (strcasecmp(ext, ".nmea") == 0);
-
-        if (isDove || isNmea) {
-          strncpy(replayFiles[numReplayFiles], name, MAX_REPLAY_FILENAME_LENGTH - 1);
-          replayFiles[numReplayFiles][MAX_REPLAY_FILENAME_LENGTH - 1] = '\0';
-          numReplayFiles++;
-          debug(F("Replay: Found file: "));
-          debugln(name);
-        }
-      }
-      #endif
     }
     entry.close();
   }
@@ -144,11 +121,7 @@ bool buildReplayFileList() {
 }
 
 /**
- * @brief Read a single line from file into buffer using block reads for speed
- * @param file File handle
- * @param buffer Output buffer
- * @param bufferSize Size of output buffer
- * @return true if line read successfully, false on EOF or error
+ * @brief Read a single line from file into buffer (drops \r, stops at \n or EOF)
  */
 bool readReplayLine(File& file, char* buffer, int bufferSize) {
   int pos = 0;
@@ -191,212 +164,6 @@ bool readReplayLine(File& file, char* buffer, int bufferSize) {
 }
 
 /**
- * @brief Parse a DOVE CSV line into a ReplaySample (parses in-place, modifies line)
- * Format: timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm
- * @param line Input CSV line (will be modified by strtok)
- * @param sample Output sample struct
- * @return true if parsed successfully
- */
-bool parseDoveLine(char* line, ReplaySample& sample) {
-  sample.valid = false;
-  sample.rpm = -1;
-
-  // Skip header line
-  if (strstr(line, "timestamp") != NULL) {
-    return false;
-  }
-
-  // Skip empty lines
-  if (strlen(line) < 10) {
-    return false;
-  }
-
-  // Parse CSV fields in-place (no copy needed - saves 128+ bytes of stack)
-  char* token;
-  int fieldIndex = 0;
-
-  token = strtok(line, ",");
-  while (token != NULL && fieldIndex < 10) {
-    switch (fieldIndex) {
-      case 0: // timestamp
-        sample.timestamp = strtoul(token, NULL, 10);
-        break;
-      case 1: // sats - skip
-        break;
-      case 2: // hdop - skip
-        break;
-      case 3: // lat
-        sample.lat = atof(token);
-        break;
-      case 4: // lng
-        sample.lng = atof(token);
-        break;
-      case 5: // speed_mph
-        sample.speed_mph = atof(token);
-        break;
-      case 6: // altitude_m
-        sample.altitude = atof(token);
-        break;
-      case 7: // heading_deg - skip (replay doesn't use it)
-        break;
-      case 8: // h_acc_m - skip (replay doesn't use it)
-        break;
-      case 9: // rpm
-        sample.rpm = atoi(token);
-        break;
-    }
-    fieldIndex++;
-    token = strtok(NULL, ",");
-  }
-
-  // Validate we got minimum required fields
-  if (fieldIndex >= 6 && sample.lat != 0.0 && sample.lng != 0.0) {
-    sample.valid = true;
-    return true;
-  }
-
-  return false;
-}
-
-/**
- * @brief Parse an NMEA sentence into a ReplaySample (parses in-place, modifies line)
- * Supports GPGGA, GNGGA, GPRMC, GNRMC
- * @param line Input NMEA sentence (will be modified by strtok)
- * @param sample Output sample struct
- * @return true if parsed successfully
- */
-bool parseNmeaSentence(char* line, ReplaySample& sample) {
-  sample.valid = false;
-  sample.rpm = -1;  // NMEA has no RPM
-  sample.altitude = 0.0;
-
-  // Check for valid NMEA sentence
-  if (line[0] != '$') {
-    return false;
-  }
-
-  // Check sentence type (do this before strtok modifies the line)
-  bool isGGA = (strstr(line, "GGA") != NULL);
-  bool isRMC = (strstr(line, "RMC") != NULL);
-
-  if (!isGGA && !isRMC) {
-    return false;
-  }
-
-  // Parse NMEA sentence in-place (no copy needed - saves 128+ bytes of stack)
-  char* token;
-  int fieldIndex = 0;
-
-  double latDeg = 0, latMin = 0;
-  double lngDeg = 0, lngMin = 0;
-  char latDir = 'N', lngDir = 'W';
-  float speedKnots = 0;
-
-  token = strtok(line, ",");
-  while (token != NULL) {
-    if (isGGA) {
-      switch (fieldIndex) {
-        case 1: // Time - can be used for timestamp
-          {
-            // Parse HHMMSS.sss format
-            if (strlen(token) >= 6) {
-              int hour = (token[0] - '0') * 10 + (token[1] - '0');
-              int min = (token[2] - '0') * 10 + (token[3] - '0');
-              int sec = (token[4] - '0') * 10 + (token[5] - '0');
-              int ms = 0;
-              if (strlen(token) > 7) {
-                ms = atoi(token + 7);
-              }
-              sample.timestamp = hour * 3600000UL + min * 60000UL + sec * 1000UL + ms;
-            }
-          }
-          break;
-        case 2: // Latitude DDMM.MMMM
-          if (strlen(token) >= 4) {
-            latDeg = (token[0] - '0') * 10 + (token[1] - '0');
-            latMin = atof(token + 2);
-          }
-          break;
-        case 3: // N/S
-          latDir = token[0];
-          break;
-        case 4: // Longitude DDDMM.MMMM
-          if (strlen(token) >= 5) {
-            lngDeg = (token[0] - '0') * 100 + (token[1] - '0') * 10 + (token[2] - '0');
-            lngMin = atof(token + 3);
-          }
-          break;
-        case 5: // E/W
-          lngDir = token[0];
-          break;
-        case 9: // Altitude
-          sample.altitude = atof(token);
-          break;
-      }
-    } else if (isRMC) {
-      switch (fieldIndex) {
-        case 1: // Time
-          {
-            if (strlen(token) >= 6) {
-              int hour = (token[0] - '0') * 10 + (token[1] - '0');
-              int min = (token[2] - '0') * 10 + (token[3] - '0');
-              int sec = (token[4] - '0') * 10 + (token[5] - '0');
-              int ms = 0;
-              if (strlen(token) > 7) {
-                ms = atoi(token + 7);
-              }
-              sample.timestamp = hour * 3600000UL + min * 60000UL + sec * 1000UL + ms;
-            }
-          }
-          break;
-        case 3: // Latitude
-          if (strlen(token) >= 4) {
-            latDeg = (token[0] - '0') * 10 + (token[1] - '0');
-            latMin = atof(token + 2);
-          }
-          break;
-        case 4: // N/S
-          latDir = token[0];
-          break;
-        case 5: // Longitude
-          if (strlen(token) >= 5) {
-            lngDeg = (token[0] - '0') * 100 + (token[1] - '0') * 10 + (token[2] - '0');
-            lngMin = atof(token + 3);
-          }
-          break;
-        case 6: // E/W
-          lngDir = token[0];
-          break;
-        case 7: // Speed in knots
-          speedKnots = atof(token);
-          break;
-      }
-    }
-
-    fieldIndex++;
-    token = strtok(NULL, ",*");
-  }
-
-  // Convert to decimal degrees
-  sample.lat = latDeg + (latMin / 60.0);
-  if (latDir == 'S') sample.lat = -sample.lat;
-
-  sample.lng = lngDeg + (lngMin / 60.0);
-  if (lngDir == 'W') sample.lng = -sample.lng;
-
-  // Convert knots to mph (1 knot = 1.15078 mph)
-  sample.speed_mph = speedKnots * 1.15078;
-
-  // Validate
-  if (sample.lat != 0.0 && sample.lng != 0.0) {
-    sample.valid = true;
-    return true;
-  }
-
-  return false;
-}
-
-/**
  * @brief Calculate haversine distance between two GPS points in miles
  */
 double haversineDistanceMiles(double lat1, double lng1, double lat2, double lng2) {
@@ -415,234 +182,6 @@ double haversineDistanceMiles(double lat1, double lng1, double lat2, double lng2
   return R * c;
 }
 
-/**
- * @brief Extract a single GPS point from a replay file (first valid point)
- */
-bool extractGpsPointFromReplayFile(const char* filename, double& lat, double& lng) {
-  File file;
-  if (!file.open(filename, O_READ)) {
-    debug(F("Replay: Cannot open file: "));
-    debugln(filename);
-    return false;
-  }
-
-  // Determine file type
-  int len = strlen(filename);
-  bool isDove = (len > 5 && strcasecmp(filename + len - 5, ".dove") == 0);
-
-  char lineBuffer[REPLAY_LINE_BUFFER_SIZE];
-  int linesChecked = 0;
-  const int maxLinesToCheck = 100; // Don't scan too much
-
-  while (linesChecked < maxLinesToCheck && readReplayLine(file, lineBuffer, sizeof(lineBuffer))) {
-    linesChecked++;
-
-    ReplaySample sample;
-    bool parsed = false;
-
-    if (isDove) {
-      parsed = parseDoveLine(lineBuffer, sample);
-    } else {
-      parsed = parseNmeaSentence(lineBuffer, sample);
-    }
-
-    if (parsed && sample.valid) {
-      lat = sample.lat;
-      lng = sample.lng;
-      file.close();
-      debug(F("Replay: Extracted point: "));
-      debug(lat, 6);
-      debug(F(", "));
-      debugln(lng, 6);
-      return true;
-    }
-  }
-
-  file.close();
-  debugln(F("Replay: No valid GPS point found in file"));
-  return false;
-}
-
-/**
- * @brief Extract a single GPS point from a track file (start line midpoint)
- */
-bool extractGpsPointFromTrackFile(int trackIndex, double& lat, double& lng) {
-  if (trackIndex < 0 || trackIndex >= numOfLocations) {
-    return false;
-  }
-
-  // Parse the track file to get coordinates
-  char filepath[FILEPATH_MAX];
-  makeFullTrackPath(locations[trackIndex], filepath);
-
-  File trackFileTemp;
-  trackFileTemp.open(filepath, O_READ);
-  if (!trackFileTemp) {
-    debug(F("Replay: Cannot open track: "));
-    debugln(filepath);
-    return false;
-  }
-
-  // Read JSON content (static to avoid ~4KB stack pressure per call)
-  static char buffer[JSON_BUFFER_SIZE];
-  static StaticJsonDocument<JSON_BUFFER_SIZE> replayTrackJson;
-  int bytesRead = trackFileTemp.read(buffer, sizeof(buffer) - 1);
-  trackFileTemp.close();
-
-  if (bytesRead <= 0) {
-    return false;
-  }
-  buffer[bytesRead] = '\0';
-
-  // Parse JSON
-  replayTrackJson.clear();
-  DeserializationError error = deserializeJson(replayTrackJson, buffer);
-  if (error != DeserializationError::Ok) {
-    return false;
-  }
-
-  // Get first layout's start line midpoint — handles both formats
-  JsonVariant firstLayout;
-  if (replayTrackJson.is<JsonObject>()) {
-    // New format: { "courses": [...] }
-    JsonArray courses = replayTrackJson["courses"];
-    if (courses.size() == 0) return false;
-    firstLayout = courses[0];
-  } else if (replayTrackJson.is<JsonArray>()) {
-    // Legacy format: bare array
-    JsonArray array = replayTrackJson.as<JsonArray>();
-    if (array.size() == 0) return false;
-    firstLayout = array[0];
-  } else {
-    return false;
-  }
-
-  double a_lat = firstLayout["start_a_lat"];
-  double a_lng = firstLayout["start_a_lng"];
-  double b_lat = firstLayout["start_b_lat"];
-  double b_lng = firstLayout["start_b_lng"];
-
-  // Calculate midpoint
-  lat = (a_lat + b_lat) / 2.0;
-  lng = (a_lng + b_lng) / 2.0;
-
-  debug(F("Replay: Track "));
-  debug(locations[trackIndex]);
-  debug(F(" point: "));
-  debug(lat, 6);
-  debug(F(", "));
-  debugln(lng, 6);
-
-  return true;
-}
-
-/**
- * @brief Detect which track a replay file belongs to
- * @param filename The replay file name
- * @return Track index if found, -1 otherwise
- */
-int detectTrackForReplayFile(const char* filename) {
-  double fileLat, fileLng;
-
-  if (!extractGpsPointFromReplayFile(filename, fileLat, fileLng)) {
-    debugln(F("Replay: Failed to extract GPS point from file"));
-    return -1;
-  }
-
-  // Compare against each track
-  for (int i = 0; i < numOfLocations; i++) {
-    double trackLat, trackLng;
-
-    if (extractGpsPointFromTrackFile(i, trackLat, trackLng)) {
-      double distance = haversineDistanceMiles(fileLat, fileLng, trackLat, trackLng);
-
-      debug(F("Replay: Distance to "));
-      debug(locations[i]);
-      debug(F(": "));
-      debug(distance, 2);
-      debugln(F(" miles"));
-
-      if (distance <= REPLAY_TRACK_DETECTION_THRESHOLD_MILES) {
-        debug(F("Replay: Matched track: "));
-        debugln(locations[i]);
-        return i;
-      }
-    }
-  }
-
-  debugln(F("Replay: No matching track found"));
-  return -1;
-}
-
-/**
- * @brief Process the selected replay file through the lap timer
- * Call this from loop() when in replay processing state
- */
-void processReplayFile() {
-  // Use isOpen() for proper SdFat file checking
-  if (!replayFile.isOpen()) {
-    debugln(F("Replay: File not open, marking complete"));
-    replayProcessingComplete = true;
-    return;
-  }
-
-  // Process multiple lines per call to speed things up
-  const int linesPerCall = 50;
-
-  // Determine file type once per batch (optimization)
-  int len = strlen(replayFiles[selectedReplayFile]);
-  bool isDove = (len > 5 && strcasecmp(replayFiles[selectedReplayFile] + len - 5, ".dove") == 0);
-
-  for (int i = 0; i < linesPerCall; i++) {
-    if (!readReplayLine(replayFile, replayLineBuffer, sizeof(replayLineBuffer))) {
-      // EOF - processing complete
-      replayFile.close();
-      replayProcessingComplete = true;
-      debugln(F("Replay: Processing complete"));
-      debug(F("Replay: Total samples: "));
-      debugln(replayProcessedSamples);
-      debug(F("Replay: Max speed: "));
-      debugln(replayMaxSpeed, 2);
-      debug(F("Replay: Max RPM: "));
-      debugln(replayMaxRpm);
-      debug(F("Replay: Laps: "));
-      debugln(lapTimer.getLaps());
-      return;
-    }
-
-    replayTotalSamples++;
-
-    ReplaySample sample;
-    bool parsed = false;
-
-    if (isDove) {
-      parsed = parseDoveLine(replayLineBuffer, sample);
-    } else {
-      parsed = parseNmeaSentence(replayLineBuffer, sample);
-    }
-
-    if (parsed && sample.valid) {
-      replayProcessedSamples++;
-
-      // Update lap timer with this sample
-      lapTimer.updateCurrentTime(sample.timestamp);
-      lapTimer.loop(sample.lat, sample.lng, sample.altitude, sample.speed_mph / 1.15078); // Convert mph to knots for lapTimer
-
-      // Track max values
-      if (sample.speed_mph > replayMaxSpeed) {
-        replayMaxSpeed = sample.speed_mph;
-      }
-      if (sample.rpm > replayMaxRpm) {
-        replayMaxRpm = sample.rpm;
-      }
-
-      // Check for new lap
-      checkForNewLapData();
-    }
-  }
-}
-
-#ifdef ENABLE_NEW_UI
 ///////////////////////////////////////////
 // DOVEX REPLAY (header-only, instant)
 ///////////////////////////////////////////
@@ -651,8 +190,10 @@ void processReplayFile() {
 
 /**
  * @brief Parse a DOVEX file's header (first 1KB) for instant replay results.
- * Line 1: datetime, driver, course, short_name, best_lap_ms, optimal_ms
- * Line 2: lap1_ms,lap2_ms,lap3_ms,...
+ * Line 1: column labels (datetime,driver,course,short_name,best_lap_ms,optimal_ms)
+ * Line 2: metadata values
+ * Line 3: column label (laps_ms)
+ * Line 4: lap1_ms,lap2_ms,lap3_ms,...
  * @return true if header parsed successfully
  */
 bool parseDovexHeader(const char* filename) {
@@ -731,4 +272,3 @@ bool parseDovexHeader(const char* filename) {
 
   return true;
 }
-#endif // ENABLE_NEW_UI
