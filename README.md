@@ -4,6 +4,7 @@
 [![arduino-lint](https://github.com/TheAngryRaven/DovesDataLogger/actions/workflows/arduino-lint.yml/badge.svg)](https://github.com/TheAngryRaven/DovesDataLogger/actions/workflows/arduino-lint.yml)
 [![unit-tests](https://github.com/TheAngryRaven/DovesDataLogger/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/TheAngryRaven/DovesDataLogger/actions/workflows/unit-tests.yml)
 [![clang-tidy](https://github.com/TheAngryRaven/DovesDataLogger/actions/workflows/clang-tidy.yml/badge.svg)](https://github.com/TheAngryRaven/DovesDataLogger/actions/workflows/clang-tidy.yml)
+[![codecov](https://codecov.io/gh/TheAngryRaven/DovesDataLogger/branch/master/graph/badge.svg)](https://codecov.io/gh/TheAngryRaven/DovesDataLogger)
 
 A high-precision GPS-based lap timer and data logger designed for motorsports and track day enthusiasts. Features 25Hz logging, sector timing, RPM monitoring via tachometer, and multiple customizable display pages.
 

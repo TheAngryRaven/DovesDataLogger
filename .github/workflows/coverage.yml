@@ -1,0 +1,61 @@
+name: coverage
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+# Line-coverage floor for the host-testable pure-logic units. Set low on
+# purpose so it never blocks day-to-day work — bump it deliberately as
+# coverage grows (it currently sits near 100% on those units).
+env:
+  COVERAGE_MIN: 1
+
+jobs:
+  coverage:
+    name: host coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install gcovr
+        run: pip install gcovr
+
+      - name: Build instrumented tests
+        run: |
+          cmake -S tests -B tests/build -DENABLE_COVERAGE=ON
+          cmake --build tests/build --parallel
+
+      - name: Run tests
+        run: ctest --test-dir tests/build --output-on-failure
+
+      # Filter to the BirdsEye pure units — that's the code the host suite
+      # can actually exercise. The .ino modules need the Arduino toolchain
+      # and aren't measured here. Fails if line coverage drops below
+      # COVERAGE_MIN; emits a Cobertura report for Codecov.
+      - name: Compute coverage + enforce floor
+        run: |
+          gcovr --root . \
+            --filter 'BirdsEye/.*\.cpp$' \
+            --fail-under-line "${COVERAGE_MIN}" \
+            --cobertura tests/build/coverage.xml \
+            --print-summary
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: tests/build/coverage.xml
+          flags: host-units
+          fail_ci_if_error: false
+          # Public repos usually upload tokenless; add a CODECOV_TOKEN
+          # repo secret if uploads get rate-limited.
+          token: ${{ secrets.CODECOV_TOKEN }}

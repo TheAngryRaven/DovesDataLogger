@@ -86,7 +86,7 @@ correct (e.g. an intentional non-null-terminated buffer), use a targeted
 4. Add a `CHANGELOG.md` entry under `[Unreleased]` for anything
    user-visible.
 5. Make sure all CI checks pass: **compile-sketch** (+ flash-size gate),
-   **arduino-lint**, **unit-tests**, **clang-tidy**.
+   **arduino-lint**, **unit-tests**, **clang-tidy**, **coverage**.
 6. Open the PR against `master` and describe what changed and how you
    verified it. Hardware-affecting changes should say what you tested on a
    real device.
