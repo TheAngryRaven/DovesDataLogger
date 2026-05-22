@@ -21,6 +21,11 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   units.
 - Flash-size budget gate in CI: the build fails if the firmware uses more
   than 90% of available program flash, protecting OTA-update headroom.
+- Self-hosted code coverage: a `coverage` CI job runs `gcovr` over the
+  host-testable units, gates on a (currently low) line-coverage floor,
+  publishes a live shields.io badge via an orphan `badges` branch, and
+  posts a per-PR coverage summary comment. No third-party coverage service
+  is used.
 - `compile-sketch` and `arduino-lint` CI workflows for the Seeed XIAO
   nRF52840 Sense, plus status badges in the README.
 - Per-module `.h` headers documenting each subsystem's public interface.

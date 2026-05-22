@@ -1,0 +1,118 @@
+name: coverage
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+# contents:write       -> publish the badge JSON to the orphan `badges` branch
+# pull-requests:write   -> post/update the per-PR coverage summary comment
+permissions:
+  contents: write
+  pull-requests: write
+
+# Line-coverage floor for the host-testable pure-logic units. Intentionally
+# low so it passes immediately and never blocks day-to-day work — RAISE AS
+# COVERAGE GROWS (it currently sits near 100% on those units). This is the
+# single knob: change it here.
+env:
+  COVERAGE_MIN: 1
+
+jobs:
+  coverage:
+    name: host coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install gcovr
+        run: pip install gcovr
+
+      - name: Build instrumented tests
+        run: |
+          cmake -S tests -B tests/build -DENABLE_COVERAGE=ON
+          cmake --build tests/build --parallel
+
+      - name: Run tests
+        run: ctest --test-dir tests/build --output-on-failure
+
+      # Coverage is filtered to the BirdsEye pure units — the code the host
+      # suite can actually exercise. The .ino modules need the Arduino
+      # toolchain and aren't measured here.
+      - name: Generate coverage reports
+        run: |
+          gcovr --root . --filter 'BirdsEye/.*\.cpp$' \
+            --json-summary-pretty -o coverage-summary.json \
+            --print-summary
+          gcovr --root . --filter 'BirdsEye/.*\.cpp$' \
+            --markdown coverage.md \
+            --markdown-title "Coverage — host-testable units"
+
+      # Writes the shields endpoint JSON, prints the %, and FAILS the job if
+      # line coverage is below COVERAGE_MIN.
+      - name: Enforce floor + build badge JSON
+        run: |
+          python3 .github/scripts/coverage_badge.py \
+            --summary coverage-summary.json \
+            --min "${COVERAGE_MIN}" \
+            --badge-out public-badges/coverage-badge.json \
+            --github-output
+
+      # Default-branch pushes only: publish the badge JSON to an orphan
+      # `badges` branch. shields.io reads it via the endpoint URL in the
+      # README. Uses the built-in GITHUB_TOKEN — no accounts, no secrets.
+      - name: Publish badge to `badges` branch
+        if: github.event_name == 'push'
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public-badges
+          publish_branch: badges
+          force_orphan: true
+
+      # Pull requests only: post/update a sticky per-file coverage comment.
+      # First-party github-script; tolerates fork PRs (read-only token) by
+      # warning instead of failing.
+      - name: Sticky PR coverage comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- coverage-summary -->';
+            let report = '_coverage report unavailable_';
+            try { report = fs.readFileSync('coverage.md', 'utf8'); } catch (e) {}
+            const body = `${marker}\n${report}`;
+            try {
+              const { owner, repo } = context.repo;
+              const issue_number = context.issue.number;
+              const { data: comments } = await github.rest.issues.listComments({
+                owner, repo, issue_number, per_page: 100,
+              });
+              const existing = comments.find(
+                c => c.body && c.body.includes(marker)
+              );
+              if (existing) {
+                await github.rest.issues.updateComment({
+                  owner, repo, comment_id: existing.id, body,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number, body,
+                });
+              }
+            } catch (e) {
+              core.warning(
+                `Could not post coverage comment (expected on fork PRs with a ` +
+                `read-only token): ${e.message}`
+              );
+            }

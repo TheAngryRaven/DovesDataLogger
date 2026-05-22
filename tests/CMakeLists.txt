@@ -38,5 +38,13 @@ target_compile_options(birdseye_tests PRIVATE
   -Wall -Wextra -Wpedantic -Werror
 )
 
+# Optional gcov instrumentation for the coverage CI job. Off by default
+# so normal test runs stay fast; enable with -DENABLE_COVERAGE=ON.
+option(ENABLE_COVERAGE "Build with gcov coverage instrumentation" OFF)
+if(ENABLE_COVERAGE)
+  target_compile_options(birdseye_tests PRIVATE -O0 -g --coverage)
+  target_link_options(birdseye_tests PRIVATE --coverage)
+endif()
+
 enable_testing()
 add_test(NAME birdseye_tests COMMAND birdseye_tests)
