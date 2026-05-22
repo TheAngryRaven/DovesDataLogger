@@ -21,11 +21,13 @@ any change — whether you're Claude or a human contributor — hold the line:
   `[Unreleased]` in `CHANGELOG.md` (Added / Changed / Removed / Fixed /
   Security). Flag breaking changes explicitly — they drive the next version
   number per the semver policy in that file.
-- **Keep CI green and meaningful.** The four checks (compile-sketch +
-  flash-size gate, arduino-lint, unit-tests, clang-tidy) must pass. Fix the
+- **Keep CI green and meaningful.** The checks (compile-sketch + flash-size
+  gate, arduino-lint, unit-tests, clang-tidy, coverage) must pass. Fix the
   root cause rather than loosening a check; if a clang-tidy finding is a
   genuine false positive, suppress that one line with `// NOLINT(check)` and
-  a reason, never by disabling the check globally.
+  a reason, never by disabling the check globally. The coverage floor
+  (`COVERAGE_MIN` in `coverage.yml`) is intentionally low — raise it as
+  coverage grows; don't lower it to pass.
 - **Keep the docs in sync.** Update this file's File Map and the relevant
   subsystem section, plus `ARCHITECTURE.md`, when you add/remove a module or
   change a subsystem interface. Stale docs are worse than none.
@@ -101,7 +103,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 
 | Path | Contents |
 |---|---|
-| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, release |
+| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, release |
 | `tests/` | Host doctest harness (CMake) for the pure-logic units |
 | `CHANGELOG.md` | Keep-a-Changelog history; release workflow ties to version tags |
 | `ARCHITECTURE.md` | Human-facing architecture narrative (subsystems, design decisions) |

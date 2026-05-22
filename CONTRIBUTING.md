@@ -75,6 +75,35 @@ Prefer fixing a finding over suppressing it. If a suppression is genuinely
 correct (e.g. an intentional non-null-terminated buffer), use a targeted
 `// NOLINT(check-name)` with a comment explaining why.
 
+## Code coverage
+
+Coverage is measured **self-hosted** — no third-party service ever receives
+our data. The [`coverage`](.github/workflows/coverage.yml) workflow builds
+the tests with gcov instrumentation, runs `gcovr` over the host-testable
+`BirdsEye/*.cpp` units, and:
+
+- **fails the job** if line coverage drops below the floor,
+- publishes a live `coverage` badge (a shields.io endpoint JSON committed to
+  the orphan `badges` branch on default-branch pushes),
+- posts a per-file summary as a sticky comment on each PR.
+
+The floor is a single env var at the top of `coverage.yml`:
+
+```yaml
+env:
+  COVERAGE_MIN: 1   # raise as coverage grows
+```
+
+It's set deliberately low so it passes today; **raise it as coverage grows,
+never lower it to make a red build pass.** Reproduce locally:
+
+```sh
+cmake -S tests -B tests/build -DENABLE_COVERAGE=ON
+cmake --build tests/build --parallel
+ctest --test-dir tests/build
+gcovr --root . --filter 'BirdsEye/.*\.cpp$' --print-summary
+```
+
 ## Pull request workflow
 
 1. Branch off `master` with a descriptive name (`feat/...`, `fix/...`,
@@ -86,7 +115,7 @@ correct (e.g. an intentional non-null-terminated buffer), use a targeted
 4. Add a `CHANGELOG.md` entry under `[Unreleased]` for anything
    user-visible.
 5. Make sure all CI checks pass: **compile-sketch** (+ flash-size gate),
-   **arduino-lint**, **unit-tests**, **clang-tidy**.
+   **arduino-lint**, **unit-tests**, **clang-tidy**, **coverage**.
 6. Open the PR against `master` and describe what changed and how you
    verified it. Hardware-affecting changes should say what you tested on a
    real device.
