@@ -5,6 +5,39 @@
 > This file is loaded into Claude's context window on every session and must
 > accurately reflect the current state of the project.**
 
+## Maintaining the Quality Bar
+
+This project went through a deliberate hardening pass (tests, CI, static
+analysis, security, release pipeline, docs). **Keep it there.** When making
+any change — whether you're Claude or a human contributor — hold the line:
+
+- **Add tests when possible.** New pure logic (math, parsing, validation,
+  formatting, anything Arduino-free) belongs in a `BirdsEye/*.{h,cpp}` unit
+  with a matching `tests/<unit>_test.cpp`. If you're touching existing logic
+  that *could* be a pure unit but isn't yet, prefer extracting it so it can
+  be tested rather than leaving it tangled in an `.ino`. Don't add untested
+  pure logic when a test is feasible.
+- **Keep the CHANGELOG updated.** Any user-visible change gets an entry under
+  `[Unreleased]` in `CHANGELOG.md` (Added / Changed / Removed / Fixed /
+  Security). Flag breaking changes explicitly — they drive the next version
+  number per the semver policy in that file.
+- **Keep CI green and meaningful.** The four checks (compile-sketch +
+  flash-size gate, arduino-lint, unit-tests, clang-tidy) must pass. Fix the
+  root cause rather than loosening a check; if a clang-tidy finding is a
+  genuine false positive, suppress that one line with `// NOLINT(check)` and
+  a reason, never by disabling the check globally.
+- **Keep the docs in sync.** Update this file's File Map and the relevant
+  subsystem section, plus `ARCHITECTURE.md`, when you add/remove a module or
+  change a subsystem interface. Stale docs are worse than none.
+- **Hold the conventions.** No Arduino `String` in hot paths, all SD access
+  through the mutex, never `analogRead()`, `TIMER3` reserved, ISRs trivially
+  short. See *Development Conventions* at the bottom for the full list.
+- **One concern per PR.** Keep refactors, behavior changes, and new tests in
+  separate PRs so each is reviewable and revertable on its own.
+
+The goal: every change should leave the codebase at least as professional as
+it found it. If a shortcut would lower the bar, flag it instead of taking it.
+
 ## What Is BirdsEye?
 
 A high-precision GPS lap timer and data logger for motorsports / track days.
