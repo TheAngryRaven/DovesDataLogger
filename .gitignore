@@ -1,0 +1,39 @@
+# ---- Build output ----
+# Host unit-test build (also covered by tests/.gitignore)
+build/
+tests/build/
+
+# Arduino / arduino-cli compile output
+dist/
+release-assets/
+*.hex
+*.uf2
+*.bin
+*.elf
+*.map
+# DFU package produced by the nRF52 BSP
+*.zip
+
+# clang-tidy / CMake scratch
+compile_commands.json
+
+# PlatformIO (if a contributor uses it locally)
+.pio/
+
+# ---- Tooling downloaded at build time ----
+uf2conv.py
+uf2families.json
+
+# ---- Editors / IDEs ----
+.vscode/
+.idea/
+*.swp
+*~
+
+# ---- OS junk ----
+.DS_Store
+Thumbs.db
+
+# ---- Python ----
+__pycache__/
+*.pyc
