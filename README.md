@@ -446,13 +446,21 @@ Look at existing pages like `displayPage_gps_speed()` or `displayPage_tachometer
 - GPS coordinates stored with 8 decimal places (~1.1mm precision)
 - BLE disconnect triggers automatic device reboot (ensures settings changes take effect)
 
+## Contributing
+
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for how
+to build the firmware, run the host tests, and the PR workflow.
+[ARCHITECTURE.md](ARCHITECTURE.md) explains how the system fits together.
+Found a security issue? Please follow [SECURITY.md](SECURITY.md) and report
+it privately. All participants are expected to follow our
+[Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## License
 
-See LICENSE file for details.
+GPL v3 — see [LICENSE](LICENSE) for details.
 
 ## Support
 
-For issues, questions, or contributions, please visit:
-- GitHub Issues: [https://github.com/TheAngryRaven/DovesDataLogger/issues](https://github.com/TheAngryRaven/DovesDataLogger/issues)
-
+For issues and questions, please use [GitHub Issues](https://github.com/TheAngryRaven/DovesDataLogger/issues)
+(search existing ones first). For security reports, see [SECURITY.md](SECURITY.md).
 
