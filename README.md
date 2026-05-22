@@ -306,10 +306,17 @@ DovesDataLogger/                  # repo root
    - See "Track Loading System" section above
 
 3. **Flash Firmware**
+
+   **Option A — prebuilt release (no toolchain needed):**
+   - Download the latest `BirdsEye.uf2` from the [Releases page](https://github.com/TheAngryRaven/DovesDataLogger/releases)
+   - Double-tap the XIAO's reset button to mount the `XIAO-SENSE` bootloader drive
+   - Drag `BirdsEye.uf2` onto that drive — the board reboots into the new firmware automatically
+
+   **Option B — build from source:**
    - Install "Seeed nRF52 Boards" board package (non-mbed)
    - Install required libraries (see table above)
    - Select board: "Seeed XIAO nRF52840 Sense"
-   - Compile and upload `BirdsEye.ino`
+   - Compile and upload `BirdsEye/BirdsEye.ino`
 
 4. **Hardware Assembly**
    - *3D printed case assembly instructions coming soon*

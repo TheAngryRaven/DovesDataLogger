@@ -68,8 +68,9 @@ desktop toolchain. This is where logic worth unit-testing lives.
 
 | Path | Contents |
 |---|---|
-| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy |
+| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, release |
 | `tests/` | Host doctest harness (CMake) for the pure-logic units |
+| `CHANGELOG.md` | Keep-a-Changelog history; release workflow ties to version tags |
 | `SDCARD/TRACKS/` | Example track JSON files |
 | `CASE/` | 3D-printable enclosure STLs |
 | `TACHOMETER/` | Tachometer circuit documentation |
