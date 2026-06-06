@@ -75,15 +75,21 @@ jobs:
             exit 0
           fi
           echo "Reading $report"
+          echo "Flash size entry:"
+          jq -c '[.boards[].sketches[].sizes[] | select(.name=="flash")][0]' "$report" || true
+          # The arduino/compile-sketches report nests usage under
+          # .current.absolute (current schema). Fall back to older shapes
+          # (.absolute.current, flat .absolute) and keep only a number, so a
+          # schema change degrades visibly rather than silently passing.
           flash_abs="$(jq -r '
             [.boards[].sketches[].sizes[]
              | select(.name=="flash")
-             | (if (.absolute|type)=="object" then .absolute.current else .absolute end)]
-            | first // empty' "$report")"
+             | (.current.absolute? // .absolute.current? // .absolute?)]
+            | map(select(type=="number")) | first // empty' "$report")"
           flash_max="$(jq -r '
             [.boards[].sketches[].sizes[]
              | select(.name=="flash") | .maximum]
-            | first // empty' "$report")"
+            | map(select(type=="number")) | first // empty' "$report")"
           if [ -z "$flash_abs" ] || [ -z "$flash_max" ] || [ "$flash_max" = "0" ]; then
             echo "::warning::Could not read flash usage from report — skipping size gate"
             exit 0
