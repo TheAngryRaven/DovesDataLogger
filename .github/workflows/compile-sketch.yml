@@ -10,8 +10,19 @@ on:
 
 jobs:
   compile:
-    name: xiao-nrf52840
+    name: ${{ matrix.board.name }}
     runs-on: ubuntu-latest
+    # Build both XIAO nRF52840 variants. The Sense board has the onboard
+    # LSM6DS3 IMU; the plain board does not (accelerometer logging degrades
+    # gracefully). Same MCU/BLE/bootloader otherwise.
+    strategy:
+      fail-fast: false
+      matrix:
+        board:
+          - name: xiao-nrf52840-sense
+            fqbn: Seeeduino:nrf52:xiaonRF52840Sense
+          - name: xiao-nrf52840
+            fqbn: Seeeduino:nrf52:xiaonRF52840
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,7 +36,7 @@ jobs:
       - name: Compile sketch
         uses: arduino/compile-sketches@v1
         with:
-          fqbn: Seeeduino:nrf52:xiaonRF52840Sense
+          fqbn: ${{ matrix.board.fqbn }}
           platforms: |
             - name: Seeeduino:nrf52
               source-url: https://files.seeedstudio.com/arduino/package_seeeduino_boards_index.json
@@ -84,6 +95,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: size-deltas-xiao-nrf52840
+          name: size-deltas-${{ matrix.board.name }}
           path: sketches-reports
           if-no-files-found: ignore

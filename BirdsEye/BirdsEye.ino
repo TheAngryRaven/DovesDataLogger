@@ -206,6 +206,14 @@ BLECharacteristic fileRequestChar = BLECharacteristic(0x2A3E);
 BLECharacteristic fileDataChar = BLECharacteristic(0x2A3F);
 BLECharacteristic fileStatusChar = BLECharacteristic(0x2A40);
 
+// OTA + version reporting services (set up in BLE_SETUP()):
+//   bledfu - buttonless Secure DFU; a write reboots the board into the
+//            bootloader's OTA mode so a companion can flash new firmware.
+//   bledis - Device Information Service; publishes FIRMWARE_VERSION so the
+//            companion can tell whether an update is available.
+BLEDfu bledfu;
+BLEDis bledis;
+
 // BLE state variables
 bool bleInitialized = false;
 bool bleActive = false;

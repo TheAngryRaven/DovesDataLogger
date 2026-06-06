@@ -10,6 +10,17 @@
 ///////////////////////////////////////////
 
 ///////////////////////////////////////////
+// FIRMWARE VERSION
+//
+// Single source of truth for the firmware version. Exposed over BLE
+// via the Device Information Service (see bluetooth.ino) so a companion
+// (DovesDataViewer) can compare it against the latest GitHub release and
+// decide whether an OTA update is needed. Keep this in sync with the
+// release git tag (tag v2.0.0 -> "2.0.0") and the CHANGELOG.
+///////////////////////////////////////////
+#define FIRMWARE_VERSION "2.0.0"
+
+///////////////////////////////////////////
 // DEBUG MACROS
 ///////////////////////////////////////////
 
