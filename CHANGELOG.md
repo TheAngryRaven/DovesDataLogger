@@ -23,10 +23,11 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   flags, and `fix` now also requires `gnssFixOK`.
 
 ### Changed
-- **Logging failures never drop out of race mode.** When a session is running
-  with the engine turning but no GPS lock yet, the device now pins the user to
-  the tachometer and waits, then begins logging and resumes normal race-mode
-  navigation the moment a valid lock arrives. A failed log-file open is
+- **Logging failures never drop out of race mode.** When a race session has no
+  GPS lock yet (any entry path — menu, auto-race, or RPM-wake), the device now
+  pins the user to the tachometer and waits, then begins logging and resumes
+  normal race-mode navigation the moment a valid lock arrives. A failed
+  log-file open is
   retried (throttled to 1 Hz) instead of faulting, and a mid-session write
   failure stops logging while the race continues — none of these show the
   full-screen "Please Reboot Device" fault anymore.

@@ -309,11 +309,12 @@ bool gpsWakeValidated = true;  // Start true (validated at boot by GPS_SETUP)
 
 float gps_speed_mph = 0.0;
 
-// GPS-lock hold: when a race session is running with the engine turning but
-// the GPS has no valid time/position lock yet, we cannot name or open the
-// log file (doing so produced garbage-dated files that corrupted on reboot).
-// Instead of faulting, we pin the user to the tachometer page and keep
-// waiting. Cleared automatically once the log file is created (lock acquired).
+// GPS-lock hold: when a race session is running but the GPS has no valid time
+// lock yet, we cannot name or open the log file (doing so produced
+// garbage-dated files that corrupted on reboot). Instead of faulting, we pin
+// the user to the tachometer page and keep waiting. Applies to every race
+// entry path (menu, auto-race, RPM-wake). Cleared automatically once the log
+// file is created (lock acquired).
 bool gpsLockHoldActive = false;
 
 ///////////////////////////////////////////
@@ -975,20 +976,16 @@ void autoRaceModeCheck() {
 /**
  * @brief Maintain the GPS-lock hold state (see gpsLockHoldActive).
  *
- * While a race session wants to log but has no valid GPS time lock yet — so
- * the log file cannot be named/created — and the engine is turning, we pin
- * the user to the tachometer instead of trying to log with a garbage date.
- * The hold latches on once the engine is seen running and clears the moment
- * the log file is created (lock acquired) or the session ends. Logging then
- * begins automatically and normal race-mode navigation resumes.
+ * Whenever a race session wants to log but has no valid GPS time lock yet —
+ * so the log file cannot be named/created — we pin the user to the
+ * tachometer instead of trying to log with a garbage date. This applies
+ * equally to every way of entering race mode (menu selection, RPM/speed
+ * auto-race, and RPM-wake from sleep), since all of them set these flags.
+ * The hold clears the moment the log file is created (lock acquired) or the
+ * session ends; logging then begins and normal navigation resumes.
  */
 void updateGpsLockHold() {
-  if (raceActive && enableLogging && !sdDataLogInitComplete) {
-    // No lock yet (file not created). Latch the hold once the engine turns.
-    if (tachLastReported > 0) gpsLockHoldActive = true;
-  } else {
-    gpsLockHoldActive = false;  // lock acquired (file created) or race ended
-  }
+  gpsLockHoldActive = (raceActive && enableLogging && !sdDataLogInitComplete);
 }
 
 /**

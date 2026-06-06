@@ -183,8 +183,9 @@ loop()  ~250 Hz
   not created from the module's placeholder date — this prevents garbage-named
   files (e.g. `20210307_0000.dovex`) that collided every boot and corrupted on
   reboot. Until the lock arrives, `updateGpsLockHold()` pins the user to the
-  tachometer page (engine running) and logging waits; a failed open is retried
-  at 1 Hz and a write failure stops logging — **none fault out of race mode**.
+  tachometer page (for every race entry path — menu, auto-race, RPM-wake) and
+  logging waits; a failed open is retried at 1 Hz and a write failure stops
+  logging — **none fault out of race mode**.
 - Time helpers: `getGpsTimeInMilliseconds()`, `getGpsUnixTimestampMillis()`.
 - 64-bit timestamps are manually converted to strings (Arduino lacks `%llu`).
 - **Sleep wake hardening**: `GPS_WAKE()` clears stale `gpsDataFresh`/`gpsData.fix`,
