@@ -159,7 +159,15 @@ void onPVTReceived(UBX_NAV_PVT_data_t *pvt) {
   gpsData.heading = pvt->headMot / 1e5;            // deg * 1e-5 → degrees
   gpsData.horizontalAccuracy = pvt->hAcc / 1000.0; // mm → meters
   gpsData.satellites = pvt->numSV;
-  gpsData.fix = (pvt->fixType >= 2);               // 2D or 3D
+  // A fix is only trustworthy when the module also asserts gnssFixOK — a bare
+  // fixType >= 2 can appear during convergence with garbage coordinates.
+  gpsData.fix = (pvt->fixType >= 2) && (pvt->flags.bits.gnssFixOK != 0);
+  // Time is only usable for naming/saving the log once the module reports the
+  // date AND time AND a fully-resolved UTC. Before this, the module emits a
+  // placeholder date (e.g. 2021-03-07) that must NOT drive file creation.
+  gpsData.timeValid = (pvt->valid.bits.validDate != 0) &&
+                      (pvt->valid.bits.validTime != 0) &&
+                      (pvt->valid.bits.fullyResolved != 0);
   gpsData.year = pvt->year - 2000;
   gpsData.month = pvt->month;
   gpsData.day = pvt->day;
@@ -310,12 +318,16 @@ void GPS_LOOP() {
 
   #ifdef SD_CARD_LOGGING_ENABLED
     // Determine if logging conditions are met.
-    // File creation does NOT require GPS fix — the file opens as soon as
-    // date is available (from RTC even before fix). This eliminates the
-    // delay between GPS reacquisition and first logged row after sleep wake.
+    // File creation requires a VALID GPS time lock (validDate+validTime+
+    // fullyResolved), not merely a non-zero day. Before the module resolves
+    // real time it emits a placeholder date; creating a file from it produced
+    // garbage-named logs (e.g. 20210307_0000.dovex) that collided every boot
+    // and corrupted on reboot. With a real lock the module keeps time across
+    // the V_BCKP backup, so this still fires within ~1 s of a warm wake.
+    // While we wait, updateGpsLockHold() pins the user to the tachometer.
     // Data writing still requires gpsData.fix for valid coordinates.
     bool canWriteData = gpsData.fix && sdSetupSuccess && enableLogging && sdDataLogInitComplete;
-    bool canCreateFile = sdSetupSuccess && enableLogging && !sdDataLogInitComplete && gpsData.day > 0;
+    bool canCreateFile = sdSetupSuccess && enableLogging && !sdDataLogInitComplete && gpsData.timeValid;
 
     if (canWriteData) {
 
@@ -385,14 +397,15 @@ void GPS_LOOP() {
 
           size_t written = dataFile.println(csvLine);
           if (written == 0) {
-            debugln(F("SD write failed - disabling logging"));
+            // A write failed mid-session. Don't fault — keep racing so lap
+            // timing / RPM / display stay live; just stop logging for this
+            // session (closing cleanly rather than truncating-and-restarting
+            // the same-minute filename).
+            debugln(F("SD write failed - stopping logging, race continues"));
             enableLogging = false;
             sdDataLogInitComplete = false;
             dataFile.close();
             releaseSDAccess(SD_ACCESS_LOGGING);
-            strncpy(internalNotification, "SD Write Failed!\nCheck card/connections", sizeof(internalNotification) - 1);
-            internalNotification[sizeof(internalNotification) - 1] = '\0';
-            switchToDisplayPage(PAGE_INTERNAL_FAULT);
           }
         }
       }
@@ -403,15 +416,18 @@ void GPS_LOOP() {
         lastCardFlush = millis();
         dataFile.flush();
       }
-    } else if (canCreateFile) {
+    } else if (canCreateFile && millis() - lastLogCreateAttempt >= 1000) {
+      // Throttle open attempts to once per second so a problem card can't
+      // churn SPI at 25 Hz. We never fault out of race mode here — if the
+      // file can't be created we simply keep waiting (the user stays on the
+      // tachometer via the GPS-lock hold) and retry next second.
+      lastLogCreateAttempt = millis();
       debugln(F("Attempt to initialize logfile"));
 
       if (!acquireSDAccess(SD_ACCESS_LOGGING)) {
-        debugln(F("Cannot start logging - SD card busy"));
-        enableLogging = false;
-        strncpy(internalNotification, "SD card busy!\nCannot start logging", sizeof(internalNotification) - 1);
-        internalNotification[sizeof(internalNotification) - 1] = '\0';
-        switchToDisplayPage(PAGE_INTERNAL_FAULT);
+        // Another subsystem holds the card (BLE/replay). Don't fault — just
+        // retry on the next throttled pass once it releases.
+        debugln(F("Cannot start logging - SD card busy, will retry"));
       } else {
         char dataFileName[80];
 
@@ -428,12 +444,11 @@ void GPS_LOOP() {
         dataFile.open(dataFileName, O_CREAT | O_WRITE | O_TRUNC);
 
         if (!dataFile) {
-          debugln(F("Error opening log file"));
+          // Open failed — do NOT fault out of race mode. Release the card and
+          // leave logging pending; updateGpsLockHold() keeps the user on the
+          // tachometer and we retry on the next throttled pass.
+          debugln(F("Error opening log file - will retry"));
           releaseSDAccess(SD_ACCESS_LOGGING);
-          snprintf(internalNotification, sizeof(internalNotification),
-                   "Error saving log:\n%s", dataFileName);
-          switchToDisplayPage(PAGE_INTERNAL_FAULT);
-          enableLogging = false;
         } else {
           // DOVEX: pre-fill header region with newlines so the FAT clusters
           // for it are allocated up front; the metadata header is written

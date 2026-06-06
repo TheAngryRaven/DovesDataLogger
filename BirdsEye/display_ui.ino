@@ -370,6 +370,13 @@ void handleRunningPageSelection() {
 }
 
 void displayLoop() {
+  // GPS-lock hold: while a race session is waiting for a valid GPS lock to
+  // create its log file (engine running, no lock yet), pin the user to the
+  // tachometer. Navigation is disabled below until the lock arrives.
+  if (gpsLockHoldActive) {
+    currentPage = TACHOMETER;
+  }
+
   // Check if I2C recovery was flagged by a previous slow display update
   if (i2cRecoveryNeeded) {
     i2cRecoveryNeeded = false;
@@ -491,6 +498,11 @@ void displayLoop() {
   }
 
   if (currentPage == PAGE_INTERNAL_FAULT) {
+    buttonsDisabled = true;
+  }
+
+  // While held on the tachometer waiting for a GPS lock, block all navigation.
+  if (gpsLockHoldActive) {
     buttonsDisabled = true;
   }
 
