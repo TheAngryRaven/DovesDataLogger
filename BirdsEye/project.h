@@ -18,7 +18,7 @@
 // decide whether an OTA update is needed. Keep this in sync with the
 // release git tag (tag v2.0.0 -> "2.0.0") and the CHANGELOG.
 ///////////////////////////////////////////
-#define FIRMWARE_VERSION "2.0.0"
+#define FIRMWARE_VERSION "2.1.0"
 
 ///////////////////////////////////////////
 // BOARD VARIANT
