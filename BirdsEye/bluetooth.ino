@@ -448,6 +448,25 @@ void BLE_SETUP() {
   // Set connection interval (7.5-15ms)
   Bluefruit.Periph.setConnInterval(6, 12);
 
+  // Buttonless OTA DFU. Registers the Secure DFU service so a companion
+  // (DovesDataViewer over Web Bluetooth) can write the "enter bootloader"
+  // command and reboot the board into the bootloader's Nordic Secure DFU
+  // mode — no physical double-tap of reset required. The bootloader then
+  // receives the firmware image and flashes it. Added before the app
+  // service so it is registered when advertising starts.
+  bledfu.begin();
+
+  // Device Information Service (0x180A). Publishes the firmware version
+  // via the standard Firmware Revision characteristic (0x2A26) so the
+  // companion can read it and compare against the latest GitHub release
+  // to decide whether an OTA update is needed.
+  bledis.setManufacturer("DovesDataLogger");
+  // Model encodes the board variant ("BirdsEye-sense" / "BirdsEye-nonsense")
+  // so the companion can pick the matching OTA package.
+  bledis.setModel("BirdsEye-" FIRMWARE_VARIANT);
+  bledis.setFirmwareRev(FIRMWARE_VERSION);
+  bledis.begin();
+
   bleSetupFileService();
   bleStartAdvertising();
 

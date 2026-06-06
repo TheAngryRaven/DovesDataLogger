@@ -32,6 +32,34 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   full-screen "Please Reboot Device" fault anymore.
 
 ### Added
+- **Over-the-air (OTA) firmware updates.** The firmware now registers the
+  buttonless Secure DFU service (`BLEDfu`), so a companion (DovesDataViewer
+  over Web Bluetooth) can reboot the board into the bootloader's Nordic
+  Secure DFU mode and flash a new image without a physical reset
+  double-tap. The bootloader validates the signed/CRC'd DFU package before
+  writing, so a corrupt or mismatched image is rejected rather than
+  bricking the board.
+- Firmware version reporting over BLE via the standard Device Information
+  Service (`BLEDis`, 0x180A / Firmware Revision 0x2A26). Lets the companion
+  read the installed version and compare it against the latest GitHub
+  release to decide whether an update is available. Version is defined once
+  as `FIRMWARE_VERSION` in `project.h` (starting at `2.0.0`). The DIS model
+  string encodes the board variant (`BirdsEye-sense` / `BirdsEye-nonsense`,
+  selected by the per-FQBN build flag `-DBIRDSEYE_BOARD_SENSE` /
+  `-DBIRDSEYE_BOARD_NONSENSE`) so the companion fetches the matching OTA
+  package.
+- Release builds now cover **both XIAO nRF52840 variants** (Sense and
+  non-Sense). The release workflow builds a matrix and publishes per-board
+  `.hex` / `.uf2` / `.zip` assets named `BirdsEye-sense.*` and
+  `BirdsEye-nonsense.*`; the `.zip` is the Secure DFU package used for OTA.
+  `compile-sketch` CI also builds both variants.
+- OTA update manifest published to GitHub Pages. On a version tag the
+  release workflow pushes the DFU packages plus a stable `manifest.json`
+  (latest version + per-variant download URLs, keyed by the DIS model
+  string) to the `gh-pages` branch. The companion reads it from the Pages
+  URL — which serves with permissive CORS, unlike raw release-asset URLs —
+  to check for updates and fetch the matching image. Older versions are
+  retained under `firmware/<version>/` for rollback.
 - Host-side unit test harness (doctest + CMake) covering the pure-logic
   units: haversine distance, GPS time/epoch math, GPS sample validation,
   and the DOVEX header format/parse. Runs in CI on every push.

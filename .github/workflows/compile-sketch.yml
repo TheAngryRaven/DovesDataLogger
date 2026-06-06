@@ -10,8 +10,21 @@ on:
 
 jobs:
   compile:
-    name: xiao-nrf52840
+    name: ${{ matrix.board.name }}
     runs-on: ubuntu-latest
+    # Build both XIAO nRF52840 variants. The Sense board has the onboard
+    # LSM6DS3 IMU; the plain board does not (accelerometer logging degrades
+    # gracefully). Same MCU/BLE/bootloader otherwise.
+    strategy:
+      fail-fast: false
+      matrix:
+        board:
+          - name: xiao-nrf52840-sense
+            fqbn: Seeeduino:nrf52:xiaonRF52840Sense
+            define: BIRDSEYE_BOARD_SENSE
+          - name: xiao-nrf52840
+            fqbn: Seeeduino:nrf52:xiaonRF52840
+            define: BIRDSEYE_BOARD_NONSENSE
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,7 +38,7 @@ jobs:
       - name: Compile sketch
         uses: arduino/compile-sketches@v1
         with:
-          fqbn: Seeeduino:nrf52:xiaonRF52840Sense
+          fqbn: ${{ matrix.board.fqbn }}
           platforms: |
             - name: Seeeduino:nrf52
               source-url: https://files.seeedstudio.com/arduino/package_seeeduino_boards_index.json
@@ -41,6 +54,9 @@ jobs:
             - source-url: https://github.com/TheAngryRaven/DovesLapTimer.git
           sketch-paths: |
             - BirdsEye
+          cli-compile-flags: |
+            - --build-property
+            - compiler.cpp.extra_flags=-D${{ matrix.board.define }}
           enable-deltas-report: true
 
       # Hard flash-size gate. The XIAO nRF52840's app flash is shared
@@ -59,15 +75,21 @@ jobs:
             exit 0
           fi
           echo "Reading $report"
+          echo "Flash size entry:"
+          jq -c '[.boards[].sketches[].sizes[] | select(.name=="flash")][0]' "$report" || true
+          # The arduino/compile-sketches report nests usage under
+          # .current.absolute (current schema). Fall back to older shapes
+          # (.absolute.current, flat .absolute) and keep only a number, so a
+          # schema change degrades visibly rather than silently passing.
           flash_abs="$(jq -r '
             [.boards[].sketches[].sizes[]
              | select(.name=="flash")
-             | (if (.absolute|type)=="object" then .absolute.current else .absolute end)]
-            | first // empty' "$report")"
+             | (.current.absolute? // .absolute.current? // .absolute?)]
+            | map(select(type=="number")) | first // empty' "$report")"
           flash_max="$(jq -r '
             [.boards[].sketches[].sizes[]
              | select(.name=="flash") | .maximum]
-            | first // empty' "$report")"
+            | map(select(type=="number")) | first // empty' "$report")"
           if [ -z "$flash_abs" ] || [ -z "$flash_max" ] || [ "$flash_max" = "0" ]; then
             echo "::warning::Could not read flash usage from report — skipping size gate"
             exit 0
@@ -84,6 +106,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: size-deltas-xiao-nrf52840
+          name: size-deltas-${{ matrix.board.name }}
           path: sketches-reports
           if-no-files-found: ignore

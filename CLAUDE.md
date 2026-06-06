@@ -103,7 +103,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 
 | Path | Contents |
 |---|---|
-| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, release |
+| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, release (dual-board build + GitHub Release + OTA manifest to `gh-pages`) |
 | `tests/` | Host doctest harness (CMake) for the pure-logic units |
 | `CHANGELOG.md` | Keep-a-Changelog history; release workflow ties to version tags |
 | `ARCHITECTURE.md` | Human-facing architecture narrative (subsystems, design decisions) |
@@ -257,6 +257,25 @@ loop()  ~250 Hz
 - BLE service UUID `0x1820`.
 - Characteristics: file list (0x2A3D), file request (0x2A3E),
   file data (0x2A3F), file status (0x2A40).
+- **OTA + version services** (set up in `BLE_SETUP()`):
+  - `BLEDfu bledfu` — buttonless Nordic Secure DFU. A companion
+    (DovesDataViewer over Web Bluetooth) writes the "enter bootloader"
+    command; the board reboots into the bootloader's Secure DFU mode and
+    receives a new firmware image over the air — no reset double-tap. The
+    bootloader validates the signed/CRC'd DFU `.zip` before writing, so a
+    bad/mismatched image is rejected rather than bricking the device. The
+    board has no internet radio (BLE only): the companion downloads the
+    GitHub release `.zip` and force-feeds it — the bootloader never
+    "chooses" a file.
+  - `BLEDis bledis` — Device Information Service (0x180A). Publishes
+    `FIRMWARE_VERSION` (from `project.h`) via the Firmware Revision
+    characteristic (0x2A26) so the companion can compare against the latest
+    GitHub release and decide whether to offer an update. The Model string
+    is `"BirdsEye-" FIRMWARE_VARIANT` (`BirdsEye-sense` / `BirdsEye-nonsense`)
+    — equal to the release asset prefix, so the companion maps model →
+    download directly. `FIRMWARE_VARIANT` is set by the per-FQBN build flag
+    `-DBIRDSEYE_BOARD_SENSE` / `-DBIRDSEYE_BOARD_NONSENSE` (defaults to
+    `sense`).
 - MTU negotiation (requests 247, default 23).
 - File listing does not require exclusive SD access; transfer does.
 - **Filename validation**: every BLE command carrying a filename
@@ -521,7 +540,21 @@ This device operates in ignition-noise environments. Three layers of defense:
 
 ## Build Notes
 
-- **Board**: Seeed XIAO nRF52840 Sense (Arduino IDE).
+- **Board**: Seeed XIAO nRF52840 Sense (Arduino IDE). The firmware also
+  builds and runs on the plain (non-Sense) Seeed XIAO nRF52840 — same MCU,
+  BLE, bootloader and pin map; it just lacks the onboard LSM6DS3 IMU, so
+  accelerometer logging degrades gracefully (`accelAvailable = false`). CI
+  (`compile-sketch`) and the `release` workflow build a matrix of both
+  variants (FQBNs `xiaonRF52840Sense` and `xiaonRF52840`), publishing
+  per-board `BirdsEye-sense.*` / `BirdsEye-nonsense.*` assets. The `.zip`
+  in each is the Secure DFU package used for OTA. Each build passes
+  `-DBIRDSEYE_BOARD_SENSE` / `-DBIRDSEYE_BOARD_NONSENSE` (via
+  `compiler.cpp.extra_flags`) so the image self-reports its variant over
+  BLE; a plain IDE build with no flag defaults to `sense`.
+- **Firmware version** is a single `#define FIRMWARE_VERSION` in `project.h`.
+  Keep it in sync with the release git tag (`v2.0.0` -> `"2.0.0"`); it is
+  reported over BLE (DIS) for the OTA update check. `FIRMWARE_VARIANT`
+  (also in `project.h`) feeds the DIS model string.
 - The sketch lives in `BirdsEye/` so the folder name matches the
   `.ino` file — required by Arduino IDE / arduino-cli.
 - `project.h` is included before other `.ino` modules so Arduino's

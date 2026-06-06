@@ -82,7 +82,9 @@ to the matching `*_LOOP()`.
 - **Display/UI** (`display_ui`, `display_pages`) — OLED driver abstraction,
   multi-sample debounced buttons, page routing.
 - **Bluetooth** (`bluetooth`) — BLE service for file transfer, settings,
-  and track sync.
+  and track sync, plus buttonless Secure DFU (`BLEDfu`) for OTA firmware
+  updates and a Device Information Service (`BLEDis`) that reports
+  `FIRMWARE_VERSION` for the update check.
 - **Replay** (`replay`) — instant DOVEX header replay.
 - **Settings** (`settings`) — JSON key/value store on the SD card.
 - **CourseManager** (external library) — owns course detection, sector
@@ -131,6 +133,24 @@ rail sags (cranking brownout, loose connector) the module reverts to
 9600 baud NMEA. `GPS_WAKE()` re-applies config and arms a 5 s PVT
 watchdog; if no fix data arrives, `GPS_BAUD_RECOVERY()` renegotiates the
 baud rate and reconfigures.
+
+### OTA firmware updates
+The board has no internet radio — only BLE — so it cannot pull a release
+itself. OTA is a two-hop flow: the companion (DovesDataViewer, over Web
+Bluetooth) downloads the firmware `.zip` from a GitHub release, writes the
+buttonless-DFU command to reboot the board into the Adafruit/Nordic Secure
+DFU bootloader, then force-feeds the image over GATT. The bootloader is a
+passive receiver: it validates the package's signed init packet (device
+type, SoftDevice requirement, CRC) before writing, so a corrupt or wrong
+image is rejected rather than bricking the board. The companion picks
+*which* image (version, Sense vs non-Sense) by reading the installed
+`FIRMWARE_VERSION` and DIS model (`BirdsEye-sense` / `BirdsEye-nonsense`)
+over the Device Information Service and comparing against a `manifest.json`
+the release workflow publishes to the `gh-pages` branch (GitHub Pages
+serves it with permissive CORS, so the browser can fetch both the manifest
+and the `.zip` — raw release-asset URLs can't be relied on for that). Sense
+and non-Sense are the same MCU + SoftDevice, so a mismatched image still
+boots — it just skips IMU init.
 
 ## Data formats
 

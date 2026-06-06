@@ -10,6 +10,39 @@
 ///////////////////////////////////////////
 
 ///////////////////////////////////////////
+// FIRMWARE VERSION
+//
+// Single source of truth for the firmware version. Exposed over BLE
+// via the Device Information Service (see bluetooth.ino) so a companion
+// (DovesDataViewer) can compare it against the latest GitHub release and
+// decide whether an OTA update is needed. Keep this in sync with the
+// release git tag (tag v2.0.0 -> "2.0.0") and the CHANGELOG.
+///////////////////////////////////////////
+#define FIRMWARE_VERSION "2.0.0"
+
+///////////////////////////////////////////
+// BOARD VARIANT
+//
+// Identifies which XIAO nRF52840 this image targets so the companion can
+// fetch the matching OTA package. Reported over BLE as part of the DIS
+// model string ("BirdsEye-" FIRMWARE_VARIANT), which equals the release
+// asset prefix (BirdsEye-sense.zip / BirdsEye-nonsense.zip) so the webapp
+// can map model -> download directly.
+//
+// The build workflows pass -DBIRDSEYE_BOARD_SENSE / -DBIRDSEYE_BOARD_NONSENSE
+// per FQBN. A plain Arduino IDE build with neither flag defaults to "sense"
+// (the primary board); the non-Sense image still boots on a Sense board and
+// vice-versa — they share the MCU/SoftDevice — so a wrong default only
+// mislabels, it never bricks. Accelerometer presence is still auto-detected
+// at runtime regardless of this flag.
+///////////////////////////////////////////
+#if defined(BIRDSEYE_BOARD_NONSENSE)
+  #define FIRMWARE_VARIANT "nonsense"
+#else  // BIRDSEYE_BOARD_SENSE or unspecified
+  #define FIRMWARE_VARIANT "sense"
+#endif
+
+///////////////////////////////////////////
 // DEBUG MACROS
 ///////////////////////////////////////////
 

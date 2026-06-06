@@ -1,11 +1,12 @@
 name: release
 
-# Build distributable firmware for the Seeed XIAO nRF52840 Sense and,
-# when triggered by a version tag, publish a GitHub Release with the
-# .hex (IDE/CLI flashing) and .uf2 (drag-and-drop to the bootloader
-# drive) attached.
+# Build distributable firmware for both XIAO nRF52840 variants (Sense and
+# plain) and, when triggered by a version tag, publish a GitHub Release with
+# the per-board .hex (IDE/CLI flashing), .uf2 (drag-and-drop to the bootloader
+# drive) and .zip (BLE/USB Secure DFU package — used for OTA from
+# DovesDataViewer) attached.
 #
-#   - push a tag like v1.1.0     -> builds + creates the release
+#   - push a tag like v2.0.0     -> builds + creates the release
 #   - run manually (workflow_dispatch) -> builds + uploads artifacts only
 #                                          (handy for testing the build)
 on:
@@ -18,7 +19,6 @@ permissions:
   contents: write   # needed to create the release on tag builds
 
 env:
-  FQBN: Seeeduino:nrf52:xiaonRF52840Sense
   SEEED_URL: https://files.seeedstudio.com/arduino/package_seeeduino_boards_index.json
   # nRF52840 UF2 family id (Adafruit bootloader). uf2conv tags blocks
   # with this so the bootloader accepts the image.
@@ -26,8 +26,22 @@ env:
 
 jobs:
   build:
-    name: build firmware
+    name: build ${{ matrix.board.name }}
     runs-on: ubuntu-latest
+    # One build per XIAO variant. The Sense board carries the onboard
+    # LSM6DS3 IMU; the plain board does not (accelerometer logging degrades
+    # gracefully). Identical MCU/BLE/bootloader, so the OTA .zip flashes the
+    # same way on both — the companion just picks the matching asset.
+    strategy:
+      fail-fast: false
+      matrix:
+        board:
+          - name: sense
+            fqbn: Seeeduino:nrf52:xiaonRF52840Sense
+            define: BIRDSEYE_BOARD_SENSE
+          - name: nonsense
+            fqbn: Seeeduino:nrf52:xiaonRF52840
+            define: BIRDSEYE_BOARD_NONSENSE
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -62,7 +76,8 @@ jobs:
       - name: Compile
         run: |
           arduino-cli compile \
-            --fqbn "$FQBN" \
+            --fqbn "${{ matrix.board.fqbn }}" \
+            --build-property "compiler.cpp.extra_flags=-D${{ matrix.board.define }}" \
             --output-dir dist \
             --warnings none \
             BirdsEye
@@ -92,35 +107,144 @@ jobs:
       - name: Stage release assets
         run: |
           mkdir -p release-assets
-          # Copy the flashable artifacts under stable names.
-          cp dist/*.hex release-assets/ 2>/dev/null || true
-          cp dist/*.uf2 release-assets/ 2>/dev/null || true
-          cp dist/*.zip release-assets/ 2>/dev/null || true
-          echo "----- release assets -----"
+          # Copy the flashable artifacts under per-board stable names so the
+          # companion (and humans) can tell the Sense and non-Sense images
+          # apart. The .zip is the Secure DFU package consumed by OTA.
+          suffix="${{ matrix.board.name }}"
+          for ext in hex uf2 zip; do
+            f="$(ls dist/*.$ext 2>/dev/null | head -1)"
+            if [ -n "$f" ]; then
+              cp "$f" "release-assets/BirdsEye-${suffix}.${ext}"
+            fi
+          done
+          echo "----- release assets (${suffix}) -----"
           ls -la release-assets
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: birdseye-firmware
+          name: birdseye-firmware-${{ matrix.board.name }}
           path: release-assets/*
           if-no-files-found: error
 
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    # Only publish on a version tag. Manual runs stop after build so the
+    # artifacts can be inspected without cutting a release.
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: birdseye-firmware-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: List collected assets
+        run: ls -la release-assets
+
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: release-assets/*
           generate_release_notes: true
           body: |
-            Firmware build for the **Seeed XIAO nRF52840 Sense**.
+            Firmware build for the **Seeed XIAO nRF52840** — both the
+            **Sense** (`BirdsEye-sense.*`) and plain **non-Sense**
+            (`BirdsEye-nonsense.*`) variants. The Sense board adds the
+            onboard IMU (g-force logging); the non-Sense build runs the
+            same firmware with accelerometer logging disabled.
 
             ### Flashing
-            - **Easiest (.uf2):** double-tap the reset button to mount the
-              `XIAO-SENSE` (bootloader) drive, then drag `BirdsEye.uf2` onto
-              it. The board reboots into the new firmware automatically.
-            - **Arduino IDE / CLI (.hex):** flash `BirdsEye.ino.hex` the same
+            - **OTA from DovesDataViewer (.zip):** connect over Bluetooth and
+              use the in-app updater — it pushes the matching `.zip` Secure
+              DFU package to the board over the air.
+            - **Easiest wired (.uf2):** double-tap the reset button to mount
+              the bootloader drive, then drag the matching `BirdsEye-*.uf2`
+              onto it. The board reboots into the new firmware automatically.
+            - **Arduino IDE / CLI (.hex):** flash `BirdsEye-*.hex` the same
               way you'd upload a sketch.
 
             See [CHANGELOG.md](https://github.com/TheAngryRaven/DovesDataLogger/blob/master/CHANGELOG.md)
             for what changed.
+
+  pages:
+    name: publish OTA manifest to Pages
+    needs: build
+    runs-on: ubuntu-latest
+    # On a version tag, publish the DFU packages + a stable manifest.json to
+    # the gh-pages branch. The companion (DovesDataViewer) reads manifest.json
+    # from the Pages URL to check for updates and download the matching image.
+    # GitHub Pages serves with permissive CORS, so the browser can fetch the
+    # manifest and the .zip directly — unlike raw release-asset URLs, whose
+    # CORS is unreliable.
+    #
+    # ONE-TIME SETUP: enable Pages in repo Settings -> Pages with source
+    # "Deploy from a branch", branch `gh-pages` / root. The first tagged run
+    # creates the branch.
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: birdseye-firmware-*
+          path: staged
+          merge-multiple: true
+
+      - name: Assemble Pages site
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"                       # v2.1.0 -> 2.1.0
+          owner="$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')" # Pages host is lowercase
+          repo="${GITHUB_REPOSITORY#*/}"
+          base="https://${owner}.github.io/${repo}"
+          dest="site/firmware/${version}"
+          mkdir -p "$dest"
+          # Keep a per-version copy (rollback history); keep_files retains
+          # older version folders across releases.
+          cp staged/* "$dest"/
+
+          # Stable manifest at the site root, always pointing at this release.
+          # Keyed by the DIS model string the firmware reports over BLE so the
+          # webapp can look up its download with manifest.builds[model].dfuZip.
+          jq -n \
+            --arg version "$version" \
+            --arg tag "$GITHUB_REF_NAME" \
+            --arg published "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg notes "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}" \
+            --arg sense "${base}/firmware/${version}/BirdsEye-sense.zip" \
+            --arg nonsense "${base}/firmware/${version}/BirdsEye-nonsense.zip" \
+            '{
+               version: $version,
+               releaseTag: $tag,
+               publishedAt: $published,
+               releaseNotes: $notes,
+               builds: {
+                 "BirdsEye-sense":    { variant: "sense",    dfuZip: $sense },
+                 "BirdsEye-nonsense": { variant: "nonsense", dfuZip: $nonsense }
+               }
+             }' > site/manifest.json
+
+          # Minimal human-facing landing page.
+          cat > site/index.html <<HTML
+          <!doctype html><meta charset="utf-8">
+          <title>BirdsEye firmware OTA</title>
+          <h1>BirdsEye firmware OTA</h1>
+          <p>Latest version: <strong>${version}</strong></p>
+          <p>Machine-readable index: <a href="manifest.json">manifest.json</a></p>
+          HTML
+
+          echo "----- manifest.json -----"; cat site/manifest.json
+          echo "----- tree -----"; find site -type f | sort
+
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          publish_branch: gh-pages
+          keep_files: true
