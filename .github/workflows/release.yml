@@ -38,8 +38,10 @@ jobs:
         board:
           - name: sense
             fqbn: Seeeduino:nrf52:xiaonRF52840Sense
+            define: BIRDSEYE_BOARD_SENSE
           - name: nonsense
             fqbn: Seeeduino:nrf52:xiaonRF52840
+            define: BIRDSEYE_BOARD_NONSENSE
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -75,6 +77,7 @@ jobs:
         run: |
           arduino-cli compile \
             --fqbn "${{ matrix.board.fqbn }}" \
+            --build-property "compiler.cpp.extra_flags=-D${{ matrix.board.define }}" \
             --output-dir dist \
             --warnings none \
             BirdsEye

@@ -461,7 +461,9 @@ void BLE_SETUP() {
   // companion can read it and compare against the latest GitHub release
   // to decide whether an OTA update is needed.
   bledis.setManufacturer("DovesDataLogger");
-  bledis.setModel("BirdsEye");
+  // Model encodes the board variant ("BirdsEye-sense" / "BirdsEye-nonsense")
+  // so the companion can pick the matching OTA package.
+  bledis.setModel("BirdsEye-" FIRMWARE_VARIANT);
   bledis.setFirmwareRev(FIRMWARE_VERSION);
   bledis.begin();
 

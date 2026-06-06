@@ -21,8 +21,10 @@ jobs:
         board:
           - name: xiao-nrf52840-sense
             fqbn: Seeeduino:nrf52:xiaonRF52840Sense
+            define: BIRDSEYE_BOARD_SENSE
           - name: xiao-nrf52840
             fqbn: Seeeduino:nrf52:xiaonRF52840
+            define: BIRDSEYE_BOARD_NONSENSE
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -52,6 +54,9 @@ jobs:
             - source-url: https://github.com/TheAngryRaven/DovesLapTimer.git
           sketch-paths: |
             - BirdsEye
+          cli-compile-flags: |
+            - --build-property
+            - compiler.cpp.extra_flags=-D${{ matrix.board.define }}
           enable-deltas-report: true
 
       # Hard flash-size gate. The XIAO nRF52840's app flash is shared

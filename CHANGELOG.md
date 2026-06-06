@@ -43,7 +43,11 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   Service (`BLEDis`, 0x180A / Firmware Revision 0x2A26). Lets the companion
   read the installed version and compare it against the latest GitHub
   release to decide whether an update is available. Version is defined once
-  as `FIRMWARE_VERSION` in `project.h` (starting at `2.0.0`).
+  as `FIRMWARE_VERSION` in `project.h` (starting at `2.0.0`). The DIS model
+  string encodes the board variant (`BirdsEye-sense` / `BirdsEye-nonsense`,
+  selected by the per-FQBN build flag `-DBIRDSEYE_BOARD_SENSE` /
+  `-DBIRDSEYE_BOARD_NONSENSE`) so the companion fetches the matching OTA
+  package.
 - Release builds now cover **both XIAO nRF52840 variants** (Sense and
   non-Sense). The release workflow builds a matrix and publishes per-board
   `.hex` / `.uf2` / `.zip` assets named `BirdsEye-sense.*` and
