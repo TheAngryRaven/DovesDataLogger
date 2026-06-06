@@ -296,6 +296,7 @@ struct GpsData {
   double horizontalAccuracy; // meters, horizontal accuracy estimate
   int satellites;
   bool fix;
+  bool timeValid;        // true only when the module reports validDate+validTime+fullyResolved
   uint16_t year;         // 2-digit (e.g. 25 for 2025) for compat with existing code
   uint8_t month;
   uint8_t day;
@@ -315,6 +316,13 @@ unsigned long gpsWakeTime = 0;
 bool gpsWakeValidated = true;  // Start true (validated at boot by GPS_SETUP)
 
 float gps_speed_mph = 0.0;
+
+// GPS-lock hold: when a race session is running with the engine turning but
+// the GPS has no valid time/position lock yet, we cannot name or open the
+// log file (doing so produced garbage-dated files that corrupted on reboot).
+// Instead of faulting, we pin the user to the tachometer page and keep
+// waiting. Cleared automatically once the log file is created (lock acquired).
+bool gpsLockHoldActive = false;
 
 ///////////////////////////////////////////
 // LAP HISTORY
@@ -398,6 +406,7 @@ bool sdDataLogInitComplete = false;
 bool enableLogging = false;
 
 unsigned long lastCardFlush = 0;
+unsigned long lastLogCreateAttempt = 0;  // Throttles log-file open retries (ms)
 const char trackFolder[8] = "/TRACKS";
 
 char locations[MAX_LOCATIONS][MAX_LOCATION_LENGTH]; // 13-char FAT16 name limit
@@ -972,6 +981,25 @@ void autoRaceModeCheck() {
 }
 
 /**
+ * @brief Maintain the GPS-lock hold state (see gpsLockHoldActive).
+ *
+ * While a race session wants to log but has no valid GPS time lock yet — so
+ * the log file cannot be named/created — and the engine is turning, we pin
+ * the user to the tachometer instead of trying to log with a garbage date.
+ * The hold latches on once the engine is seen running and clears the moment
+ * the log file is created (lock acquired) or the session ends. Logging then
+ * begins automatically and normal race-mode navigation resumes.
+ */
+void updateGpsLockHold() {
+  if (raceActive && enableLogging && !sdDataLogInitComplete) {
+    // No lock yet (file not created). Latch the hold once the engine turns.
+    if (tachLastReported > 0) gpsLockHoldActive = true;
+  } else {
+    gpsLockHoldActive = false;  // lock acquired (file created) or race ended
+  }
+}
+
+/**
  * @brief Write DOVEX header metadata into the reserved 1 KB at the
  *        start of the open log file. Layout + padding live in
  *        dovex_header::format(); this just wires up the I/O.
@@ -1213,6 +1241,7 @@ void loop() {
   checkForNewLapData();
   checkAutoIdle();
   autoRaceModeCheck();
+  updateGpsLockHold();
 
   // Button hold detection for sleep/reboot combos
   updateButtonHoldState();

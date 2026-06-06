@@ -12,6 +12,25 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Fixed
+- **Logging no longer starts before the GPS has a real time lock.** File
+  creation was gated only on `day > 0`, so before the module resolved UTC it
+  would create a log named from its placeholder date (e.g.
+  `20210307_0000.dovex`). That name was identical on every boot and, once a
+  write was interrupted, the half-written file could no longer be reopened —
+  producing a "Error saving log" fault that reproduced on every reboot. File
+  creation now requires the module's `validDate + validTime + fullyResolved`
+  flags, and `fix` now also requires `gnssFixOK`.
+
+### Changed
+- **Logging failures never drop out of race mode.** When a session is running
+  with the engine turning but no GPS lock yet, the device now pins the user to
+  the tachometer and waits, then begins logging and resumes normal race-mode
+  navigation the moment a valid lock arrives. A failed log-file open is
+  retried (throttled to 1 Hz) instead of faulting, and a mid-session write
+  failure stops logging while the race continues — none of these show the
+  full-screen "Please Reboot Device" fault anymore.
+
 ### Added
 - **Over-the-air (OTA) firmware updates.** The firmware now registers the
   buttonless Secure DFU service (`BLEDfu`), so a companion (DovesDataViewer

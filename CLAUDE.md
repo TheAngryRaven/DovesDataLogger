@@ -177,6 +177,14 @@ loop()  ~250 Hz
   course detection, Lap Anything fallback, and sector timing internally.
 - Logs validated data rows to SD as DOVEX: reserved 1 KB header,
   CSV data after byte 1024 (9-check validation pipeline).
+- **Log file creation requires a valid time lock**: `onPVTReceived()` sets
+  `gpsData.timeValid` only when the module asserts `validDate + validTime +
+  fullyResolved` (and folds `gnssFixOK` into `gpsData.fix`). The log file is
+  not created from the module's placeholder date — this prevents garbage-named
+  files (e.g. `20210307_0000.dovex`) that collided every boot and corrupted on
+  reboot. Until the lock arrives, `updateGpsLockHold()` pins the user to the
+  tachometer page (engine running) and logging waits; a failed open is retried
+  at 1 Hz and a write failure stops logging — **none fault out of race mode**.
 - Time helpers: `getGpsTimeInMilliseconds()`, `getGpsUnixTimestampMillis()`.
 - 64-bit timestamps are manually converted to strings (Arduino lacks `%llu`).
 - **Sleep wake hardening**: `GPS_WAKE()` clears stale `gpsDataFresh`/`gpsData.fix`,
@@ -325,7 +333,7 @@ loop()  ~250 Hz
   is detected via haversine proximity match, or with `courseCount=0` for
   immediate Lap Anything activation.
 - **Track detection flow** (`trackDetectionLoop()`):
-  1. GPS fix acquired → DOVEX logging starts immediately.
+  1. Valid GPS time lock acquired → DOVEX log file created (see GPS section).
   2. Every GPS fix, scans `trackManifest[]` via haversine.
   3. Closest match within 5 miles → parse full JSON, build `TrackConfig`.
   4. Create `CourseManager` with settings-configurable thresholds.
