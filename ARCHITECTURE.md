@@ -144,9 +144,13 @@ passive receiver: it validates the package's signed init packet (device
 type, SoftDevice requirement, CRC) before writing, so a corrupt or wrong
 image is rejected rather than bricking the board. The companion picks
 *which* image (version, Sense vs non-Sense) by reading the installed
-`FIRMWARE_VERSION` over the Device Information Service and comparing it
-against the latest release. Sense and non-Sense are the same MCU +
-SoftDevice, so a mismatched image still boots — it just skips IMU init.
+`FIRMWARE_VERSION` and DIS model (`BirdsEye-sense` / `BirdsEye-nonsense`)
+over the Device Information Service and comparing against a `manifest.json`
+the release workflow publishes to the `gh-pages` branch (GitHub Pages
+serves it with permissive CORS, so the browser can fetch both the manifest
+and the `.zip` — raw release-asset URLs can't be relied on for that). Sense
+and non-Sense are the same MCU + SoftDevice, so a mismatched image still
+boots — it just skips IMU init.
 
 ## Data formats
 

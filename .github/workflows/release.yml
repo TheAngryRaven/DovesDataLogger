@@ -169,3 +169,82 @@ jobs:
 
             See [CHANGELOG.md](https://github.com/TheAngryRaven/DovesDataLogger/blob/master/CHANGELOG.md)
             for what changed.
+
+  pages:
+    name: publish OTA manifest to Pages
+    needs: build
+    runs-on: ubuntu-latest
+    # On a version tag, publish the DFU packages + a stable manifest.json to
+    # the gh-pages branch. The companion (DovesDataViewer) reads manifest.json
+    # from the Pages URL to check for updates and download the matching image.
+    # GitHub Pages serves with permissive CORS, so the browser can fetch the
+    # manifest and the .zip directly — unlike raw release-asset URLs, whose
+    # CORS is unreliable.
+    #
+    # ONE-TIME SETUP: enable Pages in repo Settings -> Pages with source
+    # "Deploy from a branch", branch `gh-pages` / root. The first tagged run
+    # creates the branch.
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: birdseye-firmware-*
+          path: staged
+          merge-multiple: true
+
+      - name: Assemble Pages site
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"                       # v2.1.0 -> 2.1.0
+          owner="$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')" # Pages host is lowercase
+          repo="${GITHUB_REPOSITORY#*/}"
+          base="https://${owner}.github.io/${repo}"
+          dest="site/firmware/${version}"
+          mkdir -p "$dest"
+          # Keep a per-version copy (rollback history); keep_files retains
+          # older version folders across releases.
+          cp staged/* "$dest"/
+
+          # Stable manifest at the site root, always pointing at this release.
+          # Keyed by the DIS model string the firmware reports over BLE so the
+          # webapp can look up its download with manifest.builds[model].dfuZip.
+          jq -n \
+            --arg version "$version" \
+            --arg tag "$GITHUB_REF_NAME" \
+            --arg published "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg notes "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}" \
+            --arg sense "${base}/firmware/${version}/BirdsEye-sense.zip" \
+            --arg nonsense "${base}/firmware/${version}/BirdsEye-nonsense.zip" \
+            '{
+               version: $version,
+               releaseTag: $tag,
+               publishedAt: $published,
+               releaseNotes: $notes,
+               builds: {
+                 "BirdsEye-sense":    { variant: "sense",    dfuZip: $sense },
+                 "BirdsEye-nonsense": { variant: "nonsense", dfuZip: $nonsense }
+               }
+             }' > site/manifest.json
+
+          # Minimal human-facing landing page.
+          cat > site/index.html <<HTML
+          <!doctype html><meta charset="utf-8">
+          <title>BirdsEye firmware OTA</title>
+          <h1>BirdsEye firmware OTA</h1>
+          <p>Latest version: <strong>${version}</strong></p>
+          <p>Machine-readable index: <a href="manifest.json">manifest.json</a></p>
+          HTML
+
+          echo "----- manifest.json -----"; cat site/manifest.json
+          echo "----- tree -----"; find site -type f | sort
+
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          publish_branch: gh-pages
+          keep_files: true

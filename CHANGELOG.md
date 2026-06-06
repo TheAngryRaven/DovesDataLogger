@@ -53,6 +53,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   `.hex` / `.uf2` / `.zip` assets named `BirdsEye-sense.*` and
   `BirdsEye-nonsense.*`; the `.zip` is the Secure DFU package used for OTA.
   `compile-sketch` CI also builds both variants.
+- OTA update manifest published to GitHub Pages. On a version tag the
+  release workflow pushes the DFU packages plus a stable `manifest.json`
+  (latest version + per-variant download URLs, keyed by the DIS model
+  string) to the `gh-pages` branch. The companion reads it from the Pages
+  URL — which serves with permissive CORS, unlike raw release-asset URLs —
+  to check for updates and fetch the matching image. Older versions are
+  retained under `firmware/<version>/` for rollback.
 - Host-side unit test harness (doctest + CMake) covering the pure-logic
   units: haversine distance, GPS time/epoch math, GPS sample validation,
   and the DOVEX header format/parse. Runs in CI on every push.
