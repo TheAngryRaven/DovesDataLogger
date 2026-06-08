@@ -105,7 +105,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 
 | Path | Contents |
 |---|---|
-| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, release (dual-board build + GitHub Release + OTA manifest to `gh-pages`) |
+| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release) |
 | `tests/` | Host doctest harness (CMake) for the pure-logic units |
 | `CHANGELOG.md` | Keep-a-Changelog history; release workflow ties to version tags |
 | `ARCHITECTURE.md` | Human-facing architecture narrative (subsystems, design decisions) |
@@ -621,7 +621,10 @@ This device operates in ignition-noise environments. Three layers of defense:
 - **Firmware version** is a single `#define FIRMWARE_VERSION` in `project.h`.
   Keep it in sync with the release git tag (`v2.0.0` -> `"2.0.0"`); it is
   reported over BLE (DIS) for the OTA update check. `FIRMWARE_VARIANT`
-  (also in `project.h`) feeds the DIS model string.
+  (also in `project.h`) feeds the DIS model string. The version literal can be
+  overridden at build time with `-DFIRMWARE_VERSION_OVERRIDE=<token>` (a bare
+  token; `project.h` stringizes it) — the `beta` workflow uses this to stamp
+  nightly builds as `<base>-beta.<gitsha>`. Normal builds leave it undefined.
 - The sketch lives in `BirdsEye/` so the folder name matches the
   `.ino` file — required by Arduino IDE / arduino-cli.
 - `project.h` is included before other `.ino` modules so Arduino's
