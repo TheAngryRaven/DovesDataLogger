@@ -5,6 +5,7 @@
 
 #include "firmware_ota.h"
 
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -84,13 +85,13 @@ static const char* kStagePath = "/fw/pending.bin";
 
 // 16-byte image-descriptor magic. This firmware embeds it (kFwImageDescriptor
 // below) so EVERY image built from this codebase carries an identifiable
-// variant/version tag. Before flashing we scan the uploaded image for this
-// magic and refuse a mismatched variant (FWERR:VARIANT).
-static const uint8_t kFwMagic[16] = {
-  'D','O','V','E','S','B','I','R','D','S','E','Y','E','F','W','1'};
-
+// variant/version tag for forensics. The variant is NO LONGER inferred from
+// these bytes during apply — the web app declares the target variant in the
+// FWBEGIN handshake (derived authoritatively from the device's own DIS Model
+// Number) and the firmware validates it once, up front, against
+// FIRMWARE_VARIANT.
 struct FwImageDescriptor {
-  char magic[16];    // kFwMagic (no NUL terminator — exactly 16 bytes)
+  char magic[16];    // "DOVESBIRDSEYEFW1" (no NUL terminator — exactly 16 bytes)
   char variant[16];  // FIRMWARE_VARIANT, NUL-padded
   char version[16];  // FIRMWARE_VERSION, NUL-padded
 };
@@ -156,6 +157,21 @@ static void fwNotifyErr(const char* token) {
   fileStatusChar.notify((uint8_t*)buf, n);
 }
 
+// Case-insensitive whole-string compare of a declared variant token (from the
+// FWBEGIN handshake) against this build's compile-time FIRMWARE_VARIANT. Both
+// strings must terminate together, so "sense" never matches "nonsense".
+static bool fwVariantMatches(const char* declared) {
+  const char* self = FIRMWARE_VARIANT;
+  while (*declared && *self) {
+    if (tolower((unsigned char)*declared) != tolower((unsigned char)*self)) {
+      return false;
+    }
+    ++declared;
+    ++self;
+  }
+  return *declared == '\0' && *self == '\0';
+}
+
 // Tear down all receive state, close the file, release SD. Safe to call
 // from any path. Does NOT emit a notification.
 void fwReset() {
@@ -205,17 +221,35 @@ void fwHandleCommand(const char* cmd, uint16_t len) {
   (void)len;
 
   if (strncmp(cmd, "FWBEGIN:", 8) == 0) {
-    // FWBEGIN:<size>,<crc32hex> — control-channel handshake. Parse, store,
-    // and echo the CRC back so the web app can confirm a clean channel
-    // before it streams a single byte.
+    // FWBEGIN:<size>,<crc32hex>,<variant> — control-channel handshake. Parse
+    // all three fields, validate the declared target variant against this
+    // build's identity (the ONLY variant check), store size + CRC, and echo
+    // the CRC back so the web app can confirm a clean channel before it
+    // streams a single byte.
     if (fwState != FW_IDLE) { fwNotifyErr("STATE"); return; }
     const char* p = cmd + 8;
-    const char* comma = strchr(p, ',');
-    if (!comma) { fwNotifyErr("STATE"); return; }
+    const char* comma1 = strchr(p, ',');
+    if (!comma1) { fwNotifyErr("STATE"); return; }
+    const char* comma2 = strchr(comma1 + 1, ',');
+    if (!comma2) { fwNotifyErr("STATE"); return; }
+
     uint32_t size = (uint32_t)strtoul(p, nullptr, 10);
+
+    // The CRC field sits between the two commas. Copy out exactly those bytes
+    // so crc32::fromHex (which requires a NUL right after 8 digits) doesn't
+    // choke on the trailing ",<variant>".
+    if (comma2 - (comma1 + 1) != 8) { fwNotifyErr("CRC"); return; }
+    char crcHex[9];
+    memcpy(crcHex, comma1 + 1, 8);
+    crcHex[8] = '\0';
     uint32_t crc;
-    if (!crc32::fromHex(comma + 1, crc)) { fwNotifyErr("CRC"); return; }
+    if (!crc32::fromHex(crcHex, crc)) { fwNotifyErr("CRC"); return; }
+
     if (size == 0 || size > FW_MAX_IMAGE_SIZE) { fwNotifyErr("SIZE"); return; }
+
+    // Declared target variant must match this build's compile-time identity.
+    // Fail fast here, before any upload — this is now the only variant gate.
+    if (!fwVariantMatches(comma2 + 1)) { fwNotifyErr("VARIANT"); return; }
 
     fwExpectedSize = size;
     fwExpectedCrc = crc;
@@ -321,41 +355,6 @@ static bool fwCrcOfStageFile(uint32_t& outCrc) {
   f.close();
   outCrc = crc32::finalize(state);
   return true;
-}
-
-// Scan the staged image for the descriptor magic and confirm its variant
-// matches this board. Returns false on mismatch / missing descriptor.
-static bool fwVerifyVariant() {
-  File32 f = SD.open(kStagePath, FILE_READ);
-  if (!f) return false;
-
-  // Sliding-window scan in 512-byte reads with a 31-byte carry so the magic
-  // (16 B) + variant (16 B) is never split across a read boundary.
-  uint8_t win[512 + 31];
-  size_t carry = 0;
-  bool ok = false;
-  while (!ok) {
-    int r = f.read(win + carry, 512);
-    if (r <= 0) break;
-    size_t total = carry + (size_t)r;
-    if (total < sizeof(kFwMagic) + 16) {
-      carry = total;  // not enough yet; keep accumulating (tiny files)
-      continue;
-    }
-    for (size_t i = 0; i + sizeof(kFwMagic) + 16 <= total; ++i) {
-      if (memcmp(win + i, kFwMagic, sizeof(kFwMagic)) == 0) {
-        const char* variant = (const char*)(win + i + sizeof(kFwMagic));
-        if (strncmp(variant, FIRMWARE_VARIANT, 16) == 0) ok = true;
-        f.close();
-        return ok;  // magic found — decision is final either way
-      }
-    }
-    // Carry the tail so a magic spanning the boundary is still caught.
-    carry = sizeof(kFwMagic) + 16 - 1;
-    memmove(win, win + total - carry, carry);
-  }
-  f.close();
-  return false;
 }
 
 static void fwFinalizeReceive() {
@@ -503,11 +502,9 @@ static void fwDoApply() {
     fwNotifyErr("BATTERY");
     return;
   }
-  if (!fwVerifyVariant()) {
-    debugln(F("FW: APPLY refused — variant mismatch"));
-    fwNotifyErr("VARIANT");
-    return;
-  }
+  // Variant is validated once, up front, at FWBEGIN (the web app declares the
+  // target derived from this device's DIS Model Number). No image-byte scan
+  // here anymore.
   // Refuse if this firmware's own flash footprint reaches into the staging
   // region — erasing it (fwStageToFlash) would wipe live code mid-update. The
   // image-size cap keeps the incoming image clear of it, but the running app
