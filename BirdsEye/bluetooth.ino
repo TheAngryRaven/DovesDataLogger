@@ -5,6 +5,7 @@
 
 #include "bluetooth.h"
 #include "filename_validator.h"
+#include "firmware_ota.h"
 
 // Deferred settings command buffer (BLE callback -> main loop)
 static volatile bool settingsCmdPending = false;
@@ -22,6 +23,11 @@ static volatile uint16_t trackUploadOffset = 0;
 // Track delete state (BLE callback -> main loop)
 static volatile bool trackDeletePending = false;
 static char trackDeleteFilename[25];
+
+// Set by the disconnect callback; BLUETOOTH_LOOP() performs the SD teardown
+// (close transfer/staging file, release SD, abort OTA) and the auto-reboot
+// on the main loop, so SdFat is only ever touched by one task.
+static volatile bool bleDisconnectCleanupPending = false;
 
 void bleConnectCallback(uint16_t conn_handle) {
   debugln(F("BLE: Device connected!"));
@@ -59,29 +65,24 @@ void bleDisconnectCallback(uint16_t conn_handle, uint8_t reason) {
   debugln(F("BLE: Disconnected!"));
   bleConnected = false;
   bleNegotiatedMtu = 23; // Reset to default
-  if (bleCurrentFile) {
-    bleCurrentFile.close();
-    releaseSDAccess(SD_ACCESS_BLE_TRANSFER);  // Release SD access on disconnect
-  }
+
+  // Pure in-RAM flag resets are safe from this callback (Bluefruit) task.
   bleTransferInProgress = false;
-  // Reset track upload/delete state on disconnect
   trackUploadActive = false;
   trackUploadReady = false;
   trackUploadComplete = false;
   trackUploadError = false;
   trackDeletePending = false;
 
-  // Auto-reboot after BLE disconnect to apply any changed settings —
-  // but only if the phone disconnected (not us calling BLE_STOP()).
-  // BLE_STOP() sets bleActive=false before triggering async disconnect.
-  if (!bleActive) {
-    debugln(F("BLE: Local disconnect (BLE_STOP), skipping reboot"));
-  } else if (enableLogging) {
-    debugln(F("BLE: Skipping reboot (logging active)"));
-  } else {
-    debugln(F("BLE: Rebooting to apply settings..."));
-    delay(100);  // Brief delay for debug output to flush
-    NVIC_SystemReset();
+  // Everything that touches SdFat — closing the in-flight transfer/staging
+  // file, releasing SD access, aborting the OTA — plus the auto-reboot is
+  // DEFERRED to BLUETOOTH_LOOP() on the main loop. This callback runs in the
+  // Bluefruit task, which can preempt an in-flight SD write in the main loop,
+  // and SdFat is not thread-safe. If this was a local BLE_STOP() (which sets
+  // bleActive=false before disconnecting), BLE_STOP() already did the
+  // teardown on the main loop, so there is nothing to defer.
+  if (bleActive) {
+    bleDisconnectCleanupPending = true;
   }
 }
 
@@ -97,10 +98,12 @@ void bleSetupFileService() {
   fileListChar.setMaxLen(244);
   fileListChar.begin();
 
-  // File Request Characteristic
+  // File Request Characteristic. Max length is 244 so the firmware-OTA
+  // path can receive ~240-byte raw image chunks (text commands and the
+  // legacy 64-byte track-upload chunks fit comfortably inside this).
   fileRequestChar.setProperties(CHR_PROPS_WRITE | CHR_PROPS_WRITE_WO_RESP);
   fileRequestChar.setPermission(SECMODE_NO_ACCESS, SECMODE_OPEN);
-  fileRequestChar.setMaxLen(64);
+  fileRequestChar.setMaxLen(244);
   fileRequestChar.setWriteCallback(bleFileRequestCallback);
   fileRequestChar.begin();
 
@@ -311,6 +314,19 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
     return;
   }
 
+  // Firmware OTA image stream: while receiving, every write is raw image
+  // data EXCEPT the short FWDONE / FWABORT control tokens. Bounding the
+  // token match by length keeps a full binary chunk from being mistaken for
+  // a command (mirrors the TPUT/TDONE convention above).
+  if (fwReceiving()) {
+    if (len <= 8 && (strcmp(buffer, "FWDONE") == 0 || strcmp(buffer, "FWABORT") == 0)) {
+      fwHandleCommand(buffer, len);
+    } else {
+      fwReceiveChunk(data, len);
+    }
+    return;
+  }
+
   debug(F("BLE: Received command: ["));
   debug(buffer);
   debugln(F("]"));
@@ -405,6 +421,12 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
     char response[24];
     snprintf(response, sizeof(response), "BATT:%d,%s", pct, vbuf);
     fileStatusChar.notify((uint8_t*)response, strlen(response));
+
+  // Firmware OTA commands (FWBEGIN/FWPUT/FWDONE/FWAPPLY/FWABORT). Parsing
+  // and synchronous replies happen here; SD writes + apply are deferred to
+  // FW_OTA_LOOP() on the main loop.
+  } else if (fwIsCommand(buffer)) {
+    fwHandleCommand(buffer, len);
   }
 }
 
@@ -485,12 +507,16 @@ void BLE_STOP() {
   // knows this was a local stop (not a phone disconnect) and skips reboot.
   bleActive = false;
 
-  // Close any open file and release SD access
+  // Close any open file and release SD access (main-loop context — BLE_STOP()
+  // is called from the loop, so SdFat access here is safe). The disconnect
+  // callback skips its deferred teardown when bleActive is already false, so
+  // this is the single owner of the local-stop teardown.
   if (bleCurrentFile) {
     bleCurrentFile.close();
     releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
   }
   bleTransferInProgress = false;
+  fwReset();  // abort any in-flight OTA (closes staging file, frees SD)
 
   // Disconnect any connected device
   if (Bluefruit.connected()) {
@@ -738,6 +764,27 @@ void processTrackDelete() {
 void BLUETOOTH_LOOP() {
   if (!bleActive) return;
 
+  // Deferred disconnect teardown — runs on the main loop so SdFat is touched
+  // by a single task. Closes any in-flight transfer/staging file, releases
+  // SD, aborts the OTA, then auto-reboots to apply changed settings.
+  if (bleDisconnectCleanupPending) {
+    bleDisconnectCleanupPending = false;
+    if (bleCurrentFile) {
+      bleCurrentFile.close();
+      releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
+    }
+    bleTransferInProgress = false;
+    fwReset();  // abort any in-flight OTA (closes staging file, frees SD)
+
+    if (enableLogging) {
+      debugln(F("BLE: Skipping reboot (logging active)"));
+    } else {
+      debugln(F("BLE: Rebooting to apply settings..."));
+      delay(100);  // Brief delay for debug output to flush
+      NVIC_SystemReset();
+    }
+  }
+
   // Process deferred settings commands (thread-safe: runs in main loop)
   if (settingsCmdPending) {
     processSettingsCommand();
@@ -757,6 +804,10 @@ void BLUETOOTH_LOOP() {
   if (trackDeletePending) {
     processTrackDelete();
   }
+
+  // Service deferred firmware-OTA work (staging-file writes, CRC verify,
+  // apply sequence).
+  FW_OTA_LOOP();
 
   // Deferred MTU negotiation - read result 500ms after request
   if (bleWaitingForMTU && millis() - bleMTURequestTime >= 500) {

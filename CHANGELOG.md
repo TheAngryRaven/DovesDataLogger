@@ -32,6 +32,37 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   full-screen "Please Reboot Device" fault anymore.
 
 ### Added
+- **SD-staged firmware OTA over the custom BLE file service.** Because
+  Chrome's Web Bluetooth blocklist bans the Nordic legacy DFU service that
+  `BLEDfu` exposes (and our sealed units have no pins to install a
+  web-allowed Secure-DFU bootloader), the firmware can now update *itself*:
+  the DovesDataViewer web app streams the new image to the SD card over the
+  existing `0x1820` file service, the firmware CRC-32 verifies it, copies it
+  into a free internal-flash region, and a RAM-resident flasher swaps it into
+  the application region and resets. New `FW*` command/response protocol on
+  `0x2A3E`/`0x2A40`: `FWBEGIN:<size>,<crc>` → `FWCRC:<crc>` handshake,
+  `FWPUT:<size>` → `FWREADY` + raw chunks → `FWDONE` →
+  `FWOK:<crc>`/`FWERR:<reason>`, then `FWAPPLY` → `FWSTAGE:<pct>` →
+  `FWAPPLIED`. CRC is CRC-32/IEEE-802.3 (zlib), lowercase 8-char hex; the new
+  host-tested `crc32` pure unit pins it to the web client's algorithm. The
+  apply path is guarded by a battery-voltage check (`FWERR:BATTERY`), an
+  embedded variant/magic check (`FWERR:VARIANT`), an in-flash CRC re-verify
+  before the app region is ever erased, and a GPREGRET bootloader-recovery
+  flag so an interrupted swap leaves the unit re-flashable over BLE. The
+  request characteristic max length was raised to 244 to carry ~240-byte
+  image chunks. See `docs/firmware-ota-phase0.md` for the apply-strategy
+  decision and the hardware spikes that gate it. (The previously added
+  `BLEDfu` buttonless Secure DFU service remains registered for the one-time
+  fleet-migration push via the nRF Connect mobile app.)
+- **OTA manifest now publishes the raw app image + its CRC-32.** The release
+  workflow extracts `BirdsEye.ino.bin` from each variant's DFU `.zip`,
+  publishes it next to the `.zip`, and adds `appBin`, `appCrc32`
+  (CRC-32/IEEE-802.3, lowercase 8-char hex), and `appSize` to each
+  `manifest.json` build entry. This is the authoritative checksum for the
+  SD-staged OTA: the web client can download `appBin` directly (no client-side
+  unzip), send `FWBEGIN:<appSize>,<appCrc32>`, and the device's `FWOK:<crc>`
+  must equal `appCrc32` — build pipeline, web app, and firmware all agree on
+  one value. Additive/backwards-compatible with the existing `dfuZip` field.
 - **Over-the-air (OTA) firmware updates.** The firmware now registers the
   buttonless Secure DFU service (`BLEDfu`), so a companion (DovesDataViewer
   over Web Bluetooth) can reboot the board into the bootloader's Nordic
