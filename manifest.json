@@ -1,21 +1,21 @@
 {
-  "version": "2.2.1",
-  "releaseTag": "v2.2.1",
-  "publishedAt": "2026-06-08T22:37:07Z",
-  "releaseNotes": "https://github.com/TheAngryRaven/DovesDataLogger/releases/tag/v2.2.1",
+  "version": "2.2.2",
+  "releaseTag": "v2.2.2",
+  "publishedAt": "2026-06-08T22:51:19Z",
+  "releaseNotes": "https://github.com/TheAngryRaven/DovesDataLogger/releases/tag/v2.2.2",
   "builds": {
     "BirdsEye-sense": {
       "variant": "sense",
-      "dfuZip": "https://theangryraven.github.io/DovesDataLogger/firmware/2.2.1/BirdsEye-sense.zip",
-      "appBin": "https://theangryraven.github.io/DovesDataLogger/firmware/2.2.1/BirdsEye-sense.bin",
-      "appCrc32": "b49facaa",
+      "dfuZip": "https://theangryraven.github.io/DovesDataLogger/firmware/2.2.2/BirdsEye-sense.zip",
+      "appBin": "https://theangryraven.github.io/DovesDataLogger/firmware/2.2.2/BirdsEye-sense.bin",
+      "appCrc32": "f7f6220b",
       "appSize": 287916
     },
     "BirdsEye-nonsense": {
       "variant": "nonsense",
-      "dfuZip": "https://theangryraven.github.io/DovesDataLogger/firmware/2.2.1/BirdsEye-nonsense.zip",
-      "appBin": "https://theangryraven.github.io/DovesDataLogger/firmware/2.2.1/BirdsEye-nonsense.bin",
-      "appCrc32": "27613468",
+      "dfuZip": "https://theangryraven.github.io/DovesDataLogger/firmware/2.2.2/BirdsEye-nonsense.zip",
+      "appBin": "https://theangryraven.github.io/DovesDataLogger/firmware/2.2.2/BirdsEye-nonsense.bin",
+      "appCrc32": "2cb1b876",
       "appSize": 287916
     }
   }
