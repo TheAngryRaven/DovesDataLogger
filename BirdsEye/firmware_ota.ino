@@ -441,11 +441,19 @@ static void fwRamFlasher(uint32_t dst, uint32_t src, uint32_t words) {
 // re-verify its CRC there. Returns true on success; on any failure the
 // running app is still completely intact (nothing destructive has happened).
 static bool fwStageToFlash() {
-  // Erase the staging region (only the pages we need).
+  // Erase the staging region (only the pages we need). This is several seconds
+  // of flash erase with no progress notify, and runs while BLE may still be
+  // connected — a prime stall suspect, so breadcrumb the page count up front.
   uint32_t pages = (fwExpectedSize + FW_FLASH_PAGE_SIZE - 1) / FW_FLASH_PAGE_SIZE;
+  {
+    char eb[24];
+    snprintf(eb, sizeof(eb), "FWDBG:ERASE=%lu", (unsigned long)pages);
+    fwNotify(eb);
+  }
   for (uint32_t i = 0; i < pages; ++i) {
     flash_nrf5x_erase(FW_STAGE_BASE + i * FW_FLASH_PAGE_SIZE);
   }
+  fwNotify("FWDBG:ERASED");
 
   // Copy SD -> staging flash in page-sized blocks, padding the final block
   // with 0xFF so the write length is flash-word aligned.
@@ -501,6 +509,16 @@ static uint32_t fwAppFlashEnd() {
 static void fwDoApply() {
   if (fwState != FW_VERIFIED) { fwNotifyErr("STATE"); return; }
 
+  // Diagnostic breadcrumbs — surface in the web app's raw notification log so
+  // a stall before FWAPPLIED can be pinpointed (apply entered? battery seen?
+  // staging/erase reached?). Cheap to emit; harmless to the apply.
+  fwNotify("FWDBG:APPLY");
+  {
+    char vb[24];
+    snprintf(vb, sizeof(vb), "FWDBG:VBAT=%d", (int)(lastBatteryVoltage * 1000.0f));
+    fwNotify(vb);
+  }
+
   // --- Guards (nothing destructive yet) ---
   if (lastBatteryVoltage < FW_MIN_APPLY_VOLTAGE) {
     debugln(F("FW: APPLY refused — battery low"));
@@ -523,6 +541,7 @@ static void fwDoApply() {
 
   // --- Stage into upper flash and re-verify (still non-destructive) ---
   debugln(F("FW: staging image to flash..."));
+  fwNotify("FWDBG:STAGE");
   if (!fwStageToFlash()) {
     debugln(F("FW: stage/verify in flash failed"));
     fwNotifyErr("FLASH");

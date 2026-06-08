@@ -12,6 +12,17 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+- **Beta OTA manifest now lists each variant's `.uf2`** (`builds[model].uf2`).
+  The `.uf2` was already published to `beta/`, just not referenced — exposing
+  it makes drag-and-drop bootloader (DFU-mode) recovery easy when an OTA fails.
+- **Firmware OTA apply emits `FWDBG:*` breadcrumbs** (`APPLY`, `VBAT=<mv>`,
+  `STAGE`, `ERASE=<pages>`, `ERASED`) over the status characteristic so a stall
+  before `FWAPPLIED` can be pinpointed from the web app's raw notification log
+  — apply entered? battery reading seen? staging/erase reached? The up-front
+  staging-region erase is several seconds with no progress notify (and may run
+  while BLE is still connected), so it is bracketed explicitly.
+
 ### Fixed
 - **Firmware OTA apply was aborted by the BLE disconnect, so the update never
   installed.** After `FWAPPLY`, the web app disconnects to hand the device off
