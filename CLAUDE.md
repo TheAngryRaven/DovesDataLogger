@@ -75,6 +75,7 @@ All sketch sources live in `BirdsEye/` so the folder name matches the
 | `images.h` | PROGMEM bitmap data (splash screen, animations) |
 | `accelerometer.{h,ino}` | LSM6DS3 IMU init and g-force reads (onboard XIAO Sense) |
 | `bluetooth.{h,ino}` | BLE service (file listing, transfer, settings, track sync), auto-reboot on disconnect |
+| `firmware_ota.{h,ino}` | SD-staged firmware OTA: `FW*` BLE protocol, SD staging, CRC verify, self-flash apply (see subsystem 11) |
 | `display_pages.{h,ino}` | All page rendering functions (`displayPage_*()`) |
 | `display_ui.{h,ino}` | Display init, button reading (multi-sample debounce), menu navigation, I2C bus recovery |
 | `gps_functions.{h,ino}` | GPS init (SparkFun UBX PVT), time conversion, DOVEX logging pipeline, TIMER3 serial buffer ISR, V_BCKP recovery |
@@ -98,6 +99,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `gps_validation.{h,cpp}` | PVT sample sanity gate + dtostrf-output check |
 | `dovex_header.{h,cpp}` | DOVEX 1 KB header `format()` / `parse()` |
 | `filename_validator.{h,cpp}` | FAT-safe / traversal-proof check for BLE filenames |
+| `crc32.{h,cpp}` | CRC-32/IEEE-802.3 (zlib) incremental + hex; pins firmware-OTA CRC to the web client |
 
 ### Non-Source
 
@@ -302,9 +304,16 @@ loop()  ~250 Hz
   - Upload/delete state machines: BLE callback sets flags, `BLUETOOTH_LOOP()`
     calls `processTrackUpload()` / `processTrackDelete()` for thread-safe SD
     access. Both call `buildTrackList()` after success.
+- **Firmware OTA commands** (`FW*`, handled by `firmware_ota.ino` — see
+  subsystem 11): `FWBEGIN`/`FWPUT`/`FWDONE`/`FWAPPLY`/`FWABORT`. The BLE
+  callback dispatches them via `fwIsCommand()`/`fwHandleCommand()` and routes
+  raw image chunks to `fwReceiveChunk()` while `fwReceiving()`. The request
+  characteristic max length was raised from 64 to **244** so ~240-byte image
+  chunks fit. `BLUETOOTH_LOOP()` calls `FW_OTA_LOOP()` each iteration.
 - **Auto-reboot on BLE disconnect**: `bleDisconnectCallback()` calls
   `NVIC_SystemReset()` after 100 ms delay, ensuring new settings take
-  effect without manual power cycle.
+  effect without manual power cycle. It also calls `fwReset()` to abort any
+  in-flight OTA and free the staging file + SD access.
 
 ### 7. Replay (`replay.ino`)
 
@@ -381,6 +390,53 @@ loop()  ~250 Hz
 - **Periodic GPS fix**: `SLEEP_GPS_WAKE_INTERVAL` (24 h) — rarely fires
   in practice. Wakes GPS briefly, checks fix, re-sleeps.
 - CPU idle via `sd_app_evt_wait()` (SoftDevice-safe WFE).
+
+### 11. Firmware OTA (`firmware_ota.ino`, `crc32.{h,cpp}`)
+
+- **Why self-flash**: Chrome's Web Bluetooth blocklist bans the Nordic
+  *legacy* DFU service `BLEDfu` exposes, and the sealed units have no
+  button/SWD pins to install a web-allowed Secure-DFU bootloader. So the app
+  updates itself: the web app streams the image to SD over the existing
+  `0x1820` service, the firmware CRC-verifies it, stages it to a free flash
+  region, and a RAM flasher swaps it into the app region and resets. The
+  bootloader is **not** changed for the field flow.
+- **Wire protocol** (text on `0x2A3E` in / `0x2A40` out; image bytes are raw
+  binary writes to `0x2A3E`):
+  - `FWBEGIN:<size>,<crc32hex>` → `FWCRC:<crc32hex>` (echo handshake to
+    verify the control channel before any upload).
+  - `FWPUT:<size>` → `FWREADY`, then raw ≤240-byte chunks streamed to SD
+    (`/fw/pending.bin`), then `FWDONE` → `FWOK:<crc>` (CRC of the stored
+    file) or `FWERR:CRC|SIZE|WRITE`.
+  - `FWAPPLY` → `FWSTAGE:<pct>` (0–100, repeatable) → `FWAPPLIED` then reset,
+    or `FWERR:<reason>`. `FWABORT` cancels at any point.
+  - Error tokens: `CRC`, `SIZE`, `WRITE`, `BATTERY`, `VARIANT`, `STATE`,
+    `FLASH`.
+- **CRC**: CRC-32/IEEE-802.3 (zlib), reflected poly `0xEDB88320`, init/xor
+  `0xFFFFFFFF`, lowercase 8-char hex, compared case-insensitively. Shared
+  with the web client via the host-tested `crc32` pure unit. Sanity vector
+  `crc32("123456789") == 0xcbf43926`.
+- **Threading**: like track upload, the BLE callback only parses commands and
+  copies chunk bytes into a RAM double-buffer; `FW_OTA_LOOP()` (main loop)
+  does all SD writes, CRC verify, and the apply sequence. SD held via
+  `SD_ACCESS_BLE_TRANSFER` for the receive.
+- **Apply** (`fwDoApply()`): guards first — refuse below `FW_MIN_APPLY_VOLTAGE`
+  (3.6 V, uses cached `lastBatteryVoltage`) → `FWERR:BATTERY`; scan the image
+  for the embedded `kFwImageDescriptor` magic and refuse a variant mismatch →
+  `FWERR:VARIANT`. Then `fwStageToFlash()` copies SD → upper flash
+  (`FW_STAGE_BASE`, via the `flash_nrf5x` HAL) and **re-verifies the CRC in
+  flash before the app region is ever erased** (`FWERR:FLASH` on mismatch).
+  Only then: emit `FWAPPLIED`, arm the GPREGRET recovery flag
+  (`FW_GPREGRET_OTA_DFU`), disable the SoftDevice, and call the RAM-resident
+  `fwRamFlasher()` to erase the app region, copy the staged image down, and
+  reset.
+- **Recovery net**: an interrupted swap leaves an invalid app, so the
+  bootloader comes up in BLE DFU and the unit is re-flashable over the air via
+  the nRF Connect mobile app — no pins. **The apply path needs the Phase 0
+  hardware spikes signed off before field release** — see
+  `docs/firmware-ota-phase0.md`.
+- **Fleet migration**: the first firmware carrying `FW*` is pushed to sealed
+  units once via nRF Connect (native app, buttonless trigger works on the
+  existing single-bank bootloader); all later updates go through the web app.
 
 ---
 
@@ -502,6 +558,12 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | Track upload buffer | 4096 | `bluetooth.ino` |
 | GPS serial buffer | 4096 | `gps_functions.ino` |
 | GPS serial timer | TIMER3, 10 ms | `gps_functions.ino` |
+| OTA staging path | `/fw/pending.bin` | `firmware_ota.ino` |
+| OTA receive buffer | 2 × 4096 (double-buffer) | `firmware_ota.ino` |
+| OTA app base | `0x27000` | `firmware_ota.ino` |
+| OTA staging flash base | `0xA4000` | `firmware_ota.ino` |
+| OTA max image size | 320 KB | `firmware_ota.ino` |
+| OTA min apply voltage | 3.6 V | `firmware_ota.ino` |
 
 ---
 

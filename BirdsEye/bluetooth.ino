@@ -5,6 +5,7 @@
 
 #include "bluetooth.h"
 #include "filename_validator.h"
+#include "firmware_ota.h"
 
 // Deferred settings command buffer (BLE callback -> main loop)
 static volatile bool settingsCmdPending = false;
@@ -70,6 +71,8 @@ void bleDisconnectCallback(uint16_t conn_handle, uint8_t reason) {
   trackUploadComplete = false;
   trackUploadError = false;
   trackDeletePending = false;
+  // Abort any in-flight firmware OTA (frees the staging file + SD access).
+  fwReset();
 
   // Auto-reboot after BLE disconnect to apply any changed settings —
   // but only if the phone disconnected (not us calling BLE_STOP()).
@@ -97,10 +100,12 @@ void bleSetupFileService() {
   fileListChar.setMaxLen(244);
   fileListChar.begin();
 
-  // File Request Characteristic
+  // File Request Characteristic. Max length is 244 so the firmware-OTA
+  // path can receive ~240-byte raw image chunks (text commands and the
+  // legacy 64-byte track-upload chunks fit comfortably inside this).
   fileRequestChar.setProperties(CHR_PROPS_WRITE | CHR_PROPS_WRITE_WO_RESP);
   fileRequestChar.setPermission(SECMODE_NO_ACCESS, SECMODE_OPEN);
-  fileRequestChar.setMaxLen(64);
+  fileRequestChar.setMaxLen(244);
   fileRequestChar.setWriteCallback(bleFileRequestCallback);
   fileRequestChar.begin();
 
@@ -311,6 +316,19 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
     return;
   }
 
+  // Firmware OTA image stream: while receiving, every write is raw image
+  // data EXCEPT the short FWDONE / FWABORT control tokens. Bounding the
+  // token match by length keeps a full binary chunk from being mistaken for
+  // a command (mirrors the TPUT/TDONE convention above).
+  if (fwReceiving()) {
+    if (len <= 8 && (strcmp(buffer, "FWDONE") == 0 || strcmp(buffer, "FWABORT") == 0)) {
+      fwHandleCommand(buffer, len);
+    } else {
+      fwReceiveChunk(data, len);
+    }
+    return;
+  }
+
   debug(F("BLE: Received command: ["));
   debug(buffer);
   debugln(F("]"));
@@ -405,6 +423,12 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
     char response[24];
     snprintf(response, sizeof(response), "BATT:%d,%s", pct, vbuf);
     fileStatusChar.notify((uint8_t*)response, strlen(response));
+
+  // Firmware OTA commands (FWBEGIN/FWPUT/FWDONE/FWAPPLY/FWABORT). Parsing
+  // and synchronous replies happen here; SD writes + apply are deferred to
+  // FW_OTA_LOOP() on the main loop.
+  } else if (fwIsCommand(buffer)) {
+    fwHandleCommand(buffer, len);
   }
 }
 
@@ -757,6 +781,10 @@ void BLUETOOTH_LOOP() {
   if (trackDeletePending) {
     processTrackDelete();
   }
+
+  // Service deferred firmware-OTA work (staging-file writes, CRC verify,
+  // apply sequence).
+  FW_OTA_LOOP();
 
   // Deferred MTU negotiation - read result 500ms after request
   if (bleWaitingForMTU && millis() - bleMTURequestTime >= 500) {
