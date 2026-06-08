@@ -24,6 +24,11 @@ static volatile uint16_t trackUploadOffset = 0;
 static volatile bool trackDeletePending = false;
 static char trackDeleteFilename[25];
 
+// Set by the disconnect callback; BLUETOOTH_LOOP() performs the SD teardown
+// (close transfer/staging file, release SD, abort OTA) and the auto-reboot
+// on the main loop, so SdFat is only ever touched by one task.
+static volatile bool bleDisconnectCleanupPending = false;
+
 void bleConnectCallback(uint16_t conn_handle) {
   debugln(F("BLE: Device connected!"));
   bleConnected = true;
@@ -60,31 +65,24 @@ void bleDisconnectCallback(uint16_t conn_handle, uint8_t reason) {
   debugln(F("BLE: Disconnected!"));
   bleConnected = false;
   bleNegotiatedMtu = 23; // Reset to default
-  if (bleCurrentFile) {
-    bleCurrentFile.close();
-    releaseSDAccess(SD_ACCESS_BLE_TRANSFER);  // Release SD access on disconnect
-  }
+
+  // Pure in-RAM flag resets are safe from this callback (Bluefruit) task.
   bleTransferInProgress = false;
-  // Reset track upload/delete state on disconnect
   trackUploadActive = false;
   trackUploadReady = false;
   trackUploadComplete = false;
   trackUploadError = false;
   trackDeletePending = false;
-  // Abort any in-flight firmware OTA (frees the staging file + SD access).
-  fwReset();
 
-  // Auto-reboot after BLE disconnect to apply any changed settings —
-  // but only if the phone disconnected (not us calling BLE_STOP()).
-  // BLE_STOP() sets bleActive=false before triggering async disconnect.
-  if (!bleActive) {
-    debugln(F("BLE: Local disconnect (BLE_STOP), skipping reboot"));
-  } else if (enableLogging) {
-    debugln(F("BLE: Skipping reboot (logging active)"));
-  } else {
-    debugln(F("BLE: Rebooting to apply settings..."));
-    delay(100);  // Brief delay for debug output to flush
-    NVIC_SystemReset();
+  // Everything that touches SdFat — closing the in-flight transfer/staging
+  // file, releasing SD access, aborting the OTA — plus the auto-reboot is
+  // DEFERRED to BLUETOOTH_LOOP() on the main loop. This callback runs in the
+  // Bluefruit task, which can preempt an in-flight SD write in the main loop,
+  // and SdFat is not thread-safe. If this was a local BLE_STOP() (which sets
+  // bleActive=false before disconnecting), BLE_STOP() already did the
+  // teardown on the main loop, so there is nothing to defer.
+  if (bleActive) {
+    bleDisconnectCleanupPending = true;
   }
 }
 
@@ -509,12 +507,16 @@ void BLE_STOP() {
   // knows this was a local stop (not a phone disconnect) and skips reboot.
   bleActive = false;
 
-  // Close any open file and release SD access
+  // Close any open file and release SD access (main-loop context — BLE_STOP()
+  // is called from the loop, so SdFat access here is safe). The disconnect
+  // callback skips its deferred teardown when bleActive is already false, so
+  // this is the single owner of the local-stop teardown.
   if (bleCurrentFile) {
     bleCurrentFile.close();
     releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
   }
   bleTransferInProgress = false;
+  fwReset();  // abort any in-flight OTA (closes staging file, frees SD)
 
   // Disconnect any connected device
   if (Bluefruit.connected()) {
@@ -761,6 +763,27 @@ void processTrackDelete() {
 
 void BLUETOOTH_LOOP() {
   if (!bleActive) return;
+
+  // Deferred disconnect teardown — runs on the main loop so SdFat is touched
+  // by a single task. Closes any in-flight transfer/staging file, releases
+  // SD, aborts the OTA, then auto-reboots to apply changed settings.
+  if (bleDisconnectCleanupPending) {
+    bleDisconnectCleanupPending = false;
+    if (bleCurrentFile) {
+      bleCurrentFile.close();
+      releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
+    }
+    bleTransferInProgress = false;
+    fwReset();  // abort any in-flight OTA (closes staging file, frees SD)
+
+    if (enableLogging) {
+      debugln(F("BLE: Skipping reboot (logging active)"));
+    } else {
+      debugln(F("BLE: Rebooting to apply settings..."));
+      delay(100);  // Brief delay for debug output to flush
+      NVIC_SystemReset();
+    }
+  }
 
   // Process deferred settings commands (thread-safe: runs in main loop)
   if (settingsCmdPending) {

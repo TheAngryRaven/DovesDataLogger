@@ -69,6 +69,16 @@ extern "C" {
 // reading (lastBatteryVoltage) that the BATT command and main loop maintain.
 #define FW_MIN_APPLY_VOLTAGE 3.6f
 
+// Linker-provided markers for the end of this firmware's flash footprint,
+// used to refuse an apply that would erase live code (see fwAppFlashEnd).
+// Declared weak so a linker script lacking them disables the guard (symbols
+// resolve to address 0) instead of failing to link.
+extern "C" {
+  extern char __etext __attribute__((weak));         // end of .text in flash
+  extern char __data_start__ __attribute__((weak));  // .data (RAM) start
+  extern char __data_end__ __attribute__((weak));    // .data (RAM) end
+}
+
 // Staging file on SD.
 static const char* kStagePath = "/fw/pending.bin";
 
@@ -114,6 +124,7 @@ static uint32_t fwExpectedCrc = 0;
 static volatile bool fwPutPending = false;
 static volatile bool fwDonePending = false;
 static volatile bool fwApplyPending = false;
+static volatile bool fwAbortPending = false;
 
 // Receive bookkeeping.
 static uint32_t fwBytesReceived = 0;
@@ -152,6 +163,7 @@ void fwReset() {
   fwPutPending = false;
   fwDonePending = false;
   fwApplyPending = false;
+  fwAbortPending = false;
   fwError = false;
   fwErrorReason = nullptr;
   fwBytesReceived = 0;
@@ -243,8 +255,9 @@ void fwHandleCommand(const char* cmd, uint16_t len) {
   }
 
   if (strcmp(cmd, "FWABORT") == 0) {
-    fwReset();
-    fwNotify("FWABORTED");
+    // Defer the teardown to FW_OTA_LOOP(): fwReset() closes the staging file
+    // and releases SD, which must not run in this BLE callback task.
+    fwAbortPending = true;
     return;
   }
 }
@@ -468,6 +481,19 @@ static bool fwStageToFlash() {
   return crc32::finalize(state) == fwExpectedCrc;
 }
 
+// Highest flash address this running firmware occupies = end of code plus the
+// initialized-data image stored after it. Returns 0 if the linker didn't
+// provide the markers (guard disabled). The cast-to-integer comparison avoids
+// a -Waddress warning on the weak-symbol null test.
+static uint32_t fwAppFlashEnd() {
+  if ((uintptr_t)&__etext == 0) return 0;
+  uint32_t dataImage = 0;
+  if ((uintptr_t)&__data_end__ != 0 && (uintptr_t)&__data_start__ != 0) {
+    dataImage = (uint32_t)(&__data_end__ - &__data_start__);
+  }
+  return (uint32_t)&__etext + dataImage;
+}
+
 static void fwDoApply() {
   if (fwState != FW_VERIFIED) { fwNotifyErr("STATE"); return; }
 
@@ -480,6 +506,16 @@ static void fwDoApply() {
   if (!fwVerifyVariant()) {
     debugln(F("FW: APPLY refused — variant mismatch"));
     fwNotifyErr("VARIANT");
+    return;
+  }
+  // Refuse if this firmware's own flash footprint reaches into the staging
+  // region — erasing it (fwStageToFlash) would wipe live code mid-update. The
+  // image-size cap keeps the incoming image clear of it, but the running app
+  // could grow into it as the codebase expands, so guard at runtime too.
+  uint32_t appEnd = fwAppFlashEnd();
+  if (appEnd != 0 && appEnd > FW_STAGE_BASE) {
+    debugln(F("FW: APPLY refused — app overlaps staging region"));
+    fwNotifyErr("FLASH");
     return;
   }
 
@@ -520,6 +556,14 @@ static void fwDoApply() {
 // Main-loop service
 ///////////////////////////////////////////
 void FW_OTA_LOOP() {
+  // Deferred FWABORT: tear everything down (closes staging file, frees SD).
+  if (fwAbortPending) {
+    fwAbortPending = false;
+    fwReset();
+    fwNotify("FWABORTED");
+    return;
+  }
+
   // Deferred FWPUT: open the staging file, then signal FWREADY.
   if (fwPutPending) {
     fwPutPending = false;
