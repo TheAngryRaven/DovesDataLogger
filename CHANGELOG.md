@@ -12,6 +12,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-06-08
+
 ### Changed
 - **Firmware OTA: the target variant is now declared in the `FWBEGIN`
   handshake instead of inferred from the image bytes.** The command gains a
