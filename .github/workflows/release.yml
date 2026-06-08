@@ -208,9 +208,34 @@ jobs:
           # older version folders across releases.
           cp staged/* "$dest"/
 
+          # Extract the raw application .bin from each DFU .zip and publish it
+          # alongside, with its CRC-32 (zlib/IEEE-802.3, lowercase 8-char hex)
+          # and byte size. The SD-staged OTA flow (firmware_ota.ino) flashes
+          # this exact .bin to the app region and CRC-verifies it, so this is
+          # the AUTHORITATIVE checksum: the web client downloads appBin, sends
+          # FWBEGIN:<appSize>,<appCrc32>, and the firmware's FWOK:<crc> must
+          # equal appCrc32 — build, web, and device all agree on one value.
+          extract_bin() {            # $1 = variant; prints "<crc32hex> <size>"
+            local variant="$1"
+            local zip="staged/BirdsEye-${variant}.zip"
+            local tmp; tmp="$(mktemp -d)"
+            unzip -o -q "$zip" -d "$tmp"
+            local bin; bin="$(ls "$tmp"/*.bin | head -1)"
+            if [ -z "$bin" ]; then
+              echo "::error::No application .bin inside $zip" >&2
+              exit 1
+            fi
+            cp "$bin" "${dest}/BirdsEye-${variant}.bin"
+            local crc
+            crc="$(python3 -c "import zlib,sys;print(format(zlib.crc32(open(sys.argv[1],'rb').read())&0xffffffff,'08x'))" "$bin")"
+            echo "$crc $(stat -c%s "$bin")"
+          }
+          read -r sense_crc sense_size < <(extract_bin sense)
+          read -r nonsense_crc nonsense_size < <(extract_bin nonsense)
+
           # Stable manifest at the site root, always pointing at this release.
           # Keyed by the DIS model string the firmware reports over BLE so the
-          # webapp can look up its download with manifest.builds[model].dfuZip.
+          # webapp can look up its download with manifest.builds[model].
           jq -n \
             --arg version "$version" \
             --arg tag "$GITHUB_REF_NAME" \
@@ -218,14 +243,32 @@ jobs:
             --arg notes "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}" \
             --arg sense "${base}/firmware/${version}/BirdsEye-sense.zip" \
             --arg nonsense "${base}/firmware/${version}/BirdsEye-nonsense.zip" \
+            --arg senseBin "${base}/firmware/${version}/BirdsEye-sense.bin" \
+            --arg nonsenseBin "${base}/firmware/${version}/BirdsEye-nonsense.bin" \
+            --arg senseCrc "$sense_crc" \
+            --arg nonsenseCrc "$nonsense_crc" \
+            --argjson senseSize "$sense_size" \
+            --argjson nonsenseSize "$nonsense_size" \
             '{
                version: $version,
                releaseTag: $tag,
                publishedAt: $published,
                releaseNotes: $notes,
                builds: {
-                 "BirdsEye-sense":    { variant: "sense",    dfuZip: $sense },
-                 "BirdsEye-nonsense": { variant: "nonsense", dfuZip: $nonsense }
+                 "BirdsEye-sense": {
+                   variant: "sense",
+                   dfuZip: $sense,
+                   appBin: $senseBin,
+                   appCrc32: $senseCrc,
+                   appSize: $senseSize
+                 },
+                 "BirdsEye-nonsense": {
+                   variant: "nonsense",
+                   dfuZip: $nonsense,
+                   appBin: $nonsenseBin,
+                   appCrc32: $nonsenseCrc,
+                   appSize: $nonsenseSize
+                 }
                }
              }' > site/manifest.json
 
