@@ -384,11 +384,14 @@ static void fwFinalizeReceive() {
 // RAM-resident flasher: erases the application region and copies the staged
 // image down from FW_STAGE_BASE using the raw NVMC (the SoftDevice is already
 // disabled and this code runs from RAM, because it is erasing the very flash
-// the app executes from). It must be wholly self-contained: no calls into
-// flash-resident code, no library, no SoftDevice. NVIC_SystemReset is a CMSIS
-// inline so it folds in. PHASE 0 must confirm this lands in / executes from
-// RAM on the target toolchain (inspect the .map; the section attribute places
-// it in .data, which startup copies to RAM).
+// the app executes from). It must be wholly self-contained: NO calls into
+// flash-resident code, no library, no SoftDevice — a BL from RAM to a flash
+// symbol is out of Thumb branch range and won't even link. That is why the
+// final reset is an inline write to SCB->AIRCR rather than NVIC_SystemReset()
+// (which the core emits as an out-of-line flash function). PHASE 0 must
+// confirm this lands in / executes from RAM on the target toolchain (inspect
+// the .map; the section attribute places it in .data, which startup copies to
+// RAM).
 __attribute__((noinline, section(".data")))
 static void fwRamFlasher(uint32_t dst, uint32_t src, uint32_t words) {
   // Erase the destination (app) region, page by page.
@@ -407,7 +410,14 @@ static void fwRamFlasher(uint32_t dst, uint32_t src, uint32_t words) {
   }
   NRF_NVMC->CONFIG = (NVMC_CONFIG_WEN_Ren << NVMC_CONFIG_WEN_Pos);
 
-  NVIC_SystemReset();
+  // System reset via the Cortex-M SCB, inline (no flash call). Equivalent to
+  // NVIC_SystemReset() but reachable from RAM.
+  __DSB();
+  SCB->AIRCR = (uint32_t)((0x5FAUL << SCB_AIRCR_VECTKEY_Pos) |
+                          (SCB->AIRCR & SCB_AIRCR_PRIGROUP_Msk) |
+                          SCB_AIRCR_SYSRESETREQ_Msk);
+  __DSB();
+  for (;;) {}
 }
 
 // Copy the verified SD image into the upper staging flash region and
