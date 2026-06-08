@@ -18,7 +18,7 @@
 // decide whether an OTA update is needed. Keep this in sync with the
 // release git tag (tag v2.0.0 -> "2.0.0") and the CHANGELOG.
 ///////////////////////////////////////////
-#define FIRMWARE_VERSION "2.2.1"
+#define FIRMWARE_VERSION "2.2.2"
 
 ///////////////////////////////////////////
 // BOARD VARIANT
@@ -29,16 +29,30 @@
 // asset prefix (BirdsEye-sense.zip / BirdsEye-nonsense.zip) so the webapp
 // can map model -> download directly.
 //
-// The build workflows pass -DBIRDSEYE_BOARD_SENSE / -DBIRDSEYE_BOARD_NONSENSE
-// per FQBN. A plain Arduino IDE build with neither flag defaults to "sense"
-// (the primary board); the non-Sense image still boots on a Sense board and
-// vice-versa — they share the MCU/SoftDevice — so a wrong default only
-// mislabels, it never bricks. Accelerometer presence is still auto-detected
-// at runtime regardless of this flag.
+// Resolution order:
+//   1. The build workflows pass -DBIRDSEYE_BOARD_SENSE / -DBIRDSEYE_BOARD_NONSENSE
+//      per FQBN — these always win.
+//   2. A plain Arduino IDE build passes no such flag, but the Seeeduino core
+//      defines ARDUINO_<build.board> from the Tools -> Board selection
+//      (ARDUINO_Seeed_XIAO_nRF52840_Sense vs ARDUINO_Seeed_XIAO_nRF52840), so
+//      we derive the variant from the board you actually picked — no manual
+//      flag needed.
+//   3. If nothing matches (some other core / unknown board), default to
+//      "sense" (the primary board).
+// A wrong label only affects which OTA asset the companion offers — the images
+// share the MCU/SoftDevice, the non-Sense image boots fine on a Sense board and
+// vice-versa, and accelerometer presence is auto-detected at runtime regardless
+// of this flag — so a mislabel never bricks.
 ///////////////////////////////////////////
 #if defined(BIRDSEYE_BOARD_NONSENSE)
   #define FIRMWARE_VARIANT "nonsense"
-#else  // BIRDSEYE_BOARD_SENSE or unspecified
+#elif defined(BIRDSEYE_BOARD_SENSE)
+  #define FIRMWARE_VARIANT "sense"
+#elif defined(ARDUINO_Seeed_XIAO_nRF52840_Sense)
+  #define FIRMWARE_VARIANT "sense"
+#elif defined(ARDUINO_Seeed_XIAO_nRF52840)
+  #define FIRMWARE_VARIANT "nonsense"
+#else  // unknown board / core — fall back to the primary variant
   #define FIRMWARE_VARIANT "sense"
 #endif
 

@@ -12,6 +12,19 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [2.2.2] - 2026-06-08
+
+### Fixed
+- **`FIRMWARE_VARIANT` now follows the board you select in the Arduino IDE.**
+  Previously, only the CI/release flags (`-DBIRDSEYE_BOARD_SENSE` /
+  `-DBIRDSEYE_BOARD_NONSENSE`) set the variant; a plain IDE build with neither
+  flag always reported `"sense"` regardless of the selected board, so a
+  non-Sense unit flashed from the IDE mislabeled itself in its BLE DIS Model
+  Number (and thus to the OTA update check). `project.h` now derives the
+  variant from the Seeeduino core's `ARDUINO_Seeed_XIAO_nRF52840[_Sense]` board
+  macro when no explicit build flag is present. The explicit CI flags still
+  take precedence, and an unknown board still defaults to `"sense"`.
+
 ## [2.2.1] - 2026-06-08
 
 ### Changed
