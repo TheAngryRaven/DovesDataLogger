@@ -119,8 +119,11 @@ documented fallback if spike #3 fails on hardware.
   *in flash* (`fwStageToFlash()` returns false on mismatch → `FWERR:FLASH`,
   app untouched).
 - `FWAPPLY` is refused below `FW_MIN_APPLY_VOLTAGE` (3.6 V) → `FWERR:BATTERY`.
-- A variant/magic mismatch is refused before any flash write → `FWERR:VARIANT`
-  (every image built from this codebase embeds `kFwImageDescriptor`).
+- A variant mismatch is refused at the `FWBEGIN` handshake, before any upload
+  → `FWERR:VARIANT` (the web app declares the target variant, derived from the
+  device's DIS Model Number, and the firmware compares it to its compile-time
+  `FIRMWARE_VARIANT`). Every image still embeds `kFwImageDescriptor` for
+  forensics.
 - The GPREGRET recovery flag is armed *before* the destructive swap.
 - Every step before the RAM flasher is abortable; the running firmware stays
   intact until the flasher actually runs.

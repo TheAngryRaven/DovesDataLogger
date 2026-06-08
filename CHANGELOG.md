@@ -12,6 +12,21 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-06-08
+
+### Changed
+- **Firmware OTA: the target variant is now declared in the `FWBEGIN`
+  handshake instead of inferred from the image bytes.** The command gains a
+  third field — `FWBEGIN:<size>,<crc32>,<variant>` — where `<variant>` is the
+  target board variant (`sense` / `nonsense`) that the web app derives
+  authoritatively from the device's own DIS Model Number. The firmware
+  compares it (case-insensitively) to its compile-time `FIRMWARE_VARIANT` and
+  replies `FWERR:VARIANT` *before any upload* on a mismatch. The old image-byte
+  scan at `FWAPPLY` (which misfired `FWERR:VARIANT` on correct sense→sense
+  flashes) has been removed; the embedded image descriptor is retained for
+  forensics only. **Breaking:** a web client that still sends the two-field
+  `FWBEGIN:<size>,<crc32>` is rejected — the web side updates in lockstep.
+
 ## [2.2.0] - 2026-06-08
 
 ### Fixed

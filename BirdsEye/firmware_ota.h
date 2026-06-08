@@ -17,11 +17,18 @@
 // Wire protocol (text commands written to 0x2A3E, text responses notified
 // on 0x2A40; image bytes are raw binary writes to 0x2A3E):
 //
-//   FWBEGIN:<size>,<crc32hex>  -> FWCRC:<crc32hex>   (echo handshake)
+//   FWBEGIN:<size>,<crc32hex>,<variant>
+//                              -> FWCRC:<crc32hex>   (echo handshake)
+//                                 FWERR:VARIANT if <variant> != FIRMWARE_VARIANT
 //   FWPUT:<size>               -> FWREADY            (then raw chunks...)
 //   <raw binary chunks>
 //   FWDONE                     -> FWOK:<crc32hex> | FWERR:CRC|SIZE|WRITE
 //   FWAPPLY                    -> FWSTAGE:<pct>* , FWAPPLIED | FWERR:...
+//
+// <variant> is the target board variant ("sense" / "nonsense"), which the web
+// app derives authoritatively from the device's own DIS Model Number. It is
+// validated (case-insensitive) against this build's FIRMWARE_VARIANT at
+// FWBEGIN — the single variant gate (no image-byte scan at apply time).
 //
 // CRC is CRC-32/IEEE-802.3 (zlib), lowercase 8-char hex (see crc32.h).
 //

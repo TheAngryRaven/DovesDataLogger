@@ -402,8 +402,12 @@ loop()  ~250 Hz
   bootloader is **not** changed for the field flow.
 - **Wire protocol** (text on `0x2A3E` in / `0x2A40` out; image bytes are raw
   binary writes to `0x2A3E`):
-  - `FWBEGIN:<size>,<crc32hex>` → `FWCRC:<crc32hex>` (echo handshake to
-    verify the control channel before any upload).
+  - `FWBEGIN:<size>,<crc32hex>,<variant>` → `FWCRC:<crc32hex>` (echo handshake
+    to verify the control channel before any upload). `<variant>` (`sense` /
+    `nonsense`) is the target board variant the web app derives from the
+    device's DIS Model Number; the firmware compares it (case-insensitive) to
+    `FIRMWARE_VARIANT` and replies `FWERR:VARIANT` here — the single variant
+    gate, before any upload.
   - `FWPUT:<size>` → `FWREADY`, then raw ≤240-byte chunks streamed to SD
     (`/fw/pending.bin`), then `FWDONE` → `FWOK:<crc>` (CRC of the stored
     file) or `FWERR:CRC|SIZE|WRITE`.
@@ -420,9 +424,10 @@ loop()  ~250 Hz
   does all SD writes, CRC verify, and the apply sequence. SD held via
   `SD_ACCESS_BLE_TRANSFER` for the receive.
 - **Apply** (`fwDoApply()`): guards first — refuse below `FW_MIN_APPLY_VOLTAGE`
-  (3.6 V, uses cached `lastBatteryVoltage`) → `FWERR:BATTERY`; scan the image
-  for the embedded `kFwImageDescriptor` magic and refuse a variant mismatch →
-  `FWERR:VARIANT`. Then `fwStageToFlash()` copies SD → upper flash
+  (3.6 V, uses cached `lastBatteryVoltage`) → `FWERR:BATTERY`. (Variant is
+  validated earlier, at `FWBEGIN`; no image-byte scan here. The image still
+  embeds `kFwImageDescriptor` for forensics.) Then `fwStageToFlash()` copies
+  SD → upper flash
   (`FW_STAGE_BASE`, via the `flash_nrf5x` HAL) and **re-verifies the CRC in
   flash before the app region is ever erased** (`FWERR:FLASH` on mismatch).
   Only then: emit `FWAPPLIED`, arm the GPREGRET recovery flag
