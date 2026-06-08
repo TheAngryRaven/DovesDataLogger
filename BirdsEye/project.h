@@ -12,13 +12,25 @@
 ///////////////////////////////////////////
 // FIRMWARE VERSION
 //
-// Single source of truth for the firmware version. Exposed over BLE
+// Single source of truth for the *base* firmware version. Exposed over BLE
 // via the Device Information Service (see bluetooth.ino) so a companion
 // (DovesDataViewer) can compare it against the latest GitHub release and
-// decide whether an OTA update is needed. Keep this in sync with the
-// release git tag (tag v2.0.0 -> "2.0.0") and the CHANGELOG.
+// decide whether an OTA update is needed. Keep this in sync with the release
+// git tag (tag v2.0.0 -> "2.0.0") and the CHANGELOG.
+//
+// Beta/nightly builds override it from the build flag: the beta workflow
+// passes -DFIRMWARE_VERSION_OVERRIDE=<base>-beta.<gitsha> as a bare token —
+// the stringizer below quotes it, so there is no shell quote-escaping to get
+// wrong. A normal build (prod release, plain IDE, compile-sketch CI) leaves it
+// undefined and uses the literal below.
 ///////////////////////////////////////////
-#define FIRMWARE_VERSION "2.2.2"
+#define _BE_STRINGIFY(x) #x
+#define _BE_TOSTRING(x) _BE_STRINGIFY(x)
+#ifdef FIRMWARE_VERSION_OVERRIDE
+  #define FIRMWARE_VERSION _BE_TOSTRING(FIRMWARE_VERSION_OVERRIDE)
+#else
+  #define FIRMWARE_VERSION "2.2.2"
+#endif
 
 ///////////////////////////////////////////
 // BOARD VARIANT

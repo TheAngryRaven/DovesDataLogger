@@ -12,6 +12,29 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+- **Beta / nightly firmware channel.** A new `beta` CI workflow builds both
+  XIAO nRF52840 variants on every push to the `BETA` branch and publishes them
+  to a `beta/` subtree on `gh-pages` — a second OTA channel that lives
+  alongside the production one at the Pages root (the deploy's `keep_files`
+  keeps the two from clobbering each other). No GitHub Release and no version
+  tag are cut; these are throwaway debug builds you flash from your phone via
+  DovesDataViewer's beta channel while at the track. `beta/manifest.json`
+  mirrors the prod manifest shape (so the web client reuses one parser) plus
+  `channel`, `commit`, and `branch` markers, and points at `beta/` asset URLs.
+  Retention is **latest-only** — a single flat `beta/` slot, overwritten each
+  push (no per-build history, unlike prod's `firmware/<version>/`).
+
+### Changed
+- **`FIRMWARE_VERSION` can now be overridden at build time.** `project.h`
+  stringizes an optional `-DFIRMWARE_VERSION_OVERRIDE=<token>` build flag, so a
+  beta build self-reports its exact commit over BLE as `<base>-beta.<gitsha>`
+  (e.g. `2.2.2-beta.abcdef0`) — read the version off a device and you know
+  precisely which nightly is on it. A normal build (prod release, plain IDE,
+  `compile-sketch` CI) leaves the flag undefined and uses the literal base
+  version, so nothing changes for production. The OTA image descriptor's
+  `version` field was widened 16 → 32 bytes to hold the longer beta strings.
+
 ## [2.2.2] - 2026-06-08
 
 ### Fixed
