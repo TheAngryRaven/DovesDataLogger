@@ -1,0 +1,248 @@
+name: beta
+
+# Nightly / beta firmware channel.
+#
+# Every push to the BETA branch rebuilds both XIAO nRF52840 variants and
+# publishes them to a `beta/` subtree on the gh-pages branch, ALONGSIDE (never
+# clobbering) the production release channel at the Pages root. No GitHub
+# Release is cut and no version tag is needed — these are throwaway debug
+# builds you flash from your phone via DovesDataViewer's beta channel while
+# wrenching at the track.
+#
+# Two things differ from release.yml:
+#   1. The image self-reports a beta version. The build injects
+#      -DFIRMWARE_VERSION_OVERRIDE=<base>-beta.<gitsha> so a flashed unit
+#      reports its exact commit over BLE (DIS) — you can read the version off
+#      the device and know precisely what's on it.
+#   2. Retention is "latest only": the beta assets live at a single, flat
+#      `beta/` path with stable filenames, overwritten on every push. There is
+#      no per-build history (unlike prod's firmware/<version>/ folders).
+#
+# NOTE: the build steps intentionally mirror release.yml's build job. If the
+# BSP version, library list, or asset layout changes there, mirror it here.
+# (A future cleanup could hoist the shared build into a reusable workflow.)
+
+on:
+  push:
+    branches: [BETA]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # push to gh-pages
+
+env:
+  SEEED_URL: https://files.seeedstudio.com/arduino/package_seeeduino_boards_index.json
+  UF2_FAMILY: '0xADA52840'
+
+jobs:
+  build:
+    name: build ${{ matrix.board.name }} (beta)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        board:
+          - name: sense
+            fqbn: Seeeduino:nrf52:xiaonRF52840Sense
+            define: BIRDSEYE_BOARD_SENSE
+          - name: nonsense
+            fqbn: Seeeduino:nrf52:xiaonRF52840
+            define: BIRDSEYE_BOARD_NONSENSE
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute beta version
+        id: ver
+        run: |
+          set -euo pipefail
+          # <base> is the literal in project.h; append -beta.<shortsha> so the
+          # string sorts below the matching prod release per SemVer pre-release
+          # rules and pins the build to an exact commit.
+          base="$(grep -oP '#\s*define\s+FIRMWARE_VERSION\s+"\K[^"]+' BirdsEye/project.h | head -1)"
+          sha="$(git rev-parse --short HEAD)"
+          betaver="${base}-beta.${sha}"
+          echo "betaver=${betaver}" >> "$GITHUB_OUTPUT"
+          echo "Beta version: ${betaver}"
+
+      - name: Set up arduino-cli
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install BSP, libraries and tools
+        run: |
+          arduino-cli config init --additional-urls "$SEEED_URL"
+          arduino-cli core update-index
+          arduino-cli core install Seeeduino:nrf52
+          arduino-cli config set library.enable_unsafe_install true
+          arduino-cli lib install \
+            "ArduinoJson" \
+            "SdFat - Adafruit Fork" \
+            "Adafruit GFX Library" \
+            "Adafruit SH110X" \
+            "Adafruit SSD1306" \
+            "SparkFun u-blox GNSS v3" \
+            "Seeed Arduino LSM6DS3" \
+            "ArxTypeTraits"
+          arduino-cli lib install --git-url https://github.com/TheAngryRaven/DovesLapTimer.git
+          pip install --user adafruit-nrfutil
+
+      - name: Compile
+        run: |
+          arduino-cli compile \
+            --fqbn "${{ matrix.board.fqbn }}" \
+            --build-property "compiler.cpp.extra_flags=-D${{ matrix.board.define }} -DFIRMWARE_VERSION_OVERRIDE=${{ steps.ver.outputs.betaver }}" \
+            --output-dir dist \
+            --warnings none \
+            BirdsEye
+          echo "----- build output -----"
+          ls -la dist
+
+      - name: Ensure a .uf2 exists
+        run: |
+          if ls dist/*.uf2 >/dev/null 2>&1; then
+            echo "BSP already produced a .uf2"
+          else
+            echo "No .uf2 from the BSP — converting the .hex with uf2conv"
+            hex="$(ls dist/*.hex | head -1)"
+            if [ -z "$hex" ]; then
+              echo "::error::No .hex produced — cannot build a .uf2"
+              exit 1
+            fi
+            curl -fsSL -o uf2conv.py \
+              https://raw.githubusercontent.com/microsoft/uf2/master/utils/uf2conv.py
+            curl -fsSL -o uf2families.json \
+              https://raw.githubusercontent.com/microsoft/uf2/master/utils/uf2families.json
+            python3 uf2conv.py "$hex" --convert --family "$UF2_FAMILY" \
+              --output dist/BirdsEye.uf2
+          fi
+          ls -la dist
+
+      - name: Stage beta assets
+        run: |
+          mkdir -p release-assets
+          suffix="${{ matrix.board.name }}"
+          for ext in hex uf2 zip; do
+            f="$(ls dist/*.$ext 2>/dev/null | head -1)"
+            if [ -n "$f" ]; then
+              cp "$f" "release-assets/BirdsEye-${suffix}.${ext}"
+            fi
+          done
+          echo "----- beta assets (${suffix}) -----"
+          ls -la release-assets
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: birdseye-beta-${{ matrix.board.name }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  pages:
+    name: publish beta manifest to Pages
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: birdseye-beta-*
+          path: staged
+          merge-multiple: true
+
+      - name: Assemble beta channel
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          base="$(grep -oP '#\s*define\s+FIRMWARE_VERSION\s+"\K[^"]+' BirdsEye/project.h | head -1)"
+          sha="$(git rev-parse --short HEAD)"
+          betaver="${base}-beta.${sha}"
+          owner="$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')"
+          repo="${GITHUB_REPOSITORY#*/}"
+          base_url="https://${owner}.github.io/${repo}"
+          # Flat, latest-only beta dir. Stable filenames are overwritten each
+          # push; keep_files:true on deploy preserves the prod root.
+          dest="site/beta"
+          mkdir -p "$dest"
+          cp staged/* "$dest"/
+
+          # Extract the raw application .bin from each DFU .zip and publish it
+          # with its CRC-32 + size — same authoritative checksum the SD-staged
+          # OTA verifies (see release.yml for the prod equivalent).
+          extract_bin() {            # $1 = variant; prints "<crc32hex> <size>"
+            local variant="$1"
+            local zip="staged/BirdsEye-${variant}.zip"
+            local tmp; tmp="$(mktemp -d)"
+            unzip -o -q "$zip" -d "$tmp"
+            local bin; bin="$(ls "$tmp"/*.bin | head -1)"
+            if [ -z "$bin" ]; then
+              echo "::error::No application .bin inside $zip" >&2
+              exit 1
+            fi
+            cp "$bin" "${dest}/BirdsEye-${variant}.bin"
+            local crc
+            crc="$(python3 -c "import zlib,sys;print(format(zlib.crc32(open(sys.argv[1],'rb').read())&0xffffffff,'08x'))" "$bin")"
+            echo "$crc $(stat -c%s "$bin")"
+          }
+          read -r sense_crc sense_size < <(extract_bin sense)
+          read -r nonsense_crc nonsense_size < <(extract_bin nonsense)
+
+          # Beta manifest — same shape as the prod manifest.json (so the web
+          # client reuses one parser) plus channel/commit markers and beta/
+          # URLs.
+          jq -n \
+            --arg version "$betaver" \
+            --arg channel "beta" \
+            --arg commit "$sha" \
+            --arg branch "${GITHUB_REF_NAME}" \
+            --arg published "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg sense "${base_url}/beta/BirdsEye-sense.zip" \
+            --arg nonsense "${base_url}/beta/BirdsEye-nonsense.zip" \
+            --arg senseBin "${base_url}/beta/BirdsEye-sense.bin" \
+            --arg nonsenseBin "${base_url}/beta/BirdsEye-nonsense.bin" \
+            --arg senseCrc "$sense_crc" \
+            --arg nonsenseCrc "$nonsense_crc" \
+            --argjson senseSize "$sense_size" \
+            --argjson nonsenseSize "$nonsense_size" \
+            '{
+               version: $version,
+               channel: $channel,
+               commit: $commit,
+               branch: $branch,
+               publishedAt: $published,
+               builds: {
+                 "BirdsEye-sense": {
+                   variant: "sense",
+                   dfuZip: $sense,
+                   appBin: $senseBin,
+                   appCrc32: $senseCrc,
+                   appSize: $senseSize
+                 },
+                 "BirdsEye-nonsense": {
+                   variant: "nonsense",
+                   dfuZip: $nonsense,
+                   appBin: $nonsenseBin,
+                   appCrc32: $nonsenseCrc,
+                   appSize: $nonsenseSize
+                 }
+               }
+             }' > "${dest}/manifest.json"
+
+          echo "----- beta/manifest.json -----"; cat "${dest}/manifest.json"
+          echo "----- tree -----"; find site -type f | sort
+
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          publish_branch: gh-pages
+          keep_files: true
