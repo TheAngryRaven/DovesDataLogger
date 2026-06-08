@@ -769,19 +769,29 @@ void BLUETOOTH_LOOP() {
   // SD, aborts the OTA, then auto-reboots to apply changed settings.
   if (bleDisconnectCleanupPending) {
     bleDisconnectCleanupPending = false;
-    if (bleCurrentFile) {
-      bleCurrentFile.close();
-      releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
-    }
-    bleTransferInProgress = false;
-    fwReset();  // abort any in-flight OTA (closes staging file, frees SD)
 
-    if (enableLogging) {
-      debugln(F("BLE: Skipping reboot (logging active)"));
+    // If a firmware OTA apply has been requested, the web app disconnecting is
+    // EXPECTED — it hands the device off to self-flash. We must NOT abort the
+    // OTA (fwReset) or reboot here: doing so discards the staged image and
+    // boots the OLD firmware. Leave the apply for FW_OTA_LOOP() below, which
+    // owns the install and its own reset.
+    if (fwApplyRequested()) {
+      debugln(F("BLE: disconnect during OTA apply — deferring to FW_OTA_LOOP"));
     } else {
-      debugln(F("BLE: Rebooting to apply settings..."));
-      delay(100);  // Brief delay for debug output to flush
-      NVIC_SystemReset();
+      if (bleCurrentFile) {
+        bleCurrentFile.close();
+        releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
+      }
+      bleTransferInProgress = false;
+      fwReset();  // abort any in-flight OTA (closes staging file, frees SD)
+
+      if (enableLogging) {
+        debugln(F("BLE: Skipping reboot (logging active)"));
+      } else {
+        debugln(F("BLE: Rebooting to apply settings..."));
+        delay(100);  // Brief delay for debug output to flush
+        NVIC_SystemReset();
+      }
     }
   }
 

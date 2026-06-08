@@ -310,10 +310,16 @@ loop()  ~250 Hz
   raw image chunks to `fwReceiveChunk()` while `fwReceiving()`. The request
   characteristic max length was raised from 64 to **244** so ~240-byte image
   chunks fit. `BLUETOOTH_LOOP()` calls `FW_OTA_LOOP()` each iteration.
-- **Auto-reboot on BLE disconnect**: `bleDisconnectCallback()` calls
-  `NVIC_SystemReset()` after 100 ms delay, ensuring new settings take
-  effect without manual power cycle. It also calls `fwReset()` to abort any
-  in-flight OTA and free the staging file + SD access.
+- **Auto-reboot on BLE disconnect**: `bleDisconnectCallback()` flags a
+  deferred teardown that `BLUETOOTH_LOOP()` runs on the main loop —
+  `NVIC_SystemReset()` after a 100 ms delay so new settings take effect
+  without a manual power cycle, plus `fwReset()` to abort any in-flight OTA
+  and free the staging file + SD access. **Exception — OTA apply**: if an
+  apply has been requested (`fwApplyRequested()`), the teardown skips *both*
+  the abort and the reboot. After `FWAPPLY` the web app disconnects on purpose
+  to let the device self-flash; rebooting here would discard the staged image
+  and boot the old firmware, so the apply is left to `FW_OTA_LOOP()` (called
+  later in the same `BLUETOOTH_LOOP()`), which owns its own reset.
 
 ### 7. Replay (`replay.ino`)
 

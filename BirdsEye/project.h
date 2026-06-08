@@ -29,7 +29,7 @@
 #ifdef FIRMWARE_VERSION_OVERRIDE
   #define FIRMWARE_VERSION _BE_TOSTRING(FIRMWARE_VERSION_OVERRIDE)
 #else
-  #define FIRMWARE_VERSION "2.2.2"
+  #define FIRMWARE_VERSION "2.2.3"
 #endif
 
 ///////////////////////////////////////////

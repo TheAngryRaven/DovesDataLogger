@@ -12,6 +12,19 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Fixed
+- **Firmware OTA apply was aborted by the BLE disconnect, so the update never
+  installed.** After `FWAPPLY`, the web app disconnects to hand the device off
+  to self-flash — but `BLUETOOTH_LOOP()` ran its disconnect teardown (which
+  calls `fwReset()` to abort the OTA, then `NVIC_SystemReset()`) *before*
+  `FW_OTA_LOOP()`, where the apply actually runs. So a disconnect at that point
+  discarded the staged image and rebooted into the **old** firmware (reported
+  as "applied OK, rebooted, still the old version"). The disconnect teardown
+  now detects an in-flight apply (`fwApplyRequested()`) and skips both the abort
+  and the reboot, leaving the install to `FW_OTA_LOOP()`, which owns its own
+  reset. The SoftDevice is still up at that point, so the SD→flash staging and
+  CRC re-verify proceed normally with the radio already gone.
+
 ### Added
 - **Beta / nightly firmware channel.** A new `beta` CI workflow builds both
   XIAO nRF52840 variants on every push to the `BETA` branch and publishes them
