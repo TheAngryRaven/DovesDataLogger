@@ -12,6 +12,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-06-08
+
 ### Fixed
 - **Logging no longer starts before the GPS has a real time lock.** File
   creation was gated only on `day > 0`, so before the module resolved UTC it
@@ -143,5 +145,6 @@ Initial tagged release. Core capabilities:
 - 8+ OLED display pages, Bluetooth LE file download / settings / track
   sync, and a low-power sleep mode.
 
-[Unreleased]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v2.2.0...HEAD
+[2.2.0]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v1.0.0...v2.2.0
 [1.0.0]: https://github.com/TheAngryRaven/DovesDataLogger/releases/tag/v1.0.0
