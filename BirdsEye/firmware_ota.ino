@@ -93,7 +93,8 @@ static const char* kStagePath = "/fw/pending.bin";
 struct FwImageDescriptor {
   char magic[16];    // "DOVESBIRDSEYEFW1" (no NUL terminator — exactly 16 bytes)
   char variant[16];  // FIRMWARE_VARIANT, NUL-padded
-  char version[16];  // FIRMWARE_VERSION, NUL-padded
+  char version[32];  // FIRMWARE_VERSION, NUL-padded (wide enough for beta
+                     // strings like "2.2.1-beta.abcdef0")
 };
 
 // `used` keeps the descriptor in the linked image even though nothing
