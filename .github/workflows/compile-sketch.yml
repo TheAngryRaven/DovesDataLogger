@@ -102,6 +102,43 @@ jobs:
             exit 1
           fi
 
+      # OTA image-size gate. The SD-staged OTA path can only deliver an image
+      # up to FW_MAX_IMAGE_SIZE (firmware_ota.ino) — FWBEGIN rejects anything
+      # larger with FWERR:SIZE, and the staging region carved out below the
+      # bootloader is exactly that size. The program's flash usage equals the
+      # app .bin that gets streamed/flashed, so gate it against that cap: warn
+      # as it approaches, fail if it crosses (the image would be un-OTA-able).
+      - name: OTA image size gate
+        env:
+          # Keep in sync with FW_MAX_IMAGE_SIZE in BirdsEye/firmware_ota.ino.
+          OTA_IMAGE_MAX_BYTES: 327680   # 320 KiB
+          OTA_WARN_PERCENT: 90
+        run: |
+          report="$(find sketches-reports -name '*.json' | head -1)"
+          if [ -z "$report" ]; then
+            echo "::warning::No compile report found — skipping OTA image gate"
+            exit 0
+          fi
+          flash_abs="$(jq -r '
+            [.boards[].sketches[].sizes[]
+             | select(.name=="flash")
+             | (.current.absolute? // .absolute.current? // .absolute?)]
+            | map(select(type=="number")) | first // empty' "$report")"
+          if [ -z "$flash_abs" ]; then
+            echo "::warning::Could not read flash usage from report — skipping OTA image gate"
+            exit 0
+          fi
+          pct="$(awk "BEGIN { printf \"%.1f\", ($flash_abs / $OTA_IMAGE_MAX_BYTES) * 100 }")"
+          echo "OTA image: ${flash_abs} / ${OTA_IMAGE_MAX_BYTES} bytes (${pct}% of the OTA cap)"
+          if [ "$flash_abs" -gt "$OTA_IMAGE_MAX_BYTES" ]; then
+            echo "::error::Image ${flash_abs} B exceeds the OTA cap ${OTA_IMAGE_MAX_BYTES} B — FWBEGIN would reject it (FWERR:SIZE). Shrink the image or raise FW_MAX_IMAGE_SIZE (which moves the staging base down, costing app space)."
+            exit 1
+          fi
+          warn="$(awk "BEGIN { print (($flash_abs / $OTA_IMAGE_MAX_BYTES) * 100 >= ${OTA_WARN_PERCENT}) ? 1 : 0 }")"
+          if [ "$warn" = "1" ]; then
+            echo "::warning::OTA image at ${pct}% of the ${OTA_IMAGE_MAX_BYTES} B cap (>= ${OTA_WARN_PERCENT}%) — getting close to un-OTA-able; plan to shrink or raise the cap."
+          fi
+
       - name: Upload size deltas report
         if: always()
         uses: actions/upload-artifact@v4
