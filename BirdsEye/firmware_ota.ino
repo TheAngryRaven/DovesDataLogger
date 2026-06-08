@@ -218,6 +218,10 @@ bool fwReceiving() {
   return fwState == FW_RECEIVING;
 }
 
+bool fwApplyRequested() {
+  return fwApplyPending;
+}
+
 void fwHandleCommand(const char* cmd, uint16_t len) {
   (void)len;
 
