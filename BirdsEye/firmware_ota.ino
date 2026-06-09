@@ -441,11 +441,19 @@ static void fwRamFlasher(uint32_t dst, uint32_t src, uint32_t words) {
 // re-verify its CRC there. Returns true on success; on any failure the
 // running app is still completely intact (nothing destructive has happened).
 static bool fwStageToFlash() {
-  // Erase the staging region (only the pages we need).
+  // Erase the staging region (only the pages we need). This is several seconds
+  // of flash erase with no progress notify, and runs while BLE may still be
+  // connected — a prime stall suspect, so breadcrumb the page count up front.
   uint32_t pages = (fwExpectedSize + FW_FLASH_PAGE_SIZE - 1) / FW_FLASH_PAGE_SIZE;
+  {
+    char eb[24];
+    snprintf(eb, sizeof(eb), "FWDBG:ERASE=%lu", (unsigned long)pages);
+    fwNotify(eb);
+  }
   for (uint32_t i = 0; i < pages; ++i) {
     flash_nrf5x_erase(FW_STAGE_BASE + i * FW_FLASH_PAGE_SIZE);
   }
+  fwNotify("FWDBG:ERASED");
 
   // Copy SD -> staging flash in page-sized blocks, padding the final block
   // with 0xFF so the write length is flash-word aligned.
@@ -501,6 +509,16 @@ static uint32_t fwAppFlashEnd() {
 static void fwDoApply() {
   if (fwState != FW_VERIFIED) { fwNotifyErr("STATE"); return; }
 
+  // Diagnostic breadcrumbs — surface in the web app's raw notification log so
+  // a stall before FWAPPLIED can be pinpointed (apply entered? battery seen?
+  // staging/erase reached?). Cheap to emit; harmless to the apply.
+  fwNotify("FWDBG:APPLY");
+  {
+    char vb[24];
+    snprintf(vb, sizeof(vb), "FWDBG:VBAT=%d", (int)(lastBatteryVoltage * 1000.0f));
+    fwNotify(vb);
+  }
+
   // --- Guards (nothing destructive yet) ---
   if (lastBatteryVoltage < FW_MIN_APPLY_VOLTAGE) {
     debugln(F("FW: APPLY refused — battery low"));
@@ -523,6 +541,7 @@ static void fwDoApply() {
 
   // --- Stage into upper flash and re-verify (still non-destructive) ---
   debugln(F("FW: staging image to flash..."));
+  fwNotify("FWDBG:STAGE");
   if (!fwStageToFlash()) {
     debugln(F("FW: stage/verify in flash failed"));
     fwNotifyErr("FLASH");
@@ -536,15 +555,33 @@ static void fwDoApply() {
   fwNotify("FWAPPLIED");
   delay(250);
 
+  // The SoftDevice will NOT cleanly disable while a BLE link is still up, and
+  // the previous code disabled it with the web app still connected. A failed
+  // disable leaves flash SoftDevice-protected, so the raw NVMC swap below
+  // silently no-ops — yet the chip still resets, booting the OLD image
+  // (exactly the "FWAPPLIED then still the old version" symptom). So drop the
+  // central and wait for the link to actually close FIRST.
+  fwNotify("FWDBG:DISCONNECT");
+  if (Bluefruit.connected()) {
+    Bluefruit.disconnect(Bluefruit.connHandle());
+    uint32_t t0 = millis();
+    while (Bluefruit.connected() && (millis() - t0) < 2000) { delay(10); }
+  }
+  Bluefruit.Advertising.stop();
+
   // Arm the bootloader recovery net BEFORE the destructive swap: if power is
-  // lost mid-erase, the bootloader comes up in BLE DFU and the unit is
-  // re-flashable over the air via nRF Connect — no pins, no opening the box.
+  // lost mid-erase (or the swap can't proceed), the bootloader comes up in BLE
+  // DFU and the unit is re-flashable over the air — no pins, no opening the box.
   sd_power_gpregret_clr(0, 0xFF);
   sd_power_gpregret_set(0, FW_GPREGRET_OTA_DFU);
 
-  // Hand the radio + SoftDevice down; from here only RAM-resident code runs.
-  Bluefruit.Advertising.stop();
-  sd_softdevice_disable();
+  // Hand the SoftDevice down; from here only RAM-resident code runs. If it
+  // refuses to disable (e.g. a link is somehow still up), the raw NVMC swap
+  // would no-op or fault — so DON'T run it: reset instead, with the recovery
+  // flag armed, rather than silently boot the old image.
+  if (sd_softdevice_disable() != NRF_SUCCESS) {
+    NVIC_SystemReset();
+  }
   __disable_irq();
 
   uint32_t words = (fwExpectedSize + 3U) / 4U;
