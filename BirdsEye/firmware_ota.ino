@@ -555,15 +555,33 @@ static void fwDoApply() {
   fwNotify("FWAPPLIED");
   delay(250);
 
+  // The SoftDevice will NOT cleanly disable while a BLE link is still up, and
+  // the previous code disabled it with the web app still connected. A failed
+  // disable leaves flash SoftDevice-protected, so the raw NVMC swap below
+  // silently no-ops — yet the chip still resets, booting the OLD image
+  // (exactly the "FWAPPLIED then still the old version" symptom). So drop the
+  // central and wait for the link to actually close FIRST.
+  fwNotify("FWDBG:DISCONNECT");
+  if (Bluefruit.connected()) {
+    Bluefruit.disconnect(Bluefruit.connHandle());
+    uint32_t t0 = millis();
+    while (Bluefruit.connected() && (millis() - t0) < 2000) { delay(10); }
+  }
+  Bluefruit.Advertising.stop();
+
   // Arm the bootloader recovery net BEFORE the destructive swap: if power is
-  // lost mid-erase, the bootloader comes up in BLE DFU and the unit is
-  // re-flashable over the air via nRF Connect — no pins, no opening the box.
+  // lost mid-erase (or the swap can't proceed), the bootloader comes up in BLE
+  // DFU and the unit is re-flashable over the air — no pins, no opening the box.
   sd_power_gpregret_clr(0, 0xFF);
   sd_power_gpregret_set(0, FW_GPREGRET_OTA_DFU);
 
-  // Hand the radio + SoftDevice down; from here only RAM-resident code runs.
-  Bluefruit.Advertising.stop();
-  sd_softdevice_disable();
+  // Hand the SoftDevice down; from here only RAM-resident code runs. If it
+  // refuses to disable (e.g. a link is somehow still up), the raw NVMC swap
+  // would no-op or fault — so DON'T run it: reset instead, with the recovery
+  // flag armed, rather than silently boot the old image.
+  if (sd_softdevice_disable() != NRF_SUCCESS) {
+    NVIC_SystemReset();
+  }
   __disable_irq();
 
   uint32_t words = (fwExpectedSize + 3U) / 4U;

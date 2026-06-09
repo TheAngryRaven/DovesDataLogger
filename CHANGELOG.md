@@ -24,6 +24,16 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   while BLE is still connected), so it is bracketed explicitly.
 
 ### Fixed
+- **Firmware OTA self-flash swap never took effect — `FWAPPLIED` but still the
+  old image after reboot.** The apply disabled the SoftDevice (`sd_softdevice_
+  disable()`) with the web app *still connected* and ignored the return code.
+  The SoftDevice won't cleanly disable while a link is up, so it stayed partly
+  active, flash remained SoftDevice-protected, and the RAM flasher's raw NVMC
+  erase/copy silently no-opped — but the final `SCB->AIRCR` reset still fired,
+  rebooting into the intact old application. The apply now **disconnects the
+  central and waits for the link to close** before disabling the SoftDevice,
+  and **checks the disable return** — on failure it resets toward the armed
+  bootloader-recovery flag instead of running a swap that can't write.
 - **Firmware OTA apply was aborted by the BLE disconnect, so the update never
   installed.** After `FWAPPLY`, the web app disconnects to hand the device off
   to self-flash — but `BLUETOOTH_LOOP()` ran its disconnect teardown (which
