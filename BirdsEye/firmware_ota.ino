@@ -450,16 +450,23 @@ static bool fwStageToFlash() {
     snprintf(eb, sizeof(eb), "FWDBG:ERASE=%lu", (unsigned long)pages);
     fwNotify(eb);
   }
+  debug(F("FW: erasing ")); debug(pages); debugln(F(" staging pages..."));
   for (uint32_t i = 0; i < pages; ++i) {
     flash_nrf5x_erase(FW_STAGE_BASE + i * FW_FLASH_PAGE_SIZE);
   }
   fwNotify("FWDBG:ERASED");
+  debugln(F("FW: staging erase done; copying SD -> flash"));
 
   // Copy SD -> staging flash in page-sized blocks, padding the final block
   // with 0xFF so the write length is flash-word aligned.
   File32 f = SD.open(kStagePath, FILE_READ);
-  if (!f) return false;
-  uint8_t blk[FW_FLASH_PAGE_SIZE];
+  if (!f) { debugln(F("FW: stage open failed")); return false; }
+  // STATIC, not on the stack: the Adafruit nRF52 loop() task runs on a small
+  // (~3 KB) FreeRTOS stack, and a 4 KB local buffer here overflowed it →
+  // hardfault → SoftDevice reset mid-staging (looked like a spontaneous
+  // reboot). fwStageToFlash() is not reentrant, so a single static page
+  // buffer is safe.
+  static uint8_t blk[FW_FLASH_PAGE_SIZE];
   uint32_t off = 0;
   int lastPct = -1;
   while (off < fwExpectedSize) {
@@ -467,7 +474,7 @@ static bool fwStageToFlash() {
     uint32_t want = fwExpectedSize - off;
     if (want > FW_FLASH_PAGE_SIZE) want = FW_FLASH_PAGE_SIZE;
     int r = f.read(blk, want);
-    if (r != (int)want) { f.close(); return false; }
+    if (r != (int)want) { f.close(); debugln(F("FW: stage SD read short")); return false; }
     uint32_t wlen = (want + 3U) & ~3U;  // round up to whole words
     flash_nrf5x_write(FW_STAGE_BASE + off, blk, wlen);
     off += want;
@@ -485,12 +492,15 @@ static bool fwStageToFlash() {
   // this matches the pinned Adafruit core — some versions take a bool
   // (flash_nrf5x_flush(true)). This is one of the Phase 0 build checks.
   flash_nrf5x_flush();
+  debugln(F("FW: SD -> flash copy done; re-verifying CRC in flash"));
 
   // Re-verify the CRC of what is now sitting in staging flash (catches any
   // flash-write fault before we touch the app region).
   uint32_t state = crc32::kInit;
   state = crc32::update(state, (const void*)FW_STAGE_BASE, fwExpectedSize);
-  return crc32::finalize(state) == fwExpectedCrc;
+  bool ok = (crc32::finalize(state) == fwExpectedCrc);
+  debug(F("FW: in-flash CRC ")); debugln(ok ? F("OK") : F("MISMATCH"));
+  return ok;
 }
 
 // Highest flash address this running firmware occupies = end of code plus the
