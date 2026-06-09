@@ -547,6 +547,7 @@ static void fwDoApply() {
     fwNotifyErr("FLASH");
     return;
   }
+  debugln(F("FW: staged + CRC re-verified in flash OK"));
 
   // Point of no return is now imminent. Tell the web app we're committed so
   // it can wait for the disconnect, then give the notification a moment to
@@ -579,9 +580,29 @@ static void fwDoApply() {
   // refuses to disable (e.g. a link is somehow still up), the raw NVMC swap
   // would no-op or fault — so DON'T run it: reset instead, with the recovery
   // flag armed, rather than silently boot the old image.
-  if (sd_softdevice_disable() != NRF_SUCCESS) {
+  //
+  // The return code is logged over serial (build with HAS_DEBUG, watch the
+  // USB Serial Monitor): it is the single most useful datum when a swap fails
+  // — rc != 0 means the disable was refused and the early reset below fires
+  // (so the RAM flasher never runs); rc == 0 followed by a reboot into the old
+  // image points the finger at the RAM flasher itself. This is the last thing
+  // serial can show — USB CDC dies once IRQs are off below.
+  uint32_t sdErr = sd_softdevice_disable();
+  debug(F("FW: sd_softdevice_disable rc=")); debugln(sdErr);
+#ifdef HAS_DEBUG
+  Serial.flush(); delay(50);
+#endif
+  if (sdErr != NRF_SUCCESS) {
+    debugln(F("FW: SoftDevice would not disable — aborting swap, resetting"));
+#ifdef HAS_DEBUG
+    Serial.flush(); delay(50);
+#endif
     NVIC_SystemReset();
   }
+  debugln(F("FW: SoftDevice down — entering RAM flasher (no return)"));
+#ifdef HAS_DEBUG
+  Serial.flush(); delay(50);
+#endif
   __disable_irq();
 
   uint32_t words = (fwExpectedSize + 3U) / 4U;
