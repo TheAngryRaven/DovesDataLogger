@@ -411,11 +411,17 @@ static void fwFinalizeReceive() {
 // RAM).
 __attribute__((noinline, section(".data")))
 static void fwRamFlasher(uint32_t dst, uint32_t src, uint32_t words) {
+  // The hardware watchdog (~4 s, started in wdtSetup) keeps running here with
+  // IRQs disabled, and this erase+copy takes several seconds — so feed it via
+  // the raw register (RR[0], reload key 0x6E524635). wdtPet() is a flash
+  // function and unreachable from this RAM-resident code, so inline the write.
+  NRF_WDT->RR[0] = 0x6E524635UL;
   // Erase the destination (app) region, page by page.
   NRF_NVMC->CONFIG = (NVMC_CONFIG_WEN_Een << NVMC_CONFIG_WEN_Pos);
   for (uint32_t a = dst; a < dst + words * 4U; a += FW_FLASH_PAGE_SIZE) {
     NRF_NVMC->ERASEPAGE = a;
     while (NRF_NVMC->READY == 0) {}
+    NRF_WDT->RR[0] = 0x6E524635UL;  // feed WDT each page (~85 ms each)
   }
   // Program the new image, word by word.
   NRF_NVMC->CONFIG = (NVMC_CONFIG_WEN_Wen << NVMC_CONFIG_WEN_Pos);
@@ -424,6 +430,7 @@ static void fwRamFlasher(uint32_t dst, uint32_t src, uint32_t words) {
   for (uint32_t i = 0; i < words; ++i) {
     d[i] = s[i];
     while (NRF_NVMC->READY == 0) {}
+    if ((i & 0x3FFU) == 0) NRF_WDT->RR[0] = 0x6E524635UL;  // feed every ~4 KB
   }
   NRF_NVMC->CONFIG = (NVMC_CONFIG_WEN_Ren << NVMC_CONFIG_WEN_Pos);
 
@@ -453,6 +460,8 @@ static bool fwStageToFlash() {
   debug(F("FW: erasing ")); debug(pages); debugln(F(" staging pages..."));
   for (uint32_t i = 0; i < pages; ++i) {
     flash_nrf5x_erase(FW_STAGE_BASE + i * FW_FLASH_PAGE_SIZE);
+    wdtPet();  // each erase ~85 ms; the main loop is blocked here, so the ~4 s
+               // watchdog would reset us mid-staging unless we feed it.
   }
   fwNotify("FWDBG:ERASED");
   debugln(F("FW: staging erase done; copying SD -> flash"));
@@ -470,6 +479,7 @@ static bool fwStageToFlash() {
   uint32_t off = 0;
   int lastPct = -1;
   while (off < fwExpectedSize) {
+    wdtPet();  // keep the watchdog fed through the multi-second copy
     memset(blk, 0xFF, sizeof(blk));
     uint32_t want = fwExpectedSize - off;
     if (want > FW_FLASH_PAGE_SIZE) want = FW_FLASH_PAGE_SIZE;
@@ -492,6 +502,7 @@ static bool fwStageToFlash() {
   // this matches the pinned Adafruit core — some versions take a bool
   // (flash_nrf5x_flush(true)). This is one of the Phase 0 build checks.
   flash_nrf5x_flush();
+  wdtPet();
   debugln(F("FW: SD -> flash copy done; re-verifying CRC in flash"));
 
   // Re-verify the CRC of what is now sitting in staging flash (catches any
