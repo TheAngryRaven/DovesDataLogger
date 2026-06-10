@@ -13,6 +13,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **The OLED now shows a full-screen "UPDATING FIRMWARE / Do not power off"
+  notice during an OTA apply.** The apply blocks the main loop (UI frozen) and
+  ends in a reboot; previously the screen just sat on a stale page with no
+  indication anything was happening. The notice stays up through staging and
+  the swap until the new firmware boots and repaints; on a failed apply the
+  normal 3 Hz display refresh replaces it automatically.
 - **Beta OTA manifest now lists each variant's `.uf2`** (`builds[model].uf2`).
   The `.uf2` was already published to `beta/`, just not referenced — exposing
   it makes drag-and-drop bootloader (DFU-mode) recovery easy when an OTA fails.
@@ -22,8 +28,29 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   — apply entered? battery reading seen? staging/erase reached? The up-front
   staging-region erase is several seconds with no progress notify (and may run
   while BLE is still connected), so it is bracketed explicitly.
+- **Beta / nightly firmware channel.** A new `beta` CI workflow builds both
+  XIAO nRF52840 variants on every push to the `BETA` branch and publishes them
+  to a `beta/` subtree on `gh-pages` — a second OTA channel that lives
+  alongside the production one at the Pages root (the deploy's `keep_files`
+  keeps the two from clobbering each other). No GitHub Release and no version
+  tag are cut; these are throwaway debug builds you flash from your phone via
+  DovesDataViewer's beta channel while at the track. `beta/manifest.json`
+  mirrors the prod manifest shape (so the web client reuses one parser) plus
+  `channel`, `commit`, and `branch` markers, and points at `beta/` asset URLs.
+  Retention is **latest-only** — a single flat `beta/` slot, overwritten each
+  push (no per-build history, unlike prod's `firmware/<version>/`).
 
 ### Fixed
+- **Device now boots straight into the new firmware after an OTA apply
+  (no more manual power-cycle).** The apply arms the bootloader-recovery
+  magic (`GPREGRET = 0xA8`, OTA-DFU) before the destructive swap, but never
+  cleared it on success — so after the RAM flasher's reset the bootloader saw
+  the magic and parked in BLE DFU mode instead of booting the freshly
+  installed app (blank/stale screen, odd USB device on the PC; a manual
+  power-cycle cleared the register, which is why it booted fine afterwards).
+  The RAM flasher now clears `GPREGRET` after a successful copy, immediately
+  before its reset. An interrupted swap never reaches that line, so the
+  recovery net is unchanged.
 - **Firmware OTA self-flash swap never took effect — `FWAPPLIED` but still the
   old image after reboot.** The apply disabled the SoftDevice (`sd_softdevice_
   disable()`) with the web app *still connected* and ignored the return code.
@@ -45,19 +72,6 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   and the reboot, leaving the install to `FW_OTA_LOOP()`, which owns its own
   reset. The SoftDevice is still up at that point, so the SD→flash staging and
   CRC re-verify proceed normally with the radio already gone.
-
-### Added
-- **Beta / nightly firmware channel.** A new `beta` CI workflow builds both
-  XIAO nRF52840 variants on every push to the `BETA` branch and publishes them
-  to a `beta/` subtree on `gh-pages` — a second OTA channel that lives
-  alongside the production one at the Pages root (the deploy's `keep_files`
-  keeps the two from clobbering each other). No GitHub Release and no version
-  tag are cut; these are throwaway debug builds you flash from your phone via
-  DovesDataViewer's beta channel while at the track. `beta/manifest.json`
-  mirrors the prod manifest shape (so the web client reuses one parser) plus
-  `channel`, `commit`, and `branch` markers, and points at `beta/` asset URLs.
-  Retention is **latest-only** — a single flat `beta/` slot, overwritten each
-  push (no per-build history, unlike prod's `firmware/<version>/`).
 
 ### Changed
 - **`FIRMWARE_VERSION` can now be overridden at build time.** `project.h`
