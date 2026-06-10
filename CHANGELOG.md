@@ -12,6 +12,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [2.2.3] - 2026-06-10
+
 ### Added
 - **The OLED now shows a full-screen "UPDATING FIRMWARE / Do not power off"
   notice during an OTA apply.** The apply blocks the main loop (UI frozen) and
