@@ -218,6 +218,10 @@ bool fwReceiving() {
   return fwState == FW_RECEIVING;
 }
 
+bool fwApplyRequested() {
+  return fwApplyPending;
+}
+
 void fwHandleCommand(const char* cmd, uint16_t len) {
   (void)len;
 
@@ -407,11 +411,17 @@ static void fwFinalizeReceive() {
 // RAM).
 __attribute__((noinline, section(".data")))
 static void fwRamFlasher(uint32_t dst, uint32_t src, uint32_t words) {
+  // The hardware watchdog (~4 s, started in wdtSetup) keeps running here with
+  // IRQs disabled, and this erase+copy takes several seconds — so feed it via
+  // the raw register (RR[0], reload key 0x6E524635). wdtPet() is a flash
+  // function and unreachable from this RAM-resident code, so inline the write.
+  NRF_WDT->RR[0] = 0x6E524635UL;
   // Erase the destination (app) region, page by page.
   NRF_NVMC->CONFIG = (NVMC_CONFIG_WEN_Een << NVMC_CONFIG_WEN_Pos);
   for (uint32_t a = dst; a < dst + words * 4U; a += FW_FLASH_PAGE_SIZE) {
     NRF_NVMC->ERASEPAGE = a;
     while (NRF_NVMC->READY == 0) {}
+    NRF_WDT->RR[0] = 0x6E524635UL;  // feed WDT each page (~85 ms each)
   }
   // Program the new image, word by word.
   NRF_NVMC->CONFIG = (NVMC_CONFIG_WEN_Wen << NVMC_CONFIG_WEN_Pos);
@@ -420,8 +430,19 @@ static void fwRamFlasher(uint32_t dst, uint32_t src, uint32_t words) {
   for (uint32_t i = 0; i < words; ++i) {
     d[i] = s[i];
     while (NRF_NVMC->READY == 0) {}
+    if ((i & 0x3FFU) == 0) NRF_WDT->RR[0] = 0x6E524635UL;  // feed every ~4 KB
   }
   NRF_NVMC->CONFIG = (NVMC_CONFIG_WEN_Ren << NVMC_CONFIG_WEN_Pos);
+
+  // The swap succeeded — clear the GPREGRET recovery magic BEFORE resetting.
+  // It was armed (0xA8 = DFU_MAGIC_OTA_RESET) in case the swap was
+  // interrupted; if left set, the bootloader boots into BLE DFU mode instead
+  // of the freshly installed app (symptom: "applied fine but needed a manual
+  // power-cycle to boot — Windows saw a strange USB device" — the bootloader's
+  // DFU CDC). SoftDevice is disabled here, so the raw register write is legal
+  // and RAM-safe. An interrupted swap never reaches this line, so the
+  // recovery net still holds.
+  NRF_POWER->GPREGRET = 0;
 
   // System reset via the Cortex-M SCB, inline (no flash call). Equivalent to
   // NVIC_SystemReset() but reachable from RAM.
@@ -437,25 +458,43 @@ static void fwRamFlasher(uint32_t dst, uint32_t src, uint32_t words) {
 // re-verify its CRC there. Returns true on success; on any failure the
 // running app is still completely intact (nothing destructive has happened).
 static bool fwStageToFlash() {
-  // Erase the staging region (only the pages we need).
+  // Erase the staging region (only the pages we need). This is several seconds
+  // of flash erase with no progress notify, and runs while BLE may still be
+  // connected — a prime stall suspect, so breadcrumb the page count up front.
   uint32_t pages = (fwExpectedSize + FW_FLASH_PAGE_SIZE - 1) / FW_FLASH_PAGE_SIZE;
+  {
+    char eb[24];
+    snprintf(eb, sizeof(eb), "FWDBG:ERASE=%lu", (unsigned long)pages);
+    fwNotify(eb);
+  }
+  debug(F("FW: erasing ")); debug(pages); debugln(F(" staging pages..."));
   for (uint32_t i = 0; i < pages; ++i) {
     flash_nrf5x_erase(FW_STAGE_BASE + i * FW_FLASH_PAGE_SIZE);
+    wdtPet();  // each erase ~85 ms; the main loop is blocked here, so the ~4 s
+               // watchdog would reset us mid-staging unless we feed it.
   }
+  fwNotify("FWDBG:ERASED");
+  debugln(F("FW: staging erase done; copying SD -> flash"));
 
   // Copy SD -> staging flash in page-sized blocks, padding the final block
   // with 0xFF so the write length is flash-word aligned.
   File32 f = SD.open(kStagePath, FILE_READ);
-  if (!f) return false;
-  uint8_t blk[FW_FLASH_PAGE_SIZE];
+  if (!f) { debugln(F("FW: stage open failed")); return false; }
+  // STATIC, not on the stack: the Adafruit nRF52 loop() task runs on a small
+  // (~3 KB) FreeRTOS stack, and a 4 KB local buffer here overflowed it →
+  // hardfault → SoftDevice reset mid-staging (looked like a spontaneous
+  // reboot). fwStageToFlash() is not reentrant, so a single static page
+  // buffer is safe.
+  static uint8_t blk[FW_FLASH_PAGE_SIZE];
   uint32_t off = 0;
   int lastPct = -1;
   while (off < fwExpectedSize) {
+    wdtPet();  // keep the watchdog fed through the multi-second copy
     memset(blk, 0xFF, sizeof(blk));
     uint32_t want = fwExpectedSize - off;
     if (want > FW_FLASH_PAGE_SIZE) want = FW_FLASH_PAGE_SIZE;
     int r = f.read(blk, want);
-    if (r != (int)want) { f.close(); return false; }
+    if (r != (int)want) { f.close(); debugln(F("FW: stage SD read short")); return false; }
     uint32_t wlen = (want + 3U) & ~3U;  // round up to whole words
     flash_nrf5x_write(FW_STAGE_BASE + off, blk, wlen);
     off += want;
@@ -473,12 +512,16 @@ static bool fwStageToFlash() {
   // this matches the pinned Adafruit core — some versions take a bool
   // (flash_nrf5x_flush(true)). This is one of the Phase 0 build checks.
   flash_nrf5x_flush();
+  wdtPet();
+  debugln(F("FW: SD -> flash copy done; re-verifying CRC in flash"));
 
   // Re-verify the CRC of what is now sitting in staging flash (catches any
   // flash-write fault before we touch the app region).
   uint32_t state = crc32::kInit;
   state = crc32::update(state, (const void*)FW_STAGE_BASE, fwExpectedSize);
-  return crc32::finalize(state) == fwExpectedCrc;
+  bool ok = (crc32::finalize(state) == fwExpectedCrc);
+  debug(F("FW: in-flash CRC ")); debugln(ok ? F("OK") : F("MISMATCH"));
+  return ok;
 }
 
 // Highest flash address this running firmware occupies = end of code plus the
@@ -494,8 +537,39 @@ static uint32_t fwAppFlashEnd() {
   return (uint32_t)&__etext + dataImage;
 }
 
+// Full-screen "UPDATING FIRMWARE" notice. The apply blocks the main loop (no
+// displayLoop redraw) and neither the staging code nor the RAM flasher touch
+// the OLED, so this stays on screen from here through the swap until the new
+// app boots and repaints. On a FAILED apply the main loop resumes and the
+// 3 Hz displayLoop redraw replaces it automatically — no restore needed.
+// (`display` + DISPLAY_TEXT_WHITE come from display_config.h, same translation
+// unit — the same way display_pages.ino uses them.)
+static void fwShowUpdatingScreen() {
+  display.clearDisplay();
+  display.setTextColor(DISPLAY_TEXT_WHITE);
+  display.setTextSize(2);
+  display.setCursor(16, 8);
+  display.println(F("UPDATING"));
+  display.setCursor(16, 28);
+  display.println(F("FIRMWARE"));
+  display.setTextSize(1);
+  display.setCursor(16, 52);
+  display.println(F("Do not power off"));
+  display.display();
+}
+
 static void fwDoApply() {
   if (fwState != FW_VERIFIED) { fwNotifyErr("STATE"); return; }
+
+  // Diagnostic breadcrumbs — surface in the web app's raw notification log so
+  // a stall before FWAPPLIED can be pinpointed (apply entered? battery seen?
+  // staging/erase reached?). Cheap to emit; harmless to the apply.
+  fwNotify("FWDBG:APPLY");
+  {
+    char vb[24];
+    snprintf(vb, sizeof(vb), "FWDBG:VBAT=%d", (int)(lastBatteryVoltage * 1000.0f));
+    fwNotify(vb);
+  }
 
   // --- Guards (nothing destructive yet) ---
   if (lastBatteryVoltage < FW_MIN_APPLY_VOLTAGE) {
@@ -517,13 +591,20 @@ static void fwDoApply() {
     return;
   }
 
+  // Guards passed — the update is going ahead. Tell the human at the kart,
+  // not just the web app: from here the UI is frozen (apply blocks the main
+  // loop) and the device will go dark/reboot, so show what's happening.
+  fwShowUpdatingScreen();
+
   // --- Stage into upper flash and re-verify (still non-destructive) ---
   debugln(F("FW: staging image to flash..."));
+  fwNotify("FWDBG:STAGE");
   if (!fwStageToFlash()) {
     debugln(F("FW: stage/verify in flash failed"));
     fwNotifyErr("FLASH");
     return;
   }
+  debugln(F("FW: staged + CRC re-verified in flash OK"));
 
   // Point of no return is now imminent. Tell the web app we're committed so
   // it can wait for the disconnect, then give the notification a moment to
@@ -532,15 +613,53 @@ static void fwDoApply() {
   fwNotify("FWAPPLIED");
   delay(250);
 
+  // The SoftDevice will NOT cleanly disable while a BLE link is still up, and
+  // the previous code disabled it with the web app still connected. A failed
+  // disable leaves flash SoftDevice-protected, so the raw NVMC swap below
+  // silently no-ops — yet the chip still resets, booting the OLD image
+  // (exactly the "FWAPPLIED then still the old version" symptom). So drop the
+  // central and wait for the link to actually close FIRST.
+  fwNotify("FWDBG:DISCONNECT");
+  if (Bluefruit.connected()) {
+    Bluefruit.disconnect(Bluefruit.connHandle());
+    uint32_t t0 = millis();
+    while (Bluefruit.connected() && (millis() - t0) < 2000) { delay(10); }
+  }
+  Bluefruit.Advertising.stop();
+
   // Arm the bootloader recovery net BEFORE the destructive swap: if power is
-  // lost mid-erase, the bootloader comes up in BLE DFU and the unit is
-  // re-flashable over the air via nRF Connect — no pins, no opening the box.
+  // lost mid-erase (or the swap can't proceed), the bootloader comes up in BLE
+  // DFU and the unit is re-flashable over the air — no pins, no opening the box.
   sd_power_gpregret_clr(0, 0xFF);
   sd_power_gpregret_set(0, FW_GPREGRET_OTA_DFU);
 
-  // Hand the radio + SoftDevice down; from here only RAM-resident code runs.
-  Bluefruit.Advertising.stop();
-  sd_softdevice_disable();
+  // Hand the SoftDevice down; from here only RAM-resident code runs. If it
+  // refuses to disable (e.g. a link is somehow still up), the raw NVMC swap
+  // would no-op or fault — so DON'T run it: reset instead, with the recovery
+  // flag armed, rather than silently boot the old image.
+  //
+  // The return code is logged over serial (build with HAS_DEBUG, watch the
+  // USB Serial Monitor): it is the single most useful datum when a swap fails
+  // — rc != 0 means the disable was refused and the early reset below fires
+  // (so the RAM flasher never runs); rc == 0 followed by a reboot into the old
+  // image points the finger at the RAM flasher itself. This is the last thing
+  // serial can show — USB CDC dies once IRQs are off below.
+  uint32_t sdErr = sd_softdevice_disable();
+  debug(F("FW: sd_softdevice_disable rc=")); debugln(sdErr);
+#ifdef HAS_DEBUG
+  Serial.flush(); delay(50);
+#endif
+  if (sdErr != NRF_SUCCESS) {
+    debugln(F("FW: SoftDevice would not disable — aborting swap, resetting"));
+#ifdef HAS_DEBUG
+    Serial.flush(); delay(50);
+#endif
+    NVIC_SystemReset();
+  }
+  debugln(F("FW: SoftDevice down — entering RAM flasher (no return)"));
+#ifdef HAS_DEBUG
+  Serial.flush(); delay(50);
+#endif
   __disable_irq();
 
   uint32_t words = (fwExpectedSize + 3U) / 4U;

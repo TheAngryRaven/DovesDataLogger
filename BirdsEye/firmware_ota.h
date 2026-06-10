@@ -52,6 +52,12 @@ void fwHandleCommand(const char* cmd, uint16_t len);
 // While true the BLE callback routes raw writes to fwReceiveChunk().
 bool fwReceiving();
 
+// True once an FWAPPLY has been queued (and until the apply consumes it). A
+// BLE disconnect at this point is EXPECTED — the web app hands off to the
+// device to self-flash — so the disconnect handler must NOT abort the OTA or
+// reboot; it leaves the apply for FW_OTA_LOOP(), which owns its own reset.
+bool fwApplyRequested();
+
 // Buffer one raw image chunk (BLE callback task). Double-buffered; the main
 // loop drains it to SD. Sets an internal error flag on overrun / oversize.
 void fwReceiveChunk(const uint8_t* data, uint16_t len);

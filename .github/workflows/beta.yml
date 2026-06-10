@@ -208,6 +208,8 @@ jobs:
             --arg nonsense "${base_url}/beta/BirdsEye-nonsense.zip" \
             --arg senseBin "${base_url}/beta/BirdsEye-sense.bin" \
             --arg nonsenseBin "${base_url}/beta/BirdsEye-nonsense.bin" \
+            --arg senseUf2 "${base_url}/beta/BirdsEye-sense.uf2" \
+            --arg nonsenseUf2 "${base_url}/beta/BirdsEye-nonsense.uf2" \
             --arg senseCrc "$sense_crc" \
             --arg nonsenseCrc "$nonsense_crc" \
             --argjson senseSize "$sense_size" \
@@ -223,6 +225,7 @@ jobs:
                    variant: "sense",
                    dfuZip: $sense,
                    appBin: $senseBin,
+                   uf2: $senseUf2,
                    appCrc32: $senseCrc,
                    appSize: $senseSize
                  },
@@ -230,6 +233,7 @@ jobs:
                    variant: "nonsense",
                    dfuZip: $nonsense,
                    appBin: $nonsenseBin,
+                   uf2: $nonsenseUf2,
                    appCrc32: $nonsenseCrc,
                    appSize: $nonsenseSize
                  }

@@ -12,7 +12,24 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [2.2.3] - 2026-06-10
+
 ### Added
+- **The OLED now shows a full-screen "UPDATING FIRMWARE / Do not power off"
+  notice during an OTA apply.** The apply blocks the main loop (UI frozen) and
+  ends in a reboot; previously the screen just sat on a stale page with no
+  indication anything was happening. The notice stays up through staging and
+  the swap until the new firmware boots and repaints; on a failed apply the
+  normal 3 Hz display refresh replaces it automatically.
+- **Beta OTA manifest now lists each variant's `.uf2`** (`builds[model].uf2`).
+  The `.uf2` was already published to `beta/`, just not referenced — exposing
+  it makes drag-and-drop bootloader (DFU-mode) recovery easy when an OTA fails.
+- **Firmware OTA apply emits `FWDBG:*` breadcrumbs** (`APPLY`, `VBAT=<mv>`,
+  `STAGE`, `ERASE=<pages>`, `ERASED`) over the status characteristic so a stall
+  before `FWAPPLIED` can be pinpointed from the web app's raw notification log
+  — apply entered? battery reading seen? staging/erase reached? The up-front
+  staging-region erase is several seconds with no progress notify (and may run
+  while BLE is still connected), so it is bracketed explicitly.
 - **Beta / nightly firmware channel.** A new `beta` CI workflow builds both
   XIAO nRF52840 variants on every push to the `BETA` branch and publishes them
   to a `beta/` subtree on `gh-pages` — a second OTA channel that lives
@@ -24,6 +41,39 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   `channel`, `commit`, and `branch` markers, and points at `beta/` asset URLs.
   Retention is **latest-only** — a single flat `beta/` slot, overwritten each
   push (no per-build history, unlike prod's `firmware/<version>/`).
+
+### Fixed
+- **Device now boots straight into the new firmware after an OTA apply
+  (no more manual power-cycle).** The apply arms the bootloader-recovery
+  magic (`GPREGRET = 0xA8`, OTA-DFU) before the destructive swap, but never
+  cleared it on success — so after the RAM flasher's reset the bootloader saw
+  the magic and parked in BLE DFU mode instead of booting the freshly
+  installed app (blank/stale screen, odd USB device on the PC; a manual
+  power-cycle cleared the register, which is why it booted fine afterwards).
+  The RAM flasher now clears `GPREGRET` after a successful copy, immediately
+  before its reset. An interrupted swap never reaches that line, so the
+  recovery net is unchanged.
+- **Firmware OTA self-flash swap never took effect — `FWAPPLIED` but still the
+  old image after reboot.** The apply disabled the SoftDevice (`sd_softdevice_
+  disable()`) with the web app *still connected* and ignored the return code.
+  The SoftDevice won't cleanly disable while a link is up, so it stayed partly
+  active, flash remained SoftDevice-protected, and the RAM flasher's raw NVMC
+  erase/copy silently no-opped — but the final `SCB->AIRCR` reset still fired,
+  rebooting into the intact old application. The apply now **disconnects the
+  central and waits for the link to close** before disabling the SoftDevice,
+  and **checks the disable return** — on failure it resets toward the armed
+  bootloader-recovery flag instead of running a swap that can't write.
+- **Firmware OTA apply was aborted by the BLE disconnect, so the update never
+  installed.** After `FWAPPLY`, the web app disconnects to hand the device off
+  to self-flash — but `BLUETOOTH_LOOP()` ran its disconnect teardown (which
+  calls `fwReset()` to abort the OTA, then `NVIC_SystemReset()`) *before*
+  `FW_OTA_LOOP()`, where the apply actually runs. So a disconnect at that point
+  discarded the staged image and rebooted into the **old** firmware (reported
+  as "applied OK, rebooted, still the old version"). The disconnect teardown
+  now detects an in-flight apply (`fwApplyRequested()`) and skips both the abort
+  and the reboot, leaving the install to `FW_OTA_LOOP()`, which owns its own
+  reset. The SoftDevice is still up at that point, so the SD→flash staging and
+  CRC re-verify proceed normally with the radio already gone.
 
 ### Changed
 - **`FIRMWARE_VERSION` can now be overridden at build time.** `project.h`
