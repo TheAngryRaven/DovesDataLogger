@@ -434,6 +434,16 @@ static void fwRamFlasher(uint32_t dst, uint32_t src, uint32_t words) {
   }
   NRF_NVMC->CONFIG = (NVMC_CONFIG_WEN_Ren << NVMC_CONFIG_WEN_Pos);
 
+  // The swap succeeded — clear the GPREGRET recovery magic BEFORE resetting.
+  // It was armed (0xA8 = DFU_MAGIC_OTA_RESET) in case the swap was
+  // interrupted; if left set, the bootloader boots into BLE DFU mode instead
+  // of the freshly installed app (symptom: "applied fine but needed a manual
+  // power-cycle to boot — Windows saw a strange USB device" — the bootloader's
+  // DFU CDC). SoftDevice is disabled here, so the raw register write is legal
+  // and RAM-safe. An interrupted swap never reaches this line, so the
+  // recovery net still holds.
+  NRF_POWER->GPREGRET = 0;
+
   // System reset via the Cortex-M SCB, inline (no flash call). Equivalent to
   // NVIC_SystemReset() but reachable from RAM.
   __DSB();
@@ -527,6 +537,27 @@ static uint32_t fwAppFlashEnd() {
   return (uint32_t)&__etext + dataImage;
 }
 
+// Full-screen "UPDATING FIRMWARE" notice. The apply blocks the main loop (no
+// displayLoop redraw) and neither the staging code nor the RAM flasher touch
+// the OLED, so this stays on screen from here through the swap until the new
+// app boots and repaints. On a FAILED apply the main loop resumes and the
+// 3 Hz displayLoop redraw replaces it automatically — no restore needed.
+// (`display` + DISPLAY_TEXT_WHITE come from display_config.h, same translation
+// unit — the same way display_pages.ino uses them.)
+static void fwShowUpdatingScreen() {
+  display.clearDisplay();
+  display.setTextColor(DISPLAY_TEXT_WHITE);
+  display.setTextSize(2);
+  display.setCursor(16, 8);
+  display.println(F("UPDATING"));
+  display.setCursor(16, 28);
+  display.println(F("FIRMWARE"));
+  display.setTextSize(1);
+  display.setCursor(16, 52);
+  display.println(F("Do not power off"));
+  display.display();
+}
+
 static void fwDoApply() {
   if (fwState != FW_VERIFIED) { fwNotifyErr("STATE"); return; }
 
@@ -559,6 +590,11 @@ static void fwDoApply() {
     fwNotifyErr("FLASH");
     return;
   }
+
+  // Guards passed — the update is going ahead. Tell the human at the kart,
+  // not just the web app: from here the UI is frozen (apply blocks the main
+  // loop) and the device will go dark/reboot, so show what's happening.
+  fwShowUpdatingScreen();
 
   // --- Stage into upper flash and re-verify (still non-destructive) ---
   debugln(F("FW: staging image to flash..."));
