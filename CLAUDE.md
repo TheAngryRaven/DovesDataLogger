@@ -107,7 +107,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 
 | Path | Contents |
 |---|---|
-| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). DovesLapTimer ref per channel: `BETA` builds track the library's `BETA` branch, master/release pin `v2.3.1` |
+| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). DovesLapTimer ref per channel: `BETA` builds track the library's `BETA` branch, master/release pin `v4.1.0` |
 | `tests/` | Host doctest harness (CMake) for the pure-logic units |
 | `CHANGELOG.md` | Keep-a-Changelog history; release workflow ties to version tags |
 | `ARCHITECTURE.md` | Human-facing architecture narrative (subsystems, design decisions) |
@@ -616,7 +616,7 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | SparkFun u-blox GNSS v3 | UBX binary PVT GPS interface |
 | ArduinoJson 6.x | Track file JSON parsing |
 | SdFat | SD card (FAT16/32) |
-| DovesLapTimer | Lap/sector timing (external: TheAngryRaven/DovesLapTimer). CI refs: `BETA`-targeted builds track the library's `BETA` branch; master/release builds pin `v2.3.1` (bump deliberately) |
+| DovesLapTimer | Lap/sector timing (external: TheAngryRaven/DovesLapTimer). CI refs: `BETA`-targeted builds track the library's `BETA` branch; master/release builds pin `v4.1.0` (bump deliberately) |
 | Seeed Arduino LSM6DS3 | Onboard IMU accelerometer/gyro (Sense variant, ±16g) |
 | Bluefruit nRF52 | BLE (built into board package) |
 
