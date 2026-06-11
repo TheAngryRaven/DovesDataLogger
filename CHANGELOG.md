@@ -16,7 +16,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - **CI now controls which DovesLapTimer the firmware is built against.**
   Builds targeting (or running on) the `BETA` branch track the library's own
   `BETA` branch, so the two beta channels move together; `master` CI and the
-  release/tag builds pin the known-good `v2.3.1` tag instead of floating on
+  release/tag builds pin the known-good `v4.1.0` tag instead of floating on
   the library's default-branch tip. Bump the pin deliberately when a new
   library release is validated.
 

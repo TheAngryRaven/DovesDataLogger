@@ -18,7 +18,7 @@ jobs:
       # channels move together; everything else pins the known-good release
       # tag (bump deliberately). base_ref is only set on pull_request events;
       # ref_name covers push / workflow_dispatch.
-      LAPTIMER_REF: ${{ (github.base_ref == 'BETA' || github.ref_name == 'BETA') && 'BETA' || 'v2.3.1' }}
+      LAPTIMER_REF: ${{ (github.base_ref == 'BETA' || github.ref_name == 'BETA') && 'BETA' || 'v4.1.0' }}
     # Build both XIAO nRF52840 variants. The Sense board has the onboard
     # LSM6DS3 IMU; the plain board does not (accelerometer logging degrades
     # gracefully). Same MCU/BLE/bootloader otherwise.
