@@ -380,16 +380,11 @@ File replayFile;
 
 ///////////////////////////////////////////
 // SD CARD ACCESS STATE MANAGEMENT
-// Prevents race conditions between logging, replay, and BLE file transfers
+// Prevents race conditions between logging, replay, and BLE file transfers.
+// The SD_ACCESS_* modes come from sd_functions.h (aliases of the host-tested
+// sd_access_policy constants); transitions are made atomically by
+// acquireSDAccess() / releaseSDAccess() in sd_functions.ino.
 ///////////////////////////////////////////
-// Note: Using #define instead of enum to avoid Arduino preprocessor issues
-// (Arduino generates function prototypes before seeing enum definitions)
-#define SD_ACCESS_NONE         0   // SD card not in use by any subsystem
-#define SD_ACCESS_LOGGING      1   // Data logging active (dataFile in use)
-#define SD_ACCESS_REPLAY       2   // Replay mode active (replayFile in use)
-#define SD_ACCESS_BLE_TRANSFER 3   // BLE file transfer active (bleCurrentFile in use)
-#define SD_ACCESS_TRACK_PARSE  4   // Track file parsing (temporary, should release quickly)
-
 volatile int currentSDAccess = SD_ACCESS_NONE;
 
 // Replay function prototypes (must be after SdFat include for File type)

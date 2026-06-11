@@ -100,6 +100,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `dovex_header.{h,cpp}` | DOVEX 1 KB header `format()` / `parse()` |
 | `filename_validator.{h,cpp}` | FAT-safe / traversal-proof check for BLE filenames |
 | `crc32.{h,cpp}` | CRC-32/IEEE-802.3 (zlib) incremental + hex; pins firmware-OTA CRC to the web client |
+| `sd_access_policy.{h,cpp}` | SD access arbitration decision table (mode values + grant/deny rules) |
 
 ### Non-Source
 
@@ -239,7 +240,14 @@ loop()  ~250 Hz
 - **SD access arbitration** prevents concurrent access:
   - `acquireSDAccess(mode)` / `releaseSDAccess(mode)`
   - Modes: `SD_ACCESS_NONE` (0), `LOGGING` (1), `REPLAY` (2),
-    `BLE_TRANSFER` (3), `TRACK_PARSE` (4).
+    `BLE_TRANSFER` (3), `TRACK_PARSE` (4) — values and grant/deny rules
+    live in the host-tested `sd_access_policy` pure unit.
+  - Transitions are **atomic**: the check-then-set runs inside a FreeRTOS
+    critical section (`taskENTER_CRITICAL`, BASEPRI-masked so SoftDevice
+    radio interrupts are unaffected) because the Bluefruit callback task
+    and the main loop share the owner flag.
+  - Belt-and-suspenders only: all SD-touching BLE work is deferred to the
+    main loop (see subsystem 6), so SdFat itself is single-task.
 - Data flushes every 10 seconds during logging.
 
 ### 5. Display & UI (`display_ui.ino`, `display_pages.ino`, `display_config.h`)
@@ -279,7 +287,15 @@ loop()  ~250 Hz
     `-DBIRDSEYE_BOARD_SENSE` / `-DBIRDSEYE_BOARD_NONSENSE` (defaults to
     `sense`).
 - MTU negotiation (requests 247, default 23).
-- File listing does not require exclusive SD access; transfer does.
+- **No SdFat in the callback task — ever.** Every SD-touching command
+  (`LIST`, `GET:`, `DELETE:`, `TLIST`, `TGET:` via the deferred
+  `fileCmdBuffer`; settings, `TPUT:`/`TDEL:`, and `FW*` via their own
+  deferred state) is only parsed/validated in the BLE callback and is
+  executed by `BLUETOOTH_LOOP()` on the main loop. Listings hold the SD
+  lock for the whole directory walk; `DELETE` takes the lock and refuses
+  (`BUSY`) while a transfer is streaming. One file command may be queued
+  at a time — a second gets the protocol's busy reply (`BUSY` /
+  `TERR:BUSY`).
 - **Filename validation**: every BLE command carrying a filename
   (`GET:`, `DELETE:`, `TGET:`, `TPUT:`, `TDEL:`) runs the name through
   `filename_validator::isValidFilename()` BEFORE any `SD.open()` /

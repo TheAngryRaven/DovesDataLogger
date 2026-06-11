@@ -107,9 +107,23 @@ the main loop, and the GPS library reads from that buffer. This is why
 The BLE callbacks run in a **separate FreeRTOS task** from `loop()`, and
 SdFat is not thread-safe. Every SD user (logging, replay, BLE transfer,
 track parsing) must take a single mutex via `acquireSDAccess(mode)` /
-`releaseSDAccess(mode)`. BLE commands that need the card defer their work
-into `BLUETOOTH_LOOP()` (main-loop context) instead of touching SdFat from
-the callback.
+`releaseSDAccess(mode)`. Two layers make this sound:
+
+1. **Atomic transitions.** `acquireSDAccess()` evaluates the grant rules
+   and commits the new owner inside a FreeRTOS critical section
+   (`taskENTER_CRITICAL`, BASEPRI-masked so the SoftDevice's radio
+   interrupts are untouched) — a plain check-then-set on the shared flag
+   would be a TOCTOU between the two tasks. The grant/deny decision table
+   itself (same-mode re-acquire is idempotent; the brief `TRACK_PARSE`
+   mode is preemptible as leak recovery) is the host-tested
+   `sd_access_policy` pure unit.
+2. **Single-task SdFat.** *Every* BLE command that touches the card —
+   `LIST`/`GET`/`DELETE`, `TLIST`/`TGET`/`TPUT`/`TDEL`, settings, firmware
+   OTA — is parsed in the callback (filenames validated there, RAM only)
+   and executed by `BLUETOOTH_LOOP()` on the main loop. Nothing calls
+   SdFat from the Bluefruit callback task, so the filesystem only ever
+   has one task in it; directory listings hold the lock for the whole
+   walk, and `DELETE` refuses while a transfer is streaming.
 
 ### DOVEX crash safety
 A `.dovex` file reserves the first 1 KB for session metadata (driver,
