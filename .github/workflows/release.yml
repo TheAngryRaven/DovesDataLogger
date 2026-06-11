@@ -70,7 +70,9 @@ jobs:
             "SparkFun u-blox GNSS v3" \
             "Seeed Arduino LSM6DS3" \
             "ArxTypeTraits"
-          arduino-cli lib install --git-url https://github.com/TheAngryRaven/DovesLapTimer.git
+          # Release builds pin the lap-timer library to a known-good tag —
+          # bump deliberately. (Beta builds track its BETA branch instead.)
+          arduino-cli lib install --git-url https://github.com/TheAngryRaven/DovesLapTimer.git#v4.1.0
           pip install --user adafruit-nrfutil
 
       - name: Compile
