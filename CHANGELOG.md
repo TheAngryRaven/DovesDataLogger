@@ -12,6 +12,24 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Security
+- **SD card arbitration race fixed — a BLE client in radio range could
+  corrupt the card.** `acquireSDAccess()` was a non-atomic check-then-set on
+  a shared flag, and several BLE commands (`LIST`, `GET:`, `DELETE:`,
+  `TLIST`, `TGET:`) ran SdFat directly in the Bluefruit callback task —
+  concurrently with the main loop's 25 Hz session logging. Overlapping
+  commands could close a file mid-read, delete the file being streamed
+  (`DELETE:` took no lock at all), or interleave two SdFat operations:
+  FAT corruption, lost session logs, or an SPI wedge. Now: lock
+  transitions are atomic (FreeRTOS critical section; the grant/deny table
+  is the new host-tested `sd_access_policy` unit), all five commands are
+  deferred to `BLUETOOTH_LOOP()` on the main loop like the
+  settings/track/OTA commands already were, directory listings hold the
+  lock for the whole walk, and `DELETE` takes the lock and refuses with
+  `BUSY` while a transfer is streaming. Protocol impact: commands that
+  arrive while another file command is still queued now get the existing
+  `BUSY` / `TERR:BUSY` replies instead of executing concurrently.
+
 ## [2.2.3] - 2026-06-10
 
 ### Added

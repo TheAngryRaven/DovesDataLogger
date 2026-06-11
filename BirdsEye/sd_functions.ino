@@ -9,21 +9,30 @@
  * @brief Attempt to acquire SD card access for a subsystem
  * @param mode The access mode being requested (SD_ACCESS_*)
  * @return true if access granted, false if SD busy with another operation
+ *
+ * The check-then-set must be atomic: the main loop and the Bluefruit
+ * callback task can both call this, and a plain `volatile int` test+store
+ * is a TOCTOU that lets two tasks each believe they own the card.
+ * taskENTER_CRITICAL() masks interrupts only up to
+ * configMAX_SYSCALL_INTERRUPT_PRIORITY (BASEPRI), so the SoftDevice's
+ * high-priority radio interrupts are never starved. The grant/deny rules
+ * live in the host-tested sd_access_policy pure unit.
  */
 bool acquireSDAccess(int mode) {
-  // Allow re-acquiring same mode (idempotent)
-  if (currentSDAccess == mode) return true;
-
-  // Only allow acquisition if currently free or track parsing (which is temporary)
-  if (currentSDAccess == SD_ACCESS_NONE || currentSDAccess == SD_ACCESS_TRACK_PARSE) {
+  bool granted;
+  taskENTER_CRITICAL();
+  granted = sd_access_policy::canAcquire(currentSDAccess, mode);
+  if (granted) {
     currentSDAccess = mode;
-    return true;
   }
+  taskEXIT_CRITICAL();
 
-  // SD busy with another subsystem
-  debug(F("SD access denied, current mode: "));
-  debugln(currentSDAccess);
-  return false;
+  if (!granted) {
+    // SD busy with another subsystem
+    debug(F("SD access denied, current mode: "));
+    debugln(currentSDAccess);
+  }
+  return granted;
 }
 
 /**
@@ -31,16 +40,20 @@ bool acquireSDAccess(int mode) {
  * @param mode The access mode being released (must match current)
  */
 void releaseSDAccess(int mode) {
-  if (currentSDAccess == mode) {
+  taskENTER_CRITICAL();
+  if (sd_access_policy::releaseClears(currentSDAccess, mode)) {
     currentSDAccess = SD_ACCESS_NONE;
   }
+  taskEXIT_CRITICAL();
 }
 
 /**
  * @brief Force release all SD access (use during cleanup/error recovery)
  */
 void forceReleaseSDAccess() {
+  taskENTER_CRITICAL();
   currentSDAccess = SD_ACCESS_NONE;
+  taskEXIT_CRITICAL();
 }
 
 void makeFullTrackPath(const char* trackName, char* filepath) {

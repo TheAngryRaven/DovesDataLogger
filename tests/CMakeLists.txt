@@ -17,12 +17,14 @@ add_executable(birdseye_tests
   dovex_header_test.cpp
   filename_validator_test.cpp
   crc32_test.cpp
+  sd_access_policy_test.cpp
   ${BIRDSEYE_DIR}/haversine.cpp
   ${BIRDSEYE_DIR}/gps_time.cpp
   ${BIRDSEYE_DIR}/gps_validation.cpp
   ${BIRDSEYE_DIR}/dovex_header.cpp
   ${BIRDSEYE_DIR}/filename_validator.cpp
   ${BIRDSEYE_DIR}/crc32.cpp
+  ${BIRDSEYE_DIR}/sd_access_policy.cpp
 )
 
 target_include_directories(birdseye_tests PRIVATE

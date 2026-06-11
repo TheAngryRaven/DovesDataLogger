@@ -7,14 +7,17 @@
 // access mutex to avoid corrupting SdFat's internal state.
 ///////////////////////////////////////////
 
-// SD access modes — used by acquireSDAccess / releaseSDAccess.
-// TRACK_PARSE is treated as "preemptible" by other acquirers since it's
-// always brief.
-#define SD_ACCESS_NONE         0
-#define SD_ACCESS_LOGGING      1
-#define SD_ACCESS_REPLAY       2
-#define SD_ACCESS_BLE_TRANSFER 3
-#define SD_ACCESS_TRACK_PARSE  4
+#include "sd_access_policy.h"
+
+// SD access modes — used by acquireSDAccess / releaseSDAccess. Aliases of
+// the sd_access_policy constants (the single source of truth for the values
+// and the grant/deny rules — TRACK_PARSE is preemptible, same-mode
+// re-acquire is idempotent; see sd_access_policy.h).
+#define SD_ACCESS_NONE         sd_access_policy::kNone
+#define SD_ACCESS_LOGGING      sd_access_policy::kLogging
+#define SD_ACCESS_REPLAY       sd_access_policy::kReplay
+#define SD_ACCESS_BLE_TRANSFER sd_access_policy::kBleTransfer
+#define SD_ACCESS_TRACK_PARSE  sd_access_policy::kTrackParse
 
 // JSON parser status codes returned by parseTrackFile(). Defined in
 // BirdsEye.ino; redeclared here so callers in other .ino files can

@@ -24,6 +24,25 @@ static volatile uint16_t trackUploadOffset = 0;
 static volatile bool trackDeletePending = false;
 static char trackDeleteFilename[25];
 
+// Deferred file command buffer (BLE callback -> main loop). Carries the
+// SD-touching commands (LIST / GET: / DELETE: / TLIST / TGET:) so SdFat is
+// only ever driven from the main-loop task — the Bluefruit callback task
+// can preempt an in-flight SD write, and SdFat is not thread-safe.
+static volatile bool fileCmdPending = false;
+static char fileCmdBuffer[65];
+
+// Queue an SD-touching command for BLUETOOTH_LOOP(). Returns false if one
+// is already pending — the caller sends its protocol-appropriate busy reply.
+// The buffer is stable once fileCmdPending is set: the callback refuses new
+// commands until the main loop has processed it and cleared the flag.
+static bool deferFileCommand(const char* cmd) {
+  if (fileCmdPending) return false;
+  strncpy(fileCmdBuffer, cmd, sizeof(fileCmdBuffer) - 1);
+  fileCmdBuffer[sizeof(fileCmdBuffer) - 1] = '\0';
+  fileCmdPending = true;
+  return true;
+}
+
 // Set by the disconnect callback; BLUETOOTH_LOOP() performs the SD teardown
 // (close transfer/staging file, release SD, abort OTA) and the auto-reboot
 // on the main loop, so SdFat is only ever touched by one task.
@@ -73,6 +92,10 @@ void bleDisconnectCallback(uint16_t conn_handle, uint8_t reason) {
   trackUploadComplete = false;
   trackUploadError = false;
   trackDeletePending = false;
+  // Drop any queued-but-unprocessed commands so they can't fire on behalf
+  // of a peer that is no longer connected (or after a reconnect).
+  fileCmdPending = false;
+  settingsCmdPending = false;
 
   // Everything that touches SdFat — closing the in-flight transfer/staging
   // file, releasing SD access, aborting the OTA — plus the auto-reboot is
@@ -133,11 +156,13 @@ void bleStartAdvertising() {
 }
 
 void bleSendFileList() {
-  // BLE callbacks run in a separate FreeRTOS task from loop().
-  // SdFat is NOT thread-safe — concurrent access from BLE task and main
-  // loop (e.g. CSV logging) can corrupt internal state.
-  // Check if SD is in use and return BUSY if so.
-  if (currentSDAccess != SD_ACCESS_NONE) {
+  // Runs on the main loop (deferred via fileCmdBuffer). Hold the SD lock
+  // for the entire walk — the delay(10) per entry yields to other tasks,
+  // so ownership must be held, not just peeked. The explicit free-check
+  // first keeps the idempotent/preempting acquire from piggybacking on an
+  // active transfer or stealing a track parse.
+  if (currentSDAccess != SD_ACCESS_NONE ||
+      !acquireSDAccess(SD_ACCESS_BLE_TRANSFER)) {
     debugln(F("BLE: SD busy, cannot list files"));
     fileListChar.notify((uint8_t*)"BUSY", 4);
     return;
@@ -146,6 +171,7 @@ void bleSendFileList() {
   File32 root = SD.open("/");
   if (!root) {
     debugln(F("BLE: Failed to open root directory"));
+    releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
     fileListChar.notify((uint8_t*)"BUSY", 4);
     return;
   }
@@ -181,6 +207,7 @@ void bleSendFileList() {
     entry.close();
   }
   root.close();
+  releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
 
   fileListChar.notify((uint8_t*)"END", 3);
   debug(F("BLE: File list sent, "));
@@ -189,7 +216,9 @@ void bleSendFileList() {
 }
 
 void bleSendTrackList() {
-  if (currentSDAccess != SD_ACCESS_NONE) {
+  // Same locking discipline as bleSendFileList() — see the comment there.
+  if (currentSDAccess != SD_ACCESS_NONE ||
+      !acquireSDAccess(SD_ACCESS_BLE_TRANSFER)) {
     debugln(F("BLE: SD busy, cannot list tracks"));
     fileStatusChar.notify((uint8_t*)"TERR:SD_BUSY", 12);
     return;
@@ -198,6 +227,7 @@ void bleSendTrackList() {
   File32 trackDir2 = SD.open("/TRACKS/");
   if (!trackDir2) {
     debugln(F("BLE: Failed to open TRACKS directory"));
+    releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
     fileStatusChar.notify((uint8_t*)"TEND", 4);
     return;
   }
@@ -222,6 +252,7 @@ void bleSendTrackList() {
     entry.close();
   }
   trackDir2.close();
+  releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
 
   fileStatusChar.notify((uint8_t*)"TEND", 4);
   debug(F("BLE: Track list sent, "));
@@ -271,6 +302,20 @@ void bleDeleteFile(const char* filename) {
   debug(filename);
   debugln(F("]"));
 
+  // An active transfer holds SD_ACCESS_BLE_TRANSFER, and the same-mode
+  // re-acquire below would succeed — guard explicitly so a DELETE can't
+  // remove the file being streamed and then drop the transfer's lock.
+  if (bleTransferInProgress) {
+    debugln(F("BLE: transfer in progress, cannot delete"));
+    fileStatusChar.notify((uint8_t*)"BUSY", 4);
+    return;
+  }
+  if (!acquireSDAccess(SD_ACCESS_BLE_TRANSFER)) {
+    debugln(F("BLE: SD busy, cannot delete"));
+    fileStatusChar.notify((uint8_t*)"BUSY", 4);
+    return;
+  }
+
   if (SD.exists(filename)) {
     if (SD.remove(filename)) {
       debugln(F("BLE: File deleted successfully"));
@@ -283,6 +328,8 @@ void bleDeleteFile(const char* filename) {
     debugln(F("BLE: File not found"));
     fileStatusChar.notify((uint8_t*)"NOT_FOUND", 9);
   }
+
+  releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
 }
 
 void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, uint16_t len) {
@@ -331,8 +378,14 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
   debug(buffer);
   debugln(F("]"));
 
+  // File commands (LIST/GET/DELETE/TLIST/TGET) all touch SD, so they are
+  // DEFERRED to BLUETOOTH_LOOP() via deferFileCommand() — SdFat must never
+  // run in this Bluefruit callback task. Filename validation is RAM-only
+  // and stays here so bad names are rejected immediately.
   if (strncmp(buffer, "LIST", 4) == 0) {
-    bleSendFileList();
+    if (!deferFileCommand(buffer)) {
+      fileListChar.notify((uint8_t*)"BUSY", 4);
+    }
   } else if (strncmp(buffer, "GET:", 4) == 0) {
     // Skip "GET:" prefix and trim leading whitespace
     char* filename = buffer + 4;
@@ -343,7 +396,9 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
       fileStatusChar.notify((uint8_t*)"ERROR", 5);
       return;
     }
-    bleStartFileTransfer(filename);
+    if (!deferFileCommand(buffer)) {
+      fileStatusChar.notify((uint8_t*)"BUSY", 4);
+    }
   } else if (strncmp(buffer, "DELETE:", 7) == 0) {
     // Skip "DELETE:" prefix and trim leading whitespace
     char* filename = buffer + 7;
@@ -353,7 +408,9 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
       fileStatusChar.notify((uint8_t*)"NOT_FOUND", 9);
       return;
     }
-    bleDeleteFile(filename);
+    if (!deferFileCommand(buffer)) {
+      fileStatusChar.notify((uint8_t*)"BUSY", 4);
+    }
   } else if (strcmp(buffer, "SLIST") == 0 ||
              strncmp(buffer, "SGET:", 5) == 0 ||
              strncmp(buffer, "SSET:", 5) == 0 ||
@@ -369,7 +426,9 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
 
   // Track management commands
   } else if (strcmp(buffer, "TLIST") == 0) {
-    bleSendTrackList();
+    if (!deferFileCommand(buffer)) {
+      fileStatusChar.notify((uint8_t*)"TERR:BUSY", 9);
+    }
   } else if (strncmp(buffer, "TGET:", 5) == 0) {
     // The name is spliced into "/TRACKS/%s"; validate it so it can't
     // climb out of /TRACKS via ../ or carry FAT-unsafe characters.
@@ -378,9 +437,9 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
       fileStatusChar.notify((uint8_t*)"TERR:BAD_NAME", 13);
       return;
     }
-    char filepath[FILEPATH_MAX];
-    snprintf(filepath, sizeof(filepath), "/TRACKS/%s", buffer + 5);
-    bleStartFileTransfer(filepath);
+    if (!deferFileCommand(buffer)) {
+      fileStatusChar.notify((uint8_t*)"TERR:BUSY", 9);
+    }
   } else if (strncmp(buffer, "TPUT:", 5) == 0) {
     if (trackUploadActive || bleTransferInProgress) {
       fileStatusChar.notify((uint8_t*)"TERR:BUSY", 9);
@@ -518,6 +577,12 @@ void BLE_STOP() {
   bleTransferInProgress = false;
   fwReset();  // abort any in-flight OTA (closes staging file, frees SD)
 
+  // Drop queued-but-unprocessed commands so a stale one can't execute on
+  // the next BLE session (BLUETOOTH_LOOP stops running once bleActive is
+  // false, so nothing would clear them otherwise).
+  fileCmdPending = false;
+  settingsCmdPending = false;
+
   // Disconnect any connected device
   if (Bluefruit.connected()) {
     Bluefruit.disconnect(Bluefruit.connHandle());
@@ -536,6 +601,33 @@ void BLE_STOP() {
   // bleActive already set false at top of BLE_STOP()
 
   debugln(F("BLE: Bluetooth stopped"));
+}
+
+// Execute a deferred file command (main-loop context — the only place
+// SdFat may be touched). The filename was validated in the callback and
+// the buffer is stable while fileCmdPending is set.
+static void processFileCommand() {
+  debug(F("BLE: Processing file cmd: ["));
+  debug(fileCmdBuffer);
+  debugln(F("]"));
+
+  if (strncmp(fileCmdBuffer, "LIST", 4) == 0) {
+    bleSendFileList();
+  } else if (strncmp(fileCmdBuffer, "GET:", 4) == 0) {
+    char* filename = fileCmdBuffer + 4;
+    while (*filename == ' ') filename++;
+    bleStartFileTransfer(filename);
+  } else if (strncmp(fileCmdBuffer, "DELETE:", 7) == 0) {
+    char* filename = fileCmdBuffer + 7;
+    while (*filename == ' ') filename++;
+    bleDeleteFile(filename);
+  } else if (strcmp(fileCmdBuffer, "TLIST") == 0) {
+    bleSendTrackList();
+  } else if (strncmp(fileCmdBuffer, "TGET:", 5) == 0) {
+    char filepath[FILEPATH_MAX];
+    snprintf(filepath, sizeof(filepath), "/TRACKS/%s", fileCmdBuffer + 5);
+    bleStartFileTransfer(filepath);
+  }
 }
 
 void processSettingsCommand() {
@@ -799,6 +891,14 @@ void BLUETOOTH_LOOP() {
   if (settingsCmdPending) {
     processSettingsCommand();
     settingsCmdPending = false;
+  }
+
+  // Process deferred file commands (LIST/GET/DELETE/TLIST/TGET) — the only
+  // place these touch SdFat. A GET lands here before the burst-send block
+  // below, so a transfer still starts in the same loop iteration.
+  if (fileCmdPending) {
+    processFileCommand();
+    fileCmdPending = false;
   }
 
   // Process track upload state machine
