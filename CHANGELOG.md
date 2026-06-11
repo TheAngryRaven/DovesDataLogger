@@ -12,6 +12,24 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Fixed
+- **Sleep mode actually sleeps now.** The tach ISR latched `tachHavePeriod`
+  on the first engine pulse since boot and nothing ever cleared it, so every
+  sleep entry (long-press, 5-min menu idle, USB) instantly bounced through
+  the RPM-wake path back into race mode **with logging enabled** — the
+  device would silently start a new session and drain the pack overnight.
+  `enterSleepMode()` now calls the new `TACH_SLEEP()`, which re-arms the
+  wake trigger and drops stale ring-buffer/Kalman state; the next *real*
+  pulse still RPM-wakes straight into race mode as designed.
+- **Lap times under 100 ms-fraction rendered wrong on the live pages.** The
+  current-lap, best-lap, and optimal-lap pages appended the millisecond
+  zero-padding *after* the value, so `1:23.007` displayed as `1:23.700` (a
+  693 ms error), and the lap-history list did no padding at all (`1:5.7`).
+  All six divergent inline copies of the ms → `M:SS.mmm` math are replaced
+  by one host-tested `lap_format` unit; the replay page's already-correct
+  rendering is unchanged, and the lap list now shows zero-padded
+  `M:SS.mmm`.
+
 ### Security
 - **SD card arbitration race fixed — a BLE client in radio range could
   corrupt the card.** `acquireSDAccess()` was a non-atomic check-then-set on

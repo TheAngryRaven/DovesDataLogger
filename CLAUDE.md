@@ -101,6 +101,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `filename_validator.{h,cpp}` | FAT-safe / traversal-proof check for BLE filenames |
 | `crc32.{h,cpp}` | CRC-32/IEEE-802.3 (zlib) incremental + hex; pins firmware-OTA CRC to the web client |
 | `sd_access_policy.{h,cpp}` | SD access arbitration decision table (mode values + grant/deny rules) |
+| `lap_format.{h,cpp}` | ms → `M:SS.mmm` lap-time rendering (three zero-minutes styles), used by all display pages |
 
 ### Non-Source
 
@@ -212,6 +213,9 @@ loop()  ~250 Hz
 - `tachLastReported` updates every main-loop call (~250 Hz). Consumers
   (display at 3 Hz, logging at 25 Hz) rate-limit themselves.
 - 500 ms timeout sets RPM to 0 (engine stopped), resets Kalman state.
+- `TACH_SLEEP()` (called from `enterSleepMode()`) clears the latched
+  `tachHavePeriod` wake flag and drops ring/Kalman state so the RPM wake
+  trigger is re-armed for the *next* pulse instead of firing instantly.
 
 ### 3. Accelerometer (`accelerometer.ino`)
 
@@ -254,6 +258,10 @@ loop()  ~250 Hz
 
 - Driver selected at compile time (`USE_1306_DISPLAY` define).
 - Button debounce: 3 samples at 500 us intervals, 200 ms refire lockout.
+- All lap times render via the host-tested `lap_format::formatLapTime()`
+  (ms → `M:SS.mmm`, always 3-digit ms; zero-minutes styles: `kOmit` for
+  replay results, `kShow` for the lap list, `kSpace` column-stable for the
+  big-font live pages). Never hand-roll the `60000`/`%1000` math inline.
 - Pages are integer constants; key pages:
   - Boot/menu: `PAGE_BOOT` (999), `PAGE_MAIN_MENU` (-1).
   - Racing: `GPS_STATS` (4) through `LOGGING_STOP` (12).
@@ -391,10 +399,14 @@ loop()  ~250 Hz
   or USB connected on main menu.
 - **`enterSleepMode()`**: ends active race session, stops BLE, display off
   (I2C `DISPLAYOFF`), GPS backup mode (`powerOff(0)`), IMU power off,
-  GPS serial timer stopped.
+  GPS serial timer stopped, and `TACH_SLEEP()` re-arms the RPM wake
+  trigger (clears the latched `tachHavePeriod` + stale ring/Kalman state
+  — without this, one engine pulse since boot made every sleep entry
+  bounce straight back into race mode with logging on).
 - **Wake triggers** (checked every loop in sleep):
-  - **RPM wake**: tach ISR fires → `exitSleepMode(true)` → straight into
-    race mode with logging enabled, Lap Anything CourseManager created.
+  - **RPM wake**: tach ISR sets `tachHavePeriod` on the next valid pulse →
+    `exitSleepMode(true)` → straight into race mode with logging enabled,
+    Lap Anything CourseManager created.
   - **Button wake**: any button → `exitSleepMode(false)` → main menu.
 - **`exitSleepMode()`**: re-enables IMU, GPS wake, display on, GPS serial
   timer restarted. RPM wake skips menu and goes directly to race mode.
