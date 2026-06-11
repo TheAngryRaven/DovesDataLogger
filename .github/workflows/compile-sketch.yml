@@ -12,6 +12,13 @@ jobs:
   compile:
     name: ${{ matrix.board.name }}
     runs-on: ubuntu-latest
+    env:
+      # DovesLapTimer ref for this build: anything targeting (or running on)
+      # the BETA branch tracks the library's own BETA branch, so the two beta
+      # channels move together; everything else pins the known-good release
+      # tag (bump deliberately). base_ref is only set on pull_request events;
+      # ref_name covers push / workflow_dispatch.
+      LAPTIMER_REF: ${{ (github.base_ref == 'BETA' || github.ref_name == 'BETA') && 'BETA' || 'v2.3.1' }}
     # Build both XIAO nRF52840 variants. The Sense board has the onboard
     # LSM6DS3 IMU; the plain board does not (accelerometer logging degrades
     # gracefully). Same MCU/BLE/bootloader otherwise.
@@ -52,6 +59,7 @@ jobs:
             - name: Seeed Arduino LSM6DS3
             - name: ArxTypeTraits
             - source-url: https://github.com/TheAngryRaven/DovesLapTimer.git
+              version: ${{ env.LAPTIMER_REF }}
           sketch-paths: |
             - BirdsEye
           cli-compile-flags: |
