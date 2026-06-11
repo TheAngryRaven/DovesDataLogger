@@ -1061,11 +1061,16 @@ void enterSleepMode() {
     digitalWrite(PIN_LSM6DS3TR_C_POWER, HIGH);  // HIGH = disable power
   }
 
-  // 5. Set state
+  // 5. Re-arm the tach RPM wake trigger and drop pre-sleep pulse state.
+  // The ISR stays attached — the NEXT valid pulse sets tachHavePeriod and
+  // wakes straight into race mode. Without this clear, the flag stays
+  // latched from the first pulse since boot and sleep instantly bounces.
+  TACH_SLEEP();
+
+  // 6. Set state
   sleepModeActive = true;
   sleepEnteredAt = millis();
   sleepLastGpsWake = millis();
-  // Tach ISR stays attached -- RPM pulses will wake via tachHavePeriod
 }
 
 void exitSleepMode(bool rpmWake = false) {

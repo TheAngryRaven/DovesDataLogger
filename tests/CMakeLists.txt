@@ -18,6 +18,7 @@ add_executable(birdseye_tests
   filename_validator_test.cpp
   crc32_test.cpp
   sd_access_policy_test.cpp
+  lap_format_test.cpp
   ${BIRDSEYE_DIR}/haversine.cpp
   ${BIRDSEYE_DIR}/gps_time.cpp
   ${BIRDSEYE_DIR}/gps_validation.cpp
@@ -25,6 +26,7 @@ add_executable(birdseye_tests
   ${BIRDSEYE_DIR}/filename_validator.cpp
   ${BIRDSEYE_DIR}/crc32.cpp
   ${BIRDSEYE_DIR}/sd_access_policy.cpp
+  ${BIRDSEYE_DIR}/lap_format.cpp
 )
 
 target_include_directories(birdseye_tests PRIVATE

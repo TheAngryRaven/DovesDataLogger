@@ -164,3 +164,29 @@ void TACH_LOOP() {
   // ---- Step 5: Update reported value ----
   tachLastReported = (int)(kalmanX + 0.5f);
 }
+
+/**
+ * Prepare the tachometer for sleep mode — call from enterSleepMode().
+ *
+ * Re-arms the RPM wake trigger and discards pre-sleep pulse state. Without
+ * this, tachHavePeriod stays true forever after the first engine pulse
+ * since boot, and every sleep entry (long-press, menu idle, USB) instantly
+ * bounces through the RPM-wake path back into race mode with logging
+ * enabled — silently starting a session and draining the pack overnight.
+ *
+ * The ISR stays attached during sleep: the next valid pulse sets
+ * tachHavePeriod again, and THAT is the legitimate RPM wake.
+ */
+void TACH_SLEEP() {
+  tachHavePeriod = false;
+
+  // Drop any buffered pre-sleep pulses and filter state so the wake's RPM
+  // computation starts clean instead of chewing on stale timestamps (the
+  // first post-wake period would otherwise span the whole sleep).
+  tachRingTail = tachRingHead;
+  tachHavePrevTimestamp = false;
+  tachNeedFirstPulseDiscard = true;
+  kalmanX = 0.0f;
+  kalmanP = 10000.0f;
+  tachLastReported = 0;
+}

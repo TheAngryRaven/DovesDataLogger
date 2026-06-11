@@ -36,4 +36,5 @@ jobs:
             BirdsEye/gps_validation.cpp \
             BirdsEye/dovex_header.cpp \
             BirdsEye/filename_validator.cpp \
-            BirdsEye/sd_access_policy.cpp
+            BirdsEye/sd_access_policy.cpp \
+            BirdsEye/lap_format.cpp
