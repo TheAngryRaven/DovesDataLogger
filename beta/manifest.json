@@ -1,16 +1,16 @@
 {
-  "version": "2.2.3-beta.a2a24b8",
+  "version": "2.2.3-beta.ae803e4",
   "channel": "beta",
-  "commit": "a2a24b8",
+  "commit": "ae803e4",
   "branch": "BETA",
-  "publishedAt": "2026-06-11T16:45:25Z",
+  "publishedAt": "2026-06-11T17:22:37Z",
   "builds": {
     "BirdsEye-sense": {
       "variant": "sense",
       "dfuZip": "https://theangryraven.github.io/DovesDataLogger/beta/BirdsEye-sense.zip",
       "appBin": "https://theangryraven.github.io/DovesDataLogger/beta/BirdsEye-sense.bin",
       "uf2": "https://theangryraven.github.io/DovesDataLogger/beta/BirdsEye-sense.uf2",
-      "appCrc32": "1ac23ad3",
+      "appCrc32": "80c27403",
       "appSize": 289228
     },
     "BirdsEye-nonsense": {
@@ -18,7 +18,7 @@
       "dfuZip": "https://theangryraven.github.io/DovesDataLogger/beta/BirdsEye-nonsense.zip",
       "appBin": "https://theangryraven.github.io/DovesDataLogger/beta/BirdsEye-nonsense.bin",
       "uf2": "https://theangryraven.github.io/DovesDataLogger/beta/BirdsEye-nonsense.uf2",
-      "appCrc32": "aa2e4d0f",
+      "appCrc32": "4426d575",
       "appSize": 289228
     }
   }
