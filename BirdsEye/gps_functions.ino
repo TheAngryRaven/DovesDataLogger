@@ -515,6 +515,15 @@ void GPS_RECONFIGURE() {
 bool GPS_BAUD_RECOVERY() {
   debugln(F("GPS baud recovery: attempting..."));
 
+  // This path runs from GPS_LOOP() under the armed ~4 s hardware watchdog,
+  // and it is the slowest thing in the firmware short of the OTA apply:
+  // up to three myGNSS.begin() probes (~1.1 s of ping timeouts each) plus
+  // ~500 ms of explicit delay(). Against a genuinely hung module that
+  // out-waits the WDT → reset → re-setup → recovery → reset boot loop —
+  // the one path built to revive a sick GPS must not trip the watchdog.
+  // Pet before every blocking probe (same rationale as fwStageToFlash()).
+  wdtPet();
+
   // Stop timer so GpsBufferedStream passes through to Serial1 directly.
   // The SparkFun library needs direct serial access for begin()/setSerialRate().
   stopGpsSerialTimer();
@@ -532,6 +541,7 @@ bool GPS_BAUD_RECOVERY() {
 
   // Module not responding at 57600 — try 9600 (factory default)
   debugln(F("GPS baud recovery: trying 9600..."));
+  wdtPet();  // the first begin() just burned ~1 s of the 4 s budget
   GPS_SERIAL.end();
   delay(50);
   GPS_SERIAL.begin(9600);
@@ -540,12 +550,14 @@ bool GPS_BAUD_RECOVERY() {
   if (myGNSS.begin(gpsStream)) {
     // Found at 9600 — switch it back to 57600
     debugln(F("GPS baud recovery: found at 9600, switching to 57600"));
+    wdtPet();  // second begin() done; baud switch + final probe still ahead
     myGNSS.setSerialRate(GPS_BAUD_RATE);
     delay(100);
     GPS_SERIAL.end();
     delay(50);
     GPS_SERIAL.begin(GPS_BAUD_RATE);
     delay(100);
+    wdtPet();
 
     if (myGNSS.begin(gpsStream)) {
       debugln(F("GPS baud recovery: reconnected at 57600"));
@@ -562,6 +574,7 @@ bool GPS_BAUD_RECOVERY() {
   }
 
   // Restore 57600 even on failure so other code doesn't break
+  wdtPet();
   GPS_SERIAL.end();
   delay(50);
   GPS_SERIAL.begin(GPS_BAUD_RATE);

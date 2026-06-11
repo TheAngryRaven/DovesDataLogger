@@ -258,12 +258,17 @@ volatile uint32_t tachLastPulseUs = 0;
 volatile bool tachHavePeriod = false;
 
 // Ring buffer: ISR writes pulse timestamps, TACH_LOOP reads and computes periods.
-// Single-producer (ISR writes head), single-consumer (TACH_LOOP reads tail).
-// 16 entries handles up to 20k RPM with 48ms of main-loop stall margin.
+// Single-producer (ISR writes head), single-consumer (TACH_LOOP writes tail).
+// The ISR checks full before publishing (one slot sacrificed so head==tail
+// means empty) and drops + flags instead of lapping the consumer: SD GC
+// stalls can block the main loop for 100 ms–2 s, far past what any sane
+// ring size covers at racing RPM. tachRingTail is volatile because the ISR
+// reads it for the full check.
 static const uint8_t TACH_RING_SIZE = 16;
 volatile uint32_t tachRingBuf[TACH_RING_SIZE];
 volatile uint8_t  tachRingHead = 0;  // ISR write index (only ISR writes)
-static uint8_t    tachRingTail = 0;  // Main-loop read index (only TACH_LOOP writes)
+volatile uint8_t  tachRingTail = 0;  // Main-loop read index (only TACH_LOOP writes)
+volatile bool     tachRingOverflow = false;  // ISR sets on drop; TACH_LOOP clears
 
 // Tunable constants
 static const float tachRevsPerPulse = 1.0f;          // Wasted spark = 1 pulse/rev
@@ -769,6 +774,16 @@ bool activeTimerSectorsConfigured() {
  */
 void trackDetectionLoop() {
   if (trackDetected || !gpsData.fix || trackManifestCount == 0) return;
+
+  // Throttle the scan to 1 Hz. Each haversineDistanceMiles() is several
+  // software-emulated double libm calls (the M4F FPU is single-precision
+  // only); at the 200-entry manifest ceiling a full scan costs multiple
+  // milliseconds. gpsData.fix stays true BETWEEN PVT updates, so without
+  // this gate the scan ran every ~250 Hz loop iteration — collapsing the
+  // loop rate — for an answer that changes at driving pace.
+  static unsigned long lastManifestScan = 0;
+  if (millis() - lastManifestScan < 1000) return;
+  lastManifestScan = millis();
 
   double bestDist = 999999.0;
   int bestIndex = -1;
