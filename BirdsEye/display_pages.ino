@@ -4,6 +4,7 @@
 ///////////////////////////////////////////
 
 #include "display_pages.h"
+#include "lap_format.h"
 
 void displayPage_boot() {
   resetDisplay();
@@ -193,16 +194,9 @@ void displayPage_replay_results() {
     }
 
     display.print(F("Best: "));
-    unsigned long minutes = bestTime / 60000;
-    unsigned long seconds = (bestTime % 60000) / 1000;
-    unsigned long milliseconds = bestTime % 1000;
-    if (minutes > 0) { display.print(minutes); display.print(F(":")); }
-    if (seconds < 10 && minutes > 0) display.print(F("0"));
-    display.print(seconds);
-    display.print(F("."));
-    if (milliseconds < 100) display.print(F("0"));
-    if (milliseconds < 10) display.print(F("0"));
-    display.print(milliseconds);
+    char lapStr[lap_format::kLapTimeStrLen];
+    lap_format::formatLapTime(bestTime, lap_format::kOmit, lapStr, sizeof(lapStr));
+    display.print(lapStr);
     display.print(F(" (L"));
     display.print(bestNum);
     display.println(F(")"));
@@ -211,16 +205,8 @@ void displayPage_replay_results() {
     if (strcmp(dovexReplayOptimal, "N/A") != 0 && dovexReplayOptimal[0] != '\0') {
       display.print(F("Opt: "));
       unsigned long optMs = strtoul(dovexReplayOptimal, NULL, 10);
-      minutes = optMs / 60000;
-      seconds = (optMs % 60000) / 1000;
-      milliseconds = optMs % 1000;
-      if (minutes > 0) { display.print(minutes); display.print(F(":")); }
-      if (seconds < 10 && minutes > 0) display.print(F("0"));
-      display.print(seconds);
-      display.print(F("."));
-      if (milliseconds < 100) display.print(F("0"));
-      if (milliseconds < 10) display.print(F("0"));
-      display.println(milliseconds);
+      lap_format::formatLapTime(optMs, lap_format::kOmit, lapStr, sizeof(lapStr));
+      display.println(lapStr);
     }
   }
 
@@ -362,27 +348,9 @@ void displayPage_gps_lap_time() {
   unsigned long currentLapTimeMs = activeTimerCurrentLapTime();
 
   if (raceStarted) {
-    unsigned long minutes = currentLapTimeMs / 60000;
-    unsigned long seconds = (currentLapTimeMs % 60000) / 1000;
-    unsigned long milliseconds = currentLapTimeMs % 1000;
-    if (minutes > 0) {
-      display.print(minutes);
-      display.print(":");
-    } else {
-      display.print(" ");
-    }
-
-    if (seconds < 10) {
-      display.print(" ");
-    }
-    display.print(seconds);
-    display.print(".");
-    display.print(milliseconds);
-    if (milliseconds < 10) {
-      display.print("00");
-    } else if (milliseconds < 100) {
-      display.print("0");
-    }
+    char lapStr[lap_format::kLapTimeStrLen];
+    lap_format::formatLapTime(currentLapTimeMs, lap_format::kSpace, lapStr, sizeof(lapStr));
+    display.print(lapStr);
   } else {
     display.print("  N/A");
   }
@@ -467,28 +435,10 @@ void displayPage_gps_best_lap() {
   int bestLapNum = activeTimerBestLapNumber();
 
   if (bestRaceStarted && bestLaps > 0) {
-    unsigned long minutes = bestLapTimeMs / 60000;
-    unsigned long seconds = (bestLapTimeMs % 60000) / 1000;
-    unsigned long milliseconds = bestLapTimeMs % 1000;
     display.setTextSize(3);
-    if (minutes > 0) {
-      display.print(minutes);
-      display.print(":");
-    } else {
-      display.print(" ");
-    }
-
-    if (seconds < 10) {
-      display.print(" ");
-    }
-    display.print(seconds);
-    display.print(".");
-    display.print(milliseconds);
-    if (milliseconds < 10) {
-      display.print("00");
-    } else if (milliseconds < 100) {
-      display.print("0");
-    }
+    char lapStr[lap_format::kLapTimeStrLen];
+    lap_format::formatLapTime(bestLapTimeMs, lap_format::kSpace, lapStr, sizeof(lapStr));
+    display.print(lapStr);
 
     display.setTextSize(2);
     display.print(F("\n\n"));
@@ -561,28 +511,9 @@ void displayPage_optimal_lap() {
     display.setCursor(0, lineHeight);
     display.setTextSize(2);
 
-    unsigned long minutes = optLapTimeMs / 60000;
-    unsigned long seconds = (optLapTimeMs % 60000) / 1000;
-    unsigned long milliseconds = optLapTimeMs % 1000;
-
-    if (minutes > 0) {
-      display.print(minutes);
-      display.print(":");
-    } else {
-      display.print(" ");
-    }
-
-    if (seconds < 10) {
-      display.print(" ");
-    }
-    display.print(seconds);
-    display.print(".");
-    display.print(milliseconds);
-    if (milliseconds < 10) {
-      display.print("00");
-    } else if (milliseconds < 100) {
-      display.print("0");
-    }
+    char lapStr[lap_format::kLapTimeStrLen];
+    lap_format::formatLapTime(optLapTimeMs, lap_format::kSpace, lapStr, sizeof(lapStr));
+    display.print(lapStr);
 
     display.setCursor(0, lineHeight+20);
     display.setTextSize(1);
@@ -629,10 +560,6 @@ void displayPage_gps_lap_list() {
     int pageEnd = pageStart + lapsPerPage;
     for (int lap = pageStart; lap < pageEnd; ++lap) {
       if (lap < lapHistoryCount) {
-        unsigned long minutes = lapHistory[lap] / 60000;
-        unsigned long seconds = (lapHistory[lap] % 60000) / 1000;
-        unsigned long milliseconds = lapHistory[lap] % 1000;
-
         int actualLap = lap + 1;
         if (actualLap < 10) {
           display.print(F(" "));
@@ -641,12 +568,9 @@ void displayPage_gps_lap_list() {
         display.setTextSize(1);
         display.print(F(" "));
         display.setTextSize(2);
-        display.print(minutes);
-        display.print(F(":"));
-        display.print(seconds);
-        display.print(F("."));
-        display.print(milliseconds);
-        display.println();
+        char lapStr[lap_format::kLapTimeStrLen];
+        lap_format::formatLapTime(lapHistory[lap], lap_format::kShow, lapStr, sizeof(lapStr));
+        display.println(lapStr);
       }
     }
   } else {

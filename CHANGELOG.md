@@ -12,6 +12,71 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Changed
+- **CI now controls which DovesLapTimer the firmware is built against.**
+  Builds targeting (or running on) the `BETA` branch track the library's own
+  `BETA` branch, so the two beta channels move together; `master` CI and the
+  release/tag builds pin the known-good `v4.1.0` tag instead of floating on
+  the library's default-branch tip. Bump the pin deliberately when a new
+  library release is validated.
+
+### Fixed
+- **Track detection no longer throttles the whole main loop.** The manifest
+  scan (O(N) software-double haversine, several ms at the 200-entry ceiling)
+  was gated only on `gpsData.fix`, which stays true between PVT updates — so
+  it ran every ~250 Hz loop iteration instead of "every GPS fix" as
+  documented, dragging the loop rate down while hunting for a track. The
+  scan is now throttled to 1 Hz, which is still instant at driving pace.
+- **Tach ring buffer can no longer be lapped during SD stalls.** The pulse
+  ISR advanced the ring head unconditionally; an SD GC stall (the documented
+  100 ms–2 s, the same reason the GPS serial ring exists) at racing RPM
+  overruns the 16-entry buffer, breaking the ring invariant and producing a
+  confident-but-wrong RPM that was logged to CSV and fed the >500 RPM
+  auto-race trigger. The ISR now checks full and drops the pulse instead,
+  flagging the gap so `TACH_LOOP()` discards the one period spanning it —
+  the Kalman estimate coasts briefly rather than going silently wrong. The
+  filter math itself moved to the host-tested `tach_filter` pure unit.
+- **GPS baud recovery no longer risks tripping the 4 s hardware watchdog.**
+  `GPS_BAUD_RECOVERY()` can block for up to three ~1.1 s module probes plus
+  ~500 ms of delays — against a genuinely hung GPS that out-waited the WDT,
+  causing a reset → re-setup → recovery → reset boot loop. It now pets the
+  watchdog before each blocking probe (same treatment `fwStageToFlash()`
+  already had).
+- **Sleep mode actually sleeps now.** The tach ISR latched `tachHavePeriod`
+  on the first engine pulse since boot and nothing ever cleared it, so every
+  sleep entry (long-press, 5-min menu idle, USB) instantly bounced through
+  the RPM-wake path back into race mode **with logging enabled** — the
+  device would silently start a new session and drain the pack overnight.
+  `enterSleepMode()` now calls the new `TACH_SLEEP()`, which re-arms the
+  wake trigger and drops stale ring-buffer/Kalman state; the next *real*
+  pulse still RPM-wakes straight into race mode as designed.
+- **Lap times under 100 ms-fraction rendered wrong on the live pages.** The
+  current-lap, best-lap, and optimal-lap pages appended the millisecond
+  zero-padding *after* the value, so `1:23.007` displayed as `1:23.700` (a
+  693 ms error), and the lap-history list did no padding at all (`1:5.7`).
+  All six divergent inline copies of the ms → `M:SS.mmm` math are replaced
+  by one host-tested `lap_format` unit; the replay page's already-correct
+  rendering is unchanged, and the lap list now shows zero-padded
+  `M:SS.mmm`.
+
+### Security
+- **SD card arbitration race fixed — a BLE client in radio range could
+  corrupt the card.** `acquireSDAccess()` was a non-atomic check-then-set on
+  a shared flag, and several BLE commands (`LIST`, `GET:`, `DELETE:`,
+  `TLIST`, `TGET:`) ran SdFat directly in the Bluefruit callback task —
+  concurrently with the main loop's 25 Hz session logging. Overlapping
+  commands could close a file mid-read, delete the file being streamed
+  (`DELETE:` took no lock at all), or interleave two SdFat operations:
+  FAT corruption, lost session logs, or an SPI wedge. Now: lock
+  transitions are atomic (FreeRTOS critical section; the grant/deny table
+  is the new host-tested `sd_access_policy` unit), all five commands are
+  deferred to `BLUETOOTH_LOOP()` on the main loop like the
+  settings/track/OTA commands already were, directory listings hold the
+  lock for the whole walk, and `DELETE` takes the lock and refuses with
+  `BUSY` while a transfer is streaming. Protocol impact: commands that
+  arrive while another file command is still queued now get the existing
+  `BUSY` / `TERR:BUSY` replies instead of executing concurrently.
+
 ## [2.2.3] - 2026-06-10
 
 ### Added

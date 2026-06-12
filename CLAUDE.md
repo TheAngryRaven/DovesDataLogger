@@ -100,12 +100,15 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `dovex_header.{h,cpp}` | DOVEX 1 KB header `format()` / `parse()` |
 | `filename_validator.{h,cpp}` | FAT-safe / traversal-proof check for BLE filenames |
 | `crc32.{h,cpp}` | CRC-32/IEEE-802.3 (zlib) incremental + hex; pins firmware-OTA CRC to the web client |
+| `sd_access_policy.{h,cpp}` | SD access arbitration decision table (mode values + grant/deny rules) |
+| `lap_format.{h,cpp}` | ms → `M:SS.mmm` lap-time rendering (three zero-minutes styles), used by all display pages |
+| `tach_filter.{h,cpp}` | Tachometer 1-D Kalman filter (predict/update math + Q/R tuning constants) |
 
 ### Non-Source
 
 | Path | Contents |
 |---|---|
-| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release) |
+| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). DovesLapTimer ref per channel: `BETA` builds track the library's `BETA` branch, master/release pin `v4.1.0` |
 | `tests/` | Host doctest harness (CMake) for the pure-logic units |
 | `CHANGELOG.md` | Keep-a-Changelog history; release workflow ties to version tags |
 | `ARCHITECTURE.md` | Human-facing architecture narrative (subsystems, design decisions) |
@@ -199,11 +202,16 @@ loop()  ~250 Hz
 - ISR `TACH_COUNT_PULSE()` fires on falling edge of D0.
 - 3 ms minimum pulse gap (supports up to ~20 000 RPM).
 - **Ring buffer architecture**: ISR timestamps every valid pulse into a
-  16-entry ring buffer (`tachRingBuf`). `TACH_LOOP()` drains the buffer
+  16-entry ring buffer (`tachRingBuf`). The ISR checks full before
+  publishing (SPSC, one slot sacrificed) and drops + sets
+  `tachRingOverflow` instead of lapping the consumer during SD GC stalls;
+  `TACH_LOOP()` then discards the one period spanning the gap. `TACH_LOOP()` drains the buffer
   each main-loop iteration, computes mean inter-pulse period from ALL
   accumulated pulses, and feeds the result through a 1D Kalman filter.
 - **Kalman filter** replaces the old median-of-3 + EMA. Two floats of
-  state (RPM estimate `kalmanX` + uncertainty `kalmanP`). Process noise
+  state (estimate + uncertainty in `tach_filter::Kalman`); the
+  predict/update math and tuning constants live in the host-tested
+  `tach_filter` pure unit. Process noise
   Q = 800 (tuned for kart engine inertia). Measurement noise R scales
   inversely with pulse count (more pulses = more confident).
 - Time-based debounce only (3 ms). Old volatile flag gate removed — ISR
@@ -211,6 +219,9 @@ loop()  ~250 Hz
 - `tachLastReported` updates every main-loop call (~250 Hz). Consumers
   (display at 3 Hz, logging at 25 Hz) rate-limit themselves.
 - 500 ms timeout sets RPM to 0 (engine stopped), resets Kalman state.
+- `TACH_SLEEP()` (called from `enterSleepMode()`) clears the latched
+  `tachHavePeriod` wake flag and drops ring/Kalman state so the RPM wake
+  trigger is re-armed for the *next* pulse instead of firing instantly.
 
 ### 3. Accelerometer (`accelerometer.ino`)
 
@@ -239,13 +250,24 @@ loop()  ~250 Hz
 - **SD access arbitration** prevents concurrent access:
   - `acquireSDAccess(mode)` / `releaseSDAccess(mode)`
   - Modes: `SD_ACCESS_NONE` (0), `LOGGING` (1), `REPLAY` (2),
-    `BLE_TRANSFER` (3), `TRACK_PARSE` (4).
+    `BLE_TRANSFER` (3), `TRACK_PARSE` (4) — values and grant/deny rules
+    live in the host-tested `sd_access_policy` pure unit.
+  - Transitions are **atomic**: the check-then-set runs inside a FreeRTOS
+    critical section (`taskENTER_CRITICAL`, BASEPRI-masked so SoftDevice
+    radio interrupts are unaffected) because the Bluefruit callback task
+    and the main loop share the owner flag.
+  - Belt-and-suspenders only: all SD-touching BLE work is deferred to the
+    main loop (see subsystem 6), so SdFat itself is single-task.
 - Data flushes every 10 seconds during logging.
 
 ### 5. Display & UI (`display_ui.ino`, `display_pages.ino`, `display_config.h`)
 
 - Driver selected at compile time (`USE_1306_DISPLAY` define).
 - Button debounce: 3 samples at 500 us intervals, 200 ms refire lockout.
+- All lap times render via the host-tested `lap_format::formatLapTime()`
+  (ms → `M:SS.mmm`, always 3-digit ms; zero-minutes styles: `kOmit` for
+  replay results, `kShow` for the lap list, `kSpace` column-stable for the
+  big-font live pages). Never hand-roll the `60000`/`%1000` math inline.
 - Pages are integer constants; key pages:
   - Boot/menu: `PAGE_BOOT` (999), `PAGE_MAIN_MENU` (-1).
   - Racing: `GPS_STATS` (4) through `LOGGING_STOP` (12).
@@ -279,7 +301,15 @@ loop()  ~250 Hz
     `-DBIRDSEYE_BOARD_SENSE` / `-DBIRDSEYE_BOARD_NONSENSE` (defaults to
     `sense`).
 - MTU negotiation (requests 247, default 23).
-- File listing does not require exclusive SD access; transfer does.
+- **No SdFat in the callback task — ever.** Every SD-touching command
+  (`LIST`, `GET:`, `DELETE:`, `TLIST`, `TGET:` via the deferred
+  `fileCmdBuffer`; settings, `TPUT:`/`TDEL:`, and `FW*` via their own
+  deferred state) is only parsed/validated in the BLE callback and is
+  executed by `BLUETOOTH_LOOP()` on the main loop. Listings hold the SD
+  lock for the whole directory walk; `DELETE` takes the lock and refuses
+  (`BUSY`) while a transfer is streaming. One file command may be queued
+  at a time — a second gets the protocol's busy reply (`BUSY` /
+  `TERR:BUSY`).
 - **Filename validation**: every BLE command carrying a filename
   (`GET:`, `DELETE:`, `TGET:`, `TPUT:`, `TDEL:`) runs the name through
   `filename_validator::isValidFilename()` BEFORE any `SD.open()` /
@@ -354,7 +384,9 @@ loop()  ~250 Hz
   immediate Lap Anything activation.
 - **Track detection flow** (`trackDetectionLoop()`):
   1. Valid GPS time lock acquired → DOVEX log file created (see GPS section).
-  2. Every GPS fix, scans `trackManifest[]` via haversine.
+  2. Scans `trackManifest[]` via haversine, throttled to 1 Hz (the scan
+     is O(N) software-double math; `gpsData.fix` stays true between PVT
+     updates, so an unthrottled scan ran every ~250 Hz loop iteration).
   3. Closest match within 5 miles → parse full JSON, build `TrackConfig`.
   4. Create `CourseManager` with settings-configurable thresholds.
   5. CourseManager handles course detection + Lap Anything fallback.
@@ -375,10 +407,14 @@ loop()  ~250 Hz
   or USB connected on main menu.
 - **`enterSleepMode()`**: ends active race session, stops BLE, display off
   (I2C `DISPLAYOFF`), GPS backup mode (`powerOff(0)`), IMU power off,
-  GPS serial timer stopped.
+  GPS serial timer stopped, and `TACH_SLEEP()` re-arms the RPM wake
+  trigger (clears the latched `tachHavePeriod` + stale ring/Kalman state
+  — without this, one engine pulse since boot made every sleep entry
+  bounce straight back into race mode with logging on).
 - **Wake triggers** (checked every loop in sleep):
-  - **RPM wake**: tach ISR fires → `exitSleepMode(true)` → straight into
-    race mode with logging enabled, Lap Anything CourseManager created.
+  - **RPM wake**: tach ISR sets `tachHavePeriod` on the next valid pulse →
+    `exitSleepMode(true)` → straight into race mode with logging enabled,
+    Lap Anything CourseManager created.
   - **Button wake**: any button → `exitSleepMode(false)` → main menu.
 - **`exitSleepMode()`**: re-enables IMU, GPS wake, display on, GPS serial
   timer restarted. RPM wake skips menu and goes directly to race mode.
@@ -555,8 +591,9 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | Track detect radius | 5 miles | `BirdsEye.ino` |
 | Tach min pulse gap | 3 ms | `BirdsEye.ino` |
 | Tach ring buffer | 16 entries | `BirdsEye.ino` |
-| Tach Kalman Q | 800 RPM² | `tachometer.ino` |
-| Tach Kalman R_BASE | 2500 RPM² | `tachometer.ino` |
+| Tach Kalman Q | 800 RPM² | `tach_filter.h` |
+| Tach Kalman R_BASE | 2500 RPM² | `tach_filter.h` |
+| Track manifest scan throttle | 1 Hz | `BirdsEye.ino` |
 | Tach stop timeout | 500 ms | `BirdsEye.ino` |
 | Display refresh | 3 Hz | `display_ui.ino` |
 | Button debounce | 200 ms | `display_ui.ino` |
@@ -588,7 +625,7 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | SparkFun u-blox GNSS v3 | UBX binary PVT GPS interface |
 | ArduinoJson 6.x | Track file JSON parsing |
 | SdFat | SD card (FAT16/32) |
-| DovesLapTimer | Lap/sector timing (external: TheAngryRaven/DovesLapTimer) |
+| DovesLapTimer | Lap/sector timing (external: TheAngryRaven/DovesLapTimer). CI refs: `BETA`-targeted builds track the library's `BETA` branch; master/release builds pin `v4.1.0` (bump deliberately) |
 | Seeed Arduino LSM6DS3 | Onboard IMU accelerometer/gyro (Sense variant, ±16g) |
 | Bluefruit nRF52 | BLE (built into board package) |
 

@@ -258,12 +258,17 @@ volatile uint32_t tachLastPulseUs = 0;
 volatile bool tachHavePeriod = false;
 
 // Ring buffer: ISR writes pulse timestamps, TACH_LOOP reads and computes periods.
-// Single-producer (ISR writes head), single-consumer (TACH_LOOP reads tail).
-// 16 entries handles up to 20k RPM with 48ms of main-loop stall margin.
+// Single-producer (ISR writes head), single-consumer (TACH_LOOP writes tail).
+// The ISR checks full before publishing (one slot sacrificed so head==tail
+// means empty) and drops + flags instead of lapping the consumer: SD GC
+// stalls can block the main loop for 100 ms–2 s, far past what any sane
+// ring size covers at racing RPM. tachRingTail is volatile because the ISR
+// reads it for the full check.
 static const uint8_t TACH_RING_SIZE = 16;
 volatile uint32_t tachRingBuf[TACH_RING_SIZE];
 volatile uint8_t  tachRingHead = 0;  // ISR write index (only ISR writes)
-static uint8_t    tachRingTail = 0;  // Main-loop read index (only TACH_LOOP writes)
+volatile uint8_t  tachRingTail = 0;  // Main-loop read index (only TACH_LOOP writes)
+volatile bool     tachRingOverflow = false;  // ISR sets on drop; TACH_LOOP clears
 
 // Tunable constants
 static const float tachRevsPerPulse = 1.0f;          // Wasted spark = 1 pulse/rev
@@ -380,16 +385,11 @@ File replayFile;
 
 ///////////////////////////////////////////
 // SD CARD ACCESS STATE MANAGEMENT
-// Prevents race conditions between logging, replay, and BLE file transfers
+// Prevents race conditions between logging, replay, and BLE file transfers.
+// The SD_ACCESS_* modes come from sd_functions.h (aliases of the host-tested
+// sd_access_policy constants); transitions are made atomically by
+// acquireSDAccess() / releaseSDAccess() in sd_functions.ino.
 ///////////////////////////////////////////
-// Note: Using #define instead of enum to avoid Arduino preprocessor issues
-// (Arduino generates function prototypes before seeing enum definitions)
-#define SD_ACCESS_NONE         0   // SD card not in use by any subsystem
-#define SD_ACCESS_LOGGING      1   // Data logging active (dataFile in use)
-#define SD_ACCESS_REPLAY       2   // Replay mode active (replayFile in use)
-#define SD_ACCESS_BLE_TRANSFER 3   // BLE file transfer active (bleCurrentFile in use)
-#define SD_ACCESS_TRACK_PARSE  4   // Track file parsing (temporary, should release quickly)
-
 volatile int currentSDAccess = SD_ACCESS_NONE;
 
 // Replay function prototypes (must be after SdFat include for File type)
@@ -775,6 +775,16 @@ bool activeTimerSectorsConfigured() {
 void trackDetectionLoop() {
   if (trackDetected || !gpsData.fix || trackManifestCount == 0) return;
 
+  // Throttle the scan to 1 Hz. Each haversineDistanceMiles() is several
+  // software-emulated double libm calls (the M4F FPU is single-precision
+  // only); at the 200-entry manifest ceiling a full scan costs multiple
+  // milliseconds. gpsData.fix stays true BETWEEN PVT updates, so without
+  // this gate the scan ran every ~250 Hz loop iteration — collapsing the
+  // loop rate — for an answer that changes at driving pace.
+  static unsigned long lastManifestScan = 0;
+  if (millis() - lastManifestScan < 1000) return;
+  lastManifestScan = millis();
+
   double bestDist = 999999.0;
   int bestIndex = -1;
 
@@ -1066,11 +1076,16 @@ void enterSleepMode() {
     digitalWrite(PIN_LSM6DS3TR_C_POWER, HIGH);  // HIGH = disable power
   }
 
-  // 5. Set state
+  // 5. Re-arm the tach RPM wake trigger and drop pre-sleep pulse state.
+  // The ISR stays attached — the NEXT valid pulse sets tachHavePeriod and
+  // wakes straight into race mode. Without this clear, the flag stays
+  // latched from the first pulse since boot and sleep instantly bounces.
+  TACH_SLEEP();
+
+  // 6. Set state
   sleepModeActive = true;
   sleepEnteredAt = millis();
   sleepLastGpsWake = millis();
-  // Tach ISR stays attached -- RPM pulses will wake via tachHavePeriod
 }
 
 void exitSleepMode(bool rpmWake = false) {

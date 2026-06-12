@@ -15,20 +15,12 @@
 ///////////////////////////////////////////
 
 #include "tachometer.h"
+#include "tach_filter.h"
 
 // ---- Kalman filter state ----
-static float kalmanX = 0.0f;       // RPM estimate
-static float kalmanP = 10000.0f;   // Estimate uncertainty (RPM^2)
-
-// Process noise Q: how much RPM^2 can change between Kalman updates.
-// A kart engine with light flywheel can shift ~200 RPM per pulse at 5k RPM.
-// Q=800 is conservative-smooth. Increase to 1500-2000 if tracking feels sluggish.
-static const float KALMAN_Q = 800.0f;
-
-// Measurement noise R_BASE: uncertainty of a single-period RPM measurement.
-// ~50 RPM std dev from combustion variation + ISR latency jitter = variance 2500.
-// Scales inversely with number of periods: more pulses → lower noise.
-static const float KALMAN_R_BASE = 2500.0f;
+// The predict/update math and the tuning constants (Q, R_BASE, the
+// uncertainty floor) live in the host-tested tach_filter pure unit.
+static tach_filter::Kalman tachKalman;
 
 // After engine-stopped timeout, the first period is garbage (it spans the
 // entire stopped duration). This flag discards it.
@@ -55,15 +47,29 @@ void TACH_COUNT_PULSE() {
   // Time-based debounce: reject ignition ringing within 3ms of last valid pulse
   if (dt < tachMinPulseGapUs) return;
 
-  // Record timestamp
   tachLastPulseUs = now;
-  tachRingBuf[tachRingHead] = now;
-  // ARM Cortex-M4: single-byte write is atomic. Data is visible before head
-  // advances because stores are observed in program order on same processor.
-  tachRingHead = (tachRingHead + 1) % TACH_RING_SIZE;
 
-  // Wake trigger for sleep mode (BirdsEye.ino reads this)
+  // Wake trigger for sleep mode (BirdsEye.ino reads this). Set even when
+  // the ring is full below — a dropped timestamp is still a real pulse.
   tachHavePeriod = true;
+
+  // SPSC full check (one slot is sacrificed so head==tail is unambiguously
+  // "empty"). TACH_LOOP can be blocked for 100 ms–2 s by the same SD GC
+  // stalls the GPS serial ring exists for; at 6000 RPM a 200 ms stall
+  // overruns 16 entries, and advancing head unconditionally would lap the
+  // consumer and corrupt every period it computes. Dropping the pulse and
+  // flagging the gap is safe — the consumer discards the one period that
+  // spans the gap and the Kalman estimate coasts until fresh data arrives.
+  uint8_t nextHead = (tachRingHead + 1) % TACH_RING_SIZE;
+  if (nextHead == tachRingTail) {
+    tachRingOverflow = true;
+    return;
+  }
+
+  // Data is visible before head advances because stores are observed in
+  // program order on the same processor (single-byte head write is atomic).
+  tachRingBuf[tachRingHead] = now;
+  tachRingHead = nextHead;
 }
 
 /**
@@ -132,35 +138,59 @@ void TACH_LOOP() {
         periodSum += periods[i];
       }
       float meanPeriodUs = (float)periodSum / (float)periodCount;
-      float rpmMeasured = (60.0e6f * tachRevsPerPulse) / meanPeriodUs;
-
-      // Predict step: constant-RPM model, uncertainty grows
-      kalmanP += KALMAN_Q;
-
-      // Measurement noise scales inversely with number of periods
-      float R = KALMAN_R_BASE / (float)periodCount;
-
-      // Update step
-      float K = kalmanP / (kalmanP + R);
-      kalmanX += K * (rpmMeasured - kalmanX);
-      kalmanP *= (1.0f - K);
-
-      // Uncertainty floor to prevent numerical collapse
-      if (kalmanP < 1.0f) kalmanP = 1.0f;
+      float rpmMeasured =
+          tach_filter::rpmFromMeanPeriodUs(meanPeriodUs, tachRevsPerPulse);
+      tach_filter::update(tachKalman, rpmMeasured, periodCount);
     }
+  }
+
+  // ---- Step 3.5: Ring overflow recovery ----
+  // The ISR dropped pulses while the ring was full (main loop stalled).
+  // The period between the last retained timestamp and the next retained
+  // pulse spans the whole gap and is NOT a real measurement — drop the
+  // carried prev-timestamp so that period is never computed. The estimate
+  // simply coasts until consecutive post-gap pulses arrive.
+  if (tachRingOverflow) {
+    tachRingOverflow = false;
+    tachHavePrevTimestamp = false;
   }
 
   // ---- Step 4: Engine-stopped timeout ----
   // 32-bit reads are atomic on ARM Cortex-M4, no noInterrupts() needed
   uint32_t lastPulseUs = tachLastPulseUs;
   if ((uint32_t)(micros() - lastPulseUs) > tachStopTimeoutUs) {
-    kalmanX = 0.0f;
-    kalmanP = 10000.0f;           // High uncertainty for next startup
+    tach_filter::reset(tachKalman);  // High uncertainty for next startup
     tachNeedFirstPulseDiscard = true;
     tachHavePrevTimestamp = false;
     tachRingTail = tachRingHead;  // Flush ring buffer
   }
 
   // ---- Step 5: Update reported value ----
-  tachLastReported = (int)(kalmanX + 0.5f);
+  tachLastReported = (int)(tachKalman.x + 0.5f);
+}
+
+/**
+ * Prepare the tachometer for sleep mode — call from enterSleepMode().
+ *
+ * Re-arms the RPM wake trigger and discards pre-sleep pulse state. Without
+ * this, tachHavePeriod stays true forever after the first engine pulse
+ * since boot, and every sleep entry (long-press, menu idle, USB) instantly
+ * bounces through the RPM-wake path back into race mode with logging
+ * enabled — silently starting a session and draining the pack overnight.
+ *
+ * The ISR stays attached during sleep: the next valid pulse sets
+ * tachHavePeriod again, and THAT is the legitimate RPM wake.
+ */
+void TACH_SLEEP() {
+  tachHavePeriod = false;
+
+  // Drop any buffered pre-sleep pulses and filter state so the wake's RPM
+  // computation starts clean instead of chewing on stale timestamps (the
+  // first post-wake period would otherwise span the whole sleep).
+  tachRingTail = tachRingHead;
+  tachRingOverflow = false;
+  tachHavePrevTimestamp = false;
+  tachNeedFirstPulseDiscard = true;
+  tach_filter::reset(tachKalman);
+  tachLastReported = 0;
 }
