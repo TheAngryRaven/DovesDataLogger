@@ -102,6 +102,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `crc32.{h,cpp}` | CRC-32/IEEE-802.3 (zlib) incremental + hex; pins firmware-OTA CRC to the web client |
 | `sd_access_policy.{h,cpp}` | SD access arbitration decision table (mode values + grant/deny rules) |
 | `lap_format.{h,cpp}` | ms → `M:SS.mmm` lap-time rendering (three zero-minutes styles), used by all display pages |
+| `tach_filter.{h,cpp}` | Tachometer 1-D Kalman filter (predict/update math + Q/R tuning constants) |
 
 ### Non-Source
 
@@ -201,11 +202,16 @@ loop()  ~250 Hz
 - ISR `TACH_COUNT_PULSE()` fires on falling edge of D0.
 - 3 ms minimum pulse gap (supports up to ~20 000 RPM).
 - **Ring buffer architecture**: ISR timestamps every valid pulse into a
-  16-entry ring buffer (`tachRingBuf`). `TACH_LOOP()` drains the buffer
+  16-entry ring buffer (`tachRingBuf`). The ISR checks full before
+  publishing (SPSC, one slot sacrificed) and drops + sets
+  `tachRingOverflow` instead of lapping the consumer during SD GC stalls;
+  `TACH_LOOP()` then discards the one period spanning the gap. `TACH_LOOP()` drains the buffer
   each main-loop iteration, computes mean inter-pulse period from ALL
   accumulated pulses, and feeds the result through a 1D Kalman filter.
 - **Kalman filter** replaces the old median-of-3 + EMA. Two floats of
-  state (RPM estimate `kalmanX` + uncertainty `kalmanP`). Process noise
+  state (estimate + uncertainty in `tach_filter::Kalman`); the
+  predict/update math and tuning constants live in the host-tested
+  `tach_filter` pure unit. Process noise
   Q = 800 (tuned for kart engine inertia). Measurement noise R scales
   inversely with pulse count (more pulses = more confident).
 - Time-based debounce only (3 ms). Old volatile flag gate removed — ISR
@@ -378,7 +384,9 @@ loop()  ~250 Hz
   immediate Lap Anything activation.
 - **Track detection flow** (`trackDetectionLoop()`):
   1. Valid GPS time lock acquired → DOVEX log file created (see GPS section).
-  2. Every GPS fix, scans `trackManifest[]` via haversine.
+  2. Scans `trackManifest[]` via haversine, throttled to 1 Hz (the scan
+     is O(N) software-double math; `gpsData.fix` stays true between PVT
+     updates, so an unthrottled scan ran every ~250 Hz loop iteration).
   3. Closest match within 5 miles → parse full JSON, build `TrackConfig`.
   4. Create `CourseManager` with settings-configurable thresholds.
   5. CourseManager handles course detection + Lap Anything fallback.
@@ -583,8 +591,9 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | Track detect radius | 5 miles | `BirdsEye.ino` |
 | Tach min pulse gap | 3 ms | `BirdsEye.ino` |
 | Tach ring buffer | 16 entries | `BirdsEye.ino` |
-| Tach Kalman Q | 800 RPM² | `tachometer.ino` |
-| Tach Kalman R_BASE | 2500 RPM² | `tachometer.ino` |
+| Tach Kalman Q | 800 RPM² | `tach_filter.h` |
+| Tach Kalman R_BASE | 2500 RPM² | `tach_filter.h` |
+| Track manifest scan throttle | 1 Hz | `BirdsEye.ino` |
 | Tach stop timeout | 500 ms | `BirdsEye.ino` |
 | Display refresh | 3 Hz | `display_ui.ino` |
 | Button debounce | 200 ms | `display_ui.ino` |

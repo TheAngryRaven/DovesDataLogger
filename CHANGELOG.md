@@ -21,6 +21,27 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   library release is validated.
 
 ### Fixed
+- **Track detection no longer throttles the whole main loop.** The manifest
+  scan (O(N) software-double haversine, several ms at the 200-entry ceiling)
+  was gated only on `gpsData.fix`, which stays true between PVT updates — so
+  it ran every ~250 Hz loop iteration instead of "every GPS fix" as
+  documented, dragging the loop rate down while hunting for a track. The
+  scan is now throttled to 1 Hz, which is still instant at driving pace.
+- **Tach ring buffer can no longer be lapped during SD stalls.** The pulse
+  ISR advanced the ring head unconditionally; an SD GC stall (the documented
+  100 ms–2 s, the same reason the GPS serial ring exists) at racing RPM
+  overruns the 16-entry buffer, breaking the ring invariant and producing a
+  confident-but-wrong RPM that was logged to CSV and fed the >500 RPM
+  auto-race trigger. The ISR now checks full and drops the pulse instead,
+  flagging the gap so `TACH_LOOP()` discards the one period spanning it —
+  the Kalman estimate coasts briefly rather than going silently wrong. The
+  filter math itself moved to the host-tested `tach_filter` pure unit.
+- **GPS baud recovery no longer risks tripping the 4 s hardware watchdog.**
+  `GPS_BAUD_RECOVERY()` can block for up to three ~1.1 s module probes plus
+  ~500 ms of delays — against a genuinely hung GPS that out-waited the WDT,
+  causing a reset → re-setup → recovery → reset boot loop. It now pets the
+  watchdog before each blocking probe (same treatment `fwStageToFlash()`
+  already had).
 - **Sleep mode actually sleeps now.** The tach ISR latched `tachHavePeriod`
   on the first engine pulse since boot and nothing ever cleared it, so every
   sleep entry (long-press, 5-min menu idle, USB) instantly bounced through
