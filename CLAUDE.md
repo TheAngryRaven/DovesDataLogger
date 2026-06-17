@@ -492,7 +492,7 @@ loop()  ~250 Hz
 ### DOVEX Log (`.dovex` files) — New UI default
 
 ```
-datetime,driver_name,course_name,short_name,best_lap_ms,optimal_lap_ms
+datetime,driver_name,course_name,short_name,best_lap_ms,optimal_lap_ms,device_name
 lap1_ms,lap2_ms,lap3_ms,...
 \n padding to byte 1024
 timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z
@@ -501,6 +501,9 @@ timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x
 
 - **Reserved header** (bytes 0–1023): Line 1 = session metadata, Line 2 =
   all lap times (comma-separated ms values), padded with `\n` to 1024 bytes.
+- **`device_name`** is the trailing metadata column (after `optimal_lap_ms`).
+  Appending it keeps old logs readable (parsed as empty) and lets older
+  readers ignore the extra column — backwards compatible by design.
 - **GPS data** (byte 1024+): CSV column header then streaming GPS rows.
 - **Crash safety**: file created with pre-filled newlines to 1024 bytes
   before any data. Header written on session end. If header is empty

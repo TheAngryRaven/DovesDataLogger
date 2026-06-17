@@ -218,8 +218,8 @@ DOVEX files (`.dovex`) use a reserved **1 KB** header for session metadata, with
 **Structure:**
 ```
 Bytes 0-1023:    Session header (written when session ends)
-  Line 1:        datetime,driver,course,short_name,best_lap_ms,optimal_ms   (column labels)
-  Line 2:        2025-03-11 14:30:00,Driver,Normal,OKC,62345,61890          (session metadata)
+  Line 1:        datetime,driver,course,short_name,best_lap_ms,optimal_ms,device_name (column labels)
+  Line 2:        2025-03-11 14:30:00,Driver,Normal,OKC,62345,61890,ApexTurbo (session metadata)
   Line 3:        laps_ms                                                     (column label)
   Line 4:        65432,63210,62345,64567,...                                 (all lap times in ms)
   Remaining:     \n padding to byte 1024
