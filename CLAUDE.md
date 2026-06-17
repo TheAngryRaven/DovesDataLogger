@@ -365,7 +365,7 @@ loop()  ~250 Hz
 
 - Persistent JSON key-value store at `/SETTINGS.json` on SD card.
 - `SETTINGS_SETUP()` called once from `setup()` after SD init; creates
-  default file on first boot (random BLE name + PIN).
+  default file on first boot (random BLE name + PIN + racing-word device name).
 - **Auto-populate**: `ensureDefaultSettings()` checks for missing keys on
   boot and adds them with defaults. Existing values are never overwritten.
 - `getSetting(key, buf, bufSize)` reads a value into a caller-provided
@@ -492,7 +492,7 @@ loop()  ~250 Hz
 ### DOVEX Log (`.dovex` files) — New UI default
 
 ```
-datetime,driver_name,course_name,short_name,best_lap_ms,optimal_lap_ms
+datetime,driver_name,course_name,short_name,best_lap_ms,optimal_lap_ms,device_name
 lap1_ms,lap2_ms,lap3_ms,...
 \n padding to byte 1024
 timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z
@@ -501,6 +501,9 @@ timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x
 
 - **Reserved header** (bytes 0–1023): Line 1 = session metadata, Line 2 =
   all lap times (comma-separated ms values), padded with `\n` to 1024 bytes.
+- **`device_name`** is the trailing metadata column (after `optimal_lap_ms`).
+  Appending it keeps old logs readable (parsed as empty) and lets older
+  readers ignore the extra column — backwards compatible by design.
 - **GPS data** (byte 1024+): CSV column header then streaming GPS rows.
 - **Crash safety**: file created with pre-filled newlines to 1024 bytes
   before any data. Header written on session end. If header is empty
@@ -551,6 +554,7 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 {
   "bluetooth_name": "DovesDataLogger-042",
   "bluetooth_pin": "7391",
+  "device_name": "ApexTurbo",
   "driver_name": "Driver",
   "lap_detection_distance": "7",
   "waypoint_detection_distance": "30",
@@ -562,6 +566,7 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 |-----|------|---------|---------|
 | `bluetooth_name` | string | Random | BLE device name |
 | `bluetooth_pin` | string | Random 4-digit | BLE pairing PIN |
+| `device_name` | string | Random racing words | Identifies the logging device (DOVEX header) |
 | `driver_name` | string | `"Driver"` | Logged in DOVEX header |
 | `lap_detection_distance` | int | `7` | DovesLapTimer crossing threshold (meters) |
 | `waypoint_detection_distance` | int | `30` | WaypointLapTimer proximity zone (meters) |

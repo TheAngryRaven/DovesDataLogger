@@ -12,6 +12,18 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+- **`device_name` setting to label logs per device.** A new persistent
+  setting identifies which unit produced a log — handy when dumping logs
+  from a fleet. On first boot (or upgrade) a friendly default is generated
+  by picking two of twelve racing-adjacent words at random (e.g.
+  `ApexTurbo`); editable on a computer or over BLE like any other setting.
+- **`device_name` recorded in the DOVEX header.** The session metadata line
+  now carries the logging device's name as a new trailing column. The column
+  is appended after `optimal_ms`, so older readers ignore it and the firmware
+  reads pre-existing logs (no column) as an empty device name — fully
+  backwards compatible with the reserved 1 KB header.
+
 ### Changed
 - **CI now controls which DovesLapTimer the firmware is built against.**
   Builds targeting (or running on) the `BETA` branch track the library's own

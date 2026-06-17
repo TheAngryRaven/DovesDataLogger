@@ -8,7 +8,7 @@
 // operate through this interface — the file I/O stays out of here.
 //
 // On-disk layout (DOVEX_HEADER_SIZE = 1024 bytes total):
-//   Line 1 (\r\n):  datetime,driver,course,short_name,best_lap_ms,optimal_ms
+//   Line 1 (\r\n):  datetime,driver,course,short_name,best_lap_ms,optimal_ms,device_name
 //   Line 2 (\r\n):  <metadata values>
 //   Line 3 (\r\n):  laps_ms
 //   Line 4 (\r\n):  <lap1_ms,lap2_ms,...,lapN_ms>
@@ -17,6 +17,10 @@
 // The header is written when a session ends. If the device crashes
 // mid-session the bytes 0..1023 are left blank but everything after
 // (the streaming GPS rows) is still valid.
+//
+// device_name is the trailing column so it stays backwards compatible:
+// older readers stop at optimal_ms and ignore it, and logs written before
+// this column existed parse back with an empty device_name.
 ///////////////////////////////////////////
 
 #include <stddef.h>
@@ -33,6 +37,7 @@ constexpr size_t kDriverLen    = 32;
 constexpr size_t kCourseLen    = 32;
 constexpr size_t kShortNameLen = 16;
 constexpr size_t kLapStrLen    = 16;  // "N/A" or numeric lap time as text
+constexpr size_t kDeviceLen    = 32;
 
 // Input to format(). All const char* fields must be non-null and
 // well-formed; format() does NOT escape commas inside them.
@@ -43,6 +48,7 @@ struct Metadata {
   const char*   shortName;    // "OKC"
   unsigned long bestLapMs;    // 0 -> printed as "N/A"
   unsigned long optimalMs;    // 0 -> printed as "N/A"
+  const char*   device;       // logging device name; null/"" -> empty column
 };
 
 // Output of parse(). Strings are always null-terminated.
@@ -53,6 +59,7 @@ struct ParsedHeader {
   char shortName[kShortNameLen];
   char bestLap[kLapStrLen];   // text — may be "N/A"
   char optimal[kLapStrLen];   // text — may be "N/A"
+  char device[kDeviceLen];    // logging device name — "" for legacy logs
 };
 
 // Render metadata + lap times into the first kHeaderSize bytes of

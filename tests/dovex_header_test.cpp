@@ -25,7 +25,8 @@ Metadata fixtureMeta() {
         "Normal",               // course
         "OKC",                  // shortName
         62345UL,                // bestLapMs
-        61890UL                 // optimalMs
+        61890UL,                // optimalMs
+        "ApexTurbo"             // device
     };
 }
 
@@ -58,7 +59,7 @@ TEST_CASE("format - line 1 is the column label with CRLF") {
     REQUIRE(dovex_header::format(buf, sizeof(buf), fixtureMeta(), laps, 1));
 
     const std::string expected =
-        "datetime,driver,course,short_name,best_lap_ms,optimal_ms\r\n";
+        "datetime,driver,course,short_name,best_lap_ms,optimal_ms,device_name\r\n";
     CHECK(asString(buf, expected.size()) == expected);
 }
 
@@ -69,7 +70,7 @@ TEST_CASE("format - line 2 fields appear in order") {
 
     // The metadata line follows line 1's CRLF and ends with its own CRLF.
     const std::string head = asString(buf, kHeaderSize);
-    CHECK(head.find("2025-03-11 14:30:00,Driver,Normal,OKC,62345,61890\r\n")
+    CHECK(head.find("2025-03-11 14:30:00,Driver,Normal,OKC,62345,61890,ApexTurbo\r\n")
           != std::string::npos);
 }
 
@@ -83,7 +84,7 @@ TEST_CASE("format - bestLap / optimal of 0 become 'N/A'") {
     REQUIRE(dovex_header::format(buf, sizeof(buf), m, laps, 1));
 
     const std::string head = asString(buf, kHeaderSize);
-    CHECK(head.find(",N/A,N/A\r\n") != std::string::npos);
+    CHECK(head.find(",N/A,N/A,ApexTurbo\r\n") != std::string::npos);
 }
 
 TEST_CASE("format - empty lap list still produces valid 1024-byte buffer") {
@@ -156,12 +157,60 @@ TEST_CASE("parse - round-trips format() output") {
     CHECK(std::string(meta.shortName) == "OKC");
     CHECK(std::string(meta.bestLap)   == "62345");
     CHECK(std::string(meta.optimal)   == "61890");
+    CHECK(std::string(meta.device)    == "ApexTurbo");
 
     CHECK(readCount == 4u);
     CHECK(readLaps[0] == 65432UL);
     CHECK(readLaps[1] == 63210UL);
     CHECK(readLaps[2] == 62345UL);
     CHECK(readLaps[3] == 64567UL);
+}
+
+TEST_CASE("parse - legacy header without device_name yields empty device") {
+    // A header written before the device_name column existed: line 2 has
+    // only six fields. The parser must read it cleanly with device == "".
+    char buf[kHeaderSize];
+    std::memset(buf, '\n', sizeof(buf));
+    const char* hdr =
+        "datetime,driver,course,short_name,best_lap_ms,optimal_ms\r\n"
+        "2025-03-11 14:30:00,Driver,Normal,OKC,62345,61890\r\n"
+        "laps_ms\r\n"
+        "65432,63210\r\n";
+    std::memcpy(buf, hdr, std::strlen(hdr));
+
+    ParsedHeader meta;
+    unsigned long readLaps[10] = {0};
+    size_t readCount = 0;
+    REQUIRE(dovex_header::parse(buf, sizeof(buf),
+                                meta, readLaps, 10, readCount));
+    CHECK(std::string(meta.driver)  == "Driver");
+    CHECK(std::string(meta.optimal) == "61890");
+    CHECK(std::string(meta.device)  == "");  // absent column → empty
+    CHECK(readCount == 2u);
+    CHECK(readLaps[0] == 65432UL);
+    CHECK(readLaps[1] == 63210UL);
+}
+
+TEST_CASE("format - null device renders an empty trailing column") {
+    Metadata m = fixtureMeta();
+    m.device = nullptr;
+
+    char buf[kHeaderSize];
+    const unsigned long laps[] = {1000};
+    REQUIRE(dovex_header::format(buf, sizeof(buf), m, laps, 1));
+
+    const std::string head = asString(buf, kHeaderSize);
+    // Trailing comma then CRLF — the column exists but is empty.
+    CHECK(head.find("2025-03-11 14:30:00,Driver,Normal,OKC,62345,61890,\r\n")
+          != std::string::npos);
+
+    // And it round-trips back to an empty device.
+    ParsedHeader meta;
+    unsigned long readLaps[10];
+    size_t readCount = 0;
+    REQUIRE(dovex_header::parse(buf, sizeof(buf),
+                                meta, readLaps, 10, readCount));
+    CHECK(std::string(meta.device) == "");
 }
 
 TEST_CASE("parse - round-trips zero-lap session") {

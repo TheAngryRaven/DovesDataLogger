@@ -132,6 +132,7 @@ float settingLapDetectionDistance = 7.0;
 float settingWaypointDetectionDistance = 30.0;
 float settingWaypointSpeed = 30.0;
 char settingDriverName[32] = "Driver";
+char settingDeviceName[32] = "BirdsEye";
 
 // Track manifest for proximity detection
 TrackManifestEntry trackManifest[MAX_LOCATIONS];
@@ -627,6 +628,10 @@ void setup() {
       strncpy(settingDriverName, buf, sizeof(settingDriverName) - 1);
       settingDriverName[sizeof(settingDriverName) - 1] = '\0';
     }
+    if (getSetting("device_name", buf, sizeof(buf))) {
+      strncpy(settingDeviceName, buf, sizeof(settingDeviceName) - 1);
+      settingDeviceName[sizeof(settingDeviceName) - 1] = '\0';
+    }
     crossingThresholdMeters = settingLapDetectionDistance;
     debug(F("Settings loaded: lap_dist="));
     debug(settingLapDetectionDistance);
@@ -635,7 +640,9 @@ void setup() {
     debug(F(" wp_speed="));
     debug(settingWaypointSpeed);
     debug(F(" driver="));
-    debugln(settingDriverName);
+    debug(settingDriverName);
+    debug(F(" device="));
+    debugln(settingDeviceName);
   }
 
   if (!sdSetupSuccess) {
@@ -1037,6 +1044,7 @@ void writeDovexHeader() {
       shortName,
       activeTimerBestLapTime(),
       activeTimerOptimalLapTime(),
+      settingDeviceName,
   };
 
   static char headerBuf[dovex_header::kHeaderSize];

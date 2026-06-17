@@ -50,7 +50,8 @@ bool format(char* buf, size_t bufSize,
   };
 
   // Line 1: column labels (CRLF — matches Arduino Print::println).
-  if (!append("datetime,driver,course,short_name,best_lap_ms,optimal_ms\r\n")) {
+  // device_name is the trailing column for backwards compatibility.
+  if (!append("datetime,driver,course,short_name,best_lap_ms,optimal_ms,device_name\r\n")) {
     return false;
   }
 
@@ -61,12 +62,13 @@ bool format(char* buf, size_t bufSize,
   formatLapField(optStr,  sizeof(optStr),  meta.optimalMs);
 
   const int n = snprintf(p, static_cast<size_t>(end - p),
-                          "%s,%s,%s,%s,%s,%s\r\n",
+                          "%s,%s,%s,%s,%s,%s,%s\r\n",
                           meta.datetime ? meta.datetime : "",
                           meta.driver   ? meta.driver   : "",
                           meta.course   ? meta.course   : "",
                           meta.shortName? meta.shortName: "",
-                          bestStr, optStr);
+                          bestStr, optStr,
+                          meta.device   ? meta.device   : "");
   if (n < 0 || p + n > end) return false;
   p += n;
 
@@ -116,6 +118,7 @@ bool parse(const char* buf, size_t bufSize,
   outMeta.shortName[0] = '\0';
   outMeta.bestLap[0]   = '\0';
   outMeta.optimal[0]   = '\0';
+  outMeta.device[0]    = '\0';
 
   if (buf == nullptr || bufSize < kHeaderSize) return false;
 
@@ -163,6 +166,9 @@ bool parse(const char* buf, size_t bufSize,
   if (tok) boundedCopy(outMeta.bestLap,   sizeof(outMeta.bestLap),   tok, strlen(tok));
   tok = strtok(nullptr, ",");
   if (tok) boundedCopy(outMeta.optimal,   sizeof(outMeta.optimal),   tok, strlen(tok));
+  // device_name — trailing column; absent in pre-device_name logs (stays "").
+  tok = strtok(nullptr, ",");
+  if (tok) boundedCopy(outMeta.device,    sizeof(outMeta.device),    tok, strlen(tok));
 
   // Line 3 (lap column label) — skip; tolerate missing.
   if (!nextLine(lineBegin, lineLen)) return true;  // no laps recorded
