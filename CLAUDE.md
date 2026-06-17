@@ -365,7 +365,7 @@ loop()  ~250 Hz
 
 - Persistent JSON key-value store at `/SETTINGS.json` on SD card.
 - `SETTINGS_SETUP()` called once from `setup()` after SD init; creates
-  default file on first boot (random BLE name + PIN).
+  default file on first boot (random BLE name + PIN + racing-word device name).
 - **Auto-populate**: `ensureDefaultSettings()` checks for missing keys on
   boot and adds them with defaults. Existing values are never overwritten.
 - `getSetting(key, buf, bufSize)` reads a value into a caller-provided
@@ -551,6 +551,7 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 {
   "bluetooth_name": "DovesDataLogger-042",
   "bluetooth_pin": "7391",
+  "device_name": "ApexTurbo",
   "driver_name": "Driver",
   "lap_detection_distance": "7",
   "waypoint_detection_distance": "30",
@@ -562,6 +563,7 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 |-----|------|---------|---------|
 | `bluetooth_name` | string | Random | BLE device name |
 | `bluetooth_pin` | string | Random 4-digit | BLE pairing PIN |
+| `device_name` | string | Random racing words | Identifies the logging device (DOVEX header) |
 | `driver_name` | string | `"Driver"` | Logged in DOVEX header |
 | `lap_detection_distance` | int | `7` | DovesLapTimer crossing threshold (meters) |
 | `waypoint_detection_distance` | int | `30` | WaypointLapTimer proximity zone (meters) |

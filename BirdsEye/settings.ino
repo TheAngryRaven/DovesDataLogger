@@ -10,6 +10,29 @@ static const char SETTINGS_FILE_PATH[] = "/SETTINGS.json";
 static char settingsFileBuffer[512];
 static StaticJsonDocument<512> settingsJson;
 
+// 12 racing-adjacent words used to build a friendly default device name so
+// logs dumped from a fleet of devices stay distinguishable. The literals
+// live in flash and the pointer table is tiny (~48 bytes), so this costs
+// almost no RAM. A default name is two of these picked at random.
+static const char* const kDeviceNameWords[] = {
+  "Apex", "Turbo", "Nitro", "Drift", "Slick", "Boost",
+  "Piston", "Vortex", "Camber", "Draft", "Redline", "Gearbox"
+};
+
+/**
+ * @brief Compose a random default device name (e.g. "ApexTurbo") by picking
+ *        two distinct racing words from kDeviceNameWords.
+ * @param buf Caller-provided buffer for the name (null-terminated)
+ * @param bufSize Size of buf
+ */
+static void generateDeviceName(char* buf, size_t bufSize) {
+  const int count = (int)(sizeof(kDeviceNameWords) / sizeof(kDeviceNameWords[0]));
+  int i = (int)random(0, count);
+  int j = (int)random(0, count - 1);
+  if (j >= i) j++;  // map onto the remaining words so the two always differ
+  snprintf(buf, bufSize, "%s%s", kDeviceNameWords[i], kDeviceNameWords[j]);
+}
+
 /**
  * @brief Generate default settings file on first boot
  * @return true if file created successfully
@@ -35,6 +58,11 @@ bool createDefaultSettings() {
   char defaultPin[5];
   snprintf(defaultPin, sizeof(defaultPin), "%04d", (int)random(1000, 10000));
   settingsJson["bluetooth_pin"] = defaultPin;
+
+  // Random racing-themed device name so multi-device log dumps stay sorted
+  char deviceName[32];
+  generateDeviceName(deviceName, sizeof(deviceName));
+  settingsJson["device_name"] = deviceName;
 
   // New default settings
   settingsJson["driver_name"] = "Driver";
@@ -80,6 +108,13 @@ static void ensureDefaultSettings() {
     if (!getSetting(defaults[i].key, buf, sizeof(buf))) {
       setSetting(defaults[i].key, defaults[i].defaultValue);
     }
+  }
+
+  // device_name needs random generation, not a static default
+  if (!getSetting("device_name", buf, sizeof(buf))) {
+    char dev[32];
+    generateDeviceName(dev, sizeof(dev));
+    setSetting("device_name", dev);
   }
 
   // BLE keys need random generation, not static defaults
