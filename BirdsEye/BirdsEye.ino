@@ -64,6 +64,10 @@
 #include "SdFat.h"
 #include "sdios.h"
 
+// TinyUSB — provides Adafruit_USBD_MSC / TinyUSBDevice for the USB
+// mass-storage transfer mode (usb_msc module). Must precede usb_msc.h.
+#include <Adafruit_TinyUSB.h>
+
 // Module interfaces. Each header documents its module's public
 // surface and pulls in any library types those signatures need.
 #include "accelerometer.h"
@@ -77,6 +81,7 @@
 #include "sd_functions.h"
 #include "settings.h"
 #include "tachometer.h"
+#include "usb_msc.h"
 
 ///////////////////////////////////////////
 // BATTERY CONFIGURATION
@@ -494,6 +499,8 @@ const int PAGE_RC_ERROR = 990;
 const int PAGE_MAIN_MENU = -1;
 const int PAGE_BLUETOOTH = -2;
 const int PAGE_REPLAY_FILE_SELECT = -3;
+const int PAGE_TRANSFER_MENU = -4;   // Bluetooth-vs-USB submenu
+const int PAGE_USB_STORAGE = -5;     // USB mass-storage active screen
 const int PAGE_REPLAY_RESULTS = -8;
 const int PAGE_REPLAY_EXIT = -9;
 
@@ -604,6 +611,12 @@ void setup() {
 
   // Load settings from SD (creates defaults on first boot)
   SETTINGS_SETUP();
+
+  // Register the USB mass-storage callbacks (no drive presented until the
+  // user enters USB transfer mode). Needs a working SD card for block I/O.
+  if (sdSetupSuccess) {
+    USB_MSC_SETUP();
+  }
 
   ACCEL_SETUP();
 

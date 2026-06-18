@@ -287,11 +287,31 @@ void handleMenuPageSelection() {
         switchToDisplayPage(PAGE_INTERNAL_WARNING);
       }
     } else {
-      // Bluetooth selected
-      debugln(F("Main Menu: Bluetooth selected"));
+      // Transfer selected — open the Bluetooth-vs-USB submenu
+      debugln(F("Main Menu: Transfer selected"));
+      switchToDisplayPage(PAGE_TRANSFER_MENU);
+    }
+  } else if (currentPage == PAGE_TRANSFER_MENU) {
+    if (menuSelectionIndex == 0) {
+      // Bluetooth — same flow as before
+      debugln(F("Transfer: Bluetooth selected"));
       BLE_SETUP();
       switchToDisplayPage(PAGE_BLUETOOTH);
+    } else {
+      // USB mass storage — show the status page, then enumerate the drive
+      debugln(F("Transfer: USB selected"));
+      switchToDisplayPage(PAGE_USB_STORAGE);
+      if (!USB_MSC_ENABLE()) {
+        // SD busy with another subsystem — bounce back to the submenu
+        strncpy(internalNotification, "SD busy, cannot\nstart USB mode!", sizeof(internalNotification) - 1);
+        internalNotification[sizeof(internalNotification) - 1] = '\0';
+        switchToDisplayPage(PAGE_INTERNAL_WARNING);
+      }
     }
+  } else if (currentPage == PAGE_USB_STORAGE) {
+    // Exit — reboot to drop the drive and remount a fresh filesystem
+    debugln(F("USB Storage: Exit selected"));
+    USB_MSC_DISABLE();  // does not return (NVIC_SystemReset)
   } else if (currentPage == PAGE_REPLAY_FILE_SELECT) {
     if (numReplayFiles == 0) {
       // No files - go back
@@ -411,6 +431,10 @@ void displayLoop() {
       displayPage_main_menu();
     } else if (currentPage == PAGE_BLUETOOTH) {
       displayPage_bluetooth();
+    } else if (currentPage == PAGE_TRANSFER_MENU) {
+      displayPage_transfer_menu();
+    } else if (currentPage == PAGE_USB_STORAGE) {
+      displayPage_usb_storage();
     } else if (currentPage == PAGE_REPLAY_FILE_SELECT) {
       displayPage_replay_file_select();
     } else if (currentPage == PAGE_REPLAY_RESULTS) {
@@ -478,6 +502,8 @@ void displayLoop() {
   if (
     currentPage == PAGE_MAIN_MENU ||
     currentPage == PAGE_BLUETOOTH ||
+    currentPage == PAGE_TRANSFER_MENU ||
+    currentPage == PAGE_USB_STORAGE ||
     currentPage == LOGGING_STOP_CONFIRM ||
     currentPage == PAGE_REPLAY_FILE_SELECT ||
     currentPage == PAGE_REPLAY_EXIT
@@ -486,6 +512,10 @@ void displayLoop() {
     if (currentPage == PAGE_MAIN_MENU) {
       menuLimit = 3; // Race, Replay, Download
     } else if (currentPage == PAGE_BLUETOOTH) {
+      menuLimit = 1; // Only "Exit" option
+    } else if (currentPage == PAGE_TRANSFER_MENU) {
+      menuLimit = 2; // Bluetooth, USB
+    } else if (currentPage == PAGE_USB_STORAGE) {
       menuLimit = 1; // Only "Exit" option
     } else if (
       currentPage == LOGGING_STOP_CONFIRM ||

@@ -83,6 +83,7 @@ All sketch sources live in `BirdsEye/` so the folder name matches the
 | `sd_functions.{h,ino}` | SD init, track list/JSON parsing (dual format), track manifest, SD access arbitration |
 | `settings.{h,ino}` | Persistent JSON settings on SD (`/SETTINGS.json`), `getSetting()`/`setSetting()` |
 | `tachometer.{h,ino}` | Falling-edge ISR on D0, Kalman-filtered RPM calculation |
+| `usb_msc.{h,ino}` | USB Mass Storage (TinyUSB MSC): SD card as a drag-and-drop drive (see subsystem 12) |
 | `diagram.json` | Wokwi simulator wiring |
 | `libraries.txt` | Wokwi simulator library list |
 
@@ -250,8 +251,10 @@ loop()  ~250 Hz
 - **SD access arbitration** prevents concurrent access:
   - `acquireSDAccess(mode)` / `releaseSDAccess(mode)`
   - Modes: `SD_ACCESS_NONE` (0), `LOGGING` (1), `REPLAY` (2),
-    `BLE_TRANSFER` (3), `TRACK_PARSE` (4) — values and grant/deny rules
-    live in the host-tested `sd_access_policy` pure unit.
+    `BLE_TRANSFER` (3), `TRACK_PARSE` (4), `USB_MSC` (5) — values and
+    grant/deny rules live in the host-tested `sd_access_policy` pure unit.
+    `USB_MSC` is a normal exclusive holder (held for the whole USB
+    mass-storage session; see subsystem 12).
   - Transitions are **atomic**: the check-then-set runs inside a FreeRTOS
     critical section (`taskENTER_CRITICAL`, BASEPRI-masked so SoftDevice
     radio interrupts are unaffected) because the Bluefruit callback task
@@ -273,6 +276,8 @@ loop()  ~250 Hz
   - Racing: `GPS_STATS` (4) through `LOGGING_STOP` (12).
   - Replay: `PAGE_REPLAY_FILE_SELECT` (-3), `PAGE_REPLAY_RESULTS` (-8),
     `PAGE_REPLAY_EXIT` (-9).
+  - Transfer: `PAGE_TRANSFER_MENU` (-4) Bluetooth/USB submenu,
+    `PAGE_USB_STORAGE` (-5) USB drive active.
   - BLE: `PAGE_BLUETOOTH` (-2).
   - Errors: `PAGE_INTERNAL_WARNING` (100), `PAGE_INTERNAL_FAULT` (105).
 
@@ -485,6 +490,40 @@ loop()  ~250 Hz
   units once via nRF Connect (native app, buttonless trigger works on the
   existing single-bank bootloader); all later updates go through the web app.
 
+### 12. USB Mass Storage (`usb_msc.ino`)
+
+- **Why**: a wired, app-free way to move files. The SD is FAT16/32, so a
+  host PC can mount it as a drive and drag-and-drop track JSON / DOVEX logs.
+  Complements (does not replace) the BLE transfer service.
+- **Stack**: TinyUSB `Adafruit_USBD_MSC` (bundled in the Seeed/Adafruit
+  nRF52 core; the core's default USB stack is TinyUSB). Three block
+  callbacks wrap SdFat's block device: `msc_read_cb` →
+  `SD.card()->readSectors()`, `msc_write_cb` → `writeSectors()`,
+  `msc_flush_cb` → `syncDevice()` + `SD.cacheClear()`. These run on the
+  USBD task, not the main loop.
+- **UI flow**: main-menu **Transfer** → `PAGE_TRANSFER_MENU` (Bluetooth /
+  USB). **Bluetooth** keeps the existing `BLE_SETUP()` + `PAGE_BLUETOOTH`
+  path untouched. **USB** → `PAGE_USB_STORAGE` + `USB_MSC_ENABLE()`.
+- **Opt-in enumeration**: `USB_MSC_SETUP()` (called from `setup()` after a
+  successful `SD_SETUP()`) only registers the callbacks — no drive is
+  presented at boot, so charging/plug-in behaves as before.
+  `USB_MSC_ENABLE()` acquires `SD_ACCESS_USB_MSC`, sets the capacity from
+  `sectorCount()`, marks the unit ready, `begin()`s the interface, and
+  forces a `TinyUSBDevice.detach()/attach()` re-enumeration so the host
+  mounts the drive. If the SD mutex is busy it bails to a warning page and
+  changes nothing.
+- **Exit = reboot**: `USB_MSC_DISABLE()` calls `NVIC_SystemReset()` (mirrors
+  the BLE auto-reboot on disconnect). The reboot drops the MSC interface and
+  remounts a clean filesystem, so host edits are picked up without any SdFat
+  cache-coherency dance.
+- **Mutex**: the whole session holds `SD_ACCESS_USB_MSC`, so logging,
+  replay, and BLE transfer are locked out (and vice-versa). The
+  transfer/USB pages are not the main menu, so the USB-on-main-menu
+  auto-sleep never fires while transferring.
+- **No pure unit test**: the block-callback glue is TinyUSB/Arduino-bound
+  (hardware), so there is no host-testable logic here — only the
+  `sd_access_policy` mode addition is unit-tested.
+
 ---
 
 ## Data Formats
@@ -633,6 +672,7 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | DovesLapTimer | Lap/sector timing (external: TheAngryRaven/DovesLapTimer). CI refs: `BETA`-targeted builds track the library's `BETA` branch; master/release builds pin `v4.1.0` (bump deliberately) |
 | Seeed Arduino LSM6DS3 | Onboard IMU accelerometer/gyro (Sense variant, ±16g) |
 | Bluefruit nRF52 | BLE (built into board package) |
+| Adafruit TinyUSB | USB Mass Storage (`Adafruit_USBD_MSC`); built into board package |
 
 ---
 

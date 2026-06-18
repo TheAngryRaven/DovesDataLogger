@@ -70,6 +70,42 @@ void displayPage_bluetooth() {
   safeDisplayUpdate();
 }
 
+void displayPage_transfer_menu() {
+  resetDisplay();
+
+  display.setTextSize(1);
+  display.println(F("   Transfer Mode"));
+  display.println();
+  display.setTextSize(2);
+
+  display.print(menuSelectionIndex == 0 ? "->" : "  ");
+  display.println(F("Bluetooth"));
+  display.print(menuSelectionIndex == 1 ? "->" : "  ");
+  display.println(F("USB"));
+
+  safeDisplayUpdate();
+}
+
+void displayPage_usb_storage() {
+  resetDisplay();
+
+  display.setTextSize(1);
+  display.println(F("   USB Storage"));
+  display.println();
+
+  display.setTextSize(2);
+  display.println(F(" Drive On"));
+
+  display.setTextSize(1);
+  display.println();
+  display.println(F("Connected to PC."));
+  display.println(F("Drag & drop files."));
+  display.println();
+  display.println(F("->Exit (reboots)"));
+
+  safeDisplayUpdate();
+}
+
 void displayPage_replay_file_select() {
   resetDisplay();
 

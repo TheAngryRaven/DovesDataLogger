@@ -13,6 +13,16 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **USB mass-storage file transfer.** The Transfer screen now opens a
+  submenu offering **Bluetooth** (the existing BLE file-transfer flow,
+  unchanged) or **USB**. Choosing USB presents the SD card to a connected
+  computer as a standard drive (TinyUSB MSC) for drag-and-drop of track
+  files and logs — no companion app required. The drive is opt-in: it only
+  enumerates while on the USB page, so normal plug-in/charging is unchanged.
+  Exiting USB mode reboots the device so the firmware remounts a clean
+  filesystem after host edits. USB transfer holds the SD card exclusively
+  via the access mutex (new `SD_ACCESS_USB_MSC` mode), so it cannot collide
+  with logging, replay, or BLE.
 - **`device_name` setting to label logs per device.** A new persistent
   setting identifies which unit produced a log — handy when dumping logs
   from a fleet. On first boot (or upgrade) a friendly default is generated
