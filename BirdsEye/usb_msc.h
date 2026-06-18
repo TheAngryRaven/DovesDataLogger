@@ -10,7 +10,9 @@
 // USB transfer page (USB_MSC_ENABLE), so normal plug-in/charging is
 // unchanged. Leaving the page reboots the device (USB_MSC_DISABLE) so
 // the firmware re-reads a clean filesystem after host edits and the
-// drive disappears from the host.
+// drive disappears from the host. The parked loop branch in BirdsEye.ino
+// also calls USB_MSC_DISABLE() if the cable is unplugged, so the SD lock
+// and fast SPI clock can never leak past the end of a transfer session.
 //
 // While the drive is active the SD mutex is held as SD_ACCESS_USB_MSC,
 // keeping logging/replay/BLE off the card — the TinyUSB read/write

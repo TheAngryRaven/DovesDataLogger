@@ -512,18 +512,28 @@ loop()  ~250 Hz
   successful `SD_SETUP()`) only registers the callbacks — no drive is
   presented at boot, so charging/plug-in behaves as before.
   `USB_MSC_ENABLE()` acquires `SD_ACCESS_USB_MSC`, sets the capacity from
-  `sectorCount()`, marks the unit ready, `begin()`s the interface, and
-  forces a `TinyUSBDevice.detach()/attach()` re-enumeration so the host
-  mounts the drive. If the SD mutex is busy it bails to a warning page and
-  changes nothing.
-- **Exit = reboot**: `USB_MSC_DISABLE()` calls `NVIC_SystemReset()` (mirrors
-  the BLE auto-reboot on disconnect). The reboot drops the MSC interface and
-  remounts a clean filesystem, so host edits are picked up without any SdFat
-  cache-coherency dance.
+  `sectorCount()`, marks the unit ready, `begin()`s the interface (bailing
+  out — restoring the clock and releasing the lock — if `begin()` fails),
+  and forces a `TinyUSBDevice.detach()` / 50 ms / `attach()` re-enumeration
+  so the host mounts the drive. If the SD mutex is busy it bails to a
+  warning page and changes nothing.
+- **Loop parking**: while `usbMscActive`, `loop()` takes an early-return
+  branch (mirroring the `bleActive` branch) that skips all GPS/tach/lap/SD
+  processing — the host PC owns the FAT, so the firmware must not touch it
+  concurrently. The branch services only the Exit button and the status
+  page, and watches VBUS: if the cable is unplugged it calls
+  `USB_MSC_DISABLE()` so the SD lock and fast SPI clock can't leak past the
+  session.
+- **Exit = reboot**: `USB_MSC_DISABLE()` drops media-ready, `syncDevice()`s
+  the card, then calls `NVIC_SystemReset()` (mirrors the BLE auto-reboot on
+  disconnect). The reboot drops the MSC interface and remounts a clean
+  filesystem, so host edits are picked up without any SdFat cache-coherency
+  dance. Triggered by the on-device Exit button or a cable unplug.
 - **Mutex**: the whole session holds `SD_ACCESS_USB_MSC`, so logging,
-  replay, and BLE transfer are locked out (and vice-versa). The
-  transfer/USB pages are not the main menu, so the USB-on-main-menu
-  auto-sleep never fires while transferring.
+  replay, and BLE transfer are locked out (and vice-versa) — though loop
+  parking, not the mutex, is the primary guarantee the firmware stays off
+  the card. The transfer/USB pages are not the main menu, so the
+  USB-on-main-menu auto-sleep never fires while transferring.
 - **No pure unit test**: the block-callback glue is TinyUSB/Arduino-bound
   (hardware), so there is no host-testable logic here — only the
   `sd_access_policy` mode addition is unit-tested.

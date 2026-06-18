@@ -21,14 +21,29 @@ bool usbMscActive = false;
 // conflicts with static functions in .ino files. Names are unique
 // across the concatenated sketch.
 
+// A whole, sector-aligned transfer is expected; reject anything else rather
+// than silently dropping a partial sector via integer division. Retry up to
+// 3x like the rest of the SD code (ignition EMI can glitch a single op).
 int32_t msc_read_cb(uint32_t lba, void* buffer, uint32_t bufsize) {
-  bool ok = SD.card()->readSectors(lba, (uint8_t*) buffer, bufsize / 512);
-  return ok ? (int32_t) bufsize : -1;
+  if (bufsize == 0 || (bufsize % 512) != 0) return -1;
+  uint32_t sectors = bufsize / 512;
+  for (uint8_t attempt = 0; attempt < 3; attempt++) {
+    if (SD.card()->readSectors(lba, (uint8_t*) buffer, sectors)) {
+      return (int32_t) bufsize;
+    }
+  }
+  return -1;
 }
 
 int32_t msc_write_cb(uint32_t lba, uint8_t* buffer, uint32_t bufsize) {
-  bool ok = SD.card()->writeSectors(lba, buffer, bufsize / 512);
-  return ok ? (int32_t) bufsize : -1;
+  if (bufsize == 0 || (bufsize % 512) != 0) return -1;
+  uint32_t sectors = bufsize / 512;
+  for (uint8_t attempt = 0; attempt < 3; attempt++) {
+    if (SD.card()->writeSectors(lba, buffer, sectors)) {
+      return (int32_t) bufsize;
+    }
+  }
+  return -1;
 }
 
 // Host signalled it is done writing — flush the card and drop SdFat's
@@ -77,12 +92,23 @@ bool USB_MSC_ENABLE() {
 
   usb_msc.setCapacity(sectorCount, 512);
   usb_msc.setUnitReady(true);
-  usb_msc.begin();
+  if (!usb_msc.begin()) {
+    // MSC interface registration failed — don't strand the user on a
+    // "drive active" screen with no drive. Undo and report failure.
+    debugln(F("USB MSC: begin() failed, aborting"));
+    usb_msc.setUnitReady(false);
+    sdSetTransferSpeed(false);
+    releaseSDAccess(SD_ACCESS_USB_MSC);
+    return false;
+  }
 
   // USB is already enumerated (for charging/CDC). Re-enumerate so the
   // host picks up the newly-added MSC interface and mounts the drive.
+  // The detach must settle long enough for the host to notice the
+  // disconnect before we re-attach — 10 ms is below the USB spec's
+  // recommended window and some hosts won't re-enumerate cleanly.
   TinyUSBDevice.detach();
-  delay(10);
+  delay(50);
   TinyUSBDevice.attach();
 
   usbMscActive = true;
@@ -96,6 +122,12 @@ void USB_MSC_DISABLE() {
   // files the host added/removed are picked up. Mirrors the BLE
   // auto-reboot on disconnect.
   debugln(F("USB MSC: exiting — rebooting to remount filesystem"));
+  // Drop media-ready so the host sees the drive go away, and flush any
+  // buffered writes to the card before we reset — the reboot is otherwise
+  // a hard cut that would lose a not-yet-synced sector and risk leaving the
+  // FAT inconsistent if the host hadn't already ejected.
+  usb_msc.setUnitReady(false);
+  SD.card()->syncDevice();
   delay(50);
   NVIC_SystemReset();
 }

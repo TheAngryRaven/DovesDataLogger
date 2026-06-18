@@ -374,6 +374,17 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
     return;
   }
 
+  // A command longer than the parse buffer was truncated by the memcpy
+  // above. The raw-data paths (track upload / OTA image) returned already,
+  // so anything this long is a malformed command — never a valid filename
+  // command (those are FAT-short). Reject rather than validate and act on a
+  // silently-mangled name. (len <= 64 fits buffer[65] with NUL intact.)
+  if (len >= sizeof(buffer)) {
+    debugln(F("BLE: command too long, rejecting"));
+    fileStatusChar.notify((uint8_t*)"ERROR", 5);
+    return;
+  }
+
   debug(F("BLE: Received command: ["));
   debug(buffer);
   debugln(F("]"));

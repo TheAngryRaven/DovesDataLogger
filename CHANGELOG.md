@@ -50,6 +50,20 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   to 2 MHz automatically if the fast re-init fails.
 
 ### Fixed
+- **USB mass-storage no longer races the host for the SD card.** While the
+  drive was mounted the main loop kept running `GPS_LOOP()`,
+  `trackDetectionLoop()`, auto-idle, etc., so the firmware and the host PC
+  could both drive the FAT — corruption was prevented only as a side effect
+  of the access mutex denying those acquires, not by design. The loop now
+  parks while `usbMscActive` (mirroring the BLE branch): GPS/tach/lap/SD
+  processing is skipped entirely, only the Exit button and the status page
+  are serviced, so the host owns the card uncontested.
+- **Unplugging the USB cable now exits mass-storage mode.** Previously the
+  only way out was the on-device Exit button; pulling the cable (the natural
+  way to "finish") left the device stuck `usbMscActive` — holding the
+  `SD_ACCESS_USB_MSC` lock and the EMI-unsafe 8 MHz SD clock indefinitely,
+  so a subsequent drive would silently fail to log. The parked loop now
+  watches VBUS and reboots out of USB mode when the cable is removed.
 - **Track detection no longer throttles the whole main loop.** The manifest
   scan (O(N) software-double haversine, several ms at the 200-entry ceiling)
   was gated only on `gpsData.fix`, which stays true between PVT updates — so
@@ -86,7 +100,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   All six divergent inline copies of the ms → `M:SS.mmm` math are replaced
   by one host-tested `lap_format` unit; the replay page's already-correct
   rendering is unchanged, and the lap list now shows zero-padded
-  `M:SS.mmm`.
+  `M:SS.mmm`. (Cosmetic side effect: once a lap passes one minute the
+  big-font live pages now zero-pad the seconds — `1:05.007` rather than the
+  old `1: 5.007` — same field width, so the column stays stable.)
 
 ### Security
 - **SD card arbitration race fixed — a BLE client in radio range could

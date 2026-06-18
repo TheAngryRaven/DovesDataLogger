@@ -1275,6 +1275,36 @@ void loop() {
     return; // Skip GPS, tach, lap checks while BLE is active
   }
 
+  // When USB mass-storage is active the host PC owns the SD card over MSC.
+  // Park the loop exactly like the BLE branch so the firmware never drives
+  // the FAT concurrently with the host — GPS/tach/lap/SD processing is all
+  // skipped. (The SD-access policy would deny those acquires anyway, but
+  // parking here is the real guarantee rather than a side effect.)
+  if (usbMscActive) {
+    // Cable pulled without using the on-device Exit (the natural way to
+    // "finish") — tear down so the SD lock, the fast SPI clock, and the
+    // media-ready state don't leak into a later driving session and
+    // silently refuse to log. USB_MSC_DISABLE() reboots and does not return.
+    if (!isUsbConnected()) {
+      USB_MSC_DISABLE();
+    }
+
+    // Minimal button check for the on-device Exit (Select).
+    readButtons();
+    if (btn2->pressed) {
+      USB_MSC_DISABLE();  // does not return (NVIC_SystemReset)
+    }
+    resetButtons();
+
+    // Refresh the status page at the normal rate.
+    if (millis() - displayLastUpdate > (1000 / displayUpdateRateHz)) {
+      displayLastUpdate = millis();
+      displayPage_usb_storage();
+    }
+
+    return;  // host owns the card — skip GPS/tach/lap/SD entirely
+  }
+
   GPS_LOOP();
   TACH_LOOP();
   ACCEL_LOOP();

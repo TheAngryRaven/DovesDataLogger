@@ -73,6 +73,16 @@ TEST_CASE("formatLapTime - kSpace keeps the decimal point column-stable") {
     CHECK(fmt(5123, kSpace).find('.') == fmt(59999, kSpace).find('.'));
 }
 
+TEST_CASE("formatLapTime - kSpace minutes>0 zero-pads seconds (column-stable)") {
+    // Once minutes appear, kSpace switches from space-padded to zero-padded
+    // seconds ("1:05.007", not the pre-refactor "1: 5.007"). Same field
+    // width either way, so the big-font column stays stable across the
+    // 1-minute boundary — this pins the intended behavior.
+    CHECK(fmt(65007, kSpace) == "1:05.007");
+    CHECK(fmt(63123, kSpace) == "1:03.123");
+    CHECK(fmt(65007, kSpace).find('.') == fmt(63123, kSpace).find('.'));
+}
+
 // ---------------------------------------------------------------------------
 // Bounds and safety
 // ---------------------------------------------------------------------------
