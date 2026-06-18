@@ -77,12 +77,23 @@ bool USB_MSC_ENABLE() {
 
   usb_msc.setCapacity(sectorCount, 512);
   usb_msc.setUnitReady(true);
-  usb_msc.begin();
+  if (!usb_msc.begin()) {
+    // MSC interface registration failed — don't strand the user on a
+    // "drive active" screen with no drive. Undo and report failure.
+    debugln(F("USB MSC: begin() failed, aborting"));
+    usb_msc.setUnitReady(false);
+    sdSetTransferSpeed(false);
+    releaseSDAccess(SD_ACCESS_USB_MSC);
+    return false;
+  }
 
   // USB is already enumerated (for charging/CDC). Re-enumerate so the
   // host picks up the newly-added MSC interface and mounts the drive.
+  // The detach must settle long enough for the host to notice the
+  // disconnect before we re-attach — 10 ms is below the USB spec's
+  // recommended window and some hosts won't re-enumerate cleanly.
   TinyUSBDevice.detach();
-  delay(10);
+  delay(50);
   TinyUSBDevice.attach();
 
   usbMscActive = true;
