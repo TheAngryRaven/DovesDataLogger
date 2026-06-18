@@ -51,6 +51,14 @@ void makeFullTrackPath(const char* trackName, char* filepath);
 // on success. Populates the global SD object.
 bool SD_SETUP();
 
+// (Re)initialize the SD card at a specific SPI clock (EMI-tolerant retries).
+bool sdSetSpiClock(uint32_t maxSck);
+
+// Switch the SD SPI clock between the fast parked-transfer clock (true) and the
+// EMI-safe normal clock (false). Only call when no SD file is open. Falls back
+// to the normal clock if the fast re-init fails.
+void sdSetTransferSpeed(bool fast);
+
 // Scan /TRACKS/ and populate locations[] + trackManifest[] (one entry
 // per .json file). Returns true if the folder existed.
 bool buildTrackList();

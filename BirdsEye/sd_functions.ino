@@ -62,16 +62,41 @@ void makeFullTrackPath(const char* trackName, char* filepath) {
   snprintf(filepath, FILEPATH_MAX, "/TRACKS/%s.json", trackName);
 }
 
-bool SD_SETUP() {
-  // TODO: FAT32 CHECK
-  // Try multiple times - EMI from ignition can cause init failures
+// (Re)initialize the SD card at a given SPI clock. Re-calling SD.begin() is
+// the supported way to change the SdFat SPI speed at runtime — it re-inits the
+// card and remounts the volume. Retried because EMI from ignition can cause
+// init failures. Returns true on success.
+bool sdSetSpiClock(uint32_t maxSck) {
   for (int attempt = 0; attempt < 3; attempt++) {
-    if (SD.begin(PIN_SPI_CS, SPI_SPEED)) {
-      debugln(F("SD Card initialized successfully"));
+    if (SD.begin(PIN_SPI_CS, maxSck)) {
       return true;
     }
     debugln(F("SD init attempt failed, retrying..."));
     delay(100);  // Brief delay between attempts
+  }
+  return false;
+}
+
+// Switch the SD SPI clock between the parked-transfer fast clock and the
+// EMI-safe normal clock. Only safe to call when no SD file is open (the
+// BLE/USB transfer entry/exit points). Falls back to the normal clock if the
+// fast re-init fails, so a flaky fast clock can never leave the card unusable.
+void sdSetTransferSpeed(bool fast) {
+  uint32_t target = fast ? (uint32_t)SD_SPI_SPEED_FAST : (uint32_t)SPI_SPEED;
+  if (sdSetSpiClock(target)) {
+    return;
+  }
+  if (fast) {
+    debugln(F("SD: fast clock re-init failed, falling back to normal speed"));
+    sdSetSpiClock(SPI_SPEED);
+  }
+}
+
+bool SD_SETUP() {
+  // TODO: FAT32 CHECK
+  if (sdSetSpiClock(SPI_SPEED)) {
+    debugln(F("SD Card initialized successfully"));
+    return true;
   }
   debugln(F("Card initialization failed after 3 attempts."));
   return false;

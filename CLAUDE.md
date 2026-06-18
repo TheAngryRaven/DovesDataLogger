@@ -236,7 +236,11 @@ loop()  ~250 Hz
 
 ### 4. SD Card & Logging (`sd_functions.ino`)
 
-- SdFat library, FAT16/32, 1 MHz SPI (reduced from default for EMI hardening).
+- SdFat library, FAT16/32, 2 MHz SPI (reduced from default for EMI hardening).
+  Raised to 8 MHz (`SD_SPI_SPEED_FAST`) for the duration of a BLE or USB
+  transfer via `sdSetTransferSpeed(true)` and reverted afterward — transfers
+  happen parked (motor off), so the EMI rationale doesn't apply. Re-`SD.begin()`
+  is the runtime clock switch; it falls back to 2 MHz if the fast re-init fails.
 - Track files live under `/TRACKS/*.json` (ArduinoJson 6 parsing).
 - **Dual JSON format**: `parseTrackFile()` auto-detects root type:
   - **Object** (HackTheTrack format): `longName`, `shortName`,
@@ -641,7 +645,8 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | Tach stop timeout | 500 ms | `BirdsEye.ino` |
 | Display refresh | 3 Hz | `display_ui.ino` |
 | Button debounce | 200 ms | `display_ui.ino` |
-| SD SPI clock | 2 MHz | `BirdsEye.ino` |
+| SD SPI clock (normal) | 2 MHz | `BirdsEye.ino` |
+| SD SPI clock (transfer) | 8 MHz (`SD_SPI_SPEED_FAST`) | `BirdsEye.ino` |
 | Battery check interval | 5 s | `BirdsEye.ino` |
 | BLE default MTU | 23 | `bluetooth.ino` |
 | JSON buffer | 4096 (1024 on Wokwi) | `sd_functions.ino` |
@@ -686,7 +691,8 @@ This device operates in ignition-noise environments. Three layers of defense:
    3 ms minimum pulse gap in tachometer.
 3. **Software**: Multi-sample button reads (3x at 500 us), 200 ms refire
    lockout, Kalman-filtered RPM (absorbs ISR jitter), 2 MHz SPI clock for
-   SD stability.
+   SD stability (raised to 8 MHz only during parked BLE/USB transfers, where
+   the motor is off and ignition EMI is absent — see subsystem 4).
 4. **GPS serial buffer**: TIMER3 ISR drains Serial1 into a 4 KB RAM ring
    buffer every 10 ms, preventing GPS data loss during SD card GC pauses
    that can block writes for 100 ms–2 s.

@@ -490,6 +490,11 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
 }
 
 void BLE_SETUP() {
+  // Parked transfer — bump the SD clock for faster file transfers. Reverted
+  // in BLE_STOP() (and by the auto-reboot on phone disconnect). Done before
+  // the early-return so re-entering the BLE page re-applies it.
+  sdSetTransferSpeed(true);
+
   if (bleInitialized) {
     // Already initialized, just start advertising
     debugln(F("BLE: Restarting advertising..."));
@@ -599,6 +604,9 @@ void BLE_STOP() {
 
   bleConnected = false;
   // bleActive already set false at top of BLE_STOP()
+
+  // Restore the EMI-safe SD clock now that the transfer session is over.
+  sdSetTransferSpeed(false);
 
   debugln(F("BLE: Bluetooth stopped"));
 }

@@ -62,9 +62,15 @@ bool USB_MSC_ENABLE() {
     return false;
   }
 
+  // Parked transfer — bump the SD clock for real USB throughput (the 2 MHz
+  // EMI-safe clock caps the drive at ~250 KB/s). Restored on the reboot in
+  // USB_MSC_DISABLE(); restored explicitly here on the early-bail path.
+  sdSetTransferSpeed(true);
+
   uint32_t sectorCount = SD.card()->sectorCount();
   if (sectorCount == 0) {
     debugln(F("USB MSC: SD sectorCount() == 0, aborting"));
+    sdSetTransferSpeed(false);
     releaseSDAccess(SD_ACCESS_USB_MSC);
     return false;
   }

@@ -61,6 +61,13 @@
 // and the BLE-2M file transfer ceiling.
 #define SPI_SPEED SD_SCK_MHZ(2)
 
+// Parked-transfer SPI clock. File transfers (BLE / USB mass storage) only
+// happen with the motor off, so the ignition-EMI rationale for the slow 2 MHz
+// clock doesn't apply — sdSetTransferSpeed(true) bumps to this for the session
+// and reverts to SPI_SPEED afterward. Bump to SD_SCK_MHZ(16) if the board
+// proves it can sustain it (the nRF52840 standard SPIM may clamp 16 to 8 MHz).
+#define SD_SPI_SPEED_FAST SD_SCK_MHZ(8)
+
 #include "SdFat.h"
 #include "sdios.h"
 

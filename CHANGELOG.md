@@ -42,6 +42,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   the library's default-branch tip. Bump the pin deliberately when a new
   library release is validated.
 
+- **SD SPI clock raised during file transfers.** While a BLE or USB
+  mass-storage transfer is active the SD card is clocked at 8 MHz (4x the
+  normal 2 MHz), reverting to 2 MHz afterward. Transfers only happen parked
+  with the motor off, so the ignition-EMI rationale for the slow clock doesn't
+  apply — this lifts the USB drag-and-drop ceiling from ~250 KB/s. Falls back
+  to 2 MHz automatically if the fast re-init fails.
+
 ### Fixed
 - **Track detection no longer throttles the whole main loop.** The manifest
   scan (O(N) software-double haversine, several ms at the 200-entry ceiling)
