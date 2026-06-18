@@ -21,14 +21,29 @@ bool usbMscActive = false;
 // conflicts with static functions in .ino files. Names are unique
 // across the concatenated sketch.
 
+// A whole, sector-aligned transfer is expected; reject anything else rather
+// than silently dropping a partial sector via integer division. Retry up to
+// 3x like the rest of the SD code (ignition EMI can glitch a single op).
 int32_t msc_read_cb(uint32_t lba, void* buffer, uint32_t bufsize) {
-  bool ok = SD.card()->readSectors(lba, (uint8_t*) buffer, bufsize / 512);
-  return ok ? (int32_t) bufsize : -1;
+  if (bufsize == 0 || (bufsize % 512) != 0) return -1;
+  uint32_t sectors = bufsize / 512;
+  for (uint8_t attempt = 0; attempt < 3; attempt++) {
+    if (SD.card()->readSectors(lba, (uint8_t*) buffer, sectors)) {
+      return (int32_t) bufsize;
+    }
+  }
+  return -1;
 }
 
 int32_t msc_write_cb(uint32_t lba, uint8_t* buffer, uint32_t bufsize) {
-  bool ok = SD.card()->writeSectors(lba, buffer, bufsize / 512);
-  return ok ? (int32_t) bufsize : -1;
+  if (bufsize == 0 || (bufsize % 512) != 0) return -1;
+  uint32_t sectors = bufsize / 512;
+  for (uint8_t attempt = 0; attempt < 3; attempt++) {
+    if (SD.card()->writeSectors(lba, buffer, sectors)) {
+      return (int32_t) bufsize;
+    }
+  }
+  return -1;
 }
 
 // Host signalled it is done writing — flush the card and drop SdFat's
