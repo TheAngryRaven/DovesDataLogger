@@ -122,6 +122,12 @@ void USB_MSC_DISABLE() {
   // files the host added/removed are picked up. Mirrors the BLE
   // auto-reboot on disconnect.
   debugln(F("USB MSC: exiting — rebooting to remount filesystem"));
+  // Drop media-ready so the host sees the drive go away, and flush any
+  // buffered writes to the card before we reset — the reboot is otherwise
+  // a hard cut that would lose a not-yet-synced sector and risk leaving the
+  // FAT inconsistent if the host hadn't already ejected.
+  usb_msc.setUnitReady(false);
+  SD.card()->syncDevice();
   delay(50);
   NVIC_SystemReset();
 }
