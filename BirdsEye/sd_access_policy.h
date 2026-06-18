@@ -21,6 +21,7 @@ constexpr int kLogging = 1;      // DOVEX session logging (held all session)
 constexpr int kReplay = 2;       // DOVEX header replay
 constexpr int kBleTransfer = 3;  // BLE file transfer / track write / OTA staging
 constexpr int kTrackParse = 4;   // brief track-JSON / settings reads
+constexpr int kUsbMsc = 5;       // USB mass-storage active (host owns the card)
 
 // May `requested` take ownership when `current` holds the card?
 //   - Re-acquiring the mode you already hold is allowed (idempotent), so

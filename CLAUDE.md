@@ -83,6 +83,7 @@ All sketch sources live in `BirdsEye/` so the folder name matches the
 | `sd_functions.{h,ino}` | SD init, track list/JSON parsing (dual format), track manifest, SD access arbitration |
 | `settings.{h,ino}` | Persistent JSON settings on SD (`/SETTINGS.json`), `getSetting()`/`setSetting()` |
 | `tachometer.{h,ino}` | Falling-edge ISR on D0, Kalman-filtered RPM calculation |
+| `usb_msc.{h,ino}` | USB Mass Storage (TinyUSB MSC): SD card as a drag-and-drop drive (see subsystem 12) |
 | `diagram.json` | Wokwi simulator wiring |
 | `libraries.txt` | Wokwi simulator library list |
 
@@ -235,7 +236,11 @@ loop()  ~250 Hz
 
 ### 4. SD Card & Logging (`sd_functions.ino`)
 
-- SdFat library, FAT16/32, 1 MHz SPI (reduced from default for EMI hardening).
+- SdFat library, FAT16/32, 2 MHz SPI (reduced from default for EMI hardening).
+  Raised to 8 MHz (`SD_SPI_SPEED_FAST`) for the duration of a BLE or USB
+  transfer via `sdSetTransferSpeed(true)` and reverted afterward — transfers
+  happen parked (motor off), so the EMI rationale doesn't apply. Re-`SD.begin()`
+  is the runtime clock switch; it falls back to 2 MHz if the fast re-init fails.
 - Track files live under `/TRACKS/*.json` (ArduinoJson 6 parsing).
 - **Dual JSON format**: `parseTrackFile()` auto-detects root type:
   - **Object** (HackTheTrack format): `longName`, `shortName`,
@@ -250,8 +255,10 @@ loop()  ~250 Hz
 - **SD access arbitration** prevents concurrent access:
   - `acquireSDAccess(mode)` / `releaseSDAccess(mode)`
   - Modes: `SD_ACCESS_NONE` (0), `LOGGING` (1), `REPLAY` (2),
-    `BLE_TRANSFER` (3), `TRACK_PARSE` (4) — values and grant/deny rules
-    live in the host-tested `sd_access_policy` pure unit.
+    `BLE_TRANSFER` (3), `TRACK_PARSE` (4), `USB_MSC` (5) — values and
+    grant/deny rules live in the host-tested `sd_access_policy` pure unit.
+    `USB_MSC` is a normal exclusive holder (held for the whole USB
+    mass-storage session; see subsystem 12).
   - Transitions are **atomic**: the check-then-set runs inside a FreeRTOS
     critical section (`taskENTER_CRITICAL`, BASEPRI-masked so SoftDevice
     radio interrupts are unaffected) because the Bluefruit callback task
@@ -273,6 +280,8 @@ loop()  ~250 Hz
   - Racing: `GPS_STATS` (4) through `LOGGING_STOP` (12).
   - Replay: `PAGE_REPLAY_FILE_SELECT` (-3), `PAGE_REPLAY_RESULTS` (-8),
     `PAGE_REPLAY_EXIT` (-9).
+  - Transfer: `PAGE_TRANSFER_MENU` (-4) Bluetooth/USB submenu,
+    `PAGE_USB_STORAGE` (-5) USB drive active.
   - BLE: `PAGE_BLUETOOTH` (-2).
   - Errors: `PAGE_INTERNAL_WARNING` (100), `PAGE_INTERNAL_FAULT` (105).
 
@@ -485,6 +494,40 @@ loop()  ~250 Hz
   units once via nRF Connect (native app, buttonless trigger works on the
   existing single-bank bootloader); all later updates go through the web app.
 
+### 12. USB Mass Storage (`usb_msc.ino`)
+
+- **Why**: a wired, app-free way to move files. The SD is FAT16/32, so a
+  host PC can mount it as a drive and drag-and-drop track JSON / DOVEX logs.
+  Complements (does not replace) the BLE transfer service.
+- **Stack**: TinyUSB `Adafruit_USBD_MSC` (bundled in the Seeed/Adafruit
+  nRF52 core; the core's default USB stack is TinyUSB). Three block
+  callbacks wrap SdFat's block device: `msc_read_cb` →
+  `SD.card()->readSectors()`, `msc_write_cb` → `writeSectors()`,
+  `msc_flush_cb` → `syncDevice()` + `SD.cacheClear()`. These run on the
+  USBD task, not the main loop.
+- **UI flow**: main-menu **Transfer** → `PAGE_TRANSFER_MENU` (Bluetooth /
+  USB). **Bluetooth** keeps the existing `BLE_SETUP()` + `PAGE_BLUETOOTH`
+  path untouched. **USB** → `PAGE_USB_STORAGE` + `USB_MSC_ENABLE()`.
+- **Opt-in enumeration**: `USB_MSC_SETUP()` (called from `setup()` after a
+  successful `SD_SETUP()`) only registers the callbacks — no drive is
+  presented at boot, so charging/plug-in behaves as before.
+  `USB_MSC_ENABLE()` acquires `SD_ACCESS_USB_MSC`, sets the capacity from
+  `sectorCount()`, marks the unit ready, `begin()`s the interface, and
+  forces a `TinyUSBDevice.detach()/attach()` re-enumeration so the host
+  mounts the drive. If the SD mutex is busy it bails to a warning page and
+  changes nothing.
+- **Exit = reboot**: `USB_MSC_DISABLE()` calls `NVIC_SystemReset()` (mirrors
+  the BLE auto-reboot on disconnect). The reboot drops the MSC interface and
+  remounts a clean filesystem, so host edits are picked up without any SdFat
+  cache-coherency dance.
+- **Mutex**: the whole session holds `SD_ACCESS_USB_MSC`, so logging,
+  replay, and BLE transfer are locked out (and vice-versa). The
+  transfer/USB pages are not the main menu, so the USB-on-main-menu
+  auto-sleep never fires while transferring.
+- **No pure unit test**: the block-callback glue is TinyUSB/Arduino-bound
+  (hardware), so there is no host-testable logic here — only the
+  `sd_access_policy` mode addition is unit-tested.
+
 ---
 
 ## Data Formats
@@ -602,7 +645,8 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | Tach stop timeout | 500 ms | `BirdsEye.ino` |
 | Display refresh | 3 Hz | `display_ui.ino` |
 | Button debounce | 200 ms | `display_ui.ino` |
-| SD SPI clock | 2 MHz | `BirdsEye.ino` |
+| SD SPI clock (normal) | 2 MHz | `BirdsEye.ino` |
+| SD SPI clock (transfer) | 8 MHz (`SD_SPI_SPEED_FAST`) | `BirdsEye.ino` |
 | Battery check interval | 5 s | `BirdsEye.ino` |
 | BLE default MTU | 23 | `bluetooth.ino` |
 | JSON buffer | 4096 (1024 on Wokwi) | `sd_functions.ino` |
@@ -633,6 +677,7 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | DovesLapTimer | Lap/sector timing (external: TheAngryRaven/DovesLapTimer). CI refs: `BETA`-targeted builds track the library's `BETA` branch; master/release builds pin `v4.1.0` (bump deliberately) |
 | Seeed Arduino LSM6DS3 | Onboard IMU accelerometer/gyro (Sense variant, ±16g) |
 | Bluefruit nRF52 | BLE (built into board package) |
+| Adafruit TinyUSB | USB Mass Storage (`Adafruit_USBD_MSC`); built into board package |
 
 ---
 
@@ -646,7 +691,8 @@ This device operates in ignition-noise environments. Three layers of defense:
    3 ms minimum pulse gap in tachometer.
 3. **Software**: Multi-sample button reads (3x at 500 us), 200 ms refire
    lockout, Kalman-filtered RPM (absorbs ISR jitter), 2 MHz SPI clock for
-   SD stability.
+   SD stability (raised to 8 MHz only during parked BLE/USB transfers, where
+   the motor is off and ignition EMI is absent — see subsystem 4).
 4. **GPS serial buffer**: TIMER3 ISR drains Serial1 into a 4 KB RAM ring
    buffer every 10 ms, preventing GPS data loss during SD card GC pauses
    that can block writes for 100 ms–2 s.

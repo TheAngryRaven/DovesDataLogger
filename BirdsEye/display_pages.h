@@ -11,6 +11,8 @@
 void displayPage_boot();
 void displayPage_main_menu();
 void displayPage_bluetooth();
+void displayPage_transfer_menu();
+void displayPage_usb_storage();
 void displayPage_internal_fault();
 void displayPage_internal_warning();
 void displayPage_sleep_charging();

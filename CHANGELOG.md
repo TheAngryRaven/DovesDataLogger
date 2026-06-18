@@ -13,6 +13,16 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **USB mass-storage file transfer.** The Transfer screen now opens a
+  submenu offering **Bluetooth** (the existing BLE file-transfer flow,
+  unchanged) or **USB**. Choosing USB presents the SD card to a connected
+  computer as a standard drive (TinyUSB MSC) for drag-and-drop of track
+  files and logs — no companion app required. The drive is opt-in: it only
+  enumerates while on the USB page, so normal plug-in/charging is unchanged.
+  Exiting USB mode reboots the device so the firmware remounts a clean
+  filesystem after host edits. USB transfer holds the SD card exclusively
+  via the access mutex (new `SD_ACCESS_USB_MSC` mode), so it cannot collide
+  with logging, replay, or BLE.
 - **`device_name` setting to label logs per device.** A new persistent
   setting identifies which unit produced a log — handy when dumping logs
   from a fleet. On first boot (or upgrade) a friendly default is generated
@@ -31,6 +41,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   release/tag builds pin the known-good `v4.1.0` tag instead of floating on
   the library's default-branch tip. Bump the pin deliberately when a new
   library release is validated.
+
+- **SD SPI clock raised during file transfers.** While a BLE or USB
+  mass-storage transfer is active the SD card is clocked at 8 MHz (4x the
+  normal 2 MHz), reverting to 2 MHz afterward. Transfers only happen parked
+  with the motor off, so the ignition-EMI rationale for the slow clock doesn't
+  apply — this lifts the USB drag-and-drop ceiling from ~250 KB/s. Falls back
+  to 2 MHz automatically if the fast re-init fails.
 
 ### Fixed
 - **Track detection no longer throttles the whole main loop.** The manifest
