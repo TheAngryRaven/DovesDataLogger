@@ -100,7 +100,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   All six divergent inline copies of the ms → `M:SS.mmm` math are replaced
   by one host-tested `lap_format` unit; the replay page's already-correct
   rendering is unchanged, and the lap list now shows zero-padded
-  `M:SS.mmm`.
+  `M:SS.mmm`. (Cosmetic side effect: once a lap passes one minute the
+  big-font live pages now zero-pad the seconds — `1:05.007` rather than the
+  old `1: 5.007` — same field width, so the column stays stable.)
 
 ### Security
 - **SD card arbitration race fixed — a BLE client in radio range could
