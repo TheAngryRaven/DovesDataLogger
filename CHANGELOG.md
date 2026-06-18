@@ -58,6 +58,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   parks while `usbMscActive` (mirroring the BLE branch): GPS/tach/lap/SD
   processing is skipped entirely, only the Exit button and the status page
   are serviced, so the host owns the card uncontested.
+- **Unplugging the USB cable now exits mass-storage mode.** Previously the
+  only way out was the on-device Exit button; pulling the cable (the natural
+  way to "finish") left the device stuck `usbMscActive` — holding the
+  `SD_ACCESS_USB_MSC` lock and the EMI-unsafe 8 MHz SD clock indefinitely,
+  so a subsequent drive would silently fail to log. The parked loop now
+  watches VBUS and reboots out of USB mode when the cable is removed.
 - **Track detection no longer throttles the whole main loop.** The manifest
   scan (O(N) software-double haversine, several ms at the 200-entry ceiling)
   was gated only on `gpsData.fix`, which stays true between PVT updates — so

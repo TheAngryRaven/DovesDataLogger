@@ -1281,6 +1281,14 @@ void loop() {
   // skipped. (The SD-access policy would deny those acquires anyway, but
   // parking here is the real guarantee rather than a side effect.)
   if (usbMscActive) {
+    // Cable pulled without using the on-device Exit (the natural way to
+    // "finish") — tear down so the SD lock, the fast SPI clock, and the
+    // media-ready state don't leak into a later driving session and
+    // silently refuse to log. USB_MSC_DISABLE() reboots and does not return.
+    if (!isUsbConnected()) {
+      USB_MSC_DISABLE();
+    }
+
     // Minimal button check for the on-device Exit (Select).
     readButtons();
     if (btn2->pressed) {
