@@ -247,6 +247,72 @@ normal wake path, because `GPS_LOOP()` runs in the normal loop.
 
 ## 7. Findings (bugs / state-flow risks)
 
-*This section is populated from the deep-dive audit — see the chat summary for
-severities and reproduction scenarios.*
+From the deep-dive audit of the sleep state machine. Severities reflect
+likelihood × impact on the field device.
+
+### CONFIRMED
+
+**[HIGH] Wake button "leaks" into a menu action on button-wake.**
+`BirdsEye.ino:1178` (wake), `display_ui.ino` `checkButton()` / `switchToDisplayPage()`.
+Button wake calls `anyButtonPressed()` then `exitSleepMode(false)` → main menu.
+Neither `exitSleepMode()` nor `switchToDisplayPage()` clears the `ButtonState`
+edge fields (`wasReleased`, `lastPressed`, `pressed`), and `readButtons()`
+never ran during sleep — so those fields are frozen at their pre-sleep values
+(in menu idle, `wasReleased == true`). On the first post-wake loop,
+`checkButton()` sees the wake button still physically held, finds
+`wasReleased == true` and `millis() - lastPressed >= antiBounceIntv` (millis
+jumped far during sleep), and registers `pressed = true`.
+**Consequence:** the button used to wake immediately fires a menu action — waking
+with Select can auto-start a Race/logging session or enter Replay with no
+intent. **Fix direction:** clear/seed button edge state in the wake path
+(e.g. a `resetButtonEdges()` before landing on the menu).
+
+### SUSPECTED (needs bench confirmation)
+
+**[MEDIUM] Watchdog may reset the device during quiescent sleep.**
+WDT is configured `SLEEP_Run` (~4 s) and only fed at the top of `loop()`, but
+in sleep the loop blocks in `sd_app_evt_wait()` until an interrupt. With BLE
+stopped, TIMER3 stopped, IMU off, and the tach ISR only firing on engine
+pulses, if the SoftDevice doesn't raise an event every ~4 s the pet never
+runs and the WDT resets the MCU — a silent ~4 s reset cycle during sleep that
+wastes power and breaks the charge/GPS timers. Depends on SoftDevice tick
+behavior, not determinable from source. **Bench test:** multi-minute idle
+sleep with no USB/engine.
+
+### LOWER SEVERITY / ROBUSTNESS
+
+**[LOW] GPS baud-recovery never runs during the periodic sleep GPS check.**
+`GPS_SLEEP_PERIODIC_CHECK()` arms the PVT watchdog, but the sleep loop calls
+`checkUblox()`/`checkCallbacks()` directly and never runs `GPS_LOOP()` — the
+only place `GPS_BAUD_RECOVERY()` is wired. If V_BCKP was lost during the 24 h
+backup (module dropped to 9600 baud), the periodic check just times out and
+re-sleeps; the armed watchdog state is dead. Only a real wake recovers baud.
+Low impact (24 h interval, best-effort fix).
+
+**[LOW] Charging mode busy-loops (no WFE).** The USB-present branch `return`s
+before `sd_app_evt_wait()`, so the whole charge period spins the core at full
+loop speed instead of idling — counterproductive for a path meant for
+*efficient* charging. Intentional ("just loop") but runs the core hot.
+
+**[LOW] `sleepEnteredAt` is dead state.** Written in `enterSleepMode()`, never
+read. Suggests a dropped idle/safety timeout.
+
+### CHECKED — OK (audit scope)
+
+- **No CourseManager/file leak** on sleep-from-race: `enterSleepMode()` →
+  `endRaceSession()` deletes `courseManager`, closes `dataFile`, releases SD.
+  `createLapAnythingCourseManager()` is null-guarded (no double-alloc on rpm wake).
+- **Tach wake re-arm correct:** `TACH_SLEEP()` clears the flag + flushes ring/
+  filter; ISR stays attached; `wakeRpm` is checked *before* the USB/charging
+  branch so RPM wake works even while plugged in.
+- **TIMER3 ordering safe:** stop does INTENCLR + DisableIRQ + ClearPending +
+  DSB before clearing `gpsTimerActive`; start clears pending before enable.
+- **Stale GPS state cleared** by `GPS_WAKE()` before the timer restarts.
+- **BLE teardown vs sleep:** `BLE_STOP()` clears `bleActive` first so the
+  disconnect callback skips its reboot; sleep can't be entered from the BLE page.
+- **rpmWake race start** matches the manual menu Race start and
+  `autoRaceModeCheck()` — no sleep-specific divergence.
+
+> Note: a `usb_msc.{h,ino}` subsystem exists that interacts with the
+> USB/charging path and is **not** documented in `CLAUDE.md`.
 </content>
