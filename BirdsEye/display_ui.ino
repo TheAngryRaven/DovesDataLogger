@@ -17,6 +17,13 @@ static bool i2cRecoveryNeeded = false;
 void i2cBusRecover() {
   debugln(F("I2C: Bus recovery - bit-banging 9 SCL clocks"));
 
+  // Feed the watchdog before each potentially-blocking I2C re-init step.
+  // If ignition EMI is still glitching the bus, Wire.begin() / display.begin()
+  // can stall on it — without these pets the recovery routine itself would
+  // trip the 4 s WDT and reboot, then re-trigger on the next boot (boot loop).
+  // Mirrors the GPS baud-recovery hardening in gps_functions.ino.
+  wdtPet();
+
   Wire.end();
 
   // Manually toggle SCL 9 times to free stuck slave
@@ -41,16 +48,19 @@ void i2cBusRecover() {
   delayMicroseconds(5);
 
   // Re-init Wire
+  wdtPet();
   Wire.begin();
   Wire.setClock(400000);  // Must re-set after begin() (resets to 100kHz)
 
   // Re-init display
+  wdtPet();
   #ifdef USE_1306_DISPLAY
     display.begin(SSD1306_SWITCHCAPVCC, I2C_DISPLAY_ADDRESS);
   #else
     display.begin(I2C_DISPLAY_ADDRESS, true);
   #endif
 
+  wdtPet();
   debugln(F("I2C: Bus recovery complete"));
 }
 
@@ -63,8 +73,11 @@ void safeDisplayUpdate() {
   unsigned long elapsed = millis() - start;
 
   if (elapsed > 100) {
-    debugln(F("I2C: display.display() took too long, scheduling recovery"));
-    i2cRecoveryNeeded = true;
+    // Recover immediately rather than deferring to the next frame — a stuck
+    // bus would otherwise get one more (also-slow) paint before recovery runs.
+    debugln(F("I2C: display.display() took too long, recovering now"));
+    i2cRecoveryNeeded = false;
+    i2cBusRecover();
   }
 }
 

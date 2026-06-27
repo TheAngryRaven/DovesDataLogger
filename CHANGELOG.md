@@ -50,6 +50,31 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   to 2 MHz automatically if the fast re-init fails.
 
 ### Fixed
+- **I2C bus recovery no longer risks a reboot loop.** `i2cBusRecover()`
+  re-inits Wire and the OLED over I2C, which can block if ignition EMI is
+  still glitching the bus — and it never fed the watchdog, so the recovery
+  routine itself could trip the 4 s WDT and reset, then re-trigger on the
+  next boot. It now pets the watchdog before each blocking re-init step
+  (matching the GPS baud-recovery hardening), and `safeDisplayUpdate()`
+  recovers a hung bus immediately instead of waiting one more (also-slow)
+  frame.
+- **Logging init aborts cleanly if the SD card drops mid-header.** The DOVEX
+  1 KB header pre-fill ignored each `write()` return, so a card dropping
+  sectors during log creation could leave a truncated header region while
+  the firmware still marked logging ready and streamed rows into it. The
+  pre-fill now verifies every write and aborts the open (retrying next
+  second) on a short write.
+- **A mid-session SD write failure now tries to save the lap times.** When a
+  data-row write fails (typical of a failing card/tray), logging stops
+  cleanly as before — but the reserved header is now written first, so the
+  session's lap list and best/optimal times survive instead of being lost
+  with the session.
+- **`buildTrackList()` now arbitrates SD access.** The track-list/manifest
+  rebuild walked the `/TRACKS` directory with raw SdFat calls and no access
+  mutex, the lone SD consumer that didn't — leaving a window where a BLE
+  track upload/delete completing during a logging teardown could touch SdFat
+  from two tasks. It now holds `SD_ACCESS_TRACK_PARSE` for the walk and
+  checks the directory open.
 - **USB mass-storage no longer races the host for the SD card.** While the
   drive was mounted the main loop kept running `GPS_LOOP()`,
   `trackDetectionLoop()`, auto-idle, etc., so the firmware and the host PC

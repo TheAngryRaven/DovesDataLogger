@@ -109,8 +109,19 @@ static char jsonFileBuffer[JSON_BUFFER_SIZE];
 static StaticJsonDocument<JSON_BUFFER_SIZE> trackJson;
 
 bool buildTrackList() {
+  // Take the SD mutex for the whole directory walk. Every other SD consumer
+  // arbitrates through it; without this, a BLE track upload/delete completing
+  // while logging is being torn down could hit SdFat from two tasks at once.
+  // Both BLE callers (processTrackUpload/processTrackDelete) and setup()
+  // release/hold no lock before calling, so this can't self-deadlock.
+  if (!acquireSDAccess(SD_ACCESS_TRACK_PARSE)) {
+    debugln(F("buildTrackList: SD busy, skipping rebuild."));
+    return false;
+  }
+
   if (!SD.exists(trackFolder)) {
     debugln(F("TRACKS folder does not exist."));
+    releaseSDAccess(SD_ACCESS_TRACK_PARSE);
     return false;
   }
 
@@ -119,7 +130,11 @@ bool buildTrackList() {
   trackManifestCount = 0;
 
   // If the TRACKS directory exists, open it
-  trackDir.open(trackFolder);
+  if (!trackDir.open(trackFolder)) {
+    debugln(F("Failed to open TRACKS folder."));
+    releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+    return false;
+  }
 
   // Reset the file to the first position in the directory
   trackDir.rewind();
@@ -198,6 +213,7 @@ bool buildTrackList() {
   debug(F("Manifest entries: "));
   debugln(trackManifestCount);
 
+  releaseSDAccess(SD_ACCESS_TRACK_PARSE);
   return true;
 }
 
