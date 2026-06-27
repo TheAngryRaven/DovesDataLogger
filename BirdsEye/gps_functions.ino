@@ -404,6 +404,12 @@ void GPS_LOOP() {
             debugln(F("SD write failed - stopping logging, race continues"));
             enableLogging = false;
             sdDataLogInitComplete = false;
+            // Try to salvage the session's lap times / metadata into the
+            // reserved header before closing. A write failure here usually
+            // means a flaky card, so this may also fail — but when it
+            // succeeds the lap list survives instead of being lost with the
+            // session. writeDovexHeader() no-ops if the file isn't open.
+            writeDovexHeader();
             dataFile.close();
             releaseSDAccess(SD_ACCESS_LOGGING);
           }
@@ -455,14 +461,27 @@ void GPS_LOOP() {
           // back into this region at session end.
           char padBuf[64];
           memset(padBuf, '\n', sizeof(padBuf));
+          bool prefillOk = true;
           for (uint32_t i = 0; i < DOVEX_HEADER_SIZE; i += sizeof(padBuf)) {
             uint32_t toWrite = min((uint32_t)sizeof(padBuf), DOVEX_HEADER_SIZE - i);
-            dataFile.write(padBuf, toWrite);
+            // Verify each write landed. On a card dropping sectors mid-init,
+            // an unchecked short write would leave a truncated header region
+            // but we'd still mark logging ready and stream rows into garbage.
+            if (dataFile.write(padBuf, toWrite) != toWrite) {
+              prefillOk = false;
+              break;
+            }
           }
-          // Cursor is now at exactly DOVEX_HEADER_SIZE
-          dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z"));
-          debugln(F("CSV header written"));
-          sdDataLogInitComplete = true;
+          if (!prefillOk) {
+            debugln(F("Header pre-fill write failed - aborting log init, will retry"));
+            dataFile.close();
+            releaseSDAccess(SD_ACCESS_LOGGING);
+          } else {
+            // Cursor is now at exactly DOVEX_HEADER_SIZE
+            dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z"));
+            debugln(F("CSV header written"));
+            sdDataLogInitComplete = true;
+          }
         }
       }
     }
