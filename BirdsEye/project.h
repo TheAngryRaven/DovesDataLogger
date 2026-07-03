@@ -1,6 +1,8 @@
 #ifndef _DOVES_PROJECT_H
 #define _DOVES_PROJECT_H
 
+#include <stdint.h>
+
 ///////////////////////////////////////////
 // DovesDataLogger - Project-Wide Types & Macros
 //
@@ -102,6 +104,21 @@ inline void dummy_debug(...) {
 #define SLEEP_GPS_FIX_TIMEOUT     120000   // 2 min max for GPS fix attempt
 #define SLEEP_RPM_WAKE_THRESHOLD  100      // RPM above this wakes from sleep
 #define CHARGE_DISPLAY_TIMEOUT_MS 10000    // Show charging screen for 10s then display off
+
+///////////////////////////////////////////
+// BLE RADIO OWNERSHIP
+// The one SoftDevice (single advert set + single peripheral connection
+// slot) is shared between the file-transfer service (bluetooth.ino) and
+// the camera remote (camera_ble.ino). bleOwner (defined in BirdsEye.ino,
+// documented in bluetooth.h) records which subsystem currently owns the
+// advert set, so the shared connect/disconnect callbacks can route a
+// peer to the right module.
+///////////////////////////////////////////
+enum BleOwner : uint8_t {
+  BLE_OWNER_NONE = 0,      // radio idle — nobody advertising
+  BLE_OWNER_TRANSFER = 1,  // file-transfer page (BLE_SETUP/BLE_STOP)
+  BLE_OWNER_CAMERA = 2,    // camera remote (camera_ble)
+};
 
 ///////////////////////////////////////////
 // STRUCT DEFINITIONS

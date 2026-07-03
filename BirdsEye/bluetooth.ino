@@ -4,6 +4,7 @@
 ///////////////////////////////////////////
 
 #include "bluetooth.h"
+#include "camera_ble.h"
 #include "filename_validator.h"
 #include "firmware_ota.h"
 
@@ -49,6 +50,14 @@ static bool deferFileCommand(const char* cmd) {
 static volatile bool bleDisconnectCleanupPending = false;
 
 void bleConnectCallback(uint16_t conn_handle) {
+  // Camera-owned link (the X4 connecting to our remote GATT) — route to the
+  // camera module and skip everything below: bleConnected and the MTU/PHY/
+  // DLE negotiation are transfer-only.
+  if (bleOwner == BLE_OWNER_CAMERA) {
+    cameraBleOnConnect(conn_handle);
+    return;
+  }
+
   debugln(F("BLE: Device connected!"));
   bleConnected = true;
 
@@ -81,6 +90,15 @@ void bleConnectCallback(uint16_t conn_handle) {
 }
 
 void bleDisconnectCallback(uint16_t conn_handle, uint8_t reason) {
+  // Camera-owned link — route to the camera module and return. This makes
+  // the transfer teardown below (and with it the deferred auto-reboot in
+  // BLUETOOTH_LOOP()) structurally unreachable for camera links: a camera
+  // dropping off must never reboot the logger mid-session.
+  if (bleOwner == BLE_OWNER_CAMERA) {
+    cameraBleOnDisconnect(conn_handle, reason);
+    return;
+  }
+
   debugln(F("BLE: Disconnected!"));
   bleConnected = false;
   bleNegotiatedMtu = 23; // Reset to default
@@ -143,7 +161,24 @@ void bleSetupFileService() {
   fileStatusChar.begin();
 }
 
-void bleStartAdvertising() {
+void bleApplyTransferAdvertising() {
+  // Full rebuild, not an incremental start: the camera module may have
+  // owned the advert set (name + payload) since the last transfer session,
+  // so drop whatever is there and reconstruct the transfer advert exactly.
+  Bluefruit.Advertising.stop();  // safe no-op if not advertising
+  Bluefruit.Advertising.clearData();
+  Bluefruit.ScanResponse.clearData();
+
+  char bleName[32];
+  if (getSetting("bluetooth_name", bleName, sizeof(bleName))) {
+    debug(F("BLE: Name from settings: "));
+    debugln(bleName);
+    Bluefruit.setName(bleName);
+  } else {
+    debugln(F("BLE: WARNING - bluetooth_name not found, using fallback"));
+    Bluefruit.setName("DovesDataLogger");
+  }
+
   Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
   Bluefruit.Advertising.addTxPower();
   Bluefruit.Advertising.addService(fileService);
@@ -333,6 +368,11 @@ void bleDeleteFile(const char* filename) {
 }
 
 void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, uint16_t len) {
+  // Only serve the file service while the transfer page owns the radio. A
+  // peer that connects during camera mode must not queue deferred SD work —
+  // BLUETOOTH_LOOP() is gated on bleActive and would never drain it.
+  if (bleOwner != BLE_OWNER_TRANSFER) return;
+
   char buffer[65];
   memset(buffer, 0, sizeof(buffer));
   uint16_t copyLen = len < 64 ? len : 64;
@@ -500,44 +540,21 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
   }
 }
 
-void BLE_SETUP() {
-  // Parked transfer — bump the SD clock for faster file transfers. Reverted
-  // in BLE_STOP() (and by the auto-reboot on phone disconnect). Done before
-  // the early-return so re-entering the BLE page re-applies it.
-  sdSetTransferSpeed(true);
+void bleCoreEnsureInit() {
+  if (bleInitialized) return;
 
-  if (bleInitialized) {
-    // Already initialized, just start advertising
-    debugln(F("BLE: Restarting advertising..."));
-    Bluefruit.autoConnLed(true);
-    Bluefruit.setConnLedInterval(250); // Blink every 250ms when connected
-    Bluefruit.Advertising.start(0);
-    bleActive = true;
-    return;
-  }
-
-  debugln(F("BLE: Initializing Bluetooth..."));
+  debugln(F("BLE: Initializing Bluetooth core..."));
 
   // Custom BLE config for max file transfer throughput:
   // MTU 247, event_len 100 (125ms max radio time per event),
   // HVN TX queue 10 (up from BANDWIDTH_MAX's 3 — deeper notification pipeline),
   // WrCmd queue 1 (default, we don't use write commands).
   Bluefruit.configPrphConn(247, 100, 10, 1);
-  Bluefruit.begin();
+  // 1 peripheral + 1 central: the central slot carries the camera control
+  // link (camera_ble connecting to the X4's be80 service). Central conn
+  // parameters stay at Bluefruit defaults.
+  Bluefruit.begin(1, 1);
   Bluefruit.setTxPower(4);
-  char bleName[32];
-  if (getSetting("bluetooth_name", bleName, sizeof(bleName))) {
-    debug(F("BLE: Name from settings: "));
-    debugln(bleName);
-    Bluefruit.setName(bleName);
-  } else {
-    debugln(F("BLE: WARNING - bluetooth_name not found, using fallback"));
-    Bluefruit.setName("DovesDataLogger");
-  }
-
-  // Enable connection LED
-  Bluefruit.autoConnLed(true);
-  Bluefruit.setConnLedInterval(250);
 
   Bluefruit.Periph.setConnectCallback(bleConnectCallback);
   Bluefruit.Periph.setDisconnectCallback(bleDisconnectCallback);
@@ -565,9 +582,40 @@ void BLE_SETUP() {
   bledis.begin();
 
   bleSetupFileService();
-  bleStartAdvertising();
+
+  // Camera remote GATT (peripheral ce80 + D0FF services) plus the central
+  // client objects for the camera's be80 service. GATT services can only
+  // be added before advertising starts, so they are registered here even
+  // when the user never touches the camera feature.
+  cameraBleRegisterServices();
 
   bleInitialized = true;
+
+  // Deliberately NO advertising, NO device name, NO conn-LED here — the
+  // owner (transfer page or camera module) applies its own advert set.
+}
+
+void BLE_SETUP() {
+  // Parked transfer — bump the SD clock for faster file transfers. Reverted
+  // in BLE_STOP() (and by the auto-reboot on phone disconnect).
+  sdSetTransferSpeed(true);
+
+  debugln(F("BLE: Starting transfer mode..."));
+
+  bleCoreEnsureInit();
+
+  // Take the radio for the transfer service (main-loop context — the camera
+  // module released its links via CAMERA_FORCE_RELEASE() before this page
+  // opened). The full advert rebuild below is what makes re-entry correct
+  // even when the camera owned the advert set in between.
+  bleOwner = BLE_OWNER_TRANSFER;
+
+  // Enable connection LED
+  Bluefruit.autoConnLed(true);
+  Bluefruit.setConnLedInterval(250); // Blink every 250ms when connected
+
+  bleApplyTransferAdvertising();
+
   bleActive = true;
 
   debugln(F("BLE: Ready for connection!"));
@@ -615,6 +663,10 @@ void BLE_STOP() {
 
   bleConnected = false;
   // bleActive already set false at top of BLE_STOP()
+
+  // Release radio ownership. The camera module re-acquires it on its next
+  // advertising action (in CAMERA_LOOP()) — nothing to hand off here.
+  bleOwner = BLE_OWNER_NONE;
 
   // Restore the EMI-safe SD clock now that the transfer session is over.
   sdSetTransferSpeed(false);
