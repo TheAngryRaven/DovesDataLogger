@@ -20,6 +20,8 @@ add_executable(birdseye_tests
   sd_access_policy_test.cpp
   lap_format_test.cpp
   tach_filter_test.cpp
+  camera_fsm_test.cpp
+  insta360_protocol_test.cpp
   ${BIRDSEYE_DIR}/haversine.cpp
   ${BIRDSEYE_DIR}/gps_time.cpp
   ${BIRDSEYE_DIR}/gps_validation.cpp
@@ -29,6 +31,8 @@ add_executable(birdseye_tests
   ${BIRDSEYE_DIR}/sd_access_policy.cpp
   ${BIRDSEYE_DIR}/lap_format.cpp
   ${BIRDSEYE_DIR}/tach_filter.cpp
+  ${BIRDSEYE_DIR}/camera_fsm.cpp
+  ${BIRDSEYE_DIR}/insta360_protocol.cpp
 )
 
 target_include_directories(birdseye_tests PRIVATE

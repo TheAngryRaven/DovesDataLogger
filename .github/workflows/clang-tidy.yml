@@ -38,4 +38,6 @@ jobs:
             BirdsEye/filename_validator.cpp \
             BirdsEye/sd_access_policy.cpp \
             BirdsEye/lap_format.cpp \
-            BirdsEye/tach_filter.cpp
+            BirdsEye/tach_filter.cpp \
+            BirdsEye/camera_fsm.cpp \
+            BirdsEye/insta360_protocol.cpp
