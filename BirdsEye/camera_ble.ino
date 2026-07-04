@@ -26,6 +26,23 @@
 #include "insta360_protocol.h"
 #include "settings.h"
 
+// Forward declarations for every function whose signature mentions a
+// Bluefruit type. Arduino's auto-prototype generator inserts prototypes
+// BEFORE <bluefruit.h> is included, so without these explicit ones the
+// generated prototypes fail with "'BLECharacteristic' has not been
+// declared" (same workaround as bleFileRequestCallback in bluetooth.ino
+// — arduino-cli skips functions that already have a prototype).
+static void cameraCe81WriteCallback(uint16_t conn_hdl, BLECharacteristic* chr,
+                                    uint8_t* data, uint16_t len);
+static void cameraD0ffIgnoreWriteCallback(uint16_t conn_hdl, BLECharacteristic* chr,
+                                          uint8_t* data, uint16_t len);
+static void cameraBe82NotifyCallback(BLEClientCharacteristic* chr,
+                                     uint8_t* data, uint16_t len);
+static void cameraScanCallback(ble_gap_evt_adv_report_t* report);
+static void cameraBeginReadChar(BLECharacteristic& chr, const uint8_t* value,
+                                uint8_t len);
+static void cameraBeginWriteChar(BLECharacteristic& chr);
+
 ///////////////////////////////////////////
 // MODULE STATE
 ///////////////////////////////////////////
