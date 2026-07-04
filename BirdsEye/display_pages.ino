@@ -121,11 +121,15 @@ void displayPage_pair_camera() {
     display.println(serial);
     display.println();
 
+    // Back first (index 0): the page flips from the pairing screen to
+    // this menu the frame a serial is captured, and a "Cancel" press
+    // landing one frame late must not hit Unpair and erase the
+    // just-captured serial.
     display.setTextSize(2);
     display.print(menuSelectionIndex == 0 ? "->" : "  ");
-    display.println(F("Unpair"));
-    display.print(menuSelectionIndex == 1 ? "->" : "  ");
     display.println(F("Back"));
+    display.print(menuSelectionIndex == 1 ? "->" : "  ");
+    display.println(F("Unpair"));
   } else {
     // Unpaired: live pairing status from the camera FSM.
     display.setTextSize(1);

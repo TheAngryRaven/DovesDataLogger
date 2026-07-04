@@ -54,9 +54,12 @@ void CAMERA_SETUP();
 // the bleActive / usbMscActive parking branches or sleep — intentional.
 void CAMERA_LOOP();
 
-// Session-end hook: called at the top of endRaceSession(). Queues the
-// one-shot sessionEndRequested event for the next CAMERA_LOOP() step
-// (stops recording immediately / powers off from cooldown).
+// Session-end hook: called from the MANUAL logging-stop confirm (the
+// user's explicit "I'm done") — deliberately NOT from auto-idle, which
+// ends the log on speed alone and must not cut camera footage during a
+// grid idle. Queues the one-shot sessionEndRequested event for the next
+// CAMERA_LOOP() step (stops recording immediately / powers off from
+// cooldown). Sleep entry uses CAMERA_SLEEP() instead.
 void CAMERA_NOTIFY_SESSION_END();
 
 // Transfer takeover: best-effort stop-video if recording, drop both

@@ -457,6 +457,12 @@ static void cameraExecuteAction(camera_fsm::Action a) {
 
     case camera_fsm::Action::kStopControlConnect:
       Bluefruit.Scanner.stop();
+      // A pending CONNECT_IND handshake (advert seen, no handle yet)
+      // isn't covered by disconnect() — cancel it explicitly so a late
+      // connect can't complete while the FSM is idle or the transfer
+      // service owns the radio. Harmless (returns an error) when no
+      // connect is pending.
+      (void)sd_ble_gap_connect_cancel();
       // Drop a half-open (or aborted) central connection so the retry
       // starts clean.
       if (controlConnHandle != BLE_CONN_HANDLE_INVALID) {
@@ -474,6 +480,11 @@ static void cameraExecuteAction(camera_fsm::Action a) {
     }
 
     case camera_fsm::Action::kSendStopVideo: {
+      // Known edge (rare): if the control link dropped in the same
+      // instant as a manual session end, this send fails silently and
+      // the camera keeps recording. The cooldown's ce82 power-off (or
+      // the camera's own auto-off if both links died) closes the file —
+      // accepted for v1 rather than adding a stop-retry channel.
       cameraSendStopVideo();
       debugln(F("CAM: stop-video sent"));
       break;
@@ -671,6 +682,9 @@ static void cameraTeardown(bool sendPowerOff) {
     }
 
     Bluefruit.Scanner.stop();
+    // Also cancel any pending CONNECT_IND handshake (no handle yet) so a
+    // late central connect can't complete after this teardown.
+    (void)sd_ble_gap_connect_cancel();
     if (controlConnHandle != BLE_CONN_HANDLE_INVALID) {
       Bluefruit.disconnect(controlConnHandle);
     }

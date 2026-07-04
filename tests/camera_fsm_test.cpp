@@ -752,9 +752,11 @@ TEST_CASE("camera_fsm - forceIdle clears all timers") {
 // unpair
 // ---------------------------------------------------------------------------
 
-TEST_CASE("camera_fsm - unpair from IDLE clears the serial") {
+TEST_CASE("camera_fsm - unpair from IDLE clears the serial and drops links") {
     Sim s;
-    CHECK(s.pulse(&Inputs::unpairRequested, 10) == Action::kNone);
+    // kDisconnect, not kNone: a remote link surviving into kIdle must not
+    // stay connected to an unpaired (or subsequently re-paired) device.
+    CHECK(s.pulse(&Inputs::unpairRequested, 10) == Action::kDisconnect);
     CHECK(s.f.state == State::kUnpaired);
     CHECK(s.f.serialPresent == false);
 }

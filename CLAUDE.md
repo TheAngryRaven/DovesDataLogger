@@ -587,8 +587,10 @@ loop()  ~250 Hz
   at mfg[14..19], X4-verified format); recording starts on GPS fix (or
   after 30 s regardless); stops after 60 s of stationary (<2 mph) **AND**
   engine-off (<300 rpm) — grid idling and coasting stalls keep recording;
-  a manual session end (`CAMERA_NOTIFY_SESSION_END()` from
-  `endRaceSession()`) stops the camera immediately; power-off (ce82 3-s
+  a manual session end (`CAMERA_NOTIFY_SESSION_END()` from the
+  logging-stop confirm — deliberately NOT from `endRaceSession()`, whose
+  auto-idle caller ends the log on speed alone and must not cut footage
+  during a grid idle) stops the camera immediately; power-off (ce82 3-s
   power-button frame) fires after a 3-min cooldown. All timing (debounce,
   retries, timeouts, GPS-feed decimation) lives in the FSM so the entire
   temporal behavior is host-testable; every tunable is a single-point

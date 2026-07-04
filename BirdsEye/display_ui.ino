@@ -312,9 +312,14 @@ void handleMenuPageSelection() {
       switchToDisplayPage(PAGE_PAIR_CAMERA);
     }
   } else if (currentPage == PAGE_PAIR_CAMERA) {
-    // Only a menu while paired (Unpair / Back) — the unpaired pairing
+    // Only a menu while paired (Back / Unpair) — the unpaired pairing
     // screen handles its buttons in the custom branch in displayLoop().
+    // Back is index 0 so a late "Cancel" press right after a serial
+    // capture can't land on Unpair.
     if (menuSelectionIndex == 0) {
+      debugln(F("Camera: Back selected"));
+      switchToDisplayPage(PAGE_MAIN_MENU);
+    } else {
       debugln(F("Camera: Unpair selected"));
       if (cameraRequestUnpair()) {
         switchToDisplayPage(PAGE_MAIN_MENU);
@@ -324,9 +329,6 @@ void handleMenuPageSelection() {
         internalNotification[sizeof(internalNotification) - 1] = '\0';
         switchToDisplayPage(PAGE_INTERNAL_WARNING);
       }
-    } else {
-      debugln(F("Camera: Back selected"));
-      switchToDisplayPage(PAGE_MAIN_MENU);
     }
   } else if (currentPage == PAGE_TRANSFER_MENU) {
     if (menuSelectionIndex == 0) {
@@ -393,7 +395,11 @@ void handleMenuPageSelection() {
     if (menuSelectionIndex == 0) {
       switchToDisplayPage(GPS_SPEED);
     } else {
-      // LOGGING STOP
+      // LOGGING STOP — the user's explicit "I'm done": stop the camera
+      // recording immediately too (bypasses its stationary+engine-off
+      // hold). Auto-idle deliberately does NOT do this — see the comment
+      // in endRaceSession().
+      CAMERA_NOTIFY_SESSION_END();
       endRaceSession();
       switchToDisplayPage(PAGE_MAIN_MENU);
     }

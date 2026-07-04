@@ -311,11 +311,15 @@ Action step(Fsm& f, const Inputs& in) {
   }
 
   // 2. Unpair: only honored while no session machinery is running.
+  //    kDisconnect (not kNone): a remote link can survive into kIdle
+  //    (e.g. kConnecting abandoned by session end) — left connected, the
+  //    old camera would occupy the single peripheral slot and could
+  //    re-inject its serial into the next pairing attempt.
   if (in.unpairRequested &&
       (f.state == State::kUnpaired || f.state == State::kIdle)) {
     f.state = State::kUnpaired;
     f.serialPresent = false;
-    return Action::kNone;
+    return Action::kDisconnect;
   }
 
   // 3. Enter pairing (falls through so the state logic emits the entry

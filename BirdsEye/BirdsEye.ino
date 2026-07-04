@@ -929,8 +929,13 @@ void trackDetectionLoop() {
  * and LOGGING_STOP_CONFIRM in display_ui.ino.
  */
 void endRaceSession() {
-  // Stops the camera immediately on any session end — manual, auto-idle, sleep
-  CAMERA_NOTIFY_SESSION_END();
+  // Deliberately NO camera notification here: checkAutoIdle() ends the
+  // log session on speed alone (engine ignored), but the camera must
+  // keep recording through a stationary grid idle — its own
+  // stationary-AND-engine-off rule decides the recording stop. The
+  // camera is stopped explicitly where the user means "I'm done":
+  // the manual stop confirm (display_ui.ino) and sleep entry
+  // (CAMERA_SLEEP() in enterSleepMode()).
 
   // Write DOVEX metadata header into the reserved region
   if (sdDataLogInitComplete && dataFile.isOpen()) {
