@@ -44,8 +44,7 @@ size_t buildButtonFrame(uint8_t* out, size_t cap, uint8_t button,
 // Payload follows from byte 16.
 // ---------------------------------------------------------------------
 
-constexpr size_t kBe81HeaderLen = 16;
-constexpr size_t kVideoFrameLen = 18;  // header + 2-byte payload
+constexpr size_t kVideoFrameLen = 18;  // 16-byte header + 2-byte payload
 constexpr size_t kKeepAliveLen = 7;
 constexpr size_t kGpsFrameLen = 71;
 
