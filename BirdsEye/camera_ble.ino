@@ -215,11 +215,16 @@ static void cameraCentralDisconnectCallback(uint16_t conn_handle, uint8_t reason
 }
 
 // Scan RX: minimal — flag the sighting and connect (standard Bluefruit
-// central pattern; connect() stops the scanner). Deliberately no
-// Scanner.resume(): one connect attempt per hit, the FSM owns retries.
+// central pattern; a successful connect() stops the scanner). If the
+// connect attempt fails (SoftDevice busy / conn count), resume scanning:
+// the scanner is left PAUSED after a filtered hit, and a later
+// Scanner.start() while paused is a silent INVALID_STATE no-op — without
+// the resume, the FSM's whole retry budget would burn on a stalled scan.
 static void cameraScanCallback(ble_gap_evt_adv_report_t* report) {
   scanHit = true;
-  Bluefruit.Central.connect(report);
+  if (!Bluefruit.Central.connect(report)) {
+    Bluefruit.Scanner.resume();
+  }
 }
 
 ///////////////////////////////////////////
@@ -340,6 +345,10 @@ void cameraBleRegisterServices() {
   Bluefruit.Scanner.restartOnDisconnect(false);
   Bluefruit.Scanner.setInterval(160, 80);  // 100 ms interval / 50 ms window
   Bluefruit.Scanner.useActiveScan(true);
+  // X4-VERIFY(sniff): matches only 16-bit UUID list AD fields — if the
+  // X4 advertises be80 inside a 128-bit vendor UUID list instead, this
+  // filter never fires and the central connect relies on the camera
+  // connecting to us first.
   Bluefruit.Scanner.filterUuid(0xBE80);
 
   debugln(F("CAM: GATT registered (ce80 + D0FF + be80 client)"));
@@ -350,12 +359,19 @@ void cameraBleRegisterServices() {
 ///////////////////////////////////////////
 
 // Stream a be81 command frame in <= 20-byte chunks. Prefers write-
-// without-response (Bluefruit's BLEClientCharacteristic::write() issues
-// a Write Command and returns 0 when the char doesn't support it) so
-// the ~250 Hz main loop stays non-blocking; falls back to a Write
-// Request (write_resp) otherwise.
+// without-response so the ~250 Hz main loop stays non-blocking, but the
+// choice is gated on the DISCOVERED properties: Bluefruit's
+// BLEClientCharacteristic::write() issues a Write Command
+// unconditionally (the property VERIFY in the core is commented out),
+// so a char that only accepts Write Request would silently discard
+// every frame while write() still reported success. Falls back to a
+// blocking Write Request when WWR isn't offered (bounded; ~4 chunks max
+// at 1 Hz for the GPS frame).
 static bool cameraSendBe81(const uint8_t* frame, size_t len) {
   if (!controlLinkUp || !cameraBe81Char.discovered()) return false;
+
+  const bool useWriteCmd =
+      (cameraBe81Char.properties() & CHR_PROPS_WRITE_WO_RESP) != 0;
 
   insta360_protocol::Chunker c;
   c.buf = frame;
@@ -365,8 +381,13 @@ static bool cameraSendBe81(const uint8_t* frame, size_t len) {
   uint8_t chunk[insta360_protocol::kChunkSize];
   size_t n;
   while ((n = insta360_protocol::nextChunk(c, chunk)) > 0) {
-    uint16_t wrote = cameraBe81Char.write(chunk, (uint16_t)n);
-    if (wrote != n) wrote = cameraBe81Char.write_resp(chunk, (uint16_t)n);
+    uint16_t wrote = useWriteCmd ? cameraBe81Char.write(chunk, (uint16_t)n)
+                                 : cameraBe81Char.write_resp(chunk, (uint16_t)n);
+    // Write-command path can still come up short on TX-buffer
+    // exhaustion — retry that one chunk as a Write Request.
+    if (wrote != n && useWriteCmd) {
+      wrote = cameraBe81Char.write_resp(chunk, (uint16_t)n);
+    }
     if (wrote != n) return false;
   }
   return true;
@@ -469,6 +490,10 @@ static void cameraExecuteAction(camera_fsm::Action a) {
 
     case camera_fsm::Action::kStartControlConnect:
       debugln(F("CAM: scanning for camera (be80)"));
+      // stop() first: a retry can land while the scanner sits PAUSED
+      // after a filtered hit whose connect failed, and start() from
+      // paused is a silent INVALID_STATE no-op.
+      Bluefruit.Scanner.stop();
       Bluefruit.Scanner.start(0);
       break;
 
