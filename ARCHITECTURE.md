@@ -58,6 +58,7 @@ loop()
  ├─ checkForNewLapData()         append completed laps to history
  ├─ checkAutoIdle()              60 s < 2 mph -> end session
  ├─ autoRaceModeCheck()          RPM/speed on menu -> enter race
+ ├─ CAMERA_LOOP()                step the Insta360 auto-record FSM
  ├─ button hold combos           sleep / reboot
  ├─ readButtons() / displayLoop() / resetButtons()
 ```
@@ -85,6 +86,11 @@ to the matching `*_LOOP()`.
   and track sync, plus buttonless Secure DFU (`BLEDfu`) for OTA firmware
   updates and a Device Information Service (`BLEDis`) that reports
   `FIRMWARE_VERSION` for the update check.
+- **Camera** (`camera_ble` + the `camera_fsm` / `insta360_protocol` pure
+  units) — hands-free Insta360 X4 auto-record: the device impersonates
+  the Insta360 GPS Remote, wakes the paired camera on engine start,
+  starts/stops recording automatically, and feeds it GPS at 1 Hz for the
+  camera's overlay.
 - **Replay** (`replay`) — instant DOVEX header replay.
 - **Settings** (`settings`) — JSON key/value store on the SD card.
 - **CourseManager** (external library) — owns course detection, sector
@@ -165,6 +171,48 @@ serves it with permissive CORS, so the browser can fetch both the manifest
 and the `.zip` — raw release-asset URLs can't be relied on for that). Sense
 and non-Sense are the same MCU + SoftDevice, so a mismatched image still
 boots — it just skips IMU init.
+
+### Insta360 camera auto-record
+An Insta360 X4 has no wired trigger, but it *does* trust its own BLE
+accessory: the "GPS Remote". So the device impersonates the remote — it
+hosts the remote's GATT (service `0xCE80` plus the secondary `D0FF`
+service) and wakes a powered-off camera with the remote's
+manufacturer-data advertisement carrying the camera's serial. Acting the
+remote alone isn't enough for deterministic control, though: the remote's
+shutter button is a *toggle*, so the device also connects as BLE
+**central** to the camera's own `0xBE80` control service, which has
+explicit start-video / stop-video commands and accepts a 1 Hz GPS
+telemetry frame for the camera's Stats Dashboard overlay. That's why the
+BLE core is dual-role (`Bluefruit.begin(1, 1)`) — one peripheral slot
+shared with the file-transfer service via an explicit `bleOwner`
+(NONE/TRANSFER/CAMERA), one central slot for the camera. The owner model
+keeps the two radio users honest: a camera link can never trigger the
+transfer path's auto-reboot-on-disconnect, and opening the transfer page
+force-releases the camera first. BLE comes up lazily on the first camera
+action, so an unpaired device pays nothing.
+
+The entire lifecycle — wake on engine start, record on GPS lock (or a
+30 s timeout), stop, cool down, power off — is a **pure FSM**
+(`camera_fsm`): it consumes a telemetry snapshot each loop tick and
+returns at most one action for the glue to execute. All the temporal
+behavior (debounce, retries, timeouts) lives inside it, so every path is
+host-tested with a fake clock rather than discovered at the track; it is
+also the board-portable core intended to move unchanged to the nRF54
+("Falcon") target. The stop condition is deliberately **AND, not OR**:
+recording ends only after 60 s of stationary *and* engine-off, because
+either signal alone lies — a kart idles on the grid at 0 mph, and a
+coasting stall has speed but no RPM. Both together mean the session is
+really over (a manual session end stops the camera immediately).
+
+Two guarantees bound the feature's blast radius. First, the FSM is a
+*read-only* consumer of telemetry — logs are byte-identical whether a
+camera is paired or not, and camera mode never parks the main loop the
+way BLE transfer and USB MSC do. Second, the protocol bytes live in the
+host-tested `insta360_protocol` unit with golden-byte tests, sourced
+from proven community reference implementations; every camera-facing
+table is marked `X4-VERIFY(sniff)` until confirmed against a live sniff
+of our own hardware (the wake advert and button frames are X4-verified;
+the control-service frames are proven on ONE/X3).
 
 ## Data formats
 
