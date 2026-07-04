@@ -337,8 +337,13 @@ void handleMenuPageSelection() {
       BLE_SETUP();
       switchToDisplayPage(PAGE_BLUETOOTH);
     } else {
-      // USB mass storage — show the status page, then enumerate the drive
+      // USB mass storage — show the status page, then enumerate the drive.
+      // Release the camera first: the USB parking branch never runs
+      // CAMERA_LOOP(), so an in-flight camera session would otherwise be
+      // frozen (advert broadcasting unserviced / cooldown never expiring)
+      // for the whole USB session.
       debugln(F("Transfer: USB selected"));
+      CAMERA_FORCE_RELEASE();
       switchToDisplayPage(PAGE_USB_STORAGE);
       if (!USB_MSC_ENABLE()) {
         // SD busy with another subsystem — bounce back to the submenu

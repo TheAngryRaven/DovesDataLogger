@@ -135,9 +135,12 @@ static void cameraCe81WriteCallback(uint16_t conn_hdl, BLECharacteristic* chr,
   uint8_t slot = ce81WriteIdx;
   if (ce81Ready[slot]) return;  // both slots full — main loop stalled, drop
 
-  uint16_t n = len < kCe81BufSize ? len : kCe81BufSize;
-  memcpy(ce81Buf[slot], data, n);
-  ce81Len[slot] = (uint8_t)n;   // publish length first...
+  // Drop oversize frames outright rather than truncating: the serial
+  // parser is tail-anchored, so a truncated serial frame would yield 6
+  // plausible-but-wrong bytes and could pair us to garbage.
+  if (len > kCe81BufSize) return;
+  memcpy(ce81Buf[slot], data, len);
+  ce81Len[slot] = (uint8_t)len;  // publish length first...
   ce81Ready[slot] = true;       // ...then the "ready" signal
   ce81WriteIdx = slot ^ 1;
 }
@@ -219,6 +222,16 @@ void cameraBleOnDisconnect(uint16_t connHandle, uint8_t reason) {
     remoteLinkUp = false;
     remoteConnHandle = BLE_CONN_HANDLE_INVALID;
   }
+}
+
+bool cameraBleOwnsConnHandle(uint16_t connHandle) {
+  // Match on the handle alone (not remoteLinkUp): cameraTeardown() clears
+  // remoteLinkUp synchronously but leaves the handle set so the in-flight
+  // disconnect event still routes here instead of to the transfer path.
+  // The handle is only invalidated by cameraBleOnDisconnect(), and the
+  // SoftDevice cannot reuse it before that event has fired.
+  return remoteConnHandle != BLE_CONN_HANDLE_INVALID &&
+         connHandle == remoteConnHandle;
 }
 
 ///////////////////////////////////////////
@@ -591,10 +604,22 @@ void CAMERA_LOOP() {
   const camera_fsm::State preState = cameraFsm.state;
   camera_fsm::Action action = camera_fsm::step(cameraFsm, in);
 
-  // cameraAdvertSeen is only meaningful in kWaking and every kWaking
-  // step reads it — clear the latch once a step has consumed it so a
-  // stale sighting can't short-circuit a future wake.
-  if (preState == camera_fsm::State::kWaking) scanHit = false;
+  // cameraAdvertSeen is only meaningful in kWaking — clear the latch only
+  // once a step has actually CONSUMED a true value (the scan callback can
+  // set it between the snapshot read above and here; clearing
+  // unconditionally would erase a sighting no step ever saw).
+  if (preState == camera_fsm::State::kWaking && in.cameraAdvertSeen) {
+    scanHit = false;
+  }
+
+  // The kConnecting->kAwaitGps success path returns kNone (the connect
+  // itself stopped the scanner), but a retry that overlapped a slow
+  // discovery can leave the scanner running — stop it explicitly on the
+  // transition so it can't idle-scan for the whole session.
+  if (preState == camera_fsm::State::kConnecting &&
+      cameraFsm.state == camera_fsm::State::kAwaitGps) {
+    Bluefruit.Scanner.stop();
+  }
 
   // 4. Execute the (single) returned action.
   cameraExecuteAction(action);
@@ -651,6 +676,13 @@ static void cameraTeardown(bool sendPowerOff) {
     }
     if (remoteLinkUp && remoteConnHandle != BLE_CONN_HANDLE_INVALID) {
       Bluefruit.disconnect(remoteConnHandle);
+      // Clear the link flag NOW — the disconnect completes asynchronously
+      // and the FSM must not see a stale remoteConnected after this
+      // teardown (a stuck-true flag makes IDLE skip the wake advert
+      // forever). The handle itself stays set so the in-flight disconnect
+      // event still routes to cameraBleOnDisconnect() via
+      // cameraBleOwnsConnHandle() instead of the transfer path.
+      remoteLinkUp = false;
     }
     if (bleOwner == BLE_OWNER_CAMERA) {
       Bluefruit.Advertising.stop();
@@ -659,7 +691,10 @@ static void cameraTeardown(bool sendPowerOff) {
   }
 
   // Drop latched signals + queued one-shots — none may survive into the
-  // next camera session.
+  // next camera session. (ce81 slots too: the callback stopped writing
+  // the moment ownership was released above.)
+  ce81Ready[0] = false;
+  ce81Ready[1] = false;
   scanHit = false;
   lastRecordState = -1;
   sessionEndPending = false;

@@ -90,11 +90,16 @@ void bleConnectCallback(uint16_t conn_handle) {
 }
 
 void bleDisconnectCallback(uint16_t conn_handle, uint8_t reason) {
-  // Camera-owned link — route to the camera module and return. This makes
-  // the transfer teardown below (and with it the deferred auto-reboot in
+  // Camera link — route to the camera module and return. This makes the
+  // transfer teardown below (and with it the deferred auto-reboot in
   // BLUETOOTH_LOOP()) structurally unreachable for camera links: a camera
-  // dropping off must never reboot the logger mid-session.
-  if (bleOwner == BLE_OWNER_CAMERA) {
+  // dropping off must never reboot the logger mid-session. Matched BY
+  // HANDLE first, not owner: a teardown-initiated camera disconnect
+  // completes asynchronously, so its event can land after ownership has
+  // already moved to NONE/TRANSFER (e.g. CAMERA_FORCE_RELEASE()
+  // immediately followed by BLE_SETUP() on the transfer page) — owner
+  // routing alone would misdeliver it here and reboot the device.
+  if (cameraBleOwnsConnHandle(conn_handle) || bleOwner == BLE_OWNER_CAMERA) {
     cameraBleOnDisconnect(conn_handle, reason);
     return;
   }

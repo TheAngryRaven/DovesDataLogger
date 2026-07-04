@@ -234,8 +234,9 @@ bool bleActive = false;
 bool bleConnected = false;
 // Which subsystem owns the BLE radio (advert set + peripheral slot):
 // transfer service vs camera remote. Transitions only on the main loop —
-// see the ownership model in bluetooth.h.
-BleOwner bleOwner = BLE_OWNER_NONE;
+// see the ownership model in bluetooth.h. volatile: read from Bluefruit
+// task callbacks for routing decisions.
+volatile BleOwner bleOwner = BLE_OWNER_NONE;
 bool bleTransferInProgress = false;
 uint32_t bleFileSize = 0;
 uint32_t bleBytesTransferred = 0;

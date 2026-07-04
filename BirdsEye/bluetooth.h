@@ -24,8 +24,9 @@
 ///////////////////////////////////////////
 
 // Current radio owner (defined in BirdsEye.ino with the other BLE
-// state flags). See the ownership model above.
-extern BleOwner bleOwner;
+// state flags). See the ownership model above. volatile: read from
+// Bluefruit task callbacks for routing decisions.
+extern volatile BleOwner bleOwner;
 
 // One-time Bluefruit core bring-up, idempotent: conn config,
 // begin(1 peripheral + 1 central — the central slot is the camera

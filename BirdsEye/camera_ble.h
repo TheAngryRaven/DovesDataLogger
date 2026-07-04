@@ -82,6 +82,14 @@ void cameraBleRegisterServices();
 void cameraBleOnConnect(uint16_t connHandle);
 void cameraBleOnDisconnect(uint16_t connHandle, uint8_t reason);
 
+// True while connHandle is the camera's remote-service link. The shared
+// disconnect callback checks this BEFORE the bleOwner test: a
+// teardown-initiated camera disconnect completes asynchronously, so its
+// event can arrive after ownership has already moved to NONE/TRANSFER —
+// routing that event by owner would misdeliver it to the transfer
+// teardown (whose auto-reboot must never fire for camera links).
+bool cameraBleOwnsConnHandle(uint16_t connHandle);
+
 // ---- UI surface (called from display_ui.ino / display_pages.ino) ----
 
 // True when a camera serial is stored (FSM armed).
