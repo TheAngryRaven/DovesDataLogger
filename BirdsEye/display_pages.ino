@@ -22,10 +22,7 @@ void displayPage_boot() {
 void displayPage_main_menu() {
   resetDisplay();
 
-  display.setTextSize(1);
-  display.println(F("   Doves MagicBox"));
-  display.setTextSize(1);
-  display.println();
+  // Four size-2 rows fill the full 64 px — no room for a title line.
   display.setTextSize(2);
 
   display.print(menuSelectionIndex == 0 ? "->" : "  ");
@@ -34,6 +31,8 @@ void displayPage_main_menu() {
   display.println(F("Review"));
   display.print(menuSelectionIndex == 2 ? "->" : "  ");
   display.println(F("Transfer"));
+  display.print(menuSelectionIndex == 3 ? "->" : "  ");
+  display.println(F("Camera"));
 
   safeDisplayUpdate();
 }
@@ -102,6 +101,97 @@ void displayPage_usb_storage() {
   display.println(F("Drag & drop files."));
   display.println();
   display.println(F("->Exit (reboots)"));
+
+  safeDisplayUpdate();
+}
+
+void displayPage_pair_camera() {
+  resetDisplay();
+
+  if (cameraIsPaired()) {
+    // Paired: show the stored serial + Unpair/Back menu. This branch also
+    // takes over the frame after pairing captures a serial (FSM -> kIdle).
+    display.setTextSize(1);
+    display.println(F("       CAMERA"));
+    display.println();
+
+    char serial[7];
+    cameraPairedSerial(serial, sizeof(serial));
+    display.print(F("Paired: "));
+    display.println(serial);
+    display.println();
+
+    // Back first (index 0): the page flips from the pairing screen to
+    // this menu the frame a serial is captured, and a "Cancel" press
+    // landing one frame late must not hit Unpair and erase the
+    // just-captured serial.
+    display.setTextSize(2);
+    display.print(menuSelectionIndex == 0 ? "->" : "  ");
+    display.println(F("Back"));
+    display.print(menuSelectionIndex == 1 ? "->" : "  ");
+    display.println(F("Unpair"));
+  } else {
+    // Unpaired: live pairing status from the camera FSM.
+    display.setTextSize(1);
+    display.println(F("     PAIR CAMERA"));
+    display.println();
+
+    if (cameraFsmState() == camera_fsm::State::kPairing) {
+      if (cameraRemoteLinkUp()) {
+        display.println(F("Connected -"));
+        display.println(F("reading serial..."));
+      } else {
+        display.println(F("Power on camera"));
+        display.println(F("nearby..."));
+      }
+    } else {
+      // Pairing ended without a capture (e.g. 2-min timeout).
+      display.println(F("Pairing stopped"));
+      display.println();
+    }
+
+    display.println();
+    display.println();
+    display.println();
+    display.println(F("B1:Manual B2:Cancel"));
+  }
+
+  safeDisplayUpdate();
+}
+
+void displayPage_camera_serial_entry() {
+  resetDisplay();
+
+  display.setTextSize(1);
+  display.println(F("    CAMERA SERIAL"));
+
+  // Six entry characters, size 2 (12 px per column), left margin 16 px.
+  display.setTextSize(2);
+  display.setCursor(16, 16);
+  for (int i = 0; i < 6; i++) {
+    display.print(cameraSerialEntryBuf[i]);
+  }
+
+  // Caret under the character being edited (cursor 6/7 = OK/CANCEL row).
+  if (cameraSerialEntryCursor < 6) {
+    display.setCursor(16 + cameraSerialEntryCursor * 12, 34);
+    display.print(F("^"));
+  }
+
+  // OK / CANCEL on the bottom line; the cursor target renders inverted.
+  display.setTextSize(1);
+  display.setCursor(28, 56);
+  if (cameraSerialEntryCursor == 6) {
+    display.setTextColor(DISPLAY_TEXT_BLACK, DISPLAY_TEXT_WHITE);
+  }
+  display.print(F(" OK "));
+  display.setTextColor(DISPLAY_TEXT_WHITE);
+  display.print(F("  "));
+  if (cameraSerialEntryCursor == 7) {
+    display.setTextColor(DISPLAY_TEXT_BLACK, DISPLAY_TEXT_WHITE);
+  }
+  display.print(F(" CANCEL "));
+  display.setTextColor(DISPLAY_TEXT_WHITE);
 
   safeDisplayUpdate();
 }

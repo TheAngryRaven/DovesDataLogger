@@ -13,6 +13,28 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **Insta360 X4 camera auto-record.** The device now impersonates the
+  Insta360 "GPS Remote" BLE accessory to drive an X4 action camera fully
+  hands-free: engine start (RPM > 500 held 2 s) wakes a powered-off camera
+  via its wake advertisement, recording starts once GPS locks (or after
+  30 s regardless), a 1 Hz GPS telemetry feed drives the camera's Stats
+  Dashboard overlay, recording stops only after 60 s of *stationary AND
+  engine-off* (so grid idling and coasting stalls keep recording — a
+  manual session end stops it immediately), and the camera powers itself
+  off after a 3-minute cooldown. Pairing is automatic — connect the camera
+  once from the new main-menu **Camera** page and its 6-character serial
+  is captured and persisted (new `camera_serial` setting); a manual
+  serial-entry screen is the fallback. The BLE core is now dual-role
+  (peripheral remote + central control link) with an explicit radio-owner
+  model, so a camera link can never trigger the file-transfer auto-reboot,
+  the main loop keeps running while the camera is connected, and logs are
+  byte-identical with the feature on or off; unpaired users pay zero cost
+  (BLE comes up lazily on the first camera action). *Caveat:* the protocol
+  bytes come from proven community reference implementations — the wake
+  advert and remote-button frames are X4-verified, but the control-service
+  start/stop/GPS frames are proven on ONE/X3 hardware and marked
+  `X4-VERIFY(sniff)` pending on-hardware sniff verification against a real
+  X4.
 - **USB mass-storage file transfer.** The Transfer screen now opens a
   submenu offering **Bluetooth** (the existing BLE file-transfer flow,
   unchanged) or **USB**. Choosing USB presents the SD card to a connected

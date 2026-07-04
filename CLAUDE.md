@@ -36,6 +36,11 @@ any change — whether you're Claude or a human contributor — hold the line:
   short. See *Development Conventions* at the bottom for the full list.
 - **One concern per PR.** Keep refactors, behavior changes, and new tests in
   separate PRs so each is reviewable and revertable on its own.
+- **Once CI is green on a PR, STOP.** Report the green status once and end.
+  Do NOT schedule recurring re-checks, polling wake-ups, or "babysit"
+  timers on a passing PR — they burn the owner's session usage confirming
+  nothing changed. Watch a PR only when explicitly asked, and even then a
+  green CI run ends the loop.
 
 The goal: every change should leave the codebase at least as professional as
 it found it. If a shortcut would lower the bar, flag it instead of taking it.
@@ -55,6 +60,9 @@ Core capabilities:
 - 8+ display pages on a 128x64 OLED (3 Hz refresh)
 - Bluetooth LE file download to companion apps / HackTheTrack.net
 - On-device session replay: instant DOVEX header replay
+- **Insta360 X4 camera auto-record**: impersonates the Insta360 GPS Remote
+  over BLE — wakes the camera on engine start, records with a 1 Hz GPS
+  overlay feed, stops and powers off automatically (see subsystem 13)
 
 ---
 
@@ -74,7 +82,8 @@ All sketch sources live in `BirdsEye/` so the folder name matches the
 | `gps_config.h` | GPS configuration constants (baud rate, nav rate, serial port) |
 | `images.h` | PROGMEM bitmap data (splash screen, animations) |
 | `accelerometer.{h,ino}` | LSM6DS3 IMU init and g-force reads (onboard XIAO Sense) |
-| `bluetooth.{h,ino}` | BLE service (file listing, transfer, settings, track sync), auto-reboot on disconnect |
+| `bluetooth.{h,ino}` | BLE service (file listing, transfer, settings, track sync), auto-reboot on disconnect; shared dual-role core init + `bleOwner` radio-ownership routing |
+| `camera_ble.{h,ino}` | Insta360 X4 auto-record BLE glue: remote GATT (0xCE80/D0FF) + central control link (0xBE80), executes `camera_fsm` actions, deferred callback→loop pattern (see subsystem 13) |
 | `firmware_ota.{h,ino}` | SD-staged firmware OTA: `FW*` BLE protocol, SD staging, CRC verify, self-flash apply (see subsystem 11) |
 | `display_pages.{h,ino}` | All page rendering functions (`displayPage_*()`) |
 | `display_ui.{h,ino}` | Display init, button reading (multi-sample debounce), menu navigation, I2C bus recovery |
@@ -104,6 +113,8 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `sd_access_policy.{h,cpp}` | SD access arbitration decision table (mode values + grant/deny rules) |
 | `lap_format.{h,cpp}` | ms → `M:SS.mmm` lap-time rendering (three zero-minutes styles), used by all display pages |
 | `tach_filter.{h,cpp}` | Tachometer 1-D Kalman filter (predict/update math + Q/R tuning constants) |
+| `camera_fsm.{h,cpp}` | Insta360 auto-record lifecycle FSM (9 states, all debounce/retry/timeout timing + tunables); board-portable core shared with the nRF54 "Falcon" target |
+| `insta360_protocol.{h,cpp}` | Insta360 X4 BLE frame builders/parsers (wake advert, ce82 buttons, be81 start/stop/keep-alive/GPS, ce81/be82 parsing, chunker) with golden-byte tests |
 
 ### Non-Source
 
@@ -154,6 +165,8 @@ loop()  ~250 Hz
  ├─ trackDetectionLoop()    haversine scan → create CourseManager on match
  ├─ checkForNewLapData()    reads from active timer (CourseManager or lapTimer)
  ├─ checkAutoIdle()         60s at <2mph → end session, write DOVEX header
+ ├─ updateGpsLockHold()     pin user to tach page until GPS time lock
+ ├─ CAMERA_LOOP()           step Insta360 auto-record FSM (GPS/tach fresh)
  ├─ calculateGPSFrameRate() 1-second PVT counter
  ├─ readButtons()           multi-sample debounce + edge detection
  ├─ displayLoop()           pages read from active timer helpers
@@ -283,14 +296,32 @@ loop()  ~250 Hz
   - Transfer: `PAGE_TRANSFER_MENU` (-4) Bluetooth/USB submenu,
     `PAGE_USB_STORAGE` (-5) USB drive active.
   - BLE: `PAGE_BLUETOOTH` (-2).
+  - Camera: `PAGE_PAIR_CAMERA` (-6) pairing / paired-status management,
+    `PAGE_CAMERA_SERIAL_ENTRY` (-7) manual 6-char serial entry fallback.
   - Errors: `PAGE_INTERNAL_WARNING` (100), `PAGE_INTERNAL_FAULT` (105).
 
 ### 6. Bluetooth (`bluetooth.ino`)
 
+- **Dual-role core, shared with the camera** (see subsystem 13): the
+  one-time `bleCoreEnsureInit()` runs `Bluefruit.begin(1, 1)` — 1
+  peripheral + 1 central (the central slot is the camera control link) —
+  and registers *every* GATT service (DFU, DIS, file service, camera
+  remote via `cameraBleRegisterServices()`) before any advertising starts.
+  `BLE_SETUP()` / `BLE_STOP()` are now just the transfer-mode owner
+  transitions on top of that core.
+- **Radio ownership (`BleOwner`)**: the single advert set + peripheral
+  connection slot are shared between the transfer service and the camera
+  remote. `bleOwner` (`NONE` / `TRANSFER` / `CAMERA`, enum in `project.h`,
+  variable in `BirdsEye.ino`) records the current owner; the shared
+  connect/disconnect callbacks route on it, so a camera link can never
+  trigger the transfer auto-reboot and file commands are ignored unless
+  the transfer service owns the radio. `bleActive` / `bleConnected` keep
+  their transfer-only meanings — camera mode never sets them. Owner
+  transitions happen only on the main loop, never in a Bluefruit callback.
 - BLE service UUID `0x1820`.
 - Characteristics: file list (0x2A3D), file request (0x2A3E),
   file data (0x2A3F), file status (0x2A40).
-- **OTA + version services** (set up in `BLE_SETUP()`):
+- **OTA + version services** (registered in `bleCoreEnsureInit()`):
   - `BLEDfu bledfu` — buttonless Nordic Secure DFU. A companion
     (DovesDataViewer over Web Bluetooth) writes the "enter bootloader"
     command; the board reboots into the bootloader's Secure DFU mode and
@@ -538,6 +569,72 @@ loop()  ~250 Hz
   (hardware), so there is no host-testable logic here — only the
   `sd_access_policy` mode addition is unit-tested.
 
+### 13. Camera Auto-Record (`camera_ble.ino`, `camera_fsm.{h,cpp}`, `insta360_protocol.{h,cpp}`)
+
+- **What**: hands-free Insta360 X4 control. The device impersonates the
+  Insta360 "GPS Remote" BLE accessory so a paired X4 is woken when the
+  engine starts, records the session with a live GPS overlay, and powers
+  itself off afterward — the driver never touches the camera.
+- **Dual BLE role** on the one SoftDevice (`Bluefruit.begin(1, 1)`):
+  - **Peripheral** — we host the remote's GATT: service `0xCE80` (ce81
+    WRITE camera→us carrying its serial + status frames, ce82 NOTIFY
+    us→camera button frames, ce83 static) plus the `D0FF` secondary
+    service the real remote exposes. The camera pairs against this and
+    connects to us after a wake advert.
+  - **Central** — we also connect to the camera's own `0xBE80` control
+    service for deterministic start/stop-video, keep-alive, and the 1 Hz
+    GPS telemetry frame (0x35, arsfabula packing; be81 write / be82
+    notify) that drives the camera's Stats Dashboard overlay.
+- **Lifecycle FSM** (`camera_fsm` pure unit, host-tested): 9 states —
+  UNPAIRED / IDLE / WAKING / CONNECTING / AWAIT_GPS / RECORDING /
+  COOLDOWN / POWERING_OFF / PAIRING. RPM > 500 held 2 s wakes a
+  powered-off camera via a 31-byte manufacturer-data wake advert (serial
+  at mfg[14..19], X4-verified format); recording starts on GPS fix (or
+  after 30 s regardless); stops after 60 s of stationary (<2 mph) **AND**
+  engine-off (<300 rpm) — grid idling and coasting stalls keep recording;
+  a manual session end (`CAMERA_NOTIFY_SESSION_END()` from the
+  logging-stop confirm — deliberately NOT from `endRaceSession()`, whose
+  auto-idle caller ends the log on speed alone and must not cut footage
+  during a grid idle) stops the camera immediately; power-off (ce82 3-s
+  power-button frame) fires after a 3-min cooldown. All timing (debounce,
+  retries, timeouts, GPS-feed decimation) lives in the FSM so the entire
+  temporal behavior is host-testable; every tunable is a single-point
+  `constexpr` in `camera_fsm.h`. The unit is also the board-portable core
+  shared with the nRF54 ("Falcon") target — nothing in it may `#ifdef`
+  on the platform.
+- **Read-only telemetry guarantee**: the FSM consumes an `Inputs`
+  snapshot (RPM, speed, fix, link state, one-shot events) built fresh
+  each `CAMERA_LOOP()` and returns at most one `Action` for the glue to
+  execute. It never writes to logging state — logs are byte-identical
+  with the feature on or off, and camera mode never parks the main loop
+  (unlike the `bleActive` / `usbMscActive` branches).
+- **Pairing**: entering pairing from `PAGE_PAIR_CAMERA` advertises
+  connectably as "Insta360 GPS Remote"; after connecting, the camera
+  writes its 6-char ASCII serial to ce81, which is captured and persisted
+  in the `camera_serial` setting (empty = unpaired). The manual 6-char
+  entry page (`PAGE_CAMERA_SERIAL_ENTRY`) is the fallback. Pairing times
+  out after 2 min.
+- **Coexistence** (`bleOwner`, see subsystem 6): the camera shares the
+  single advert set + peripheral slot with the transfer service. Opening
+  the Bluetooth transfer page calls `CAMERA_FORCE_RELEASE()` before
+  `BLE_SETUP()` — best-effort stop-video, drop both links, force the FSM
+  to IDLE, release the radio. Sleep entry runs `CAMERA_SLEEP()` (same,
+  plus a best-effort power-off). BLE comes up **lazily** on the first
+  camera action (first advertising `Action`), so unpaired users pay zero
+  RAM/power cost.
+- **Threading**: same deferred pattern as `firmware_ota` — Bluefruit
+  callbacks (connect/disconnect/scan/ce81 writes/be82 notifies) only copy
+  into RAM and set volatile flags; `CAMERA_LOOP()` on the main loop
+  consumes them, steps the FSM, and does all real work (including the one
+  `setSetting()` that persists a captured serial).
+- **X4-VERIFY posture**: all frame bytes live in the host-tested
+  `insta360_protocol` pure unit with golden-byte tests, sourced from
+  proven reference implementations (pchwalek / tsunghowu / btittelbach /
+  arsfabula). Every camera-facing table is marked `// X4-VERIFY(sniff)`
+  until confirmed against a live sniff of our own hardware: the wake
+  advert + ce82 button frames are X4-verified; the be81
+  start/stop/GPS frames are proven on ONE/X3, X4 sniff pending.
+
 ---
 
 ## Data Formats
@@ -607,6 +704,7 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 {
   "bluetooth_name": "DovesDataLogger-042",
   "bluetooth_pin": "7391",
+  "camera_serial": "",
   "device_name": "ApexTurbo",
   "driver_name": "Driver",
   "lap_detection_distance": "7",
@@ -619,6 +717,7 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 |-----|------|---------|---------|
 | `bluetooth_name` | string | Random | BLE device name |
 | `bluetooth_pin` | string | Random 4-digit | BLE pairing PIN |
+| `camera_serial` | string | `""` (empty = unpaired) | Paired Insta360 X4's 6-char serial (auto-captured on pairing, or entered manually) |
 | `device_name` | string | Random racing words | Identifies the logging device (DOVEX header) |
 | `driver_name` | string | `"Driver"` | Logged in DOVEX header |
 | `lap_detection_distance` | int | `7` | DovesLapTimer crossing threshold (meters) |
@@ -671,6 +770,14 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | OTA staging flash base | `0xA4000` | `firmware_ota.ino` |
 | OTA max image size | 320 KB | `firmware_ota.ino` |
 | OTA min apply voltage | 3.6 V | `firmware_ota.ino` |
+| Camera stop-record delay | 60 s stationary AND engine-off | `camera_fsm.h` |
+| Camera power-off cooldown | 180 s | `camera_fsm.h` |
+| Camera GPS feed rate | 1 Hz | `camera_fsm.h` |
+| Camera RPM on/off thresholds | 500 / 300 (2 s on-debounce) | `camera_fsm.h` |
+| Camera wake advert burst | 5 s | `camera_fsm.h` |
+| Camera connect timeouts | 20 s wake / 15 s control, 3 retries each | `camera_fsm.h` |
+| Camera GPS-lock wait | 30 s, then record anyway | `camera_fsm.h` |
+| Camera pairing timeout | 120 s | `camera_fsm.h` |
 
 ---
 

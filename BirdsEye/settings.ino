@@ -70,6 +70,9 @@ bool createDefaultSettings() {
   settingsJson["waypoint_detection_distance"] = "30";
   settingsJson["waypoint_speed"] = "30";
 
+  // Camera pairing: empty until an Insta360 serial is captured/entered
+  settingsJson["camera_serial"] = "";
+
   File settingsFile;
   settingsFile.open(SETTINGS_FILE_PATH, O_WRITE | O_CREAT | O_TRUNC);
   if (!settingsFile) {
@@ -101,6 +104,7 @@ static void ensureDefaultSettings() {
     { "lap_detection_distance", "7" },
     { "waypoint_detection_distance", "30" },
     { "waypoint_speed", "30" },
+    { "camera_serial", "" },  // empty = no Insta360 paired
   };
 
   char buf[48];
