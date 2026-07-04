@@ -79,6 +79,7 @@
 // surface and pulls in any library types those signatures need.
 #include "accelerometer.h"
 #include "bluetooth.h"
+#include "camera_ble.h"
 #include "display_pages.h"
 #include "display_ui.h"
 #include "dovex_header.h"
@@ -512,6 +513,8 @@ const int PAGE_BLUETOOTH = -2;
 const int PAGE_REPLAY_FILE_SELECT = -3;
 const int PAGE_TRANSFER_MENU = -4;   // Bluetooth-vs-USB submenu
 const int PAGE_USB_STORAGE = -5;     // USB mass-storage active screen
+const int PAGE_PAIR_CAMERA = -6;     // Insta360 pairing / paired-status screen
+const int PAGE_CAMERA_SERIAL_ENTRY = -7; // manual 6-char camera serial entry
 const int PAGE_REPLAY_RESULTS = -8;
 const int PAGE_REPLAY_EXIT = -9;
 
@@ -558,6 +561,11 @@ int runningPageEnd = LOGGING_STOP; // only changes if sd:/tracks not found
 
 // Display state
 int menuSelectionIndex = 0;
+// Manual camera-serial entry state (PAGE_CAMERA_SERIAL_ENTRY): edited by the
+// button handler in display_ui.ino, rendered by display_pages.ino. Cursor
+// 0-5 = characters, 6 = OK, 7 = CANCEL. Reset when the page is entered.
+char cameraSerialEntryBuf[7] = "AAAAAA";
+int cameraSerialEntryCursor = 0;
 bool paceFlashStatus = false;
 bool notificationFlash = false;
 char internalNotification[64] = "N/A";
@@ -668,6 +676,9 @@ void setup() {
     debug(F(" device="));
     debugln(settingDeviceName);
   }
+
+  // Camera auto-record: load the persisted Insta360 serial + init the FSM
+  CAMERA_SETUP();
 
   if (!sdSetupSuccess) {
     strncpy(internalNotification, "SD Init failed!\n\nlogging not possible!", sizeof(internalNotification) - 1);
@@ -917,6 +928,9 @@ void trackDetectionLoop() {
  * and LOGGING_STOP_CONFIRM in display_ui.ino.
  */
 void endRaceSession() {
+  // Stops the camera immediately on any session end — manual, auto-idle, sleep
+  CAMERA_NOTIFY_SESSION_END();
+
   // Write DOVEX metadata header into the reserved region
   if (sdDataLogInitComplete && dataFile.isOpen()) {
     writeDovexHeader();
@@ -1092,6 +1106,9 @@ bool isUsbConnected() {
 void enterSleepMode() {
   // 1. End race session if active (safety net)
   if (raceActive) endRaceSession();
+
+  // 1b. Power off / release the camera before the SoftDevice goes down
+  CAMERA_SLEEP();
 
   // 2. Stop BLE if active (prevents SoftDevice power waste during sleep)
   if (bleActive) BLE_STOP();
@@ -1319,6 +1336,7 @@ void loop() {
   checkAutoIdle();
   autoRaceModeCheck();
   updateGpsLockHold();
+  CAMERA_LOOP();  // step the Insta360 auto-record FSM (GPS/tach fresh above)
 
   // Button hold detection for sleep/reboot combos
   updateButtonHoldState();
