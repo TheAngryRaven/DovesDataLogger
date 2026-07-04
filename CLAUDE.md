@@ -36,6 +36,11 @@ any change — whether you're Claude or a human contributor — hold the line:
   short. See *Development Conventions* at the bottom for the full list.
 - **One concern per PR.** Keep refactors, behavior changes, and new tests in
   separate PRs so each is reviewable and revertable on its own.
+- **Once CI is green on a PR, STOP.** Report the green status once and end.
+  Do NOT schedule recurring re-checks, polling wake-ups, or "babysit"
+  timers on a passing PR — they burn the owner's session usage confirming
+  nothing changed. Watch a PR only when explicitly asked, and even then a
+  green CI run ends the loop.
 
 The goal: every change should leave the codebase at least as professional as
 it found it. If a shortcut would lower the bar, flag it instead of taking it.
