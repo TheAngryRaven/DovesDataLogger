@@ -335,18 +335,26 @@ void handleMenuPageSelection() {
       }
     }
   } else if (currentPage == PAGE_CAMERA_TEST) {
-    // Bench-test controls: manual wake/record/power for the paired camera.
-    // Items: 0 Turn On, 1 Rec Start, 2 Rec Stop, 3 Power Off, 4 Back.
+    // Bench-test controls for the paired camera. Items:
+    //   0 Wake      — standby wake burst (no effect on a fully-off camera)
+    //   1 Connect   — present remote advert (R) + central-connect be80 (C)
+    //   2 Rec Start — be81 start-video (needs C link)
+    //   3 Rec Stop  — be81 stop-video (needs C link)
+    //   4 Power Off — ce82 power button (needs R link)
+    //   5 Back
     if (menuSelectionIndex == 0) {
-      debugln(F("Camera Test: Turn On"));
-      cameraTestPowerOn();
+      debugln(F("Camera Test: Wake"));
+      cameraTestWake();
     } else if (menuSelectionIndex == 1) {
+      debugln(F("Camera Test: Connect"));
+      cameraTestConnect();
+    } else if (menuSelectionIndex == 2) {
       debugln(F("Camera Test: Rec Start"));
       cameraTestStartRecording();
-    } else if (menuSelectionIndex == 2) {
+    } else if (menuSelectionIndex == 3) {
       debugln(F("Camera Test: Rec Stop"));
       cameraTestStopRecording();
-    } else if (menuSelectionIndex == 3) {
+    } else if (menuSelectionIndex == 4) {
       debugln(F("Camera Test: Power Off"));
       cameraTestPowerOff();
     } else {
@@ -629,7 +637,7 @@ void displayLoop() {
     } else if (currentPage == PAGE_PAIR_CAMERA) {
       menuLimit = 3; // Back, Test, Unpair
     } else if (currentPage == PAGE_CAMERA_TEST) {
-      menuLimit = 5; // Turn On, Rec Start, Rec Stop, Power Off, Back
+      menuLimit = 6; // Wake, Connect, Rec Start, Rec Stop, Power Off, Back
     } else if (
       currentPage == LOGGING_STOP_CONFIRM ||
       currentPage == PAGE_REPLAY_EXIT

@@ -186,15 +186,18 @@ void displayPage_camera_test() {
   display.println(F("    CAMERA TEST"));
 
   // Live link status so the tester can see what's actually connected:
-  // R = remote (peripheral) link, C = central control link.
+  // R = remote (peripheral) link — camera must be paired from its own
+  // Bluetooth-remote menu for this to come up (needed for Power Off).
+  // C = central control link — used for Rec Start/Stop.
   display.print(F("Link  R:"));
   display.print(cameraRemoteLinkUp() ? F("UP  ") : F("--  "));
   display.print(F("C:"));
   display.println(cameraControlLinkUp() ? F("UP") : F("--"));
-  display.println();
 
+  // Six size-1 rows follow (y16..y63) — no blank line, so "Back" stays
+  // on-panel. Wake burst only wakes a standby camera (see camera_ble.ino).
   static const char* const kTestItems[] = {
-    "Turn On", "Rec Start", "Rec Stop", "Power Off", "Back"};
+    "Wake", "Connect", "Rec Start", "Rec Stop", "Power Off", "Back"};
   const int itemCount = (int)(sizeof(kTestItems) / sizeof(kTestItems[0]));
   for (int i = 0; i < itemCount; i++) {
     display.print(menuSelectionIndex == i ? F("->") : F("  "));
