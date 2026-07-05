@@ -451,29 +451,30 @@ static void cameraExecuteAction(camera_fsm::Action a) {
           insta360_protocol::kWakeAdvertLen) {
         break;  // can't happen with a fixed-size out buffer
       }
-      // Raw full 31-byte advert PDU via BLEAdvertisingData::setData().
-      // (Alternative additive form: addFlags(...) then
-      // addData(BLE_GAP_AD_TYPE_MANUFACTURER_SPECIFIC_DATA, adv + 5, 26)
-      // — we take the raw path so the payload is byte-exact with the
-      // reference remotes.)
+      // Raw full advert PDU via BLEAdvertisingData::setData() so the payload
+      // is byte-exact with the reference remotes.
       //
-      // SIMPLIFICATION: reference impls send the wake burst
-      // non-connectably, but Bluefruit's BLEAdvertising doesn't cleanly
-      // expose the adv type, so this burst stays connectable. Harmless:
-      // a camera connecting during the burst IS a success — the FSM
-      // treats remoteConnected in kWaking as advance-to-connecting.
+      // Broadcast NON-CONNECTABLE (ADV_NONCONN_IND): a real beacon is
+      // non-connectable, and this stops the camera from trying to connect
+      // *to our beacon* instead of just waking and advertising its own be80.
+      // setType() must be re-set to connectable in kStartConnectableAdvertising
+      // (it persists on the shared Advertising object).
+      Bluefruit.Advertising.setType(BLE_GAP_ADV_TYPE_NONCONNECTABLE_NONSCANNABLE_UNDIRECTED);
       Bluefruit.Advertising.setData(adv, insta360_protocol::kWakeAdvertLen);
       Bluefruit.Advertising.restartOnDisconnect(false);
       Bluefruit.Advertising.setInterval(160, 160);  // 100 ms, fast == slow
       // No setFastTimeout(): with equal fast/slow intervals the fast
       // window expiring changes nothing.
       Bluefruit.Advertising.start(0);
-      debugln(F("CAM: wake burst advertising"));
+      debugln(F("CAM: wake burst advertising (non-connectable)"));
       break;
     }
 
     case camera_fsm::Action::kStartConnectableAdvertising: {
       if (!cameraTakeRadio()) break;
+      // Reset the advert type to connectable — the wake burst above leaves
+      // the shared Advertising object non-connectable.
+      Bluefruit.Advertising.setType(BLE_GAP_ADV_TYPE_CONNECTABLE_SCANNABLE_UNDIRECTED);
       // Exact name the camera looks for. Payload kept lean — flags(3) +
       // 0xCE80 service(4) + name(21) = 28 <= 31 fits the primary advert;
       // no TX-power element (the reference remote's advert has none).
@@ -685,6 +686,17 @@ void CAMERA_LOOP() {
   // transition so it can't idle-scan for the whole session.
   if (preState == camera_fsm::State::kConnecting &&
       cameraFsm.state == camera_fsm::State::kAwaitGps) {
+    Bluefruit.Scanner.stop();
+  }
+
+  // WAKING now runs the be80 scanner concurrently with the wake beacon (the
+  // FSM emits kStartControlConnect as its entry step 2). Any exit that is NOT
+  // heading into CONNECTING — which deliberately keeps the scanner for the
+  // in-flight connect — must stop the scanner too: the FSM's single returned
+  // action (kStopAdvertising) only stops the beacon.
+  if (preState == camera_fsm::State::kWaking &&
+      cameraFsm.state != camera_fsm::State::kWaking &&
+      cameraFsm.state != camera_fsm::State::kConnecting) {
     Bluefruit.Scanner.stop();
   }
 

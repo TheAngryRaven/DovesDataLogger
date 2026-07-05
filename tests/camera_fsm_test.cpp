@@ -51,9 +51,13 @@ struct Sim {
         REQUIRE(tick(0) == Action::kNone);  // arms the RPM debounce
         REQUIRE(tick(kRpmOnDebounceMs) == Action::kStartWakeBurst);
         REQUIRE(f.state == State::kWaking);
+        // Entry step 2: the be80 scanner comes up alongside the wake beacon.
+        REQUIRE(tick(0) == Action::kStartControlConnect);
     }
 
     void toConnecting() {
+        // Real path: the concurrent WAKING scanner spots the camera's be80.
+        // entryPending stays false, so CONNECTING does not re-scan.
         toWaking();
         in.cameraAdvertSeen = true;
         REQUIRE(tick(10) == Action::kStopAdvertising);
@@ -61,9 +65,19 @@ struct Sim {
         REQUIRE(f.state == State::kConnecting);
     }
 
+    // Alternate entry: reach CONNECTING via a stale remote link (camera
+    // already on our ce80), which arms the CONNECTING entry action
+    // (kStartControlConnect). Used by the CONNECTING-behavior tests.
+    void toConnectingViaRemote() {
+        in.remoteConnected = true;
+        in.rpm = 1000;
+        REQUIRE(tick(0) == Action::kNone);
+        REQUIRE(tick(kRpmOnDebounceMs) == Action::kNone);  // enterConnectingFresh
+        REQUIRE(f.state == State::kConnecting);
+    }
+
     void toAwaitGps() {
-        toConnecting();
-        REQUIRE(tick(10) == Action::kStartControlConnect);  // entry action
+        toConnecting();  // scanner already running; no CONNECTING re-scan
         in.controlConnected = true;
         REQUIRE(tick(10) == Action::kNone);
         REQUIRE(f.state == State::kAwaitGps);
@@ -155,7 +169,8 @@ TEST_CASE("camera_fsm - RPM debounce: 1999 ms no action, 2000 ms fires") {
     CHECK(s.tick(1) == Action::kStartWakeBurst);  // 2000 ms held: fire
     CHECK(s.f.state == State::kWaking);
     CHECK(s.f.wakeAttemptsUsed == 1);
-    CHECK(s.f.wakeBurstPhase == true);
+    // Entry step 2 brings up the be80 scanner concurrently with the beacon.
+    CHECK(s.tick(0) == Action::kStartControlConnect);
 }
 
 TEST_CASE("camera_fsm - RPM debounce: dip below threshold resets the hold") {
@@ -254,52 +269,49 @@ TEST_CASE("camera_fsm - stale remote link skips the wake to CONNECTING") {
 // WAKING
 // ---------------------------------------------------------------------------
 
-TEST_CASE("camera_fsm - WAKING burst goes connectable at 5 s") {
+TEST_CASE("camera_fsm - WAKING keeps beaconing (no connectable switch)") {
     Sim s;
-    s.toWaking();
-    CHECK(s.tick(4999) == Action::kNone);
-    CHECK(s.f.wakeBurstPhase == true);
-    CHECK(s.tick(1) == Action::kStartConnectableAdvertising);
-    CHECK(s.f.wakeBurstPhase == false);
+    s.toWaking();  // beacon + scanner both up; entry step consumed
+    // No 5 s connectable-advert switch any more: it just keeps beaconing.
+    auto acts = s.run(19000, 500);  // through most of attempt 1
+    CHECK(countOf(acts, Action::kStartConnectableAdvertising) == 0);
+    CHECK(acts.empty());  // silent while beaconing + scanning
     CHECK(s.f.state == State::kWaking);
 }
 
 TEST_CASE("camera_fsm - WAKING retry ladder: 20 s x3 then back to IDLE") {
     Sim s;
-    s.toWaking();  // attempt 1 starts at T
-    CHECK(s.tick(5000) == Action::kStartConnectableAdvertising);   // T+5s
-    CHECK(s.tick(14999) == Action::kNone);                         // T+19.999s
-    CHECK(s.tick(1) == Action::kStartWakeBurst);                   // T+20s: attempt 2
+    s.toWaking();  // attempt 1 window starts at T (scanner already running)
+    CHECK(s.tick(19999) == Action::kNone);            // T+19.999s: still beaconing
+    CHECK(s.tick(1) == Action::kStartWakeBurst);       // T+20s: attempt 2 (re-beacon)
     CHECK(s.f.wakeAttemptsUsed == 2);
-    CHECK(s.f.wakeBurstPhase == true);
-    CHECK(s.tick(5000) == Action::kStartConnectableAdvertising);   // T+25s
-    CHECK(s.tick(15000) == Action::kStartWakeBurst);               // T+40s: attempt 3
+    CHECK(s.tick(20000) == Action::kStartWakeBurst);   // T+40s: attempt 3
     CHECK(s.f.wakeAttemptsUsed == 3);
-    CHECK(s.tick(5000) == Action::kStartConnectableAdvertising);   // T+45s
-    CHECK(s.tick(15000) == Action::kStopAdvertising);              // T+60s: give up
+    CHECK(s.tick(20000) == Action::kStopAdvertising);  // T+60s: give up
     CHECK(s.f.state == State::kIdle);
 }
 
 TEST_CASE("camera_fsm - WAKING connect during attempt 3 goes to CONNECTING") {
     Sim s;
     s.toWaking();
-    CHECK(s.tick(5000) == Action::kStartConnectableAdvertising);
-    CHECK(s.tick(15000) == Action::kStartWakeBurst);   // attempt 2
-    CHECK(s.tick(5000) == Action::kStartConnectableAdvertising);
-    CHECK(s.tick(15000) == Action::kStartWakeBurst);   // attempt 3
-    s.in.remoteConnected = true;
+    CHECK(s.tick(20000) == Action::kStartWakeBurst);   // attempt 2
+    CHECK(s.tick(20000) == Action::kStartWakeBurst);   // attempt 3
+    s.in.cameraAdvertSeen = true;                      // scanner spots be80
     CHECK(s.tick(1000) == Action::kStopAdvertising);
     CHECK(s.f.state == State::kConnecting);
     CHECK(s.f.controlAttemptsUsed == 1);
-    CHECK(s.tick(10) == Action::kStartControlConnect);
+    // Scanner already running from WAKING: CONNECTING does NOT re-scan.
+    CHECK(s.tick(10) == Action::kNone);
 }
 
-TEST_CASE("camera_fsm - WAKING cameraAdvertSeen also advances to CONNECTING") {
+TEST_CASE("camera_fsm - WAKING controlConnected advances straight to AWAIT GPS") {
     Sim s;
     s.toWaking();
-    s.in.cameraAdvertSeen = true;
+    // The scan callback can connect the control link before we even register
+    // the advert sighting — WAKING then goes straight to AWAIT GPS.
+    s.in.controlConnected = true;
     CHECK(s.tick(100) == Action::kStopAdvertising);
-    CHECK(s.f.state == State::kConnecting);
+    CHECK(s.f.state == State::kAwaitGps);
 }
 
 TEST_CASE("camera_fsm - WAKING rpm-gone for 2 s aborts back to IDLE") {
@@ -341,7 +353,7 @@ TEST_CASE("camera_fsm - WAKING sessionEnd returns to IDLE") {
 
 TEST_CASE("camera_fsm - CONNECTING entry action emitted exactly once") {
     Sim s;
-    s.toConnecting();
+    s.toConnectingViaRemote();
     CHECK(s.tick(10) == Action::kStartControlConnect);
     CHECK(s.tick(10) == Action::kNone);
     CHECK(s.tick(10) == Action::kNone);
@@ -350,7 +362,7 @@ TEST_CASE("camera_fsm - CONNECTING entry action emitted exactly once") {
 
 TEST_CASE("camera_fsm - CONNECTING retry ladder: 15 s x3 then back to IDLE") {
     Sim s;
-    s.toConnecting();  // attempt 1 window starts at T
+    s.toConnectingViaRemote();  // attempt 1 window starts at T
     CHECK(s.tick(10) == Action::kStartControlConnect);           // entry
     CHECK(s.tick(14989) == Action::kNone);                       // T+14.999s
     CHECK(s.tick(1) == Action::kStartControlConnect);            // T+15s: attempt 2
@@ -363,7 +375,7 @@ TEST_CASE("camera_fsm - CONNECTING retry ladder: 15 s x3 then back to IDLE") {
 
 TEST_CASE("camera_fsm - CONNECTING success goes to AWAIT GPS") {
     Sim s;
-    s.toConnecting();
+    s.toConnectingViaRemote();
     CHECK(s.tick(10) == Action::kStartControlConnect);
     s.in.controlConnected = true;
     CHECK(s.tick(500) == Action::kNone);
@@ -372,7 +384,7 @@ TEST_CASE("camera_fsm - CONNECTING success goes to AWAIT GPS") {
 
 TEST_CASE("camera_fsm - CONNECTING sessionEnd returns to IDLE") {
     Sim s;
-    s.toConnecting();
+    s.toConnectingViaRemote();
     CHECK(s.tick(10) == Action::kStartControlConnect);
     CHECK(s.pulse(&Inputs::sessionEndRequested, 10) == Action::kStopControlConnect);
     CHECK(s.f.state == State::kIdle);

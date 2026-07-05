@@ -184,6 +184,11 @@ void bleApplyTransferAdvertising() {
     Bluefruit.setName("DovesDataLogger");
   }
 
+  // Force connectable: the shared Advertising object may have been left
+  // non-connectable by a camera wake burst (see kStartWakeBurst in
+  // camera_ble.ino), which would otherwise make this transfer advert
+  // unconnectable.
+  Bluefruit.Advertising.setType(BLE_GAP_ADV_TYPE_CONNECTABLE_SCANNABLE_UNDIRECTED);
   Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
   Bluefruit.Advertising.addTxPower();
   Bluefruit.Advertising.addService(fileService);

@@ -39,8 +39,10 @@ constexpr uint32_t kRpmOnDebounceMs       = 2000;  // RPM must hold above ON thr
 constexpr uint32_t kRpmGoneAbortMs        = 2000;  // RPM below OFF threshold this long aborts WAKING
 
 // ---- Timeouts / retries ----
-constexpr uint32_t kWakeBurstMs             = 5000;   // wake mfg-data advert burst, then connectable advert
-constexpr uint32_t kConnectTimeoutMs        = 20000;  // per wake attempt: camera must connect within this
+// WAKING beacons the wake advert and scans for the camera's be80 for this
+// whole window per attempt (no fixed short burst — the camera's sleep-scan
+// is sparse), retrying up to kConnectRetries times before giving up.
+constexpr uint32_t kConnectTimeoutMs        = 20000;  // per wake attempt window
 constexpr uint8_t  kConnectRetries          = 3;      // wake attempts before giving up back to IDLE
 constexpr uint32_t kControlConnectTimeoutMs = 15000;  // per central connect attempt to the camera's be80
 constexpr uint8_t  kControlConnectRetries   = 3;
@@ -109,7 +111,6 @@ struct Fsm {
   uint32_t rpmGoneSince = 0;        // WAKING: rpm below OFF threshold since
   uint32_t wakeAttemptStarted = 0;  // WAKING: current attempt window start
   uint8_t  wakeAttemptsUsed = 0;
-  bool     wakeBurstPhase = false;  // WAKING: still inside the wake-burst window
   uint32_t controlAttemptStarted = 0;
   uint8_t  controlAttemptsUsed = 0;
   uint32_t awaitGpsSince = 0;

@@ -52,54 +52,57 @@ so for the R link, *we advertise and wait for the camera to connect to us.*
 
 ### What we broadcast
 
-A fixed **31-byte BLE advertising PDU** — an Apple-iBeacon masquerade carrying
-the camera's 6-character serial. Built by
-`insta360_protocol::buildWakeAdvert()`
+> **Updated** per the `xaionaro-go/insta360ctl` reference (`doc/ble_protocol.md`
+> Appendix B). Was a malformed 31-byte PDU; now a 30-byte one, broadcast
+> **non-connectably**.
+
+A fixed **30-byte BLE advertising PDU** — a 3-byte Flags AD + an Apple/iBeacon
+manufacturer AD carrying the camera's 6-character serial inside the iBeacon
+proximity UUID. Built by `insta360_protocol::buildWakeAdvert()`
 (`insta360_protocol.cpp:130`), broadcast by the `kStartWakeBurst` action
 (`camera_ble.ino:436`).
 
 Raw bytes (serial shown as `S0..S5`, ASCII of the 6-char serial):
 
 ```
-02 01 1A                          AD1: Flags = 0x1A (LE General Disc + BR/EDR not supported)
-1B FF                             AD2: length 0x1B=27, type 0xFF (Manufacturer Specific Data)
+02 01 06                          Flags AD: LE general disc + BR/EDR not supported
+1A FF                             mfg AD: length 0x1A=26, type 0xFF (Manufacturer Specific Data)
 4C 00                             Company ID 0x004C (Apple, little-endian)
 02 15                             iBeacon: sub-type 0x02, length 0x15=21
-09 4F 52 42 49 54                 0x09, "ORBIT"  ─┐
-09 FF 0F 00                                       ├─ 16-byte iBeacon "proximity UUID"
-S0 S1 S2 S3 S4 S5                 <-- serial      │   (bytes 9..24 of the PDU)
-                                                 ─┘
-00 00                             iBeacon Major = 0x0000
-00 00                             iBeacon Minor = 0x0000   (see note)
-E4 01                             trailing bytes (TX-power slot + 1 extra)
+4F 52 42 49 54 00                 "ORBIT" + 0x00   ─┐
+S0 S1 S2 S3 S4 S5                 <-- serial        ├─ 16-byte iBeacon "proximity UUID"
+00 00 00 00                       padding          ─┘   (bytes 9..24 of the PDU)
+00 01                             iBeacon Major = 0x0001
+00 01                             iBeacon Minor = 0x0001
+C5                                TX power = -59 dBm (int8)
 ```
 
-- The 6 serial bytes are written at **absolute PDU offset 19** (i.e. the last
-  6 bytes of the 16-byte proximity UUID). Serial comes from the paired
-  `camera_serial` setting.
-- The `E4 01` tail does not cleanly match a 1-byte iBeacon TX-power field;
-  treat the field boundaries after the UUID as **unverified** — the raw bytes
-  above are authoritative, the iBeacon interpretation is best-effort.
-- Company ID `0x004C` (Apple) + `02 15` is the textbook iBeacon prefix; the
-  "ORBIT" ASCII inside the UUID is the Insta360-specific marker.
+- The 6 serial bytes are written at **absolute PDU offset 15** (UUID bytes
+  6..11, right after the `"ORBIT" + 0x00` marker). Serial comes from the
+  paired `camera_serial` setting.
+- The camera matches on Apple company ID + "ORBIT" marker + serial; the Flags
+  AD is not part of the match (included so the PDU is well-formed).
 
 ### How we broadcast it
 
-`kStartWakeBurst` (`camera_ble.ino:436`):
+`kStartWakeBurst` (`camera_ble.ino:436`) — **non-connectable** (a real beacon
+is non-connectable; this stops the camera trying to connect *to our beacon*
+instead of just waking and advertising its own `be80`):
 
 ```cpp
 cameraTakeRadio();                     // bleCoreEnsureInit(); bleOwner = CAMERA;
                                        // Advertising.stop()/clearData(); ScanResponse.clearData();
 scanHit = false;
 buildWakeAdvert(adv, serialBytes);
-Bluefruit.Advertising.setData(adv, 31);        // raw 31-byte PDU, verbatim
+Bluefruit.Advertising.setType(BLE_GAP_ADV_TYPE_NONCONNECTABLE_NONSCANNABLE_UNDIRECTED);
+Bluefruit.Advertising.setData(adv, 30);        // raw 30-byte PDU, verbatim
 Bluefruit.Advertising.restartOnDisconnect(false);
 Bluefruit.Advertising.setInterval(160, 160);   // 100 ms, fast == slow
 Bluefruit.Advertising.start(0);                // advertise indefinitely
 ```
 
 Note `setData()` overwrites the whole PDU with our raw bytes, so the advert
-is exactly the 31 bytes above — no flags/name added by Bluefruit.
+is exactly the 30 bytes above.
 
 ### Known problem / hypothesis
 
@@ -316,29 +319,32 @@ not to move power-off to the C link.
 ## 5. How the auto-record FSM sequences the links (`camera_fsm.cpp`)
 
 For reference — the state machine that runs a real session (the Test menu
-bypasses this and fires actions directly):
+bypasses this and fires actions directly). **Updated** for the wake rework:
 
 ```
 IDLE ──(RPM>500 held 2s)──> WAKING
-   WAKING:  emit kStartWakeBurst (§1)
-            after 5 s (kWakeBurstMs)  -> emit kStartConnectableAdvertising (§2a)
-            on (remoteConnected || cameraAdvertSeen) -> CONNECTING, kStopAdvertising
-   CONNECTING: emit kStartControlConnect (§3, scan+central connect)
+   WAKING:  emit kStartWakeBurst (§1, non-connectable beacon)
+            next step: emit kStartControlConnect (start the be80 scanner)
+            keep beaconing + scanning for the whole 20 s attempt (retry ×3)
+            on cameraAdvertSeen -> CONNECTING (kStopAdvertising; scanner stays)
+            on controlConnected -> AWAIT_GPS directly
+   CONNECTING: wait for controlConnected (no re-scan; scanner already running)
                on controlConnected -> AWAIT_GPS
    AWAIT_GPS -> RECORDING (start-video) -> ... -> COOLDOWN -> POWERING_OFF (ce82)
 ```
 
-Two things worth noting for the R-link bug:
+Notes:
 
-1. WAKING advances to CONNECTING on **`cameraAdvertSeen` alone** (our scanner
-   spotted the camera's be80) — it does **not** require the R link
-   (`remoteConnected`) to ever form. So a real session records fine with the R
-   link permanently down.
-2. On that transition it emits **`kStopAdvertising`** — so we **stop presenting
-   the connectable remote advert** the moment we see the camera's be80. If the
-   camera hadn't connected to our ce80 yet, that window is closed. Then at
-   COOLDOWN the `ce82` power-off has no R link and does nothing — the same bug
-   the bench Test menu exposes.
+1. WAKING now runs the `be80` **scanner concurrently** with the wake beacon
+   (the FSM emits `kStartControlConnect` as its entry step 2), so a real
+   session reaches RECORDING over the C link **without ever forming the R
+   link**. The `kStartConnectableAdvertising` (named remote advert) step was
+   **removed from WAKING** — it now exists only for pairing and the bench
+   Test menu's *Connect*.
+2. Because WAKING no longer presents the connectable remote advert, the R link
+   does not form in a normal auto session, so COOLDOWN's `ce82` power-off is a
+   no-op there too — power-off remains dependent on the R link, which is only
+   attempted from the pairing / Test-menu paths.
 
 ---
 

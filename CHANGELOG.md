@@ -12,6 +12,22 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Changed
+- **Insta360 wake advert corrected + WAKING reworked.** The iBeacon wake
+  advertisement was rebuilt to match the `xaionaro-go/insta360ctl` reference:
+  30-byte PDU with the serial in the iBeacon proximity UUID (`"ORBIT" + 0x00 +
+  serial`), Major/Minor `0x0001`, TX-power `0xC5` — replacing the previous
+  malformed bytes (bogus `09 FF 0F 00`, `Major/Minor 0`, trailing `E4 01`).
+  The wake burst is now broadcast **non-connectably** so the camera wakes and
+  advertises its own `be80` instead of connecting to our beacon. The auto-record
+  **WAKING** state now runs the `be80` scanner *concurrently* with the beacon
+  and keeps beaconing for the whole attempt (20 s ×3) until the camera is seen
+  — instead of switching to a connectable-remote advert after 5 s — so a
+  session connects the control link and records even though the remote link is
+  never formed. *Caveat (from research):* wake only reaches a camera in
+  *standby* with "Bluetooth Wakeup" armed; a fully powered-off X4 has its BLE
+  radio off and cannot be woken over BLE.
+
 ### Added
 - **Insta360 camera bench-test menu.** The paired **Camera** page now has a
   **Test** entry that opens a manual-control menu — *Wake*, *Connect*,

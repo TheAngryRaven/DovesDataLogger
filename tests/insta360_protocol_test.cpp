@@ -76,29 +76,30 @@ TEST_CASE("insta360_protocol - wake advert golden vector for serial 012345") {
     CHECK(buildWakeAdvert(advert, serial) == kWakeAdvertLen);
 
     const uint8_t expected[kWakeAdvertLen] = {
-        0x02, 0x01, 0x1A,                    // Flags AD
-        0x1B, 0xFF,                          // mfg AD header
+        0x02, 0x01, 0x06,                    // Flags AD
+        0x1A, 0xFF,                          // mfg AD header (len 26)
         0x4C, 0x00,                          // Apple company ID (LE)
-        0x02, 0x15,                          // iBeacon type + len
-        0x09, 0x4F, 0x52, 0x42, 0x49, 0x54,  // 0x09 "ORBIT"
-        0x09, 0xFF, 0x0F, 0x00,
-        0x30, 0x31, 0x32, 0x33, 0x34, 0x35,  // serial "012345"
-        0x00, 0x00, 0x00, 0x00,
-        0xE4, 0x01,
+        0x02, 0x15,                          // iBeacon subtype + len
+        0x4F, 0x52, 0x42, 0x49, 0x54, 0x00,  // UUID[0..5] "ORBIT" + 0x00
+        0x30, 0x31, 0x32, 0x33, 0x34, 0x35,  // UUID[6..11] serial "012345"
+        0x00, 0x00, 0x00, 0x00,              // UUID[12..15] padding
+        0x00, 0x01,                          // Major
+        0x00, 0x01,                          // Minor
+        0xC5,                                // TX power
     };
     CHECK(std::memcmp(advert, expected, kWakeAdvertLen) == 0);
 }
 
-TEST_CASE("insta360_protocol - wake advert serial lands at offsets 19-24") {
+TEST_CASE("insta360_protocol - wake advert serial lands at offsets 15-20") {
     const uint8_t serial[kSerialLen] = {'X', '9', 'Z', '8', 'W', '7'};
     uint8_t advert[kWakeAdvertLen];
     CHECK(buildWakeAdvert(advert, serial) == kWakeAdvertLen);
-    CHECK(std::memcmp(advert + 19, serial, kSerialLen) == 0);
+    CHECK(std::memcmp(advert + 15, serial, kSerialLen) == 0);
 
     // The Flags AD comes first regardless of serial.
     CHECK(advert[0] == 0x02);
     CHECK(advert[1] == 0x01);
-    CHECK(advert[2] == 0x1A);
+    CHECK(advert[2] == 0x06);
 }
 
 // ---------------------------------------------------------------------------
