@@ -901,12 +901,26 @@ void cameraTestExitMode() {
   debugln(F("CAM: bench-test mode exited"));
 }
 
-bool cameraTestPowerOn() {
+bool cameraTestWake() {
   if (!cameraTestActive) return false;
-  // Wake a powered-off camera (mfg-data wake advert) AND start scanning for
-  // its be80 control service, so the central link comes up for record
-  // control once the camera is awake and advertising.
+  // Manufacturer-data wake advert. NOTE: this only wakes a camera that is in
+  // *standby* (screen off, BLE radio alive, "Bluetooth Wakeup" enabled) — a
+  // fully powered-off X4 has its radio off and cannot be woken over BLE.
   cameraExecuteAction(camera_fsm::Action::kStartWakeBurst);
+  return true;
+}
+
+bool cameraTestConnect() {
+  if (!cameraTestActive) return false;
+  // Two independent links, established together:
+  //   R (remote/peripheral) — present the connectable "Insta360 GPS Remote"
+  //     advert so the camera can connect to our ce80 GATT. The camera only
+  //     does this after it has been paired from ITS Settings -> Bluetooth
+  //     remote menu (capturing the serial is not enough); once connected, the
+  //     ce82 power-off frame can reach it.
+  //   C (control/central) — scan for the camera's own be80 service and
+  //     connect to it for start/stop-video (works without the R link).
+  cameraExecuteAction(camera_fsm::Action::kStartConnectableAdvertising);
   cameraExecuteAction(camera_fsm::Action::kStartControlConnect);
   return true;
 }

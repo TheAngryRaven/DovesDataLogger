@@ -144,8 +144,14 @@ bool cameraSetManualSerial(const char* serial6);
 void cameraTestEnterMode();
 void cameraTestExitMode();
 
-// Wake the camera (wake advert) and begin connecting its control service.
-bool cameraTestPowerOn();
+// Wake burst — wakes a *standby* camera only (a fully powered-off X4 has
+// its BLE radio off and cannot be woken).
+bool cameraTestWake();
+// Present the connectable "Insta360 GPS Remote" advert (R link, for
+// power-off) AND central-connect to the camera's be80 (C link, for record
+// control). The R link forms only after the camera has been paired from its
+// own Settings -> Bluetooth remote menu.
+bool cameraTestConnect();
 // be81 start-video / stop-video (needs the central control link up).
 bool cameraTestStartRecording();
 bool cameraTestStopRecording();

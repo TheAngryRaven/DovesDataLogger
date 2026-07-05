@@ -636,16 +636,30 @@ loop()  ~250 Hz
   advert + ce82 button frames are X4-verified; the be81
   start/stop/GPS frames are proven on ONE/X3, X4 sniff pending.
 - **Bench test menu** (`PAGE_CAMERA_TEST`): the paired Camera page has a
-  **Test** entry opening a manual-control menu (Turn On / Rec Start / Rec
-  Stop / Power Off / Back) plus live remote/control link status, so the
-  camera link can be exercised without staging RPM/GPS to drive the FSM.
-  `cameraTestEnterMode()` forces the FSM to IDLE and sets `cameraTestActive`,
-  which makes `CAMERA_LOOP()` suppress the FSM step (so auto-record can't
-  fight the manual actions) while the Bluefruit callbacks keep both links
-  serviced; `cameraTestExitMode()` stops any recording and tears the session
-  down. The four `cameraTest*()` action helpers reuse the exact
-  `cameraExecuteAction()` code paths the FSM would run — no new FSM states,
-  so the board-portable pure unit is untouched.
+  **Test** entry opening a manual-control menu (Wake / Connect / Rec Start /
+  Rec Stop / Power Off / Back) plus live remote (**R**) / control (**C**)
+  link status, so the camera link can be exercised without staging RPM/GPS to
+  drive the FSM. **Connect** presents the connectable "Insta360 GPS Remote"
+  advert (R link, camera→our ce80 — used by Power Off) and central-connects
+  to the camera's be80 (C link — used by Rec Start/Stop); **Wake** sends the
+  standby wake-burst advert. `cameraTestEnterMode()` forces the FSM to IDLE
+  and sets `cameraTestActive`, which makes `CAMERA_LOOP()` suppress the FSM
+  step (so auto-record can't fight the manual actions) while the Bluefruit
+  callbacks keep both links serviced; `cameraTestExitMode()` stops any
+  recording and tears the session down. The `cameraTest*()` action helpers
+  reuse the exact `cameraExecuteAction()` code paths the FSM would run — no
+  new FSM states, so the board-portable pure unit is untouched.
+- **X4 field notes** (from live bench testing, informing the above): the
+  camera connects to our ce80 remote (R link) only *after* it has been paired
+  from the camera's own **Settings → Bluetooth remote** menu — capturing the
+  serial (subsystem UI pairing) is not sufficient. Recording works without
+  the R link because the FSM advances to RECORDING on `cameraAdvertSeen`
+  (scanner spotted the camera's be80) and drives start/stop over the C link.
+  The wake-burst advert only wakes a *standby* camera (BLE radio alive);
+  a fully powered-off X4 cannot be woken over BLE. There is **no** `be80`
+  power-off command in any known reference implementation — power-off is the
+  `ce82` 3-second-hold button frame over the R link, so Power Off depends on
+  the R link being up.
 
 ---
 

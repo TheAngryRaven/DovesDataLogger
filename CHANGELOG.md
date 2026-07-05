@@ -14,13 +14,23 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ### Added
 - **Insta360 camera bench-test menu.** The paired **Camera** page now has a
-  **Test** entry that opens a manual-control menu — *Turn On*, *Rec Start*,
-  *Rec Stop*, *Power Off*, *Back* — so the camera link can be exercised on
-  the bench without staging RPM/GPS to drive the auto-record state machine.
-  The page shows live remote/control link status. While the menu is open the
+  **Test** entry that opens a manual-control menu — *Wake*, *Connect*,
+  *Rec Start*, *Rec Stop*, *Power Off*, *Back* — so the camera link can be
+  exercised on the bench without staging RPM/GPS to drive the auto-record
+  state machine. The page shows live remote (**R**) / control (**C**) link
+  status. **Connect** presents the connectable "Insta360 GPS Remote" advert
+  (the **R** link, used by *Power Off*) *and* central-connects to the
+  camera's `be80` control service (the **C** link, used by *Rec Start/Stop*).
+  **Wake** sends the standby wake-burst advert. While the menu is open the
   auto-record FSM is suppressed (so it can't fight the manual actions) and is
   reset cleanly on exit; each action reuses the exact BLE code path the FSM
-  would run, so wire behavior matches a real session.
+  would run, so wire behavior matches a real session. *Notes from live X4
+  testing:* the **R** link comes up only after the camera has been paired
+  from its own **Settings → Bluetooth remote** menu (capturing the serial is
+  not sufficient); the wake burst only wakes a *standby* camera (a fully
+  powered-off X4 has its BLE radio off); and there is no `be80` power-off
+  command — *Power Off* is the proven `ce82` 3-second-hold frame, which is
+  why it needs the **R** link.
 - **Insta360 X4 camera auto-record.** The device now impersonates the
   Insta360 "GPS Remote" BLE accessory to drive an X4 action camera fully
   hands-free: engine start (RPM > 500 held 2 s) wakes a powered-off camera
