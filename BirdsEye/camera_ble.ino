@@ -85,6 +85,13 @@ static bool pairCancelPending = false;
 static bool pairSerialCapturedPending = false;  // serial captured AND persisted
 static bool unpairPending = false;
 
+// Manual bench-test mode (paired-camera Test menu). While set, CAMERA_LOOP()
+// suppresses the FSM so it can't fight the tester's manual wake/record/
+// power actions — the Bluefruit callbacks still keep both links serviced.
+// Main-loop context only; cleared by cameraTeardown() so any release path
+// (transfer takeover, sleep) leaves it cleanly.
+static bool cameraTestActive = false;
+
 ///////////////////////////////////////////
 // GATT OBJECTS
 ///////////////////////////////////////////
@@ -631,6 +638,13 @@ void CAMERA_LOOP() {
   // 1. Drain camera writes first so a captured serial feeds this step.
   cameraDrainCe81();
 
+  // Manual bench-test mode: the tester drives wake/record/power directly
+  // (see cameraTest*() below), so the FSM is suppressed here — stepping it
+  // would let auto-record fight the manual actions (e.g. re-issue a wake or
+  // trip the stop-condition timer). Links stay serviced by the Bluefruit
+  // callbacks; ce81 is drained above to keep the RX buffer from wedging.
+  if (cameraTestActive) return;
+
   // 2. Fresh Inputs snapshot.
   camera_fsm::Inputs in;
   in.nowMs = millis();
@@ -758,6 +772,7 @@ static void cameraTeardown(bool sendPowerOff) {
   pairCancelPending = false;
   pairSerialCapturedPending = false;
   unpairPending = false;
+  cameraTestActive = false;  // any release path leaves bench-test mode
 
   // Force the FSM to IDLE/UNPAIRED with one explicit step. The physical
   // teardown above already happened; the returned action is
@@ -794,6 +809,10 @@ camera_fsm::State cameraFsmState() {
 
 bool cameraRemoteLinkUp() {
   return remoteLinkUp;
+}
+
+bool cameraControlLinkUp() {
+  return controlLinkUp;
 }
 
 bool cameraPairedSerial(char* buf, size_t bufSize) {
@@ -854,4 +873,58 @@ bool cameraSetManualSerial(const char* serial6) {
   debug(F("CAM: manual serial set: "));
   debugln(storedSerial);
   return true;
+}
+
+///////////////////////////////////////////
+// BENCH TEST MENU (main-loop context)
+// Paired-only manual controls so the camera link can be exercised on the
+// bench without staging RPM/GPS to drive the auto-record FSM. Each helper
+// reuses the exact cameraExecuteAction() code path the FSM would run, so
+// the wire behavior is identical to a real session. While test mode is
+// active CAMERA_LOOP() suppresses the FSM (see the guard there).
+///////////////////////////////////////////
+
+void cameraTestEnterMode() {
+  // Clean baseline first: drop any in-flight session and force the FSM to
+  // IDLE (cameraTeardown also clears cameraTestActive), then arm test mode.
+  cameraTeardown(false);
+  cameraTestActive = true;
+  debugln(F("CAM: bench-test mode entered"));
+}
+
+void cameraTestExitMode() {
+  // Best-effort stop before dropping links so we never leave the camera
+  // recording an orphaned clip after a test.
+  if (controlLinkUp) cameraSendStopVideo();
+  cameraTestActive = false;
+  cameraTeardown(false);  // drop links, stop advert/scan, release the radio
+  debugln(F("CAM: bench-test mode exited"));
+}
+
+bool cameraTestPowerOn() {
+  if (!cameraTestActive) return false;
+  // Wake a powered-off camera (mfg-data wake advert) AND start scanning for
+  // its be80 control service, so the central link comes up for record
+  // control once the camera is awake and advertising.
+  cameraExecuteAction(camera_fsm::Action::kStartWakeBurst);
+  cameraExecuteAction(camera_fsm::Action::kStartControlConnect);
+  return true;
+}
+
+bool cameraTestStartRecording() {
+  if (!cameraTestActive) return false;
+  cameraExecuteAction(camera_fsm::Action::kSendStartVideo);
+  return controlLinkUp;  // frame only reaches the camera when the link is up
+}
+
+bool cameraTestStopRecording() {
+  if (!cameraTestActive) return false;
+  cameraExecuteAction(camera_fsm::Action::kSendStopVideo);
+  return controlLinkUp;
+}
+
+bool cameraTestPowerOff() {
+  if (!cameraTestActive) return false;
+  cameraExecuteAction(camera_fsm::Action::kSendPowerOff);
+  return remoteLinkUp;  // ce82 power-off rides the remote (peripheral) link
 }

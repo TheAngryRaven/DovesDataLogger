@@ -127,17 +127,17 @@ void displayPage_pair_camera() {
   resetDisplay();
 
   if (cameraIsPaired()) {
-    // Paired: show the stored serial + Unpair/Back menu. This branch also
-    // takes over the frame after pairing captures a serial (FSM -> kIdle).
+    // Paired: show the stored serial + Back/Test/Unpair menu. This branch
+    // also takes over the frame after pairing captures a serial (FSM ->
+    // kIdle). The three size-2 rows below start at y=16 and fill to y=64,
+    // so the header stays tight (no blank lines) to keep "Unpair" on-panel.
     display.setTextSize(1);
-    display.println(F("       CAMERA"));
-    display.println();
+    display.println(F("      CAMERA"));
 
     char serial[7];
     cameraPairedSerial(serial, sizeof(serial));
     display.print(F("Paired: "));
     display.println(serial);
-    display.println();
 
     // Back first (index 0): the page flips from the pairing screen to
     // this menu the frame a serial is captured, and a "Cancel" press
@@ -147,6 +147,8 @@ void displayPage_pair_camera() {
     display.print(menuSelectionIndex == 0 ? "->" : "  ");
     display.println(F("Back"));
     display.print(menuSelectionIndex == 1 ? "->" : "  ");
+    display.println(F("Test"));
+    display.print(menuSelectionIndex == 2 ? "->" : "  ");
     display.println(F("Unpair"));
   } else {
     // Unpaired: live pairing status from the camera FSM.
@@ -172,6 +174,31 @@ void displayPage_pair_camera() {
     display.println();
     display.println();
     display.println(F("B1:Manual B2:Cancel"));
+  }
+
+  safeDisplayUpdate();
+}
+
+void displayPage_camera_test() {
+  resetDisplay();
+
+  display.setTextSize(1);
+  display.println(F("    CAMERA TEST"));
+
+  // Live link status so the tester can see what's actually connected:
+  // R = remote (peripheral) link, C = central control link.
+  display.print(F("Link  R:"));
+  display.print(cameraRemoteLinkUp() ? F("UP  ") : F("--  "));
+  display.print(F("C:"));
+  display.println(cameraControlLinkUp() ? F("UP") : F("--"));
+  display.println();
+
+  static const char* const kTestItems[] = {
+    "Turn On", "Rec Start", "Rec Stop", "Power Off", "Back"};
+  const int itemCount = (int)(sizeof(kTestItems) / sizeof(kTestItems[0]));
+  for (int i = 0; i < itemCount; i++) {
+    display.print(menuSelectionIndex == i ? F("->") : F("  "));
+    display.println(kTestItems[i]);
   }
 
   safeDisplayUpdate();

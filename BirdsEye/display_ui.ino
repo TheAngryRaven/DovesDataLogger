@@ -312,13 +312,17 @@ void handleMenuPageSelection() {
       switchToDisplayPage(PAGE_PAIR_CAMERA);
     }
   } else if (currentPage == PAGE_PAIR_CAMERA) {
-    // Only a menu while paired (Back / Unpair) — the unpaired pairing
-    // screen handles its buttons in the custom branch in displayLoop().
-    // Back is index 0 so a late "Cancel" press right after a serial
-    // capture can't land on Unpair.
+    // Only a menu while paired (Back / Test / Unpair) — the unpaired
+    // pairing screen handles its buttons in the custom branch in
+    // displayLoop(). Back is index 0 so a late "Cancel" press right after
+    // a serial capture can't land on Test or Unpair.
     if (menuSelectionIndex == 0) {
       debugln(F("Camera: Back selected"));
       switchToDisplayPage(PAGE_MAIN_MENU);
+    } else if (menuSelectionIndex == 1) {
+      debugln(F("Camera: Test selected"));
+      cameraTestEnterMode();
+      switchToDisplayPage(PAGE_CAMERA_TEST);
     } else {
       debugln(F("Camera: Unpair selected"));
       if (cameraRequestUnpair()) {
@@ -330,6 +334,27 @@ void handleMenuPageSelection() {
         switchToDisplayPage(PAGE_INTERNAL_WARNING);
       }
     }
+  } else if (currentPage == PAGE_CAMERA_TEST) {
+    // Bench-test controls: manual wake/record/power for the paired camera.
+    // Items: 0 Turn On, 1 Rec Start, 2 Rec Stop, 3 Power Off, 4 Back.
+    if (menuSelectionIndex == 0) {
+      debugln(F("Camera Test: Turn On"));
+      cameraTestPowerOn();
+    } else if (menuSelectionIndex == 1) {
+      debugln(F("Camera Test: Rec Start"));
+      cameraTestStartRecording();
+    } else if (menuSelectionIndex == 2) {
+      debugln(F("Camera Test: Rec Stop"));
+      cameraTestStopRecording();
+    } else if (menuSelectionIndex == 3) {
+      debugln(F("Camera Test: Power Off"));
+      cameraTestPowerOff();
+    } else {
+      debugln(F("Camera Test: Back"));
+      cameraTestExitMode();
+      switchToDisplayPage(PAGE_PAIR_CAMERA);
+    }
+    forceDisplayRefresh();
   } else if (currentPage == PAGE_TRANSFER_MENU) {
     if (menuSelectionIndex == 0) {
       // Bluetooth — same flow as before
@@ -510,6 +535,8 @@ void displayLoop() {
       displayPage_usb_storage();
     } else if (currentPage == PAGE_PAIR_CAMERA) {
       displayPage_pair_camera();
+    } else if (currentPage == PAGE_CAMERA_TEST) {
+      displayPage_camera_test();
     } else if (currentPage == PAGE_CAMERA_SERIAL_ENTRY) {
       displayPage_camera_serial_entry();
     } else if (currentPage == PAGE_REPLAY_FILE_SELECT) {
@@ -587,7 +614,8 @@ void displayLoop() {
     // Camera page is only a menu while paired; while pairing it uses the
     // custom (non-menu) button handling below. Deriving this per frame
     // flips the page into menu mode the moment a serial is captured.
-    (currentPage == PAGE_PAIR_CAMERA && cameraIsPaired())
+    (currentPage == PAGE_PAIR_CAMERA && cameraIsPaired()) ||
+    currentPage == PAGE_CAMERA_TEST
   ) {
     insideMenu = true;
     if (currentPage == PAGE_MAIN_MENU) {
@@ -599,7 +627,9 @@ void displayLoop() {
     } else if (currentPage == PAGE_USB_STORAGE) {
       menuLimit = 1; // Only "Exit" option
     } else if (currentPage == PAGE_PAIR_CAMERA) {
-      menuLimit = 2; // Unpair, Back
+      menuLimit = 3; // Back, Test, Unpair
+    } else if (currentPage == PAGE_CAMERA_TEST) {
+      menuLimit = 5; // Turn On, Rec Start, Rec Stop, Power Off, Back
     } else if (
       currentPage == LOGGING_STOP_CONFIRM ||
       currentPage == PAGE_REPLAY_EXIT

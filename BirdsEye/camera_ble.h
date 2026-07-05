@@ -106,6 +106,10 @@ camera_fsm::State cameraFsmState();
 // pairing page show "Connected — reading serial...".
 bool cameraRemoteLinkUp();
 
+// True while our central control link to the camera's be80 service is up
+// (record start/stop rides this link) — for the bench-test status page.
+bool cameraControlLinkUp();
+
 // Copy the stored 6-char serial into buf (NUL-terminated; bufSize >= 7).
 // Returns false (buf = "") when unpaired.
 bool cameraPairedSerial(char* buf, size_t bufSize);
@@ -125,3 +129,25 @@ bool cameraRequestUnpair();
 // (A-Z, 0-9), persist it, and re-arm the FSM. Returns false on an
 // invalid serial or a failed settings write.
 bool cameraSetManualSerial(const char* serial6);
+
+// ---- Bench test menu (PAGE_CAMERA_TEST, paired only) ----
+// Manual camera controls for bench testing, where staging RPM/GPS to drive
+// the auto-record FSM is impractical. Enter/exit bracket a test session:
+// cameraTestEnterMode() forces the FSM to IDLE and suppresses it (so
+// auto-record can't fight the manual actions); cameraTestExitMode() stops
+// any recording, drops the links, and releases the radio. The four action
+// helpers reuse the exact FSM action code paths, so wire behavior matches a
+// real session. Each returns true when the command could actually reach the
+// camera (test mode active + the required link up).
+
+// Enter/leave manual test mode (call on PAGE_CAMERA_TEST enter/back).
+void cameraTestEnterMode();
+void cameraTestExitMode();
+
+// Wake the camera (wake advert) and begin connecting its control service.
+bool cameraTestPowerOn();
+// be81 start-video / stop-video (needs the central control link up).
+bool cameraTestStartRecording();
+bool cameraTestStopRecording();
+// ce82 power-off button frame (needs the remote/peripheral link up).
+bool cameraTestPowerOff();
