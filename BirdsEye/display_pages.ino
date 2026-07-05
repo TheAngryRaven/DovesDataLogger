@@ -22,17 +22,35 @@ void displayPage_boot() {
 void displayPage_main_menu() {
   resetDisplay();
 
-  // Four size-2 rows fill the full 64 px — no room for a title line.
-  display.setTextSize(2);
+  // Scrolling menu: 3 size-2 rows (48 px) windowed over the items, plus
+  // a size-1 scroll-hint line. Four full size-2 rows fill the panel's
+  // nominal 64 px exactly, but the last row is cut off on real hardware
+  // — so the window follows the selection instead.
+  static const char* const kMenuItems[] = {"Race", "Review", "Transfer", "Camera"};
+  const int itemCount = (int)(sizeof(kMenuItems) / sizeof(kMenuItems[0]));
+  const int visibleRows = 3;
 
-  display.print(menuSelectionIndex == 0 ? "->" : "  ");
-  display.println(F("Race"));
-  display.print(menuSelectionIndex == 1 ? "->" : "  ");
-  display.println(F("Review"));
-  display.print(menuSelectionIndex == 2 ? "->" : "  ");
-  display.println(F("Transfer"));
-  display.print(menuSelectionIndex == 3 ? "->" : "  ");
-  display.println(F("Camera"));
+  // Keep the selection inside the window (max window start = count - rows).
+  int first = menuSelectionIndex - 1;
+  if (first < 0) first = 0;
+  if (first > itemCount - visibleRows) first = itemCount - visibleRows;
+
+  display.setTextSize(2);
+  for (int i = first; i < first + visibleRows; i++) {
+    display.print(menuSelectionIndex == i ? "->" : "  ");
+    display.println(kMenuItems[i]);
+  }
+
+  // Scroll hints on the spare bottom line.
+  display.setTextSize(1);
+  if (first > 0) {
+    display.print(F("^"));
+  } else {
+    display.print(F(" "));
+  }
+  if (first + visibleRows < itemCount) {
+    display.print(F(" v more"));
+  }
 
   safeDisplayUpdate();
 }

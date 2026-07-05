@@ -72,6 +72,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   to 2 MHz automatically if the fast re-init fails.
 
 ### Fixed
+- **Main menu scrolls — the Camera entry is reachable again.** The 4-item
+  main menu was drawn as four full-height rows filling the panel's nominal
+  64 px exactly, and the last row (Camera) was cut off on real hardware.
+  The menu now shows a 3-row window that follows the selection (same
+  pattern as the replay file list) with a `v more` scroll hint on the
+  spare bottom line.
 - **I2C bus recovery no longer risks a reboot loop.** `i2cBusRecover()`
   re-inits Wire and the OLED over I2C, which can block if ignition EMI is
   still glitching the bus — and it never fed the watchdog, so the recovery
