@@ -18,7 +18,6 @@ void clearTimers(Fsm& f) {
   f.rpmGoneSince = 0;
   f.wakeAttemptStarted = 0;
   f.wakeAttemptsUsed = 0;
-  f.wakeBurstPhase = false;
   f.controlAttemptStarted = 0;
   f.controlAttemptsUsed = 0;
   f.awaitGpsSince = 0;
@@ -109,15 +108,36 @@ Action stepIdle(Fsm& f, const Inputs& in) {
   f.state = State::kWaking;
   f.wakeAttemptsUsed = 1;
   f.wakeAttemptStarted = seedNow(in.nowMs);
-  f.wakeBurstPhase = true;
   f.rpmGoneSince = 0;
+  f.entryPending = true;  // next WAKING step brings up the be80 scanner
   return Action::kStartWakeBurst;
 }
 
 Action stepWaking(Fsm& f, const Inputs& in) {
-  if (in.remoteConnected || in.cameraAdvertSeen) {
-    enterConnectingFresh(f, in.nowMs);
-    return Action::kStopAdvertising;
+  // Entry step 2: bring up the be80 scanner alongside the wake beacon. Both
+  // run for the whole attempt — the camera's sleep-scan is sparse, so we keep
+  // beaconing (no fixed 5 s burst / no connectable-remote switch) until the
+  // scanner reports the camera's own be80 advert.
+  if (f.entryPending) {
+    f.entryPending = false;
+    return Action::kStartControlConnect;
+  }
+  // Central link already up (the scan callback connected fast): record.
+  if (in.controlConnected) {
+    enterAwaitGps(f, in.nowMs);
+    f.lastKeepAliveAt = seedNow(in.nowMs);
+    return Action::kStopAdvertising;  // beacon off; the glue stops the scanner
+  }
+  // Scanner spotted the camera's be80; its callback already began the central
+  // connect. Advance to CONNECTING but keep the scanner running for that
+  // in-flight connect — entryPending stays false so CONNECTING does NOT
+  // re-scan (which would fight the connect).
+  if (in.cameraAdvertSeen) {
+    f.state = State::kConnecting;
+    f.controlAttemptsUsed = 1;
+    f.controlAttemptStarted = seedNow(in.nowMs);
+    f.entryPending = false;
+    return Action::kStopAdvertising;  // beacon off; scanner stays up
   }
   // Engine gone again before the camera showed up: abort the wake.
   if (in.rpm < kRpmOffThreshold) {
@@ -125,25 +145,21 @@ Action stepWaking(Fsm& f, const Inputs& in) {
       f.rpmGoneSince = seedNow(in.nowMs);
     } else if (elapsed(in.nowMs, f.rpmGoneSince, kRpmGoneAbortMs)) {
       enterIdle(f);
-      return Action::kStopAdvertising;
+      return Action::kStopAdvertising;  // the glue stops the scanner too
     }
   } else {
     f.rpmGoneSince = 0;
   }
-  // Wake mfg-data burst window over: switch to connectable advertising.
-  if (f.wakeBurstPhase && elapsed(in.nowMs, f.wakeAttemptStarted, kWakeBurstMs)) {
-    f.wakeBurstPhase = false;
-    return Action::kStartConnectableAdvertising;
-  }
+  // Attempt window elapsed with no sighting: re-beacon (retry) or give up.
+  // The scanner keeps running across retries (started once on entry above).
   if (elapsed(in.nowMs, f.wakeAttemptStarted, kConnectTimeoutMs)) {
     if (f.wakeAttemptsUsed < kConnectRetries) {
       f.wakeAttemptsUsed++;
       f.wakeAttemptStarted = seedNow(in.nowMs);
-      f.wakeBurstPhase = true;
       return Action::kStartWakeBurst;
     }
     enterIdle(f);
-    return Action::kStopAdvertising;
+    return Action::kStopAdvertising;  // the glue stops the scanner too
   }
   if (in.sessionEndRequested) {
     enterIdle(f);

@@ -588,9 +588,15 @@ loop()  ~250 Hz
     notify) that drives the camera's Stats Dashboard overlay.
 - **Lifecycle FSM** (`camera_fsm` pure unit, host-tested): 9 states —
   UNPAIRED / IDLE / WAKING / CONNECTING / AWAIT_GPS / RECORDING /
-  COOLDOWN / POWERING_OFF / PAIRING. RPM > 500 held 2 s wakes a
-  powered-off camera via a 31-byte manufacturer-data wake advert (serial
-  at mfg[14..19], X4-verified format); recording starts on GPS fix (or
+  COOLDOWN / POWERING_OFF / PAIRING. RPM > 500 held 2 s enters WAKING,
+  which broadcasts a 30-byte Apple/iBeacon manufacturer-data wake advert
+  (serial in the iBeacon proximity UUID, non-connectable — per the
+  `xaionaro-go/insta360ctl` reference) **and** runs the `be80` scanner
+  concurrently, beaconing for the whole attempt (retry ×3) until the scanner
+  spots the camera; on that sighting it moves to CONNECTING and drives the
+  central control link. (Wake only reaches a camera in *standby* with
+  "Bluetooth Wakeup" armed — a fully powered-off X4 has its radio off.)
+  Recording starts on GPS fix (or
   after 30 s regardless); stops after 60 s of stationary (<2 mph) **AND**
   engine-off (<300 rpm) — grid idling and coasting stalls keep recording;
   a manual session end (`CAMERA_NOTIFY_SESSION_END()` from the
@@ -800,7 +806,7 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | Camera power-off cooldown | 180 s | `camera_fsm.h` |
 | Camera GPS feed rate | 1 Hz | `camera_fsm.h` |
 | Camera RPM on/off thresholds | 500 / 300 (2 s on-debounce) | `camera_fsm.h` |
-| Camera wake advert burst | 5 s | `camera_fsm.h` |
+| Camera wake attempt window | 20 s ×3 (beacon + scan) | `camera_fsm.h` |
 | Camera connect timeouts | 20 s wake / 15 s control, 3 retries each | `camera_fsm.h` |
 | Camera GPS-lock wait | 30 s, then record anyway | `camera_fsm.h` |
 | Camera pairing timeout | 120 s | `camera_fsm.h` |
