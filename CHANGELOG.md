@@ -13,6 +13,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **Insta360 camera bench-test menu.** The paired **Camera** page now has a
+  **Test** entry that opens a manual-control menu — *Turn On*, *Rec Start*,
+  *Rec Stop*, *Power Off*, *Back* — so the camera link can be exercised on
+  the bench without staging RPM/GPS to drive the auto-record state machine.
+  The page shows live remote/control link status. While the menu is open the
+  auto-record FSM is suppressed (so it can't fight the manual actions) and is
+  reset cleanly on exit; each action reuses the exact BLE code path the FSM
+  would run, so wire behavior matches a real session.
 - **Insta360 X4 camera auto-record.** The device now impersonates the
   Insta360 "GPS Remote" BLE accessory to drive an X4 action camera fully
   hands-free: engine start (RPM > 500 held 2 s) wakes a powered-off camera

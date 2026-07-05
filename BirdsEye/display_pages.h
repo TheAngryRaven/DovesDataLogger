@@ -14,6 +14,7 @@ void displayPage_bluetooth();
 void displayPage_transfer_menu();
 void displayPage_usb_storage();
 void displayPage_pair_camera();
+void displayPage_camera_test();
 void displayPage_camera_serial_entry();
 void displayPage_internal_fault();
 void displayPage_internal_warning();

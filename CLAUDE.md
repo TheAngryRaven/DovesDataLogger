@@ -297,7 +297,8 @@ loop()  ~250 Hz
     `PAGE_USB_STORAGE` (-5) USB drive active.
   - BLE: `PAGE_BLUETOOTH` (-2).
   - Camera: `PAGE_PAIR_CAMERA` (-6) pairing / paired-status management,
-    `PAGE_CAMERA_SERIAL_ENTRY` (-7) manual 6-char serial entry fallback.
+    `PAGE_CAMERA_SERIAL_ENTRY` (-7) manual 6-char serial entry fallback,
+    `PAGE_CAMERA_TEST` (-10) bench test menu (paired-only manual controls).
   - Errors: `PAGE_INTERNAL_WARNING` (100), `PAGE_INTERNAL_FAULT` (105).
 
 ### 6. Bluetooth (`bluetooth.ino`)
@@ -634,6 +635,17 @@ loop()  ~250 Hz
   until confirmed against a live sniff of our own hardware: the wake
   advert + ce82 button frames are X4-verified; the be81
   start/stop/GPS frames are proven on ONE/X3, X4 sniff pending.
+- **Bench test menu** (`PAGE_CAMERA_TEST`): the paired Camera page has a
+  **Test** entry opening a manual-control menu (Turn On / Rec Start / Rec
+  Stop / Power Off / Back) plus live remote/control link status, so the
+  camera link can be exercised without staging RPM/GPS to drive the FSM.
+  `cameraTestEnterMode()` forces the FSM to IDLE and sets `cameraTestActive`,
+  which makes `CAMERA_LOOP()` suppress the FSM step (so auto-record can't
+  fight the manual actions) while the Bluefruit callbacks keep both links
+  serviced; `cameraTestExitMode()` stops any recording and tears the session
+  down. The four `cameraTest*()` action helpers reuse the exact
+  `cameraExecuteAction()` code paths the FSM would run — no new FSM states,
+  so the board-portable pure unit is untouched.
 
 ---
 

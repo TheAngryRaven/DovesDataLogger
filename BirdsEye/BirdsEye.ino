@@ -518,6 +518,7 @@ const int PAGE_PAIR_CAMERA = -6;     // Insta360 pairing / paired-status screen
 const int PAGE_CAMERA_SERIAL_ENTRY = -7; // manual 6-char camera serial entry
 const int PAGE_REPLAY_RESULTS = -8;
 const int PAGE_REPLAY_EXIT = -9;
+const int PAGE_CAMERA_TEST = -10;    // bench test menu (paired camera controls)
 
 // running menu (these must be in order)
 const int GPS_DEBUG = 3;
