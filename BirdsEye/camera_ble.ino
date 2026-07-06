@@ -464,7 +464,6 @@ static void cameraExecuteAction(camera_fsm::Action a) {
       //    payload is byte-identical to buildWakeAdvert()'s golden-tested
       //    output (pchwalek needed a custom ESP32 API for exactly this).
       Bluefruit.Advertising.setType(BLE_GAP_ADV_TYPE_CONNECTABLE_SCANNABLE_UNDIRECTED);
-      Bluefruit.Advertising.setData(adv, insta360_protocol::kWakeAdvertLen);
       // Scan response: Complete Local Name "Insta360 GPS Remote" (raw AD:
       // len 0x14 = type + 19 chars). setName() too, so the GAP name
       // characteristic matches once the camera connects.
@@ -472,20 +471,47 @@ static void cameraExecuteAction(camera_fsm::Action a) {
           0x14, 0x09, 'I', 'n', 's', 't', 'a', '3', '6', '0', ' ',
           'G',  'P',  'S', ' ', 'R', 'e', 'm', 'o', 't', 'e'};
       Bluefruit.setName("Insta360 GPS Remote");
-      Bluefruit.ScanResponse.setData(kNameScanRsp, sizeof(kNameScanRsp));
-      Bluefruit.Advertising.restartOnDisconnect(false);
       Bluefruit.Advertising.setInterval(160, 160);  // 100 ms, fast == slow
+      Bluefruit.Advertising.restartOnDisconnect(false);
       // No setFastTimeout(): with equal fast/slow intervals the fast
       // window expiring changes nothing.
-      Bluefruit.Advertising.start(0);
-      debugln(F("CAM: wake advertising (connectable, name in scanrsp)"));
+      //
+      // Every step below is CHECKED — a rejected config previously failed
+      // silently ("no blue LED" = advertising never ran while the debug
+      // print claimed it did). If the raw path is refused, rebuild the
+      // SAME golden bytes through the additive AD API — the exact path the
+      // (working) Connect advert uses — before giving up.
+      bool ok = Bluefruit.Advertising.setData(adv, insta360_protocol::kWakeAdvertLen);
+      ok = Bluefruit.ScanResponse.setData(kNameScanRsp, sizeof(kNameScanRsp)) && ok;
+      ok = ok && Bluefruit.Advertising.start(0);
+      if (!ok) {
+        debugln(F("CAM: raw wake advert rejected - retrying via additive API"));
+        Bluefruit.Advertising.stop();
+        Bluefruit.Advertising.clearData();
+        Bluefruit.ScanResponse.clearData();
+        // Same bytes, additive: flag byte = adv[2] (0x1A), mfg value =
+        // adv[5..30] (26 bytes from the Apple company ID). addData()
+        // writes the same AD headers the raw PDU carries, so the on-air
+        // payload is identical.
+        const uint8_t flags = adv[2];
+        ok = Bluefruit.Advertising.addData(BLE_GAP_AD_TYPE_FLAGS, &flags, 1);
+        ok = Bluefruit.Advertising.addData(
+                 BLE_GAP_AD_TYPE_MANUFACTURER_SPECIFIC_DATA, adv + 5,
+                 insta360_protocol::kWakeAdvertLen - 5) &&
+             ok;
+        ok = Bluefruit.ScanResponse.addName() && ok;
+        ok = ok && Bluefruit.Advertising.start(0);
+      }
+      debug(F("CAM: wake advertising "));
+      debugln(ok ? F("STARTED (connectable, name in scanrsp)")
+                 : F("FAILED - advert not running"));
       break;
     }
 
     case camera_fsm::Action::kStartConnectableAdvertising: {
       if (!cameraTakeRadio()) break;
-      // Reset the advert type to connectable — the wake burst above leaves
-      // the shared Advertising object non-connectable.
+      // Explicit type: the shared Advertising object keeps whatever the
+      // last owner set.
       Bluefruit.Advertising.setType(BLE_GAP_ADV_TYPE_CONNECTABLE_SCANNABLE_UNDIRECTED);
       // Exact name the camera looks for. Payload kept lean — flags(3) +
       // 0xCE80 service(4) + name(21) = 28 <= 31 fits the primary advert;
@@ -497,8 +523,8 @@ static void cameraExecuteAction(camera_fsm::Action a) {
       Bluefruit.Advertising.restartOnDisconnect(false);
       Bluefruit.Advertising.setInterval(32, 244);
       Bluefruit.Advertising.setFastTimeout(30);
-      Bluefruit.Advertising.start(0);
-      debugln(F("CAM: connectable advertising"));
+      debug(F("CAM: connectable advertising "));
+      debugln(Bluefruit.Advertising.start(0) ? F("STARTED") : F("FAILED"));
       break;
     }
 
@@ -837,6 +863,10 @@ bool cameraRemoteLinkUp() {
 
 bool cameraControlLinkUp() {
   return controlLinkUp;
+}
+
+bool cameraAdvertisingUp() {
+  return bleInitialized && Bluefruit.Advertising.isRunning();
 }
 
 bool cameraPairedSerial(char* buf, size_t bufSize) {
