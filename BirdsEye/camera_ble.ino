@@ -66,6 +66,13 @@ static volatile uint16_t controlConnHandle = BLE_CONN_HANDLE_INVALID;
 static volatile bool     scanHit = false;        // scanner spotted the camera advertising
 static volatile int8_t   lastRecordState = -1;   // be82-reported record state (-1 unknown)
 
+// Last-6 characters of the camera's advertised name, captured by the scan
+// callback (one-slot latch: buffer written, then ready published). The
+// name suffix IS the wake payload's mfg[14..19] bytes — CAMERA_LOOP
+// cross-checks it against the stored serial and adopts it on mismatch.
+static char          scanNameSuffix[insta360_protocol::kSerialLen + 1] = "";
+static volatile bool scanNameReady = false;
+
 // ---- ce81 RX double-buffer (BLE callback fills, CAMERA_LOOP drains) ----
 // Mirrors firmware_ota's fill/flush idiom, sized for the short serial /
 // status frames the camera writes. Payload arrays are plain RAM; the
@@ -221,13 +228,36 @@ static void cameraCentralDisconnectCallback(uint16_t conn_handle, uint8_t reason
   }
 }
 
-// Scan RX: minimal — flag the sighting and connect (standard Bluefruit
-// central pattern; a successful connect() stops the scanner). If the
-// connect attempt fails (SoftDevice busy / conn count), resume scanning:
-// the scanner is left PAUSED after a filtered hit, and a later
+// Scan RX: flag the sighting and connect (standard Bluefruit central
+// pattern; a successful connect() stops the scanner). If the connect
+// attempt fails (SoftDevice busy / conn count), resume scanning: the
+// scanner is left PAUSED after a filtered hit, and a later
 // Scanner.start() while paused is a silent INVALID_STATE no-op — without
 // the resume, the FSM's whole retry budget would burn on a stalled scan.
+//
+// Also capture the camera's advertised name ("X4 XXXXXX"): its last six
+// characters ARE the wake-payload bytes (community-verified: the wake
+// mfg[14..19] is just the BLE-name suffix as ASCII). CAMERA_LOOP cross-
+// checks this against the stored serial and adopts it on mismatch, so a
+// bad ce81 capture can't leave the wake advert carrying wrong bytes.
+// RAM-parse + memcpy only (Bluefruit task rules).
 static void cameraScanCallback(ble_gap_evt_adv_report_t* report) {
+  char name[32] = {0};
+  uint8_t n = Bluefruit.Scanner.parseReportByType(
+      report, BLE_GAP_AD_TYPE_COMPLETE_LOCAL_NAME, (uint8_t*)name,
+      sizeof(name) - 1);
+  if (n == 0) {
+    n = Bluefruit.Scanner.parseReportByType(
+        report, BLE_GAP_AD_TYPE_SHORT_LOCAL_NAME, (uint8_t*)name,
+        sizeof(name) - 1);
+  }
+  if (n >= insta360_protocol::kSerialLen && !scanNameReady) {
+    memcpy(scanNameSuffix, name + n - insta360_protocol::kSerialLen,
+           insta360_protocol::kSerialLen);
+    scanNameSuffix[insta360_protocol::kSerialLen] = '\0';
+    scanNameReady = true;  // publish last
+  }
+
   scanHit = true;
   if (!Bluefruit.Central.connect(report)) {
     Bluefruit.Scanner.resume();
@@ -669,6 +699,36 @@ static void cameraDrainCe81() {
   }
 }
 
+// Cross-check the camera's advertised-name suffix (captured by the scan
+// callback) against the stored serial, and ADOPT it on mismatch: the
+// suffix IS the wake payload's mfg[14..19] (community-verified — e.g.
+// "X5 6RER6H" wakes on ASCII "6RER6H"), so it outranks whatever the ce81
+// pairing frame carried. Main-loop context (settings write is SD).
+static void cameraDrainScanName() {
+  if (!scanNameReady) return;
+
+  uint8_t suffixBytes[insta360_protocol::kSerialLen];
+  if (insta360_protocol::parseSerial(scanNameSuffix, suffixBytes)) {
+    // Only correct an existing pairing — never silently pair to a
+    // passing camera the user hasn't chosen.
+    if (cameraFsm.serialPresent &&
+        memcmp(suffixBytes, serialBytes, insta360_protocol::kSerialLen) != 0) {
+      char suffixStr[insta360_protocol::kSerialLen + 1];
+      insta360_protocol::serialToString(suffixBytes, suffixStr);
+      debug(F("CAM: advert name suffix "));
+      debug(suffixStr);
+      debug(F(" != stored serial "));
+      debug(storedSerial);
+      debugln(F(" - adopting the advertised one (wake payload source)"));
+      if (setSetting("camera_serial", suffixStr)) {
+        memcpy(serialBytes, suffixBytes, insta360_protocol::kSerialLen);
+        memcpy(storedSerial, suffixStr, sizeof(suffixStr));
+      }
+    }
+  }
+  scanNameReady = false;  // release the latch for the next sighting
+}
+
 ///////////////////////////////////////////
 // MAIN LOOP
 ///////////////////////////////////////////
@@ -676,6 +736,7 @@ static void cameraDrainCe81() {
 void CAMERA_LOOP() {
   // 1. Drain camera writes first so a captured serial feeds this step.
   cameraDrainCe81();
+  cameraDrainScanName();
 
   // Manual bench-test mode: the tester drives wake/record/power directly
   // (see cameraTest*() below), so the FSM is suppressed here — stepping it
