@@ -57,10 +57,12 @@ struct Sim {
 
     void toConnecting() {
         // Real path: the concurrent WAKING scanner spots the camera's be80.
-        // entryPending stays false, so CONNECTING does not re-scan.
+        // entryPending stays false, so CONNECTING does not re-scan. The
+        // connectable remote advert stays UP (kNone) — the woken camera
+        // reconnects to it.
         toWaking();
         in.cameraAdvertSeen = true;
-        REQUIRE(tick(10) == Action::kStopAdvertising);
+        REQUIRE(tick(10) == Action::kNone);
         in.cameraAdvertSeen = false;
         REQUIRE(f.state == State::kConnecting);
     }
@@ -297,7 +299,8 @@ TEST_CASE("camera_fsm - WAKING connect during attempt 3 goes to CONNECTING") {
     CHECK(s.tick(20000) == Action::kStartWakeBurst);   // attempt 2
     CHECK(s.tick(20000) == Action::kStartWakeBurst);   // attempt 3
     s.in.cameraAdvertSeen = true;                      // scanner spots be80
-    CHECK(s.tick(1000) == Action::kStopAdvertising);
+    // Remote advert deliberately stays up (camera reconnects to it).
+    CHECK(s.tick(1000) == Action::kNone);
     CHECK(s.f.state == State::kConnecting);
     CHECK(s.f.controlAttemptsUsed == 1);
     // Scanner already running from WAKING: CONNECTING does NOT re-scan.
@@ -308,9 +311,10 @@ TEST_CASE("camera_fsm - WAKING controlConnected advances straight to AWAIT GPS")
     Sim s;
     s.toWaking();
     // The scan callback can connect the control link before we even register
-    // the advert sighting — WAKING then goes straight to AWAIT GPS.
+    // the advert sighting — WAKING then goes straight to AWAIT GPS. The
+    // remote advert stays up for the camera's reconnect.
     s.in.controlConnected = true;
-    CHECK(s.tick(100) == Action::kStopAdvertising);
+    CHECK(s.tick(100) == Action::kNone);
     CHECK(s.f.state == State::kAwaitGps);
 }
 

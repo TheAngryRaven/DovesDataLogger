@@ -13,20 +13,24 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Changed
-- **Insta360 wake advert corrected + WAKING reworked.** The iBeacon wake
-  advertisement was rebuilt to match the `xaionaro-go/insta360ctl` reference:
-  30-byte PDU with the serial in the iBeacon proximity UUID (`"ORBIT" + 0x00 +
-  serial`), Major/Minor `0x0001`, TX-power `0xC5` — replacing the previous
-  malformed bytes (bogus `09 FF 0F 00`, `Major/Minor 0`, trailing `E4 01`).
-  The wake burst is now broadcast **non-connectably** so the camera wakes and
-  advertises its own `be80` instead of connecting to our beacon. The auto-record
-  **WAKING** state now runs the `be80` scanner *concurrently* with the beacon
-  and keeps beaconing for the whole attempt (20 s ×3) until the camera is seen
-  — instead of switching to a connectable-remote advert after 5 s — so a
-  session connects the control link and records even though the remote link is
-  never formed. *Caveat (from research):* wake only reaches a camera in
-  *standby* with "Bluetooth Wakeup" armed; a fully powered-off X4 has its BLE
-  radio off and cannot be woken over BLE.
+- **Insta360 wake advert restored to the sniffed reference + WAKING
+  reworked.** The wake advertisement is byte-for-byte the payload sniffed
+  from a real GPS Action Remote (`pchwalek/insta360_ble_esp32`, verified
+  waking an X3 and RS 1-inch): 31-byte PDU, serial at mfg[14..19],
+  all-zero "Major/Minor" region and `E4 01` tail. An interim rework to
+  the `insta360ctl` Appendix-B "idealized iBeacon" form (`ORBIT + 0x00`,
+  Major/Minor `0x0001`, TX-power `0xC5`, non-connectable) is reverted —
+  that doc mis-identified the payload as a standard iBeacon. The wake
+  advert is **connectable** (the woken camera connects back to the
+  "Insta360 GPS Remote" it carries — name in the scan response since the
+  manufacturer data fills the primary PDU) and both packets are set as
+  raw byte arrays so the BLE stack cannot truncate or reshape them. The
+  auto-record **WAKING** state runs the `be80` scanner *concurrently*
+  with the beacon for the whole attempt (20 s ×3) and keeps the remote
+  advert up after a sighting so the camera can take the R-link.
+  *Caveat (from research):* wake only reaches a camera in *standby* with
+  "Bluetooth Wakeup" armed; a fully powered-off X4 has its BLE radio off
+  and cannot be woken over BLE.
 
 ### Added
 - **Insta360 camera bench-test menu.** The paired **Camera** page now has a

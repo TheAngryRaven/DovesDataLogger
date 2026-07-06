@@ -589,12 +589,16 @@ loop()  ~250 Hz
 - **Lifecycle FSM** (`camera_fsm` pure unit, host-tested): 9 states —
   UNPAIRED / IDLE / WAKING / CONNECTING / AWAIT_GPS / RECORDING /
   COOLDOWN / POWERING_OFF / PAIRING. RPM > 500 held 2 s enters WAKING,
-  which broadcasts a 30-byte Apple/iBeacon manufacturer-data wake advert
-  (serial in the iBeacon proximity UUID, non-connectable — per the
-  `xaionaro-go/insta360ctl` reference) **and** runs the `be80` scanner
-  concurrently, beaconing for the whole attempt (retry ×3) until the scanner
-  spots the camera; on that sighting it moves to CONNECTING and drives the
-  central control link. (Wake only reaches a camera in *standby* with
+  which broadcasts the 31-byte CONNECTABLE wake advert — the sniffed
+  GPS-Action-Remote manufacturer payload (serial at mfg[14..19], per the
+  primary `pchwalek/insta360_ble_esp32` source; the earlier
+  `insta360ctl` "idealized iBeacon" form was wrong) in the primary PDU
+  with the "Insta360 GPS Remote" name in the scan response, both set as
+  raw bytes so the stack can't reshape them — **and** runs the `be80`
+  scanner concurrently, beaconing for the whole attempt (retry ×3). On a
+  sighting it moves to CONNECTING and drives the central control link;
+  the remote advert stays up so the woken camera connects back to it
+  (the R-link). (Wake only reaches a camera in *standby* with
   "Bluetooth Wakeup" armed — a fully powered-off X4 has its radio off.)
   Recording starts on GPS fix (or
   after 30 s regardless); stops after 60 s of stationary (<2 mph) **AND**
