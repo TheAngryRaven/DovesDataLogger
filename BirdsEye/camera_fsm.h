@@ -70,7 +70,9 @@ enum class State : uint8_t {
 // step() returns at most one action per call; the glue executes it.
 enum class Action : uint8_t {
   kNone,
-  kStartWakeBurst,              // non-connectable wake mfg-data advert (serial payload)
+  kStartWakeBurst,              // CONNECTABLE wake advert: mfg-data serial payload in the
+                                // primary PDU, "Insta360 GPS Remote" name in the scan
+                                // response — the woken camera connects back to it
   kStartConnectableAdvertising, // connectable "Insta360 GPS Remote" advert
   kStopAdvertising,
   kStartControlConnect,         // scan for the camera + connect central to be80

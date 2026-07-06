@@ -123,21 +123,25 @@ Action stepWaking(Fsm& f, const Inputs& in) {
     return Action::kStartControlConnect;
   }
   // Central link already up (the scan callback connected fast): record.
+  // The connectable remote advert stays UP — the woken camera reconnects
+  // to it (the R-link, which power-off needs, and possibly what keeps the
+  // camera awake). It ends naturally when the camera takes the peripheral
+  // slot, or on the teardown paths below.
   if (in.controlConnected) {
     enterAwaitGps(f, in.nowMs);
     f.lastKeepAliveAt = seedNow(in.nowMs);
-    return Action::kStopAdvertising;  // beacon off; the glue stops the scanner
+    return Action::kNone;
   }
   // Scanner spotted the camera's be80; its callback already began the central
   // connect. Advance to CONNECTING but keep the scanner running for that
   // in-flight connect — entryPending stays false so CONNECTING does NOT
-  // re-scan (which would fight the connect).
+  // re-scan (which would fight the connect). Remote advert stays up (above).
   if (in.cameraAdvertSeen) {
     f.state = State::kConnecting;
     f.controlAttemptsUsed = 1;
     f.controlAttemptStarted = seedNow(in.nowMs);
     f.entryPending = false;
-    return Action::kStopAdvertising;  // beacon off; scanner stays up
+    return Action::kNone;
   }
   // Engine gone again before the camera showed up: abort the wake.
   if (in.rpm < kRpmOffThreshold) {

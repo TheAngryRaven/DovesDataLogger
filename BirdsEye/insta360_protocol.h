@@ -36,9 +36,10 @@ constexpr size_t kChunkSize = 20;
 // Camera serial: exactly 6 ASCII characters, uppercase A-Z or 0-9.
 constexpr size_t kSerialLen = 6;
 
-// The wake advertisement is a fixed 30-byte BLE advertising payload
-// (3-byte Flags AD + 27-byte Apple/iBeacon manufacturer AD).
-constexpr size_t kWakeAdvertLen = 30;
+// The wake advertisement is a fixed 31-byte BLE advertising payload
+// (3-byte Flags AD + 28-byte Apple-framed manufacturer AD carrying the
+// 26-byte mfg-data value sniffed from the real GPS Action Remote).
+constexpr size_t kWakeAdvertLen = 31;
 
 // First message counter value for be81 control frames. Incremented by
 // the caller per command sent.

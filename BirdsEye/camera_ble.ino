@@ -451,22 +451,34 @@ static void cameraExecuteAction(camera_fsm::Action a) {
           insta360_protocol::kWakeAdvertLen) {
         break;  // can't happen with a fixed-size out buffer
       }
-      // Raw full advert PDU via BLEAdvertisingData::setData() so the payload
-      // is byte-exact with the reference remotes.
+      // Broadcast setup per the sniffed reference remote (pchwalek):
       //
-      // Broadcast NON-CONNECTABLE (ADV_NONCONN_IND): a real beacon is
-      // non-connectable, and this stops the camera from trying to connect
-      // *to our beacon* instead of just waking and advertising its own be80.
-      // setType() must be re-set to connectable in kStartConnectableAdvertising
-      // (it persists on the shared Advertising object).
-      Bluefruit.Advertising.setType(BLE_GAP_ADV_TYPE_NONCONNECTABLE_NONSCANNABLE_UNDIRECTED);
+      //  - CONNECTABLE, not non-connectable: the manuf data powers the
+      //    camera on, and the camera then connects BACK to this same
+      //    "Insta360 GPS Remote" advert (the R-link). A non-connectable
+      //    beacon breaks that reconnect — that rework was wrong.
+      //  - The 28-byte manuf AD + flags fill the 31-byte primary PDU, so
+      //    the name goes in the SCAN RESPONSE.
+      //  - Both packets are set as RAW byte arrays via setData() so the
+      //    Bluefruit stack cannot truncate or reshape them — the on-air
+      //    payload is byte-identical to buildWakeAdvert()'s golden-tested
+      //    output (pchwalek needed a custom ESP32 API for exactly this).
+      Bluefruit.Advertising.setType(BLE_GAP_ADV_TYPE_CONNECTABLE_SCANNABLE_UNDIRECTED);
       Bluefruit.Advertising.setData(adv, insta360_protocol::kWakeAdvertLen);
+      // Scan response: Complete Local Name "Insta360 GPS Remote" (raw AD:
+      // len 0x14 = type + 19 chars). setName() too, so the GAP name
+      // characteristic matches once the camera connects.
+      static const uint8_t kNameScanRsp[21] = {
+          0x14, 0x09, 'I', 'n', 's', 't', 'a', '3', '6', '0', ' ',
+          'G',  'P',  'S', ' ', 'R', 'e', 'm', 'o', 't', 'e'};
+      Bluefruit.setName("Insta360 GPS Remote");
+      Bluefruit.ScanResponse.setData(kNameScanRsp, sizeof(kNameScanRsp));
       Bluefruit.Advertising.restartOnDisconnect(false);
       Bluefruit.Advertising.setInterval(160, 160);  // 100 ms, fast == slow
       // No setFastTimeout(): with equal fast/slow intervals the fast
       // window expiring changes nothing.
       Bluefruit.Advertising.start(0);
-      debugln(F("CAM: wake burst advertising (non-connectable)"));
+      debugln(F("CAM: wake advertising (connectable, name in scanrsp)"));
       break;
     }
 

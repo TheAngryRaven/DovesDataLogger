@@ -129,30 +129,35 @@ void serialToString(const uint8_t serial[kSerialLen],
 
 size_t buildWakeAdvert(uint8_t out[kWakeAdvertLen],
                        const uint8_t serial[kSerialLen]) {
-  // X4-VERIFY(sniff): iBeacon-masquerade wake advertisement, per the
-  // xaionaro-go/insta360ctl reference (doc/ble_protocol.md Appendix B). The
-  // camera wakes when it sees this Apple manufacturer-specific payload whose
-  // iBeacon "proximity UUID" carries the marker "ORBIT" + 0x00 followed by
-  // the camera's own 6-char serial. The 6 serial bytes land at absolute
-  // offsets 15-20 (UUID[6..11]); they are filled in below.
+  // X4-VERIFY(sniff): wake advertisement, byte-for-byte from the PRIMARY
+  // source — pchwalek/insta360_ble_esp32 Insta_BLE.ino
+  // powerOnPrevConnectedCameras() manuf_data[], sniffed from a real GPS
+  // Action Remote and verified waking an X3 and an RS 1-inch. It only
+  // BORROWS the Apple/iBeacon framing (4C 00 02 15) — it is NOT a real
+  // iBeacon: the "Major/Minor" slots are 00 00 00 00 (not 0x0001) and the
+  // "TX-power" slot is a two-byte E4 01 tail (not a single int8). An
+  // earlier rework to the "idealized iBeacon" form from
+  // xaionaro-go/insta360ctl Appendix B (ORBIT+0x00 / Major 0001 / C5) was
+  // WRONG — that doc mis-identified these bytes as a standard iBeacon.
   //
-  // The camera matches on Apple company ID + "ORBIT" marker + serial; the
-  // leading Flags AD is not part of the match (included so the PDU is
-  // well-formed). NOTE: wake only reaches a camera in *standby* with
-  // "Bluetooth Wakeup" armed — a fully powered-off X4 has its radio off.
+  // The camera matches on the mfg-data value (from 4C 00) with its own
+  // 6-char ASCII serial at mfg[14..19] (absolute offsets 19-24 here). The
+  // payload is unique per camera and does not change on re-pairing.
+  // NOTE: wake only reaches a camera in *standby* with "Bluetooth Wakeup"
+  // armed — a fully powered-off X4 has its radio off.
   static const uint8_t kTemplate[kWakeAdvertLen] = {
-      0x02, 0x01, 0x06,                    // Flags AD: LE general disc + no BR/EDR
-      0x1A, 0xFF,                          // mfg AD: len 26, type 0xFF
-      0x4C, 0x00,                          // company ID 0x004C (Apple, LE)
-      0x02, 0x15,                          // iBeacon subtype 0x02, len 0x15 (21)
-      0x4F, 0x52, 0x42, 0x49, 0x54, 0x00,  // UUID[0..5]  = "ORBIT" + 0x00
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // UUID[6..11] = serial
-      0x00, 0x00, 0x00, 0x00,              // UUID[12..15] = padding
-      0x00, 0x01,                          // iBeacon Major = 0x0001
-      0x00, 0x01,                          // iBeacon Minor = 0x0001
-      0xC5,                                // TX power = -59 dBm (int8)
+      0x02, 0x01, 0x1A,                          // Flags AD (0x1A, as sniffed)
+      0x1B, 0xFF,                                // mfg AD: len 27, type 0xFF
+      0x4C, 0x00,                                // company ID 0x004C (Apple, LE)
+      0x02, 0x15,                                // iBeacon-style subtype + len 21
+      0x09,                                      // mfg[4]
+      0x4F, 0x52, 0x42, 0x49, 0x54,              // mfg[5..9]   = "ORBIT"
+      0x09, 0xFF, 0x0F, 0x00,                    // mfg[10..13]
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00,        // mfg[14..19] = serial
+      0x00, 0x00, 0x00, 0x00,                    // mfg[20..23] (all zero — NOT Major/Minor 0001)
+      0xE4, 0x01,                                // mfg[24..25] tail (NOT a C5 TX-power byte)
   };
-  constexpr size_t kSerialOffset = 15;  // absolute offset of UUID[6]
+  constexpr size_t kSerialOffset = 19;  // absolute offset of mfg[14]
 
   memcpy(out, kTemplate, kWakeAdvertLen);
   memcpy(out + kSerialOffset, serial, kSerialLen);
