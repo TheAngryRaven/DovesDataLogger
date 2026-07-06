@@ -110,6 +110,11 @@ bool cameraRemoteLinkUp();
 // (record start/stop rides this link) — for the bench-test status page.
 bool cameraControlLinkUp();
 
+// True while OUR advertising is actually on air — for the bench-test
+// status page. A wake/connect advert whose SoftDevice config was rejected
+// fails silently otherwise (the "no blue LED" symptom).
+bool cameraAdvertisingUp();
+
 // Copy the stored 6-char serial into buf (NUL-terminated; bufSize >= 7).
 // Returns false (buf = "") when unpaired.
 bool cameraPairedSerial(char* buf, size_t bufSize);

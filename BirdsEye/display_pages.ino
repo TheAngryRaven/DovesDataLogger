@@ -189,10 +189,14 @@ void displayPage_camera_test() {
   // R = remote (peripheral) link — camera must be paired from its own
   // Bluetooth-remote menu for this to come up (needed for Power Off).
   // C = central control link — used for Rec Start/Stop.
-  display.print(F("Link  R:"));
-  display.print(cameraRemoteLinkUp() ? F("UP  ") : F("--  "));
-  display.print(F("C:"));
-  display.println(cameraControlLinkUp() ? F("UP") : F("--"));
+  display.print(F("R:"));
+  display.print(cameraRemoteLinkUp() ? F("UP") : F("--"));
+  display.print(F(" C:"));
+  display.print(cameraControlLinkUp() ? F("UP") : F("--"));
+  // A: our advert actually on air — a silently-rejected wake/connect
+  // advert shows A:-- (the "no blue LED" symptom).
+  display.print(F(" Adv:"));
+  display.println(cameraAdvertisingUp() ? F("UP") : F("--"));
 
   // Six size-1 rows follow (y16..y63) — no blank line, so "Back" stays
   // on-panel. Wake burst only wakes a standby camera (see camera_ble.ino).
