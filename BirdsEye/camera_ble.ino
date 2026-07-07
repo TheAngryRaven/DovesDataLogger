@@ -493,6 +493,13 @@ static void cameraExecuteAction(camera_fsm::Action a) {
       //    Bluefruit stack cannot truncate or reshape them — the on-air
       //    payload is byte-identical to buildWakeAdvert()'s golden-tested
       //    output (pchwalek needed a custom ESP32 API for exactly this).
+      // A CONNECTABLE start needs the single peripheral slot free. If the
+      // camera already holds our R-link it is awake — a wake advert is
+      // pointless and start() would fail with NRF_ERROR_CONN_COUNT.
+      if (Bluefruit.Periph.connected()) {
+        debugln(F("CAM: wake skipped - camera already connected (R-link up)"));
+        break;
+      }
       Bluefruit.Advertising.setType(BLE_GAP_ADV_TYPE_CONNECTABLE_SCANNABLE_UNDIRECTED);
       // Scan response: Complete Local Name "Insta360 GPS Remote" (raw AD:
       // len 0x14 = type + 19 chars). setName() too, so the GAP name
@@ -505,33 +512,14 @@ static void cameraExecuteAction(camera_fsm::Action a) {
       Bluefruit.Advertising.restartOnDisconnect(false);
       // No setFastTimeout(): with equal fast/slow intervals the fast
       // window expiring changes nothing.
-      //
-      // Every step below is CHECKED — a rejected config previously failed
-      // silently ("no blue LED" = advertising never ran while the debug
-      // print claimed it did). If the raw path is refused, rebuild the
-      // SAME golden bytes through the additive AD API — the exact path the
-      // (working) Connect advert uses — before giving up.
       bool ok = Bluefruit.Advertising.setData(adv, insta360_protocol::kWakeAdvertLen);
       ok = Bluefruit.ScanResponse.setData(kNameScanRsp, sizeof(kNameScanRsp)) && ok;
+      // Pad both packets to 31 bytes — MANDATORY (Bluefruit 0.21.0
+      // freezes packet lengths at the first advert of the boot; a
+      // shorter first advert would truncate this PDU on air; see
+      // bleAdvFinalizePadded()).
+      bleAdvFinalizePadded();
       ok = ok && Bluefruit.Advertising.start(0);
-      if (!ok) {
-        debugln(F("CAM: raw wake advert rejected - retrying via additive API"));
-        Bluefruit.Advertising.stop();
-        Bluefruit.Advertising.clearData();
-        Bluefruit.ScanResponse.clearData();
-        // Same bytes, additive: flag byte = adv[2] (0x1A), mfg value =
-        // adv[5..30] (26 bytes from the Apple company ID). addData()
-        // writes the same AD headers the raw PDU carries, so the on-air
-        // payload is identical.
-        const uint8_t flags = adv[2];
-        ok = Bluefruit.Advertising.addData(BLE_GAP_AD_TYPE_FLAGS, &flags, 1);
-        ok = Bluefruit.Advertising.addData(
-                 BLE_GAP_AD_TYPE_MANUFACTURER_SPECIFIC_DATA, adv + 5,
-                 insta360_protocol::kWakeAdvertLen - 5) &&
-             ok;
-        ok = Bluefruit.ScanResponse.addName() && ok;
-        ok = ok && Bluefruit.Advertising.start(0);
-      }
       debug(F("CAM: wake advertising "));
       debugln(ok ? F("STARTED (connectable, name in scanrsp)")
                  : F("FAILED - advert not running"));
@@ -553,6 +541,7 @@ static void cameraExecuteAction(camera_fsm::Action a) {
       Bluefruit.Advertising.restartOnDisconnect(false);
       Bluefruit.Advertising.setInterval(32, 244);
       Bluefruit.Advertising.setFastTimeout(30);
+      bleAdvFinalizePadded();  // every advert must be 31+31 — see bluetooth.ino
       debug(F("CAM: connectable advertising "));
       debugln(Bluefruit.Advertising.start(0) ? F("STARTED") : F("FAILED"));
       break;

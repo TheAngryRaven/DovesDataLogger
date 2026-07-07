@@ -110,6 +110,24 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   to 2 MHz automatically if the fast re-init fails.
 
 ### Fixed
+- **Camera wake advert was garbled on air by a BLE core bug — all adverts
+  now transmit as fixed 31-byte packets.** Bluefruit 0.21.0 (the version
+  in the Seeed board package; fixed upstream in Adafruit 1.7.0) freezes
+  the advertising packet lengths at whatever the FIRST advert of the
+  boot carried (`_start()` uses a function-local static), so any later
+  advert of a different length went out truncated or with a stale tail —
+  a malformed PDU every receiver silently discards while the API reports
+  success. In practice: after the 28-byte connect advert ran once, the
+  31-byte Insta360 wake advert lost its last 3 bytes on air and could
+  never wake the camera. Every advert (transfer, camera wake, camera
+  connectable) is now zero-padded to exactly 31+31 bytes (spec-legal)
+  via a shared `bleAdvFinalizePadded()` before start, making the frozen
+  length always correct. The wake path also skips (with a debug note)
+  when the camera already holds the peripheral slot, instead of failing
+  the connectable start with `NRF_ERROR_CONN_COUNT`. *Camera-side note
+  from research:* on the X4, Bluetooth Wakeup is armed only when
+  **QuickCapture is OFF** — with QuickCapture on, the powered-down
+  camera's radio never scans and no beacon can wake it.
 - **Main menu scrolls — the Camera entry is reachable again.** The 4-item
   main menu was drawn as four full-height rows filling the panel's nominal
   64 px exactly, and the last row (Camera) was cut off on real hardware.
