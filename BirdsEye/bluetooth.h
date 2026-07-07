@@ -45,6 +45,14 @@ void bleCoreEnsureInit();
 // matter who owned the advert set before (camera or nobody).
 void bleApplyTransferAdvertising();
 
+// Pad the current advert + scan-response payloads to exactly 31 bytes
+// each (zero padding, spec-legal). MANDATORY before every
+// Advertising.start() in this firmware: Bluefruit 0.21.0's _start()
+// freezes the packet lengths at the first advert of the boot (function-
+// local static), so any later advert of a different length is garbled
+// on air. Uniform 31+31 packets make the frozen length always correct.
+void bleAdvFinalizePadded();
+
 // Bring up transfer mode: ensure the core is up, take bleOwner for the
 // transfer service, and (re)build + start transfer advertising.
 void BLE_SETUP();

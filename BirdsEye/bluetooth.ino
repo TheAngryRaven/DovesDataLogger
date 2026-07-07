@@ -166,6 +166,35 @@ void bleSetupFileService() {
   fileStatusChar.begin();
 }
 
+void bleAdvFinalizePadded() {
+  // WORKAROUND for a Bluefruit 0.21.0 core bug (fixed upstream in
+  // Adafruit 1.7.0, but the Seeed fork ships the broken version):
+  // BLEAdvertising::_start() initializes its ble_gap_adv_data_t as a
+  // function-local STATIC, so both packet .len fields freeze at whatever
+  // the FIRST advert of the boot carried. Any later advert of a
+  // different length goes on air truncated or with a stale tail — a
+  // malformed PDU every receiver silently discards, while all our API
+  // calls report success. (This is what broke the camera wake advert:
+  // a 28-byte connect advert first froze the length, then the 31-byte
+  // wake PDU lost its last 3 bytes on air.)
+  //
+  // Defeat it by construction: EVERY advert in this firmware is padded
+  // to exactly 31+31 bytes before start(), so the frozen length is
+  // always correct. Zero padding after the last AD structure is
+  // explicitly legal (BT Core Spec Vol 3 Part C §11: the non-significant
+  // part is all-zero octets). Call this after building the payload
+  // (additive or raw setData) and immediately before Advertising.start().
+  uint8_t buf[BLE_GAP_ADV_SET_DATA_SIZE_MAX] = {0};
+  uint8_t n = Bluefruit.Advertising.count();
+  memcpy(buf, Bluefruit.Advertising.getData(), n);
+  Bluefruit.Advertising.setData(buf, sizeof(buf));
+
+  memset(buf, 0, sizeof(buf));
+  n = Bluefruit.ScanResponse.count();
+  memcpy(buf, Bluefruit.ScanResponse.getData(), n);
+  Bluefruit.ScanResponse.setData(buf, sizeof(buf));
+}
+
 void bleApplyTransferAdvertising() {
   // Full rebuild, not an incremental start: the camera module may have
   // owned the advert set (name + payload) since the last transfer session,
@@ -197,6 +226,7 @@ void bleApplyTransferAdvertising() {
   Bluefruit.Advertising.restartOnDisconnect(true);
   Bluefruit.Advertising.setInterval(32, 244);
   Bluefruit.Advertising.setFastTimeout(30);
+  bleAdvFinalizePadded();  // every advert must be 31+31 — see the helper
   Bluefruit.Advertising.start(0);
 }
 

@@ -598,8 +598,12 @@ loop()  ~250 Hz
   scanner concurrently, beaconing for the whole attempt (retry ×3). On a
   sighting it moves to CONNECTING and drives the central control link;
   the remote advert stays up so the woken camera connects back to it
-  (the R-link). (Wake only reaches a camera in *standby* with
-  "Bluetooth Wakeup" armed — a fully powered-off X4 has its radio off.)
+  (the R-link). (Wake only reaches an ARMED camera: on the X4, Bluetooth
+  Wakeup is armed when **QuickCapture is OFF** — an armed camera keeps
+  its radio scanning even fully powered off; an un-armed one is
+  BLE-dead and nothing can wake it. Every advert goes through
+  `bleAdvFinalizePadded()` — see bluetooth.ino — to defeat the Bluefruit
+  0.21.0 frozen-packet-length core bug.)
   Recording starts on GPS fix (or
   after 30 s regardless); stops after 60 s of stationary (<2 mph) **AND**
   engine-off (<300 rpm) — grid idling and coasting stalls keep recording;
@@ -665,8 +669,9 @@ loop()  ~250 Hz
   serial (subsystem UI pairing) is not sufficient. Recording works without
   the R link because the FSM advances to RECORDING on `cameraAdvertSeen`
   (scanner spotted the camera's be80) and drives start/stop over the C link.
-  The wake-burst advert only wakes a *standby* camera (BLE radio alive);
-  a fully powered-off X4 cannot be woken over BLE. There is **no** `be80`
+  The wake-burst advert only wakes an *armed* camera (X4: QuickCapture
+  OFF = "Bluetooth Wakeup Enabled"; armed cameras keep the radio scanning
+  even powered off, un-armed ones are BLE-dead). There is **no** `be80`
   power-off command in any known reference implementation — power-off is the
   `ce82` 3-second-hold button frame over the R link, so Power Off depends on
   the R link being up.
