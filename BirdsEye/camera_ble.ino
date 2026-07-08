@@ -42,6 +42,8 @@ static void cameraScanCallback(ble_gap_evt_adv_report_t* report);
 static void cameraBeginReadChar(BLECharacteristic& chr, const uint8_t* value,
                                 uint8_t len);
 static void cameraBeginWriteChar(BLECharacteristic& chr);
+static void cameraCe82CccdCallback(uint16_t conn_hdl, BLECharacteristic* chr,
+                                   uint16_t value);
 
 ///////////////////////////////////////////
 // MODULE STATE
@@ -184,6 +186,18 @@ static void cameraD0ffIgnoreWriteCallback(uint16_t conn_hdl, BLECharacteristic* 
   (void)chr;
   (void)data;
   (void)len;
+}
+
+// ce82 CCCD write: the camera (as GATT client on our remote service)
+// turning button-frame delivery on/off. Trace only — the moment of
+// subscription is the key diagnostic for "power-off does nothing"
+// (0 = unsubscribed, 1 = notifications, 2 = indications).
+static void cameraCe82CccdCallback(uint16_t conn_hdl, BLECharacteristic* chr,
+                                   uint16_t value) {
+  (void)conn_hdl;
+  (void)chr;
+  debug(F("CAM: ce82 CCCD write = "));
+  debugln(value);
 }
 
 // be82 notify: record-state reports from the camera's control service.
@@ -333,6 +347,7 @@ void cameraBleRegisterServices() {
   cameraCe82Char.setProperties(CHR_PROPS_NOTIFY | CHR_PROPS_INDICATE);
   cameraCe82Char.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
   cameraCe82Char.setMaxLen(20);
+  cameraCe82Char.setCccdWriteCallback(cameraCe82CccdCallback);
   cameraCe82Char.begin();
   uint8_t ce82Initial = 0x00;
   cameraCe82Char.write(&ce82Initial, 1);
@@ -430,12 +445,36 @@ static bool cameraSendBe81(const uint8_t* frame, size_t len) {
   return true;
 }
 
-// Best-effort ce82 power-off button frame (remote link, notify).
-static void cameraSendPowerOff() {
-  if (!remoteLinkUp) return;
+// Send a ce82 button frame over the remote link, honoring HOW the camera
+// subscribed: some centrals enable INDICATIONS on a NOTIFY|INDICATE char,
+// and a notification to an indication-only subscriber is silently
+// discarded by the stack. Returns false (with the reason in the debug
+// trace) instead of failing invisibly — no link, no subscription, and a
+// rejected send are all distinguishable now.
+static bool cameraSendCe82(const uint8_t* buf, uint16_t n) {
+  if (!remoteLinkUp) {
+    debugln(F("CAM: ce82 send failed - no remote link (R)"));
+    return false;
+  }
+  const bool notifySub = cameraCe82Char.notifyEnabled();
+  const bool indicateSub = cameraCe82Char.indicateEnabled();
+  if (!notifySub && !indicateSub) {
+    debugln(F("CAM: ce82 send failed - camera never subscribed (CCCD off)"));
+    return false;
+  }
+  bool ok = notifySub ? cameraCe82Char.notify(buf, n)
+                      : cameraCe82Char.indicate(buf, n);
+  debug(F("CAM: ce82 "));
+  debug(notifySub ? F("notify ") : F("indicate "));
+  debugln(ok ? F("sent") : F("REJECTED by stack"));
+  return ok;
+}
+
+// Best-effort ce82 power-off button frame (remote link).
+static bool cameraSendPowerOff() {
   uint8_t buf[16];
   size_t n = insta360_protocol::buildPowerOff(buf, sizeof(buf));
-  if (n > 0) cameraCe82Char.notify(buf, (uint16_t)n);
+  return n > 0 && cameraSendCe82(buf, (uint16_t)n);
 }
 
 // Best-effort be81 stop-video (used by the teardown paths).
@@ -919,6 +958,11 @@ bool cameraAdvertisingUp() {
   return bleInitialized && Bluefruit.Advertising.isRunning();
 }
 
+bool cameraCe82Subscribed() {
+  return bleInitialized && remoteLinkUp &&
+         (cameraCe82Char.notifyEnabled() || cameraCe82Char.indicateEnabled());
+}
+
 bool cameraPairedSerial(char* buf, size_t bufSize) {
   if (buf == nullptr || bufSize == 0) return false;
   buf[0] = '\0';
@@ -1043,6 +1087,8 @@ bool cameraTestStopRecording() {
 
 bool cameraTestPowerOff() {
   if (!cameraTestActive) return false;
-  cameraExecuteAction(camera_fsm::Action::kSendPowerOff);
-  return remoteLinkUp;  // ce82 power-off rides the remote (peripheral) link
+  // Direct call (same code path the FSM action takes) so the bench menu
+  // gets the REAL send result: false distinguishes no-R-link / camera
+  // never subscribed / stack-rejected — all previously invisible.
+  return cameraSendPowerOff();
 }

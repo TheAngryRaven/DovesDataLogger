@@ -356,7 +356,26 @@ void handleMenuPageSelection() {
       cameraTestStopRecording();
     } else if (menuSelectionIndex == 4) {
       debugln(F("Camera Test: Power Off"));
-      cameraTestPowerOff();
+      if (!cameraTestPowerOff()) {
+        // Distinguish the failure for the tester: no R-link at all vs
+        // connected-but-never-subscribed (camera ignoring our buttons).
+        if (!cameraRemoteLinkUp()) {
+          strncpy(internalNotification, "No remote link -\nrun Connect first",
+                  sizeof(internalNotification) - 1);
+        } else if (!cameraCe82Subscribed()) {
+          strncpy(internalNotification, "Camera not subbed\nto buttons (ce82)",
+                  sizeof(internalNotification) - 1);
+        } else {
+          strncpy(internalNotification, "Power-off send\nrejected by stack",
+                  sizeof(internalNotification) - 1);
+        }
+        internalNotification[sizeof(internalNotification) - 1] = '\0';
+        // The warning page dismisses to the MAIN MENU — leave bench-test
+        // mode first or cameraTestActive would stay latched (FSM
+        // suppressed) with no way back to this menu's Back action.
+        cameraTestExitMode();
+        switchToDisplayPage(PAGE_INTERNAL_WARNING);
+      }
     } else {
       debugln(F("Camera Test: Back"));
       cameraTestExitMode();

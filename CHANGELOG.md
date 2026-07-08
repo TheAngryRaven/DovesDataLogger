@@ -110,6 +110,19 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   to 2 MHz automatically if the fast re-init fails.
 
 ### Fixed
+- **Camera Power Off no longer fails silently — ce82 sends honor the
+  camera's subscription and report failures.** The power-off button frame
+  was a fire-and-forget notify behind two invisible gates: it returned
+  silently with no remote link, and a notification to a camera that never
+  wrote the ce82 CCCD (or subscribed for *indications* rather than
+  notifications) was discarded by the stack while the UI showed nothing.
+  ce82 sends now pick notify vs indicate from the actual subscription,
+  return a real result, and the bench-test menu shows *why* a Power Off
+  failed ("run Connect first" / "camera not subscribed" / "rejected by
+  stack"). The test page's R status gains a `+` when the camera has
+  subscribed to buttons (`R:UP+` = deliverable; `R:UP` = connected but
+  ignoring us), and ce82 CCCD writes are traced to serial for bench
+  diagnosis.
 - **Camera wake advert was garbled on air by a BLE core bug — all adverts
   now transmit as fixed 31-byte packets.** Bluefruit 0.21.0 (the version
   in the Seeed board package; fixed upstream in Adafruit 1.7.0) freezes

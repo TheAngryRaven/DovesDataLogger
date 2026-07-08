@@ -189,12 +189,18 @@ void displayPage_camera_test() {
   // R = remote (peripheral) link — camera must be paired from its own
   // Bluetooth-remote menu for this to come up (needed for Power Off).
   // C = central control link — used for Rec Start/Stop.
+  // R:UP+ = camera connected AND subscribed to ce82 (buttons deliverable);
+  // R:UP without the + = connected but our button frames go nowhere.
   display.print(F("R:"));
-  display.print(cameraRemoteLinkUp() ? F("UP") : F("--"));
+  if (cameraRemoteLinkUp()) {
+    display.print(cameraCe82Subscribed() ? F("UP+") : F("UP"));
+  } else {
+    display.print(F("--"));
+  }
   display.print(F(" C:"));
   display.print(cameraControlLinkUp() ? F("UP") : F("--"));
-  // A: our advert actually on air — a silently-rejected wake/connect
-  // advert shows A:-- (the "no blue LED" symptom).
+  // Adv: our advert actually on air — a silently-rejected wake/connect
+  // advert shows Adv:-- (the "no blue LED" symptom).
   display.print(F(" Adv:"));
   display.println(cameraAdvertisingUp() ? F("UP") : F("--"));
 
