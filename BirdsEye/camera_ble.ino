@@ -101,6 +101,14 @@ static bool unpairPending = false;
 // (transfer takeover, sleep) leaves it cleanly.
 static bool cameraTestActive = false;
 
+// Bench mode: keep the connectable remote advert re-armed. Set by
+// Test->Wake/Connect; while set (and the R-link is down) CAMERA_LOOP
+// restarts the advert whenever it isn't running — the camera has been
+// seen connecting and dropping sub-second, and after a drop (or a
+// missed pairing attempt) it can only retry if we're still on air.
+static bool     testAdvertWanted = false;
+static uint32_t testAdvertRetryAt = 0;
+
 ///////////////////////////////////////////
 // GATT OBJECTS
 ///////////////////////////////////////////
@@ -287,10 +295,19 @@ static void cameraScanCallback(ble_gap_evt_adv_report_t* report) {
 void cameraBleOnConnect(uint16_t connHandle) {
   remoteConnHandle = connHandle;
   remoteLinkUp = true;
+  // Trace matters: the camera has been seen connecting and dropping
+  // faster than the display refresh — without this line those attempts
+  // are completely invisible.
+  debugln(F("CAM: R-link CONNECTED (camera took our remote advert)"));
 }
 
 void cameraBleOnDisconnect(uint16_t connHandle, uint8_t reason) {
-  (void)reason;
+  // The HCI reason code says WHO ended it and why: 0x13 = camera chose
+  // to disconnect (it vetted our GATT and left), 0x08 = supervision
+  // timeout (radio loss), 0x16 = we ended it (teardown), 0x3E = failed
+  // to establish.
+  debug(F("CAM: R-link DISCONNECTED, reason 0x"));
+  debugln(reason, HEX);
   if (connHandle == remoteConnHandle) {
     remoteLinkUp = false;
     remoteConnHandle = BLE_CONN_HANDLE_INVALID;
@@ -771,7 +788,20 @@ void CAMERA_LOOP() {
   // would let auto-record fight the manual actions (e.g. re-issue a wake or
   // trip the stop-condition timer). Links stay serviced by the Bluefruit
   // callbacks; ce81 is drained above to keep the RX buffer from wedging.
-  if (cameraTestActive) return;
+  if (cameraTestActive) {
+    // Re-arm the connectable remote advert after an R-link drop (or a
+    // start that never connected): the camera retries on ITS schedule
+    // and can only succeed if we're still advertising. Rate-limited;
+    // stops the moment the camera takes the slot (remoteLinkUp).
+    if (testAdvertWanted && bleOwner == BLE_OWNER_CAMERA && !remoteLinkUp &&
+        !Bluefruit.Advertising.isRunning() &&
+        millis() - testAdvertRetryAt >= 1000) {
+      testAdvertRetryAt = millis();
+      debugln(F("CAM: re-arming remote advert (R-link free)"));
+      cameraExecuteAction(camera_fsm::Action::kStartConnectableAdvertising);
+    }
+    return;
+  }
 
   // 2. Fresh Inputs snapshot.
   camera_fsm::Inputs in;
@@ -912,6 +942,7 @@ static void cameraTeardown(bool sendPowerOff) {
   pairSerialCapturedPending = false;
   unpairPending = false;
   cameraTestActive = false;  // any release path leaves bench-test mode
+  testAdvertWanted = false;  // and stops the bench advert re-arm
 
   // Force the FSM to IDLE/UNPAIRED with one explicit step. The physical
   // teardown above already happened; the returned action is
@@ -1051,15 +1082,17 @@ void cameraTestExitMode() {
 
 bool cameraTestWake() {
   if (!cameraTestActive) return false;
-  // Manufacturer-data wake advert. NOTE: this only wakes a camera that is in
-  // *standby* (screen off, BLE radio alive, "Bluetooth Wakeup" enabled) — a
-  // fully powered-off X4 has its radio off and cannot be woken over BLE.
+  // Manufacturer-data wake advert (only reaches an ARMED camera — X4:
+  // QuickCapture OFF). Connectable: the woken camera connects back, so
+  // keep the advert re-armed like Connect does.
+  testAdvertWanted = true;
   cameraExecuteAction(camera_fsm::Action::kStartWakeBurst);
   return true;
 }
 
 bool cameraTestConnect() {
   if (!cameraTestActive) return false;
+  testAdvertWanted = true;
   // Two independent links, established together:
   //   R (remote/peripheral) — present the connectable "Insta360 GPS Remote"
   //     advert so the camera can connect to our ce80 GATT. The camera only
