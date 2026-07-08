@@ -110,6 +110,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   to 2 MHz automatically if the fast re-init fails.
 
 ### Fixed
+- **Camera R-link diagnosis + bench advert re-arm.** The camera has been
+  observed connecting to the remote service intermittently — sometimes
+  dropping faster than the display refresh, invisibly. R-link connects
+  and disconnects (with the HCI reason code, which says who ended the
+  link and why) are now traced to serial, and in the bench-test menu the
+  connectable remote advert automatically re-arms whenever the R-link is
+  down — the camera retries on its own schedule and could previously
+  only reconnect if the tester pressed Connect at the right moment.
 - **Camera Power Off no longer fails silently — ce82 sends honor the
   camera's subscription and report failures.** The power-off button frame
   was a fire-and-forget notify behind two invisible gates: it returned
