@@ -115,6 +115,13 @@ bool cameraControlLinkUp();
 // fails silently otherwise (the "no blue LED" symptom).
 bool cameraAdvertisingUp();
 
+// True once the camera has subscribed (CCCD write) to our ce82 button
+// characteristic — button frames (power-off, shutter) are only
+// deliverable when this is true. Shown as the "+" after R:UP on the
+// bench-test page: R:UP without "+" = camera connected but ignoring
+// our buttons.
+bool cameraCe82Subscribed();
+
 // Copy the stored 6-char serial into buf (NUL-terminated; bufSize >= 7).
 // Returns false (buf = "") when unpaired.
 bool cameraPairedSerial(char* buf, size_t bufSize);
