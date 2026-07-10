@@ -110,6 +110,20 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   to 2 MHz automatically if the fast re-init fails.
 
 ### Fixed
+- **Wake advert matched byte-for-byte to the genuine GPS Remote —
+  X4-confirmed ground truth.** A real remote was captured with nRF
+  Connect against the camera, and replaying its advertisement from a
+  phone woke the sleeping X4 — making the packet authoritative rather
+  than reference-derived. Our transmission differed by exactly one byte:
+  the Flags AD is `0x05` (LE Limited Discoverable + BR/EDR Not
+  Supported), not the `0x1A` inherited from the ESP32 replication. The
+  scan response now also matches the real remote (Appearance 0x0180
+  "remote control" + name — previously name only), and the paired
+  camera-mode connectable advert is unified onto this same
+  remote-identity packet (it is the only advert a genuine remote ever
+  transmits, and what the camera's reconnect scan expects) — the
+  invented name+service advert is now used only for the unpaired pairing
+  flow, where no serial exists yet for the manufacturer block.
 - **Camera R-link diagnosis + bench advert re-arm.** The camera has been
   observed connecting to the remote service intermittently — sometimes
   dropping faster than the display refresh, invisibly. R-link connects

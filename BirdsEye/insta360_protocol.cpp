@@ -129,39 +129,59 @@ void serialToString(const uint8_t serial[kSerialLen],
 
 size_t buildWakeAdvert(uint8_t out[kWakeAdvertLen],
                        const uint8_t serial[kSerialLen]) {
-  // X4-VERIFY(sniff): wake advertisement, byte-for-byte from the PRIMARY
-  // source — pchwalek/insta360_ble_esp32 Insta_BLE.ino
-  // powerOnPrevConnectedCameras() manuf_data[], sniffed from a real GPS
-  // Action Remote and verified waking an X3 and an RS 1-inch. It only
-  // BORROWS the Apple/iBeacon framing (4C 00 02 15) — it is NOT a real
-  // iBeacon: the "Major/Minor" slots are 00 00 00 00 (not 0x0001) and the
-  // "TX-power" slot is a two-byte E4 01 tail (not a single int8). An
-  // earlier rework to the "idealized iBeacon" form from
-  // xaionaro-go/insta360ctl Appendix B (ORBIT+0x00 / Major 0001 / C5) was
-  // WRONG — that doc mis-identified these bytes as a standard iBeacon.
+  // X4-CONFIRMED (2026-07-10 bench session): byte-for-byte the ADV_IND a
+  // genuine Insta360 GPS Remote transmits, captured with nRF Connect
+  // against camera "X4 34UQG5" — and replaying this exact packet from a
+  // phone POWERED THE SLEEPING X4 ON. Only the 6 serial bytes at
+  // mfg[14..19] (absolute offsets 19-24) vary per camera; everything
+  // else is constant across Insta360 cameras.
   //
-  // The camera matches on the mfg-data value (from 4C 00) with its own
-  // 6-char ASCII serial at mfg[14..19] (absolute offsets 19-24 here). The
-  // payload is unique per camera and does not change on re-pairing.
-  // NOTE: wake only reaches a camera in *standby* with "Bluetooth Wakeup"
-  // armed — a fully powered-off X4 has its radio off.
+  // The payload only BORROWS the Apple/iBeacon framing (4C 00 02 15) —
+  // it is NOT a real iBeacon: the "UUID" region is the Insta360 ORBIT
+  // constant + the camera serial in plain ASCII, the "Major/Minor" slots
+  // are 00 00 00 00, and the "TX-power" slot is the two-byte E4 01 tail.
+  //
+  // Flags are 0x05 (LE Limited Discoverable + BR/EDR Not Supported),
+  // exactly as the real remote sends — an earlier 0x1A (from the
+  // pchwalek ESP32 replication) was the one byte differing from the
+  // captured ground truth.
+  //
+  // NOTE: wake only reaches an ARMED camera (X4: QuickCapture OFF =
+  // "Bluetooth Wakeup Enabled"); armed cameras keep scanning even fully
+  // powered off.
   static const uint8_t kTemplate[kWakeAdvertLen] = {
-      0x02, 0x01, 0x1A,                          // Flags AD (0x1A, as sniffed)
+      0x02, 0x01, 0x05,                          // Flags AD (0x05, as captured)
       0x1B, 0xFF,                                // mfg AD: len 27, type 0xFF
       0x4C, 0x00,                                // company ID 0x004C (Apple, LE)
       0x02, 0x15,                                // iBeacon-style subtype + len 21
       0x09,                                      // mfg[4]
       0x4F, 0x52, 0x42, 0x49, 0x54,              // mfg[5..9]   = "ORBIT"
       0x09, 0xFF, 0x0F, 0x00,                    // mfg[10..13]
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00,        // mfg[14..19] = serial
-      0x00, 0x00, 0x00, 0x00,                    // mfg[20..23] (all zero — NOT Major/Minor 0001)
-      0xE4, 0x01,                                // mfg[24..25] tail (NOT a C5 TX-power byte)
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00,        // mfg[14..19] = serial (ASCII)
+      0x00, 0x00, 0x00, 0x00,                    // mfg[20..23]
+      0xE4, 0x01,                                // mfg[24..25] tail
   };
   constexpr size_t kSerialOffset = 19;  // absolute offset of mfg[14]
 
   memcpy(out, kTemplate, kWakeAdvertLen);
   memcpy(out + kSerialOffset, serial, kSerialLen);
   return kWakeAdvertLen;
+}
+
+size_t buildRemoteScanResponse(uint8_t out[kRemoteScanRspLen]) {
+  // X4-CONFIRMED (same capture): the genuine remote's scan response —
+  // Appearance 0x0180 (Generic Remote Control) + Complete Local Name
+  // "Insta360 GPS Remote". Not required for wake (the camera keys on the
+  // mfg block), but part of the remote's identity for the camera's
+  // reconnect/pairing scans.
+  static const uint8_t kTemplate[kRemoteScanRspLen] = {
+      0x03, 0x19, 0x80, 0x01,  // Appearance AD: 0x0180, remote control
+      0x14, 0x09,              // Complete Local Name AD: len 20, type 0x09
+      'I', 'n', 's', 't', 'a', '3', '6', '0', ' ',
+      'G', 'P', 'S', ' ', 'R', 'e', 'm', 'o', 't', 'e',
+  };
+  memcpy(out, kTemplate, kRemoteScanRspLen);
+  return kRemoteScanRspLen;
 }
 
 // -----------------------------------------------------------------------

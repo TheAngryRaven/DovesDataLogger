@@ -75,12 +75,11 @@ TEST_CASE("insta360_protocol - wake advert golden vector for serial 012345") {
     uint8_t advert[kWakeAdvertLen];
     CHECK(buildWakeAdvert(advert, serial) == kWakeAdvertLen);
 
-    // Byte-for-byte from pchwalek/insta360_ble_esp32 manuf_data[] (the
-    // sniffed GPS Action Remote payload) — NOT the idealized-iBeacon form
-    // from insta360ctl Appendix B (no ORBIT+0x00, no Major/Minor 0001, no
-    // C5 tail). This golden pins the exact on-air layout.
+    // Byte-for-byte the ADV_IND captured from a genuine GPS Remote
+    // (X4-confirmed 2026-07-10: replaying it from a phone woke the X4).
+    // This golden pins the exact on-air layout.
     const uint8_t expected[kWakeAdvertLen] = {
-        0x02, 0x01, 0x1A,                    // Flags AD (0x1A, as sniffed)
+        0x02, 0x01, 0x05,                    // Flags AD (0x05, as captured)
         0x1B, 0xFF,                          // mfg AD header (len 27)
         0x4C, 0x00,                          // Apple company ID (LE)
         0x02, 0x15,                          // iBeacon-style subtype + len
@@ -104,7 +103,21 @@ TEST_CASE("insta360_protocol - wake advert serial lands at offsets 19-24") {
     // The Flags AD comes first regardless of serial.
     CHECK(advert[0] == 0x02);
     CHECK(advert[1] == 0x01);
-    CHECK(advert[2] == 0x1A);
+    CHECK(advert[2] == 0x05);
+}
+
+TEST_CASE("insta360_protocol - remote scan response golden bytes") {
+    uint8_t rsp[kRemoteScanRspLen];
+    CHECK(buildRemoteScanResponse(rsp) == kRemoteScanRspLen);
+    // Captured from the genuine remote: Appearance 0x0180 then
+    // Complete Local Name "Insta360 GPS Remote".
+    const uint8_t expected[kRemoteScanRspLen] = {
+        0x03, 0x19, 0x80, 0x01,
+        0x14, 0x09,
+        'I', 'n', 's', 't', 'a', '3', '6', '0', ' ',
+        'G', 'P', 'S', ' ', 'R', 'e', 'm', 'o', 't', 'e',
+    };
+    CHECK(std::memcmp(rsp, expected, kRemoteScanRspLen) == 0);
 }
 
 // ---------------------------------------------------------------------------
