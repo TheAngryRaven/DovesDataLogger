@@ -124,40 +124,57 @@ TEST_CASE("insta360_protocol - remote scan response golden bytes") {
 // ce82 button frames
 // ---------------------------------------------------------------------------
 
+// Golden bytes are the exact frames captured from a genuine remote
+// (2026-07-10 nRF Connect log): shutter seq 0x00, mode seq 0x02,
+// power-tap seq 0x04, power-hold stream seq 0x06+.
 TEST_CASE("insta360_protocol - shutter toggle golden bytes") {
     uint8_t frame[9];
-    CHECK(buildShutterToggle(frame, sizeof(frame)) == 9);
+    CHECK(buildShutterToggle(frame, sizeof(frame), 0x00) == 9);
     const uint8_t expected[9] = {0xFC, 0xEF, 0xFE, 0x86, 0x00,
                                  0x03, 0x01, 0x02, 0x00};
     CHECK(std::memcmp(frame, expected, 9) == 0);
-    CHECK(buildShutterToggle(frame, 8) == 0);
+    CHECK(buildShutterToggle(frame, 8, 0x00) == 0);
 }
 
 TEST_CASE("insta360_protocol - mode cycle golden bytes") {
     uint8_t frame[9];
-    CHECK(buildModeCycle(frame, sizeof(frame)) == 9);
-    const uint8_t expected[9] = {0xFC, 0xEF, 0xFE, 0x86, 0x00,
+    CHECK(buildModeCycle(frame, sizeof(frame), 0x02) == 9);
+    const uint8_t expected[9] = {0xFC, 0xEF, 0xFE, 0x86, 0x02,
                                  0x03, 0x01, 0x01, 0x00};
     CHECK(std::memcmp(frame, expected, 9) == 0);
-    CHECK(buildModeCycle(frame, 8) == 0);
+    CHECK(buildModeCycle(frame, 8, 0x02) == 0);
 }
 
-TEST_CASE("insta360_protocol - screen toggle golden bytes") {
+TEST_CASE("insta360_protocol - screen toggle (power tap) golden bytes") {
     uint8_t frame[9];
-    CHECK(buildScreenToggle(frame, sizeof(frame)) == 9);
-    const uint8_t expected[9] = {0xFC, 0xEF, 0xFE, 0x86, 0x00,
+    CHECK(buildScreenToggle(frame, sizeof(frame), 0x04) == 9);
+    const uint8_t expected[9] = {0xFC, 0xEF, 0xFE, 0x86, 0x04,
                                  0x03, 0x01, 0x00, 0x00};
     CHECK(std::memcmp(frame, expected, 9) == 0);
-    CHECK(buildScreenToggle(frame, 8) == 0);
+    CHECK(buildScreenToggle(frame, 8, 0x04) == 0);
 }
 
-TEST_CASE("insta360_protocol - power off golden bytes") {
+TEST_CASE("insta360_protocol - power off (hold) golden bytes") {
     uint8_t frame[9];
-    CHECK(buildPowerOff(frame, sizeof(frame)) == 9);
-    const uint8_t expected[9] = {0xFC, 0xEF, 0xFE, 0x86, 0x00,
+    // First hold frame in the captured stream: seq 0x06.
+    CHECK(buildPowerOff(frame, sizeof(frame), 0x06) == 9);
+    const uint8_t expected[9] = {0xFC, 0xEF, 0xFE, 0x86, 0x06,
                                  0x03, 0x01, 0x00, 0x03};
     CHECK(std::memcmp(frame, expected, 9) == 0);
-    CHECK(buildPowerOff(frame, 8) == 0);
+    CHECK(buildPowerOff(frame, 8, 0x06) == 0);
+}
+
+TEST_CASE("insta360_protocol - button seq lands at byte 4 and only there") {
+    uint8_t a[9], b[9];
+    CHECK(buildPowerOff(a, sizeof(a), 0x06) == 9);
+    CHECK(buildPowerOff(b, sizeof(b), 0x08) == 9);  // next hold frame
+    CHECK(a[4] == 0x06);
+    CHECK(b[4] == 0x08);
+    // Everything but byte 4 is identical between consecutive hold frames.
+    for (int i = 0; i < 9; i++) {
+        if (i == 4) continue;
+        CHECK(a[i] == b[i]);
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -110,6 +110,18 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   to 2 MHz automatically if the fast re-init fails.
 
 ### Fixed
+- **Camera Power Off now streams the held-button frame — decoded from a
+  live remote capture.** A genuine remote's ce82 traffic (nRF Connect,
+  2026-07-10) showed two things we had wrong: the button frame's byte[4]
+  is a running sequence counter the remote steps by 2 with every frame
+  (we hardcoded `0x00`), and **power-off is a held button** — the remote
+  streams the 3-second-hold frame continuously (fresh seq each) until the
+  camera powers off, rather than sending one frame. We now stream the
+  hold non-blockingly for ~3.5 s (or until the camera drops the link,
+  which is it powering off), with a per-frame sequence counter. ce82 is
+  also now NOTIFY-only, matching the captured remote's GATT. (The
+  captured shutter/mode/power-tap frames confirm our other button byte
+  patterns exactly.)
 - **Wake advert matched byte-for-byte to the genuine GPS Remote —
   X4-confirmed ground truth.** A real remote was captured with nRF
   Connect against the camera, and replaying its advertisement from a

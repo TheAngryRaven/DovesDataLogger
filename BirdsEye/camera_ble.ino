@@ -60,6 +60,20 @@ static uint8_t serialBytes[insta360_protocol::kSerialLen] = {0};
 // (start/stop video, GPS frame); wraps naturally.
 static uint16_t msgCounter = insta360_protocol::kInitialMsgCounter;
 
+// ce82 button-frame sequence counter — the real remote places this at
+// byte[4] and steps it by 2 with every button frame it sends. Kept as a
+// single running counter across all ce82 frames.
+static uint8_t ce82Seq = 0x00;
+
+// Power-off is a HELD button: the real remote streams the 3-second-hold
+// frame continuously (fresh seq each frame) until the camera powers off.
+// Non-blocking — CAMERA_LOOP feeds it; ends at the deadline or when the
+// camera drops the R-link (i.e. it powered off).
+static uint32_t ce82HoldUntil = 0;    // millis deadline; 0 = not holding
+static uint32_t ce82HoldNextAt = 0;   // next frame due at
+constexpr uint32_t kCe82PowerHoldMs   = 3500;  // stream a >3 s hold
+constexpr uint32_t kCe82HoldIntervalMs = 30;   // ~30 ms/frame (remote ~25 ms)
+
 // ---- Link flags (written from Bluefruit-task callbacks -> volatile) ----
 static volatile bool     remoteLinkUp = false;   // camera holds our ce80 remote service
 static volatile bool     controlLinkUp = false;  // our central link to the camera's be80 is up
@@ -360,8 +374,9 @@ void cameraBleRegisterServices() {
   cameraCe81Char.setWriteCallback(cameraCe81WriteCallback);
   cameraCe81Char.begin();
 
-  // ce82: us -> camera button frames.
-  cameraCe82Char.setProperties(CHR_PROPS_NOTIFY | CHR_PROPS_INDICATE);
+  // ce82: us -> camera button frames. NOTIFY-only, matching the genuine
+  // remote's GATT (captured [N]); the camera subscribes by CCCD write.
+  cameraCe82Char.setProperties(CHR_PROPS_NOTIFY);
   cameraCe82Char.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
   cameraCe82Char.setMaxLen(20);
   cameraCe82Char.setCccdWriteCallback(cameraCe82CccdCallback);
@@ -473,25 +488,50 @@ static bool cameraSendCe82(const uint8_t* buf, uint16_t n) {
     debugln(F("CAM: ce82 send failed - no remote link (R)"));
     return false;
   }
-  const bool notifySub = cameraCe82Char.notifyEnabled();
-  const bool indicateSub = cameraCe82Char.indicateEnabled();
-  if (!notifySub && !indicateSub) {
+  // ce82 is NOTIFY-only (matches the real remote); the camera subscribes
+  // by writing the CCCD. Without that subscription the notify is
+  // discarded by the stack.
+  if (!cameraCe82Char.notifyEnabled()) {
     debugln(F("CAM: ce82 send failed - camera never subscribed (CCCD off)"));
     return false;
   }
-  bool ok = notifySub ? cameraCe82Char.notify(buf, n)
-                      : cameraCe82Char.indicate(buf, n);
-  debug(F("CAM: ce82 "));
-  debug(notifySub ? F("notify ") : F("indicate "));
-  debugln(ok ? F("sent") : F("REJECTED by stack"));
-  return ok;
+  return cameraCe82Char.notify(buf, n);
 }
 
-// Best-effort ce82 power-off button frame (remote link).
+// Arm the streamed power-off hold. The real remote does not send a single
+// power-off frame — it streams the 3-second-hold frame continuously while
+// the button is held, so we do the same (non-blocking; serviced by
+// cameraServiceCe82Hold in CAMERA_LOOP). Returns false if the camera
+// isn't subscribed, so the bench menu can report the real reason.
 static bool cameraSendPowerOff() {
-  uint8_t buf[16];
-  size_t n = insta360_protocol::buildPowerOff(buf, sizeof(buf));
-  return n > 0 && cameraSendCe82(buf, (uint16_t)n);
+  if (!remoteLinkUp || !cameraCe82Char.notifyEnabled()) {
+    debugln(F("CAM: power-off not armed - no R-link / not subscribed"));
+    return false;
+  }
+  ce82HoldUntil = millis() + kCe82PowerHoldMs;
+  ce82HoldNextAt = millis();  // first frame immediately
+  debugln(F("CAM: power-off hold armed (streaming ce82)"));
+  return true;
+}
+
+// Stream the power-off hold frame while armed. Called every CAMERA_LOOP
+// iteration (before any early return) so it runs in both bench-test and
+// FSM modes. Stops at the deadline or the moment the camera drops the
+// R-link — that drop IS the camera powering off.
+static void cameraServiceCe82Hold() {
+  if (ce82HoldUntil == 0) return;
+  const uint32_t now = millis();
+  if (!remoteLinkUp || (int32_t)(now - ce82HoldUntil) >= 0) {
+    ce82HoldUntil = 0;
+    debugln(F("CAM: power-off hold ended"));
+    return;
+  }
+  if ((int32_t)(now - ce82HoldNextAt) < 0) return;  // rate limit
+  ce82HoldNextAt = now + kCe82HoldIntervalMs;
+  uint8_t buf[9];
+  size_t n = insta360_protocol::buildPowerOff(buf, sizeof(buf), ce82Seq);
+  ce82Seq += 2;
+  if (n > 0) cameraCe82Char.notify(buf, (uint16_t)n);
 }
 
 // Best-effort be81 stop-video (used by the teardown paths).
@@ -779,6 +819,9 @@ void CAMERA_LOOP() {
   // 1. Drain camera writes first so a captured serial feeds this step.
   cameraDrainCe81();
   cameraDrainScanName();
+  // Stream an in-flight power-off hold in BOTH bench-test and FSM modes
+  // (runs before the test-mode early return below).
+  cameraServiceCe82Hold();
 
   // Manual bench-test mode: the tester drives wake/record/power directly
   // (see cameraTest*() below), so the FSM is suppressed here — stepping it
@@ -987,8 +1030,7 @@ bool cameraAdvertisingUp() {
 }
 
 bool cameraCe82Subscribed() {
-  return bleInitialized && remoteLinkUp &&
-         (cameraCe82Char.notifyEnabled() || cameraCe82Char.indicateEnabled());
+  return bleInitialized && remoteLinkUp && cameraCe82Char.notifyEnabled();
 }
 
 bool cameraPairedSerial(char* buf, size_t bufSize) {

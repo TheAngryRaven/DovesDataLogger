@@ -66,11 +66,18 @@ size_t buildWakeAdvert(uint8_t out[kWakeAdvertLen],
 constexpr size_t kRemoteScanRspLen = 25;
 size_t buildRemoteScanResponse(uint8_t out[kRemoteScanRspLen]);
 
-// ce82 remote->camera button frames (9 bytes each, static contents).
-size_t buildShutterToggle(uint8_t* out, size_t cap);
-size_t buildModeCycle(uint8_t* out, size_t cap);
-size_t buildScreenToggle(uint8_t* out, size_t cap);
-size_t buildPowerOff(uint8_t* out, size_t cap);
+// ce82 remote->camera button frames (9 bytes each). `seq` is a running
+// counter the real remote places at byte[4] and increments by 2 with
+// every ce82 frame it sends (X4-confirmed capture: shutter=0x00,
+// mode=0x02, power-click=0x04, then the power-HOLD stream 0x06, 0x08,
+// 0x0A ...). The camera tracks distinct frames by it, so a held button
+// must be STREAMED with a fresh seq each frame, not sent once.
+//   btn:  0x02 shutter, 0x01 mode, 0x00 power
+//   press: 0x00 tap/click, 0x03 3-second hold (power-off)
+size_t buildShutterToggle(uint8_t* out, size_t cap, uint8_t seq);
+size_t buildModeCycle(uint8_t* out, size_t cap, uint8_t seq);
+size_t buildScreenToggle(uint8_t* out, size_t cap, uint8_t seq);  // power tap
+size_t buildPowerOff(uint8_t* out, size_t cap, uint8_t seq);      // power hold
 
 // be81 remote->camera control frames. `counter` is the per-command
 // message counter (start at kInitialMsgCounter, increment per command).

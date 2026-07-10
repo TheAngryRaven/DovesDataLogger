@@ -20,14 +20,16 @@ namespace {
 
 constexpr size_t kButtonFrameLen = 9;
 
-// X4-VERIFY(sniff): ce82 button-frame preamble.
+// X4-CONFIRMED (2026-07-10 remote capture): ce82 button-frame preamble.
+// byte[4] is a running sequence counter, filled in per-call below.
 constexpr uint8_t kButtonPreamble[7] = {0xFC, 0xEF, 0xFE, 0x86,
                                         0x00, 0x03, 0x01};
 
-size_t buildButtonFrame(uint8_t* out, size_t cap, uint8_t button,
-                        uint8_t press) {
+size_t buildButtonFrame(uint8_t* out, size_t cap, uint8_t seq,
+                        uint8_t button, uint8_t press) {
   if (out == nullptr || cap < kButtonFrameLen) return 0;
   memcpy(out, kButtonPreamble, sizeof(kButtonPreamble));
+  out[4] = seq;  // running counter, +2 per frame on the real remote
   out[7] = button;
   out[8] = press;
   return kButtonFrameLen;
@@ -188,24 +190,28 @@ size_t buildRemoteScanResponse(uint8_t out[kRemoteScanRspLen]) {
 // ce82 button frames
 // -----------------------------------------------------------------------
 
-size_t buildShutterToggle(uint8_t* out, size_t cap) {
-  // X4-VERIFY(sniff): button 0x02, press 0x00.
-  return buildButtonFrame(out, cap, 0x02, 0x00);
+size_t buildShutterToggle(uint8_t* out, size_t cap, uint8_t seq) {
+  // X4-CONFIRMED: FC EF FE 86 <seq> 03 01 02 00 (button 0x02, tap).
+  return buildButtonFrame(out, cap, seq, 0x02, 0x00);
 }
 
-size_t buildModeCycle(uint8_t* out, size_t cap) {
-  // X4-VERIFY(sniff): button 0x01, press 0x00.
-  return buildButtonFrame(out, cap, 0x01, 0x00);
+size_t buildModeCycle(uint8_t* out, size_t cap, uint8_t seq) {
+  // X4-CONFIRMED: FC EF FE 86 <seq> 03 01 01 00 (button 0x01, tap).
+  return buildButtonFrame(out, cap, seq, 0x01, 0x00);
 }
 
-size_t buildScreenToggle(uint8_t* out, size_t cap) {
-  // X4-VERIFY(sniff): button 0x00, press 0x00.
-  return buildButtonFrame(out, cap, 0x00, 0x00);
+size_t buildScreenToggle(uint8_t* out, size_t cap, uint8_t seq) {
+  // X4-CONFIRMED: FC EF FE 86 <seq> 03 01 00 00 (power button, single
+  // tap — toggles the screen on/off; a full boot uses this too).
+  return buildButtonFrame(out, cap, seq, 0x00, 0x00);
 }
 
-size_t buildPowerOff(uint8_t* out, size_t cap) {
-  // X4-VERIFY(sniff): button 0x00, press 0x03 (3-second hold).
-  return buildButtonFrame(out, cap, 0x00, 0x03);
+size_t buildPowerOff(uint8_t* out, size_t cap, uint8_t seq) {
+  // X4-CONFIRMED: FC EF FE 86 <seq> 03 01 00 03 (power button, 3-second
+  // HOLD). The real remote STREAMS this frame continuously with an
+  // incrementing seq while the button is held — the camera powers off
+  // after receiving the sustained hold; a single frame does nothing.
+  return buildButtonFrame(out, cap, seq, 0x00, 0x03);
 }
 
 // -----------------------------------------------------------------------
