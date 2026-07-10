@@ -56,9 +56,15 @@ void serialToString(const uint8_t serial[kSerialLen],
                     char out[kSerialLen + 1]);
 
 // Build the 31-byte wake advertisement (iBeacon masquerade carrying the
-// camera serial) that wakes a sleeping X4. Returns kWakeAdvertLen.
+// camera serial) that wakes a sleeping X4. X4-confirmed ground truth
+// captured from a genuine GPS Remote. Returns kWakeAdvertLen.
 size_t buildWakeAdvert(uint8_t out[kWakeAdvertLen],
                        const uint8_t serial[kSerialLen]);
+
+// The genuine remote's 25-byte scan response: Appearance 0x0180 +
+// Complete Local Name "Insta360 GPS Remote". Returns kRemoteScanRspLen.
+constexpr size_t kRemoteScanRspLen = 25;
+size_t buildRemoteScanResponse(uint8_t out[kRemoteScanRspLen]);
 
 // ce82 remote->camera button frames (9 bytes each, static contents).
 size_t buildShutterToggle(uint8_t* out, size_t cap);

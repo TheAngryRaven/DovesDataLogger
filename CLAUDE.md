@@ -643,12 +643,15 @@ loop()  ~250 Hz
   consumes them, steps the FSM, and does all real work (including the one
   `setSetting()` that persists a captured serial).
 - **X4-VERIFY posture**: all frame bytes live in the host-tested
-  `insta360_protocol` pure unit with golden-byte tests, sourced from
-  proven reference implementations (pchwalek / tsunghowu / btittelbach /
-  arsfabula). Every camera-facing table is marked `// X4-VERIFY(sniff)`
-  until confirmed against a live sniff of our own hardware: the wake
-  advert + ce82 button frames are X4-verified; the be81
-  start/stop/GPS frames are proven on ONE/X3, X4 sniff pending.
+  `insta360_protocol` pure unit with golden-byte tests. The **wake
+  advert + scan response are X4-CONFIRMED ground truth** — captured from
+  a genuine GPS Remote with nRF Connect (2026-07-10 bench session) and
+  the replayed packet woke the sleeping X4; flags are `0x05`, and the
+  paired camera-mode advert presents this same remote-identity packet.
+  Remaining `// X4-VERIFY(sniff)`: the be81 start/stop/GPS frames
+  (proven on ONE/X3; the live X4 GATT dump confirms be81 is READ/WRITE
+  — no write-without-response — and be82 NOTIFY, unencrypted, no
+  bonding) and the D0FF/ce83 statics.
 - **Bench test menu** (`PAGE_CAMERA_TEST`): the paired Camera page has a
   **Test** entry opening a manual-control menu (Wake / Connect / Rec Start /
   Rec Stop / Power Off / Back) plus live remote (**R**) / control (**C**)

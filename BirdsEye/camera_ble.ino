@@ -521,6 +521,32 @@ static bool cameraTakeRadio() {
   return true;
 }
 
+// Present the genuine remote's on-air identity — the ONE advert a real
+// GPS Remote transmits, X4-confirmed by capture and phone replay:
+// primary = flags 0x05 + ORBIT/serial manufacturer block (this is also
+// the wake trigger), scan response = appearance 0x0180 + name. Both set
+// as raw bytes (Bluefruit cannot reshape them) and padded to 31+31 (see
+// bleAdvFinalizePadded). Caller must have run cameraTakeRadio() and
+// checked the peripheral slot. ~100 ms interval (real remote runs ~66).
+static bool cameraStartRemoteIdentityAdvert() {
+  uint8_t adv[insta360_protocol::kWakeAdvertLen];
+  if (insta360_protocol::buildWakeAdvert(adv, serialBytes) !=
+      insta360_protocol::kWakeAdvertLen) {
+    return false;
+  }
+  uint8_t rsp[insta360_protocol::kRemoteScanRspLen];
+  insta360_protocol::buildRemoteScanResponse(rsp);
+
+  Bluefruit.setName("Insta360 GPS Remote");  // GAP name char, post-connect
+  Bluefruit.Advertising.setType(BLE_GAP_ADV_TYPE_CONNECTABLE_SCANNABLE_UNDIRECTED);
+  Bluefruit.Advertising.setInterval(160, 160);  // 100 ms, fast == slow
+  Bluefruit.Advertising.restartOnDisconnect(false);
+  bool ok = Bluefruit.Advertising.setData(adv, sizeof(adv));
+  ok = Bluefruit.ScanResponse.setData(rsp, sizeof(rsp)) && ok;
+  bleAdvFinalizePadded();
+  return ok && Bluefruit.Advertising.start(0);
+}
+
 static void cameraExecuteAction(camera_fsm::Action a) {
   switch (a) {
     case camera_fsm::Action::kNone:
@@ -531,24 +557,6 @@ static void cameraExecuteAction(camera_fsm::Action a) {
       // A fresh wake must judge the camera on new sightings only — drop
       // any advert hit latched by an earlier scan window.
       scanHit = false;
-
-      uint8_t adv[insta360_protocol::kWakeAdvertLen];
-      if (insta360_protocol::buildWakeAdvert(adv, serialBytes) !=
-          insta360_protocol::kWakeAdvertLen) {
-        break;  // can't happen with a fixed-size out buffer
-      }
-      // Broadcast setup per the sniffed reference remote (pchwalek):
-      //
-      //  - CONNECTABLE, not non-connectable: the manuf data powers the
-      //    camera on, and the camera then connects BACK to this same
-      //    "Insta360 GPS Remote" advert (the R-link). A non-connectable
-      //    beacon breaks that reconnect — that rework was wrong.
-      //  - The 28-byte manuf AD + flags fill the 31-byte primary PDU, so
-      //    the name goes in the SCAN RESPONSE.
-      //  - Both packets are set as RAW byte arrays via setData() so the
-      //    Bluefruit stack cannot truncate or reshape them — the on-air
-      //    payload is byte-identical to buildWakeAdvert()'s golden-tested
-      //    output (pchwalek needed a custom ESP32 API for exactly this).
       // A CONNECTABLE start needs the single peripheral slot free. If the
       // camera already holds our R-link it is awake — a wake advert is
       // pointless and start() would fail with NRF_ERROR_CONN_COUNT.
@@ -556,40 +564,29 @@ static void cameraExecuteAction(camera_fsm::Action a) {
         debugln(F("CAM: wake skipped - camera already connected (R-link up)"));
         break;
       }
-      Bluefruit.Advertising.setType(BLE_GAP_ADV_TYPE_CONNECTABLE_SCANNABLE_UNDIRECTED);
-      // Scan response: Complete Local Name "Insta360 GPS Remote" (raw AD:
-      // len 0x14 = type + 19 chars). setName() too, so the GAP name
-      // characteristic matches once the camera connects.
-      static const uint8_t kNameScanRsp[21] = {
-          0x14, 0x09, 'I', 'n', 's', 't', 'a', '3', '6', '0', ' ',
-          'G',  'P',  'S', ' ', 'R', 'e', 'm', 'o', 't', 'e'};
-      Bluefruit.setName("Insta360 GPS Remote");
-      Bluefruit.Advertising.setInterval(160, 160);  // 100 ms, fast == slow
-      Bluefruit.Advertising.restartOnDisconnect(false);
-      // No setFastTimeout(): with equal fast/slow intervals the fast
-      // window expiring changes nothing.
-      bool ok = Bluefruit.Advertising.setData(adv, insta360_protocol::kWakeAdvertLen);
-      ok = Bluefruit.ScanResponse.setData(kNameScanRsp, sizeof(kNameScanRsp)) && ok;
-      // Pad both packets to 31 bytes — MANDATORY (Bluefruit 0.21.0
-      // freezes packet lengths at the first advert of the boot; a
-      // shorter first advert would truncate this PDU on air; see
-      // bleAdvFinalizePadded()).
-      bleAdvFinalizePadded();
-      ok = ok && Bluefruit.Advertising.start(0);
       debug(F("CAM: wake advertising "));
-      debugln(ok ? F("STARTED (connectable, name in scanrsp)")
-                 : F("FAILED - advert not running"));
+      debugln(cameraStartRemoteIdentityAdvert() ? F("STARTED")
+                                                : F("FAILED - not running"));
       break;
     }
 
     case camera_fsm::Action::kStartConnectableAdvertising: {
       if (!cameraTakeRadio()) break;
-      // Explicit type: the shared Advertising object keeps whatever the
-      // last owner set.
+      if (cameraFsm.serialPresent) {
+        // Paired: present the REAL remote's identity (mfg payload +
+        // appearance/name scanrsp) — this is the one advert a genuine
+        // remote ever transmits, and it's what the camera's reconnect
+        // scan looks for. Same packet as wake (they are the same thing
+        // on the real device).
+        debug(F("CAM: remote-identity advertising "));
+        debugln(cameraStartRemoteIdentityAdvert() ? F("STARTED") : F("FAILED"));
+        break;
+      }
+      // Unpaired (pairing flow): no serial for the mfg payload yet — use
+      // a plain discoverable advert with the name + ce80 service in the
+      // primary so the camera's "add remote" scan can find us. Explicit
+      // type: the shared Advertising object keeps the last owner's.
       Bluefruit.Advertising.setType(BLE_GAP_ADV_TYPE_CONNECTABLE_SCANNABLE_UNDIRECTED);
-      // Exact name the camera looks for. Payload kept lean — flags(3) +
-      // 0xCE80 service(4) + name(21) = 28 <= 31 fits the primary advert;
-      // no TX-power element (the reference remote's advert has none).
       Bluefruit.setName("Insta360 GPS Remote");
       Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
       Bluefruit.Advertising.addService(cameraRemoteService);
@@ -598,7 +595,7 @@ static void cameraExecuteAction(camera_fsm::Action a) {
       Bluefruit.Advertising.setInterval(32, 244);
       Bluefruit.Advertising.setFastTimeout(30);
       bleAdvFinalizePadded();  // every advert must be 31+31 — see bluetooth.ino
-      debug(F("CAM: connectable advertising "));
+      debug(F("CAM: pairing advertising "));
       debugln(Bluefruit.Advertising.start(0) ? F("STARTED") : F("FAILED"));
       break;
     }
