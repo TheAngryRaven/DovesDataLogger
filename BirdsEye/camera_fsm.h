@@ -50,11 +50,19 @@ constexpr uint32_t kRpmGoneAbortMs        = 2000;  // RPM below OFF threshold th
 constexpr uint32_t kConnectTimeoutMs   = 20000;  // per wake attempt: wait for the camera to connect
 constexpr uint8_t  kConnectRetries     = 3;      // wake attempts before giving up back to IDLE
 // After the camera connects it must subscribe to ce82 before we can send
-// any button frame. If it never does, drop and re-advertise.
+// any button frame. If it never does, drop and re-advertise — bounded by
+// kSubscribeRetries so a camera that connects but never subscribes (stale
+// bond / encryption never comes up) eventually gives up to IDLE instead of
+// looping connect->timeout->re-advertise forever.
 constexpr uint32_t kSubscribeTimeoutMs = 10000;
+constexpr uint8_t  kSubscribeRetries   = 3;      // connect-but-never-subscribe cycles before IDLE
 constexpr uint32_t kGpsLockTimeoutMs   = 30000;  // max wait for GPS lock before recording anyway
 constexpr uint32_t kPairingTimeoutMs   = 120000; // pairing screen gives up after 2 min
 constexpr uint32_t kPowerOffLingerMs   = 5000;   // POWERING_OFF: wait for link drop, then force it
+// RECORDING: if the camera's observed state (0x10 timer) reports IDLE this
+// long while we believe we're recording, the start shutter never landed — so
+// re-assert it once. Never fires without a fresh observation (kUnknown).
+constexpr uint32_t kRecordConfirmMs    = 2500;
 
 // ---- Behaviour flags ----
 constexpr bool kStopOnEither              = false;  // DECIDED: require speed==0 AND rpm==0 to stop
@@ -71,6 +79,14 @@ enum class State : uint8_t {
   kPoweringOff,  // power-off streaming; waiting for the camera to drop the link
   kPairing,      // connectable advertising, waiting to capture a camera serial
 };
+
+// Camera record state OBSERVED by the glue from the camera's ce81 0x10
+// display-string frames (see insta360_protocol::parseRecordingState). The
+// FSM reconciles its recordingActive belief against this so a lost or failed
+// shutter is corrected instead of inverted (the shutter is a stateful
+// toggle, so a wrong belief flips the camera the wrong way). kUnknown = no
+// fresh observation this step (link just up, or the last 0x10 is stale).
+enum class RecordObs : uint8_t { kUnknown, kIdle, kRecording };
 
 // step() returns at most one action per call; the glue executes it.
 enum class Action : uint8_t {
@@ -93,6 +109,7 @@ struct Inputs {
   bool     gpsFixValid = false;   // gpsData.fix
   bool     remoteConnected = false;   // camera connected to our ce80 remote service (THE link)
   bool     ce82Subscribed = false;    // camera wrote our ce82 CCCD — button frames now deliverable
+  RecordObs recordObserved = RecordObs::kUnknown;  // camera-reported record state (0x10 timer)
   // one-shot events
   bool sessionEndRequested = false;   // datalogger session ended (manual stop / auto-idle / sleep)
   bool pairRequested = false;         // UI: enter pairing
@@ -112,9 +129,12 @@ struct Fsm {
   uint32_t rpmGoneSince = 0;        // WAKING: rpm below OFF threshold since
   uint32_t wakeAttemptStarted = 0;  // WAKING: current attempt window start
   uint8_t  wakeAttemptsUsed = 0;
+  uint8_t  subscribeAttemptsUsed = 0;  // AwaitReady: connect-but-never-subscribe cycles (persists across re-wake)
   uint32_t connectedSince = 0;      // kAwaitReady: camera-connected since (subscription-wait timer)
   uint32_t awaitGpsSince = 0;       // kAwaitReady: waiting-for-fix since
   uint32_t stopCondSince = 0;       // RECORDING: stop-condition hold start
+  uint32_t recordIdleSince = 0;     // RECORDING: camera-reports-idle-while-believed-recording since
+  bool     recordRetryUsed = false; // RECORDING: single re-assert-shutter latch (re-armed on confirmed recording)
   uint32_t cooldownSince = 0;
   uint32_t powerOffSentAt = 0;
   uint32_t pairingSince = 0;

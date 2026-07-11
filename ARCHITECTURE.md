@@ -206,9 +206,15 @@ The entire lifecycle — wake on engine start, wait for the camera to
 connect and subscribe, record on GPS lock (or a 30 s timeout), stop, cool
 down, power off — is a **pure FSM** (`camera_fsm`): it consumes a
 telemetry snapshot each loop tick and returns at most one action for the
-glue to execute. Because the shutter is a *toggle*, the FSM tracks a
-`recordingActive` belief so a mid-session BLE drop and reconnect never
-blind-toggles the wrong way. All the temporal behavior (debounce,
+glue to execute. Because the shutter is a *toggle*, a wrong record belief
+flips the camera the wrong way — so the FSM does not merely believe: it
+**confirms** record state from the camera's own `0x10` status frame (a live
+`.HH:MM:SS` timer while recording; the `0x02` word is unreliable) and
+reconciles its `recordingActive` belief against that observation. On a
+mid-session BLE drop it preserves the belief (the camera is unreachable, so
+we can't have stopped it) and on reconnect adopts the camera's real state
+instead of blind-toggling; if the camera reports idle while we think we're
+recording, it re-asserts the shutter once. All the temporal behavior (debounce,
 retries, timeouts) lives inside it, so every path is host-tested with a
 fake clock rather than discovered at the track; it is also the
 board-portable core intended to move unchanged to the nRF54 ("Falcon")
@@ -225,9 +231,10 @@ way BLE transfer and USB MSC do. Second, the protocol bytes live in the
 host-tested `insta360_protocol` unit with golden-byte tests. The wake
 advert + scan response, the ce82 button frames, and the ce82 GPS/RMC frame
 are all **X4-confirmed** — captured from a genuine remote (the wake advert
-was even replayed to wake a sleeping X4). Only the camera's own `ce81`
-state pushes remain to be decoded (accepted and ACKed, parsed only if we
-want LED-style feedback).
+was even replayed to wake a sleeping X4). The camera's own `ce81` state
+pushes are now partly decoded too: the `0x10` display-string frame carries
+the record timer used for the confirmation above; the remaining status
+types are accepted and ACKed, parsed only if we want richer feedback.
 
 ## Data formats
 

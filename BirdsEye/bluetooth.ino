@@ -49,6 +49,15 @@ static bool deferFileCommand(const char* cmd) {
 // on the main loop, so SdFat is only ever touched by one task.
 static volatile bool bleDisconnectCleanupPending = false;
 
+// True once a transfer peer actually DROVE the file/settings/OTA service
+// (any fileRequestChar write while the transfer owns the radio). Gates the
+// auto-reboot-on-disconnect: a bonded camera that connects to the transfer
+// advert (the radio has one BD_ADDR, so the X4 can chase it) and vets our
+// GATT then drops must NOT reboot the logger out of the user's transfer
+// session — repeatedly, if the camera keeps retrying (#1). A peer that never
+// touched the service also held no SD, so skipping the teardown is safe.
+static volatile bool bleTransferEngaged = false;
+
 void bleConnectCallback(uint16_t conn_handle) {
   // Camera-owned link (the X4 connecting to our remote GATT) — route to the
   // camera module and skip everything below: bleConnected and the MTU/PHY/
@@ -60,6 +69,7 @@ void bleConnectCallback(uint16_t conn_handle) {
 
   debugln(F("BLE: Device connected!"));
   bleConnected = true;
+  bleTransferEngaged = false;  // this peer hasn't used the service yet
 
   BLEConnection* connection = Bluefruit.Connection(conn_handle);
 
@@ -127,9 +137,16 @@ void bleDisconnectCallback(uint16_t conn_handle, uint8_t reason) {
   // and SdFat is not thread-safe. If this was a local BLE_STOP() (which sets
   // bleActive=false before disconnecting), BLE_STOP() already did the
   // teardown on the main loop, so there is nothing to defer.
-  if (bleActive) {
+  //
+  // Only reboot for a peer that actually USED the transfer service. A bonded
+  // camera can land on the transfer advert (shared BD_ADDR) and be routed
+  // here as "the phone" when it drops; without this gate its disconnect would
+  // reboot the logger mid-transfer, over and over (#1). A never-engaged peer
+  // also held no SD, so there is nothing to tear down.
+  if (bleActive && bleTransferEngaged) {
     bleDisconnectCleanupPending = true;
   }
+  bleTransferEngaged = false;  // reset for the next peer
 }
 
 // Forward declaration for callback
@@ -412,6 +429,11 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
   // peer that connects during camera mode must not queue deferred SD work —
   // BLUETOOTH_LOOP() is gated on bleActive and would never drain it.
   if (bleOwner != BLE_OWNER_TRANSFER) return;
+
+  // A write to the request characteristic means this is a genuine transfer
+  // peer (the phone app), not a bonded camera vetting our GATT — arm the
+  // reboot-on-disconnect gate (#1).
+  bleTransferEngaged = true;
 
   char buffer[65];
   memset(buffer, 0, sizeof(buffer));
@@ -706,6 +728,7 @@ void BLE_STOP() {
     releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
   }
   bleTransferInProgress = false;
+  bleTransferEngaged = false;  // session is over — no reboot owed
   fwReset();  // abort any in-flight OTA (closes staging file, frees SD)
 
   // Drop queued-but-unprocessed commands so a stale one can't execute on
@@ -713,6 +736,16 @@ void BLE_STOP() {
   // false, so nothing would clear them otherwise).
   fileCmdPending = false;
   settingsCmdPending = false;
+
+  // Disarm auto-restart BEFORE disconnecting. bleApplyTransferAdvertising()
+  // set restartOnDisconnect(true) so a mid-session phone drop re-advertises;
+  // but here we are deliberately tearing the transfer service down. The
+  // disconnect below is async, so if we left it armed Bluefruit's internal
+  // handler would restart an ownerless transfer advert AFTER we stop it —
+  // the phone would reconnect into a mute session (owner already NONE) and
+  // the occupied peripheral slot would block camera auto-record until a
+  // power cycle.
+  Bluefruit.Advertising.restartOnDisconnect(false);
 
   // Disconnect any connected device
   if (Bluefruit.connected()) {

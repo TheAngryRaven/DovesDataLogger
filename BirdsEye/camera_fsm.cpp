@@ -20,9 +20,12 @@ void clearTimers(Fsm& f) {
   f.rpmGoneSince = 0;
   f.wakeAttemptStarted = 0;
   f.wakeAttemptsUsed = 0;
+  f.subscribeAttemptsUsed = 0;
   f.connectedSince = 0;
   f.awaitGpsSince = 0;
   f.stopCondSince = 0;
+  f.recordIdleSince = 0;
+  f.recordRetryUsed = false;
   f.cooldownSince = 0;
   f.powerOffSentAt = 0;
   f.pairingSince = 0;
@@ -36,6 +39,19 @@ void clearTimers(Fsm& f) {
 void enterIdle(Fsm& f) {
   clearTimers(f);
   f.recordingActive = false;
+  f.state = State::kIdle;
+}
+
+// Land in IDLE but KEEP the recordingActive belief. Used on the paths where
+// the camera is UNREACHABLE (WAKING give-up / rpm-gone / sessionEnd, or the
+// subscribe give-up): we could not send a stop, so we must not pretend the
+// camera stopped. The next reconnect's stepAwaitReady reconcile corrects the
+// belief against the camera's observed 0x10 record state — clearing it here
+// would let that reconnect blind-toggle a still-live recording OFF (#4).
+void enterIdlePreserveRecording(Fsm& f) {
+  const bool wasRecording = f.recordingActive;
+  clearTimers(f);
+  f.recordingActive = wasRecording;
   f.state = State::kIdle;
 }
 
@@ -100,12 +116,14 @@ Action stepWaking(Fsm& f, const Inputs& in) {
     enterAwaitReady(f, in.nowMs);
     return Action::kNone;
   }
-  // Engine gone again before the camera showed up: abort the wake.
+  // Engine gone again before the camera showed up: abort the wake. Preserve
+  // the recording belief — the camera is unreachable, so we can't have
+  // stopped it (see enterIdlePreserveRecording).
   if (in.rpm < kRpmOffThreshold) {
     if (f.rpmGoneSince == 0) {
       f.rpmGoneSince = seedNow(in.nowMs);
     } else if (elapsed(in.nowMs, f.rpmGoneSince, kRpmGoneAbortMs)) {
-      enterIdle(f);
+      enterIdlePreserveRecording(f);
       return Action::kStopAdvertising;
     }
   } else {
@@ -119,14 +137,27 @@ Action stepWaking(Fsm& f, const Inputs& in) {
       f.rpmGoneSince = 0;
       return Action::kStartWakeBurst;
     }
-    enterIdle(f);
+    enterIdlePreserveRecording(f);  // never reached the camera — keep the belief
     return Action::kStopAdvertising;
   }
   if (in.sessionEndRequested) {
-    enterIdle(f);
+    enterIdlePreserveRecording(f);
     return Action::kStopAdvertising;
   }
   return Action::kNone;
+}
+
+// Enter RECORDING with fresh reconcile timers. `sendShutter` toggles the
+// camera when we need to START it; a resume (camera already rolling) passes
+// false so we never blind-toggle a live recording.
+Action enterRecording(Fsm& f, bool sendShutter) {
+  f.state = State::kRecording;
+  f.stopCondSince = 0;
+  f.recordIdleSince = 0;
+  f.recordRetryUsed = false;
+  f.subscribeAttemptsUsed = 0;  // subscribed successfully — reset the bound
+  f.recordingActive = true;
+  return sendShutter ? Action::kSendShutter : Action::kNone;
 }
 
 Action stepAwaitReady(Fsm& f, const Inputs& in) {
@@ -135,16 +166,30 @@ Action stepAwaitReady(Fsm& f, const Inputs& in) {
     return enterWakingFresh(f, in.nowMs);
   }
   if (in.sessionEndRequested) {
-    // Nothing recording yet; the camera just rides its cooldown then powers
-    // off — no shutter needed.
+    // If we came in resuming a recording (belief preserved across a drop),
+    // stop the camera on the way into cooldown; a fresh not-yet-recording
+    // session just rides cooldown then powers off.
+    if (f.recordingActive) {
+      f.recordingActive = false;
+      return enterCooldown(f, in.nowMs, Action::kSendShutter);  // toggle OFF
+    }
     return enterCooldown(f, in.nowMs, Action::kNone);
   }
   // Connected but never subscribed to ce82: we can't send button frames, so
-  // drop the link and re-wake.
+  // drop the link and re-wake — BOUNDED by kSubscribeRetries so a camera that
+  // connects but never subscribes doesn't loop forever (#9). subscribeAttemptsUsed
+  // persists across the re-wake (enterWakingFresh doesn't touch it).
   if (!in.ce82Subscribed &&
       elapsed(in.nowMs, f.connectedSince, kSubscribeTimeoutMs)) {
-    enterWakingFresh(f, in.nowMs);
-    return Action::kDisconnect;
+    f.subscribeAttemptsUsed++;
+    if (f.subscribeAttemptsUsed > kSubscribeRetries) {
+      // Give up: the camera connects but won't take our buttons. Preserve the
+      // recording belief (we never reached it to stop it).
+      enterIdlePreserveRecording(f);
+      return Action::kDisconnect;
+    }
+    enterWakingFresh(f, in.nowMs);  // re-wake; its kStartWakeBurst is intentionally
+    return Action::kDisconnect;     // dropped — drop the useless link first
   }
   // Ready to record: subscribed, and either a GPS fix or the lock wait timed
   // out (record-anyway policy).
@@ -152,14 +197,22 @@ Action stepAwaitReady(Fsm& f, const Inputs& in) {
       kRecordWithoutGpsOnTimeout &&
       elapsed(in.nowMs, f.awaitGpsSince, kGpsLockTimeoutMs);
   if (in.ce82Subscribed && (in.gpsFixValid || lockTimedOut)) {
-    f.state = State::kRecording;
-    f.stopCondSince = 0;
-    if (!f.recordingActive) {
-      f.recordingActive = true;
-      return Action::kSendShutter;  // toggle recording ON
+    // Reconcile against the camera's OBSERVED record state so we drive the
+    // shutter toward the target instead of blind-toggling on belief:
+    //  - kRecording: camera already rolling (resumed session) -> adopt, no shutter.
+    //  - kIdle:      camera confirmed stopped -> shutter to start.
+    //  - kUnknown:   no fresh 0x10 yet -> fall back to belief. If we already
+    //                believe we're recording (belief preserved across a drop),
+    //                adopt WITHOUT toggling — the observation confirms shortly;
+    //                only a not-recording belief starts. This closes the #4
+    //                inversion during the brief post-reconnect observation gap.
+    if (in.recordObserved == RecordObs::kRecording) {
+      return enterRecording(f, /*sendShutter=*/false);
     }
-    // Already recording (resumed after a reconnect): don't blind-toggle.
-    return Action::kNone;
+    if (in.recordObserved == RecordObs::kIdle) {
+      return enterRecording(f, /*sendShutter=*/true);
+    }
+    return enterRecording(f, /*sendShutter=*/!f.recordingActive);
   }
   return Action::kNone;
 }
@@ -178,7 +231,30 @@ Action stepRecording(Fsm& f, const Inputs& in) {
   if (!in.remoteConnected) {
     return enterWakingFresh(f, in.nowMs);
   }
-  // 3. Sustained stop condition.
+  // 3. Confirm the shutter took. The camera's observed 0x10 record state is
+  //    the ground truth (the shutter itself is fire-and-hope):
+  //    - kRecording: confirmed -> clear the re-assert latch/timer.
+  //    - kIdle sustained kRecordConfirmMs while we believe we're recording:
+  //      the start never landed (dropped frame / busy camera) -> re-assert the
+  //      shutter ONCE. Re-armable only after the camera next confirms recording.
+  //    - kUnknown: no fresh observation -> never retry (can't runaway).
+  if (in.recordObserved == RecordObs::kRecording) {
+    f.recordIdleSince = 0;
+    f.recordRetryUsed = false;
+  } else if (in.recordObserved == RecordObs::kIdle && f.recordingActive) {
+    if (!f.recordRetryUsed) {
+      if (f.recordIdleSince == 0) {
+        f.recordIdleSince = seedNow(in.nowMs);
+      } else if (elapsed(in.nowMs, f.recordIdleSince, kRecordConfirmMs)) {
+        f.recordIdleSince = 0;
+        f.recordRetryUsed = true;
+        return Action::kSendShutter;  // re-assert recording ON
+      }
+    }
+  } else {
+    f.recordIdleSince = 0;  // kUnknown (or belief already false): no retry in flight
+  }
+  // 4. Sustained stop condition.
   const bool speedStopped = in.speedMph < kSpeedStopThresholdMph;
   const bool rpmStopped = in.rpm < kRpmOffThreshold;
   const bool stopped = kStopOnEither ? (speedStopped || rpmStopped)

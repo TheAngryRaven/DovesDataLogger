@@ -291,4 +291,31 @@ Ce81Frame parseCe81Frame(const uint8_t* data, size_t len,
   return Ce81Frame::kStatus;
 }
 
+RecordObs parseRecordingState(const uint8_t* data, size_t len) {
+  // Header (6): FE EF FE 10 <flag> <len>. Below 7 bytes there is no room
+  // for even a 1-byte payload, so it cannot be a display string.
+  if (data == nullptr || len < 7) return RecordObs::kUnknown;
+  if (data[0] != 0xFE || data[1] != 0xEF || data[2] != 0xFE) {
+    return RecordObs::kUnknown;
+  }
+  if (data[3] != 0x10) return RecordObs::kUnknown;  // not a display-string frame
+
+  const size_t payLen = data[5];               // payload length after the header
+  if (6 + payLen > len) return RecordObs::kUnknown;  // truncated write, don't guess
+  // Payload = 4 control bytes + the ASCII display string. A payload without
+  // room for the 4 control bytes plus text is an idle/degenerate frame.
+  if (payLen <= 4) return RecordObs::kIdle;
+  const uint8_t* ascii = data + 10;            // 6 header + 4 control bytes
+  const size_t asciiLen = payLen - 4;
+
+  // The elapsed-time counter ".HH:MM:SS" is the only display string that
+  // carries ':' separators (the mode/battery strings never do), so two or
+  // more colons is the dependable "recording" signal.
+  int colons = 0;
+  for (size_t i = 0; i < asciiLen; ++i) {
+    if (ascii[i] == ':') ++colons;
+  }
+  return colons >= 2 ? RecordObs::kRecording : RecordObs::kIdle;
+}
+
 }  // namespace insta360_protocol

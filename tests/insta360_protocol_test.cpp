@@ -291,3 +291,58 @@ TEST_CASE("insta360_protocol - ce81 short or garbage frames are unknown") {
     CHECK(parseCe81Frame(nullptr, 12, nullptr) == Ce81Frame::kUnknown);
     CHECK(parseCe81Frame(garbage, 0, nullptr) == Ce81Frame::kUnknown);
 }
+
+// -------------------------------------------------------------------------
+// parseRecordingState — the 0x10 display-string record signal (spec §6.1)
+// -------------------------------------------------------------------------
+
+TEST_CASE("insta360_protocol - 0x10 recording timer is detected") {
+    // Full §6.1 frame: FE EF FE 10 80 0D 01 0E 46 01 <".00:00:05"> — payLen
+    // 0x0D = 13 (4 control + 9 ASCII), so the complete frame is 19 bytes.
+    const uint8_t recFull[19] = {0xFE, 0xEF, 0xFE, 0x10, 0x80, 0x0D,
+                                 0x01, 0x0E, 0x46, 0x01,
+                                 0x2E, 0x30, 0x30, 0x3A, 0x30, 0x30, 0x3A,
+                                 0x30, 0x35};  // . 0 0 : 0 0 : 0 5
+    CHECK(parseRecordingState(recFull, sizeof(recFull)) ==
+          RecordObs::kRecording);
+
+    // A read shorter than the header-claimed payload must never over-report:
+    // the same frame truncated to 16 bytes (< 6 + payLen 13) is kUnknown.
+    CHECK(parseRecordingState(recFull, 16) == RecordObs::kUnknown);
+}
+
+TEST_CASE("insta360_protocol - 0x10 idle mode/battery strings are not recording") {
+    // "4K|30|UW" — idle mode string.
+    const uint8_t mode[18] = {0xFE, 0xEF, 0xFE, 0x10, 0x81, 0x0C,
+                              0x01, 0x1C, 0x5E, 0x00,
+                              0x34, 0x4B, 0x7C, 0x33, 0x30, 0x7C, 0x55, 0x57};
+    CHECK(parseRecordingState(mode, sizeof(mode)) == RecordObs::kIdle);
+
+    // " 13h09m" — idle battery/runtime string.
+    const uint8_t batt[17] = {0xFE, 0xEF, 0xFE, 0x10, 0x80, 0x0B,
+                              0x01, 0x12, 0x46, 0x01,
+                              0x20, 0x31, 0x33, 0x68, 0x30, 0x39, 0x6D};
+    CHECK(parseRecordingState(batt, sizeof(batt)) == RecordObs::kIdle);
+}
+
+TEST_CASE("insta360_protocol - non-0x10 / malformed frames are unknown") {
+    // A serial handshake frame is not a display-string frame.
+    const uint8_t serial[12] = {0xFE, 0xEF, 0xFE, 0x07, 0x00, 0x06,
+                                '3', '4', 'U', 'Q', 'G', '5'};
+    CHECK(parseRecordingState(serial, sizeof(serial)) == RecordObs::kUnknown);
+
+    // Wrong magic.
+    const uint8_t badMagic[8] = {0xFC, 0xEF, 0xFE, 0x10, 0x80,
+                                 0x02, 0x00, 0x00};
+    CHECK(parseRecordingState(badMagic, sizeof(badMagic)) ==
+          RecordObs::kUnknown);
+
+    // 0x10 header claiming a longer payload than provided -> truncated.
+    const uint8_t truncated[8] = {0xFE, 0xEF, 0xFE, 0x10, 0x80, 0x40,
+                                  0x01, 0x0E};
+    CHECK(parseRecordingState(truncated, sizeof(truncated)) ==
+          RecordObs::kUnknown);
+
+    CHECK(parseRecordingState(nullptr, 12) == RecordObs::kUnknown);
+    CHECK(parseRecordingState(serial, 0) == RecordObs::kUnknown);
+}

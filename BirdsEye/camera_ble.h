@@ -118,6 +118,17 @@ bool cameraAdvertisingUp();
 // R:UP without "+" = camera connected but ignoring our buttons.
 bool cameraCe82Subscribed();
 
+// True while we are actively streaming the 10 Hz GPS/RMC feed to the camera
+// (connected + subscribed + not paused by a power-off hold). The bench-test
+// page shows this as G:SYNC / G:V (see the fix status) so the GPS link can
+// be 100% verified. GPS is streamed regardless of fix (voided RMC when no
+// lock) — this reflects that frames are actually going out.
+bool cameraGpsStreaming();
+
+// True when the camera's own 0x10 display string reports it is RECORDING
+// (a fresh ".HH:MM:SS" timer). Lets the bench page confirm the shutter took.
+bool cameraObservedRecording();
+
 // Copy the stored 6-char serial into buf (NUL-terminated; bufSize >= 7).
 // Returns false (buf = "") when unpaired.
 bool cameraPairedSerial(char* buf, size_t bufSize);
