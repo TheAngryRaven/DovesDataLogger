@@ -87,10 +87,10 @@ to the matching `*_LOOP()`.
   updates and a Device Information Service (`BLEDis`) that reports
   `FIRMWARE_VERSION` for the update check.
 - **Camera** (`camera_ble` + the `camera_fsm` / `insta360_protocol` pure
-  units) — hands-free Insta360 X4 auto-record: the device impersonates
-  the Insta360 GPS Remote, wakes the paired camera on engine start,
-  starts/stops recording automatically, and feeds it GPS at 1 Hz for the
-  camera's overlay.
+  units) — hands-free Insta360 X4 auto-record: the device emulates the
+  Insta360 GPS Remote as a pure BLE peripheral, wakes the paired camera on
+  engine start, and starts/stops/powers it off automatically via ce82
+  remote-button notifications.
 - **Replay** (`replay`) — instant DOVEX header replay.
 - **Settings** (`settings`) — JSON key/value store on the SD card.
 - **CourseManager** (external library) — owns course detection, sector
@@ -174,45 +174,57 @@ boots — it just skips IMU init.
 
 ### Insta360 camera auto-record
 An Insta360 X4 has no wired trigger, but it *does* trust its own BLE
-accessory: the "GPS Remote". So the device impersonates the remote — it
-hosts the remote's GATT (service `0xCE80` plus the secondary `D0FF`
-service) and wakes a powered-off camera with the remote's
-manufacturer-data advertisement carrying the camera's serial. Acting the
-remote alone isn't enough for deterministic control, though: the remote's
-shutter button is a *toggle*, so the device also connects as BLE
-**central** to the camera's own `0xBE80` control service, which has
-explicit start-video / stop-video commands and accepts a 1 Hz GPS
-telemetry frame for the camera's Stats Dashboard overlay. That's why the
-BLE core is dual-role (`Bluefruit.begin(1, 1)`) — one peripheral slot
-shared with the file-transfer service via an explicit `bleOwner`
-(NONE/TRANSFER/CAMERA), one central slot for the camera. The owner model
-keeps the two radio users honest: a camera link can never trigger the
-transfer path's auto-reboot-on-disconnect, and opening the transfer page
-force-releases the camera first. BLE comes up lazily on the first camera
-action, so an unpaired device pays nothing.
+accessory: the "GPS Remote". So the device **is** the remote — a pure BLE
+**peripheral**. It hosts the remote's GATT (service `0xCE80`: `ce81`
+write camera→us, `ce82` notify us→camera, `ce83` read), advertises the
+remote's manufacturer-data payload (carrying the camera's serial) to wake
+a powered-off camera, and the camera connects back to *us* as central and
+subscribes to `ce82`. **All** control is a `ce82` button notification,
+byte-for-byte the physical remote's frames: recording toggles with the
+shutter button, and power-off streams the remote's 3-second power-hold.
+We never act as central — no scanning, no connecting to the camera's own
+`0xBE80` service. (That central path was an earlier design; it let us
+send explicit start/stop-video and a 1 Hz GPS-overlay frame, but power-off
+only exists as a remote `ce82` hold, and one BLE link can hold only one
+role — you cannot be central to the camera and have the camera be central
+to you at once. The role conflict is what made power-off impossible, so
+the device commits fully to the remote role. The in-camera GPS overlay
+went with it: its true remote→camera transport is unidentified. GPS still
+logs to SD exactly as before.)
 
-The entire lifecycle — wake on engine start, record on GPS lock (or a
-30 s timeout), stop, cool down, power off — is a **pure FSM**
-(`camera_fsm`): it consumes a telemetry snapshot each loop tick and
-returns at most one action for the glue to execute. All the temporal
-behavior (debounce, retries, timeouts) lives inside it, so every path is
-host-tested with a fake clock rather than discovered at the track; it is
-also the board-portable core intended to move unchanged to the nRF54
-("Falcon") target. The stop condition is deliberately **AND, not OR**:
-recording ends only after 60 s of stationary *and* engine-off, because
-either signal alone lies — a kart idles on the grid at 0 mph, and a
-coasting stall has speed but no RPM. Both together mean the session is
-really over (a manual session end stops the camera immediately).
+The single peripheral slot is shared with the file-transfer service via
+an explicit `bleOwner` (NONE/TRANSFER/CAMERA); the owner model keeps a
+camera link from ever triggering the transfer path's
+auto-reboot-on-disconnect, and opening the transfer page force-releases
+the camera first. The link is Just-Works bonded (the genuine remote link
+is encrypted), and BLE comes up lazily on the first camera action, so an
+unpaired device pays nothing.
+
+The entire lifecycle — wake on engine start, wait for the camera to
+connect and subscribe, record on GPS lock (or a 30 s timeout), stop, cool
+down, power off — is a **pure FSM** (`camera_fsm`): it consumes a
+telemetry snapshot each loop tick and returns at most one action for the
+glue to execute. Because the shutter is a *toggle*, the FSM tracks a
+`recordingActive` belief so a mid-session BLE drop and reconnect never
+blind-toggles the wrong way. All the temporal behavior (debounce,
+retries, timeouts) lives inside it, so every path is host-tested with a
+fake clock rather than discovered at the track; it is also the
+board-portable core intended to move unchanged to the nRF54 ("Falcon")
+target. The stop condition is deliberately **AND, not OR**: recording
+ends only after 60 s of stationary *and* engine-off, because either
+signal alone lies — a kart idles on the grid at 0 mph, and a coasting
+stall has speed but no RPM. Both together mean the session is really over
+(a manual session end stops the camera immediately).
 
 Two guarantees bound the feature's blast radius. First, the FSM is a
 *read-only* consumer of telemetry — logs are byte-identical whether a
 camera is paired or not, and camera mode never parks the main loop the
 way BLE transfer and USB MSC do. Second, the protocol bytes live in the
-host-tested `insta360_protocol` unit with golden-byte tests, sourced
-from proven community reference implementations; every camera-facing
-table is marked `X4-VERIFY(sniff)` until confirmed against a live sniff
-of our own hardware (the wake advert and button frames are X4-verified;
-the control-service frames are proven on ONE/X3).
+host-tested `insta360_protocol` unit with golden-byte tests. The wake
+advert + scan response are **X4-confirmed** — captured from a genuine
+remote and replayed to wake a sleeping X4; the ce82 button frames are
+captured from a live remote too. The camera's own `ce81` state pushes and
+the eventual GPS transport remain to be sniffed.
 
 ## Data formats
 

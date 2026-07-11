@@ -186,9 +186,8 @@ void displayPage_camera_test() {
   display.println(F("    CAMERA TEST"));
 
   // Live link status so the tester can see what's actually connected:
-  // R = remote (peripheral) link — camera must be paired from its own
-  // Bluetooth-remote menu for this to come up (needed for Power Off).
-  // C = central control link — used for Rec Start/Stop.
+  // R = remote (peripheral) link — the camera connects to us and must be
+  // paired from its own Bluetooth-remote menu for this to come up.
   // R:UP+ = camera connected AND subscribed to ce82 (buttons deliverable);
   // R:UP without the + = connected but our button frames go nowhere.
   display.print(F("R:"));
@@ -197,17 +196,15 @@ void displayPage_camera_test() {
   } else {
     display.print(F("--"));
   }
-  display.print(F(" C:"));
-  display.print(cameraControlLinkUp() ? F("UP") : F("--"));
   // Adv: our advert actually on air — a silently-rejected wake/connect
   // advert shows Adv:-- (the "no blue LED" symptom).
   display.print(F(" Adv:"));
   display.println(cameraAdvertisingUp() ? F("UP") : F("--"));
 
-  // Six size-1 rows follow (y16..y63) — no blank line, so "Back" stays
-  // on-panel. Wake burst only wakes a standby camera (see camera_ble.ino).
+  // Four size-1 rows follow — no blank line, so "Back" stays on-panel.
+  // Wake burst only wakes a standby camera (see camera_ble.ino).
   static const char* const kTestItems[] = {
-    "Wake", "Connect", "Rec Start", "Rec Stop", "Power Off", "Back"};
+    "Wake", "Record", "Power Off", "Back"};
   const int itemCount = (int)(sizeof(kTestItems) / sizeof(kTestItems[0]));
   for (int i = 0; i < itemCount; i++) {
     display.print(menuSelectionIndex == i ? F("->") : F("  "));

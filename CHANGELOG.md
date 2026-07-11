@@ -12,67 +12,40 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
-### Changed
-- **Insta360 wake advert restored to the sniffed reference + WAKING
-  reworked.** The wake advertisement is byte-for-byte the payload sniffed
-  from a real GPS Action Remote (`pchwalek/insta360_ble_esp32`, verified
-  waking an X3 and RS 1-inch): 31-byte PDU, serial at mfg[14..19],
-  all-zero "Major/Minor" region and `E4 01` tail. An interim rework to
-  the `insta360ctl` Appendix-B "idealized iBeacon" form (`ORBIT + 0x00`,
-  Major/Minor `0x0001`, TX-power `0xC5`, non-connectable) is reverted —
-  that doc mis-identified the payload as a standard iBeacon. The wake
-  advert is **connectable** (the woken camera connects back to the
-  "Insta360 GPS Remote" it carries — name in the scan response since the
-  manufacturer data fills the primary PDU) and both packets are set as
-  raw byte arrays so the BLE stack cannot truncate or reshape them. The
-  auto-record **WAKING** state runs the `be80` scanner *concurrently*
-  with the beacon for the whole attempt (20 s ×3) and keeps the remote
-  advert up after a sighting so the camera can take the R-link.
-  *Caveat (from research):* wake only reaches a camera in *standby* with
-  "Bluetooth Wakeup" armed; a fully powered-off X4 has its BLE radio off
-  and cannot be woken over BLE.
-
 ### Added
-- **Insta360 camera bench-test menu.** The paired **Camera** page now has a
-  **Test** entry that opens a manual-control menu — *Wake*, *Connect*,
-  *Rec Start*, *Rec Stop*, *Power Off*, *Back* — so the camera link can be
-  exercised on the bench without staging RPM/GPS to drive the auto-record
-  state machine. The page shows live remote (**R**) / control (**C**) link
-  status. **Connect** presents the connectable "Insta360 GPS Remote" advert
-  (the **R** link, used by *Power Off*) *and* central-connects to the
-  camera's `be80` control service (the **C** link, used by *Rec Start/Stop*).
-  **Wake** sends the standby wake-burst advert. While the menu is open the
-  auto-record FSM is suppressed (so it can't fight the manual actions) and is
-  reset cleanly on exit; each action reuses the exact BLE code path the FSM
-  would run, so wire behavior matches a real session. *Notes from live X4
-  testing:* the **R** link comes up only after the camera has been paired
-  from its own **Settings → Bluetooth remote** menu (capturing the serial is
-  not sufficient); the wake burst only wakes a *standby* camera (a fully
-  powered-off X4 has its BLE radio off); and there is no `be80` power-off
-  command — *Power Off* is the proven `ce82` 3-second-hold frame, which is
-  why it needs the **R** link.
-- **Insta360 X4 camera auto-record.** The device now impersonates the
-  Insta360 "GPS Remote" BLE accessory to drive an X4 action camera fully
-  hands-free: engine start (RPM > 500 held 2 s) wakes a powered-off camera
-  via its wake advertisement, recording starts once GPS locks (or after
-  30 s regardless), a 1 Hz GPS telemetry feed drives the camera's Stats
-  Dashboard overlay, recording stops only after 60 s of *stationary AND
-  engine-off* (so grid idling and coasting stalls keep recording — a
-  manual session end stops it immediately), and the camera powers itself
-  off after a 3-minute cooldown. Pairing is automatic — connect the camera
-  once from the new main-menu **Camera** page and its 6-character serial
-  is captured and persisted (new `camera_serial` setting); a manual
-  serial-entry screen is the fallback. The BLE core is now dual-role
-  (peripheral remote + central control link) with an explicit radio-owner
-  model, so a camera link can never trigger the file-transfer auto-reboot,
-  the main loop keeps running while the camera is connected, and logs are
-  byte-identical with the feature on or off; unpaired users pay zero cost
-  (BLE comes up lazily on the first camera action). *Caveat:* the protocol
-  bytes come from proven community reference implementations — the wake
-  advert and remote-button frames are X4-verified, but the control-service
-  start/stop/GPS frames are proven on ONE/X3 hardware and marked
-  `X4-VERIFY(sniff)` pending on-hardware sniff verification against a real
-  X4.
+- **Insta360 X4 camera auto-record (remote emulation).** The device
+  emulates the physical Insta360 GPS Remote as a pure BLE **peripheral**
+  to drive an X4 hands-free. Engine start (RPM > 500 held 2 s) wakes a
+  paired, powered-off camera with the remote's manufacturer-data
+  advertisement carrying the camera's serial — byte-for-byte the genuine
+  remote's payload, **X4-confirmed** (captured with nRF Connect and
+  replayed to wake a sleeping X4; flags `0x05`, serial at mfg[14..19]).
+  The camera connects back to *us* and subscribes to our `ce82` button
+  characteristic, and **all** control rides `ce82` notifications exactly
+  like the real remote: recording toggles via the shutter button (the FSM
+  tracks record state so a mid-session reconnect never blind-toggles), and
+  power-off streams the remote's 3-second power hold. Recording starts once
+  the camera is connected + subscribed and GPS locks (or after 30 s),
+  stops after 60 s of *stationary AND engine-off* (grid idling and coasting
+  stalls keep recording; a manual session end stops it immediately), and
+  the camera powers off after a 3-minute cooldown. Pairing captures the
+  camera's 6-character serial (new `camera_serial` setting; manual-entry
+  fallback) from the new main-menu **Camera** page, which also has a bench
+  **Test** menu (*Wake / Record / Power Off*) with live `R:UP+` / `Adv`
+  status. The single BLE peripheral slot is shared with the file-transfer
+  service via an explicit `bleOwner`, so a camera link can never trigger
+  the transfer auto-reboot; the link is Just-Works bonded; the FSM is a
+  read-only telemetry consumer (logs are byte-identical with the feature
+  on or off) and BLE comes up lazily, so unpaired users pay nothing. All
+  lifecycle timing lives in a host-tested pure FSM; the frame bytes in a
+  host-tested protocol unit with golden tests. *Note:* an earlier design
+  ran the BLE **central** role too (writing the camera's `be80`
+  start/stop-video plus a 1 Hz GPS-overlay frame) — but one BLE link holds
+  one role, and power-off exists only as a remote `ce82` hold, so central
+  and remote could never coexist and power-off was impossible. Committing
+  to the remote role fixes that; the in-camera GPS overlay is dropped with
+  it (its remote→camera transport is unidentified — deferred pending a
+  sniff), though **GPS still logs to SD** exactly as before.
 - **USB mass-storage file transfer.** The Transfer screen now opens a
   submenu offering **Bluetooth** (the existing BLE file-transfer flow,
   unchanged) or **USB**. Choosing USB presents the SD card to a connected

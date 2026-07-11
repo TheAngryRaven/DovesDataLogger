@@ -1,14 +1,6 @@
 #include "insta360_protocol.h"
 
-#include <math.h>
 #include <string.h>
-
-// The GPS frame stores doubles as raw IEEE-754 binary64 little-endian
-// bytes. Both the nRF52840 (Cortex-M4F) and the CI test hosts are
-// little-endian machines with 8-byte IEEE-754 doubles, so a memcpy of
-// the in-memory representation IS the wire format.
-static_assert(sizeof(double) == 8,
-              "insta360_protocol requires 8-byte IEEE-754 doubles");
 
 namespace insta360_protocol {
 
@@ -33,68 +25,6 @@ size_t buildButtonFrame(uint8_t* out, size_t cap, uint8_t seq,
   out[7] = button;
   out[8] = press;
   return kButtonFrameLen;
-}
-
-// ---------------------------------------------------------------------
-// be81 control frames. 16-byte header:
-//   bytes 0-3   total frame length, u32 LE (includes the length field)
-//   bytes 4-6   04 00 00
-//   byte  7     command
-//   bytes 8-9   00 02
-//   bytes 10-11 message counter, u16 LE
-//   bytes 12-15 00 80 00 00
-// Payload follows from byte 16.
-// ---------------------------------------------------------------------
-
-constexpr size_t kVideoFrameLen = 18;  // 16-byte header + 2-byte payload
-constexpr size_t kKeepAliveLen = 7;
-constexpr size_t kGpsFrameLen = 71;
-
-// X4-VERIFY(sniff): be81 command bytes.
-constexpr uint8_t kCmdStartVideo = 0x04;
-constexpr uint8_t kCmdStopVideo = 0x05;
-constexpr uint8_t kCmdGps = 0x35;
-
-void writeBe81Header(uint8_t* out, uint32_t totalLen, uint8_t command,
-                     uint16_t counter) {
-  out[0] = static_cast<uint8_t>(totalLen & 0xFFu);
-  out[1] = static_cast<uint8_t>((totalLen >> 8) & 0xFFu);
-  out[2] = static_cast<uint8_t>((totalLen >> 16) & 0xFFu);
-  out[3] = static_cast<uint8_t>((totalLen >> 24) & 0xFFu);
-  out[4] = 0x04;  // X4-VERIFY(sniff): fixed 04 00 00 at bytes 4-6
-  out[5] = 0x00;
-  out[6] = 0x00;
-  out[7] = command;
-  out[8] = 0x00;  // X4-VERIFY(sniff): fixed 00 02 at bytes 8-9
-  out[9] = 0x02;
-  out[10] = static_cast<uint8_t>(counter & 0xFFu);
-  out[11] = static_cast<uint8_t>((counter >> 8) & 0xFFu);
-  out[12] = 0x00;  // X4-VERIFY(sniff): fixed 00 80 00 00 at bytes 12-15
-  out[13] = 0x80;
-  out[14] = 0x00;
-  out[15] = 0x00;
-}
-
-size_t buildVideoFrame(uint8_t* out, size_t cap, uint8_t command,
-                       uint16_t counter, uint8_t payload0,
-                       uint8_t payload1) {
-  if (out == nullptr || cap < kVideoFrameLen) return 0;
-  writeBe81Header(out, kVideoFrameLen, command, counter);
-  out[16] = payload0;
-  out[17] = payload1;
-  return kVideoFrameLen;
-}
-
-void writeU32LE(uint8_t* out, uint32_t v) {
-  out[0] = static_cast<uint8_t>(v & 0xFFu);
-  out[1] = static_cast<uint8_t>((v >> 8) & 0xFFu);
-  out[2] = static_cast<uint8_t>((v >> 16) & 0xFFu);
-  out[3] = static_cast<uint8_t>((v >> 24) & 0xFFu);
-}
-
-void writeDoubleLE(uint8_t* out, double v) {
-  memcpy(out, &v, sizeof(v));  // host is little-endian IEEE-754 (see
-                               // static_assert above)
 }
 
 }  // namespace
@@ -215,55 +145,6 @@ size_t buildPowerOff(uint8_t* out, size_t cap, uint8_t seq) {
 }
 
 // -----------------------------------------------------------------------
-// be81 control frames
-// -----------------------------------------------------------------------
-
-size_t buildStartVideo(uint8_t* out, size_t cap, uint16_t counter) {
-  // X4-VERIFY(sniff): start-video payload 08 01.
-  return buildVideoFrame(out, cap, kCmdStartVideo, counter, 0x08, 0x01);
-}
-
-size_t buildStopVideo(uint8_t* out, size_t cap, uint16_t counter) {
-  // X4-VERIFY(sniff): stop-video payload 10 01.
-  return buildVideoFrame(out, cap, kCmdStopVideo, counter, 0x10, 0x01);
-}
-
-size_t buildKeepAlive(uint8_t* out, size_t cap) {
-  // X4-VERIFY(sniff): keep-alive is 07 00 00 00 05 00 00 — length,
-  // command 0x05 variant with no counter or payload.
-  static const uint8_t kKeepAlive[kKeepAliveLen] = {0x07, 0x00, 0x00, 0x00,
-                                                    0x05, 0x00, 0x00};
-  if (out == nullptr || cap < kKeepAliveLen) return 0;
-  memcpy(out, kKeepAlive, kKeepAliveLen);
-  return kKeepAliveLen;
-}
-
-size_t buildGpsFrame(uint8_t* out, size_t cap, uint16_t counter,
-                     const GpsSample& s) {
-  if (out == nullptr || cap < kGpsFrameLen) return 0;
-
-  writeBe81Header(out, kGpsFrameLen, kCmdGps, counter);
-
-  // X4-VERIFY(sniff): protobuf field-1 length-delimited wrapper, 0x35 =
-  // 53 payload bytes (bytes 18-70).
-  out[16] = 0x0A;
-  out[17] = 0x35;
-
-  writeU32LE(out + 18, s.unixTimeSec);
-  memset(out + 22, 0x00, 6);  // X4-VERIFY(sniff): bytes 22-27 zero
-  out[28] = 0x41;             // X4-VERIFY(sniff): fixed 0x41 at byte 28
-
-  writeDoubleLE(out + 29, fabs(s.latitudeDeg));
-  out[37] = (s.latitudeDeg >= 0.0) ? 0x4E : 0x53;  // 'N' / 'S'
-  writeDoubleLE(out + 38, fabs(s.longitudeDeg));
-  out[46] = (s.longitudeDeg >= 0.0) ? 0x45 : 0x57;  // 'E' / 'W'
-  writeDoubleLE(out + 47, fabs(s.speedMps));
-  writeDoubleLE(out + 55, s.headingDeg);
-  writeDoubleLE(out + 63, s.altitudeM);
-  return kGpsFrameLen;
-}
-
-// -----------------------------------------------------------------------
 // Parsers for camera -> us traffic
 // -----------------------------------------------------------------------
 
@@ -285,33 +166,6 @@ Ce81Frame parseCe81Frame(const uint8_t* data, size_t len,
     return Ce81Frame::kSerial;
   }
   return Ce81Frame::kStatus;
-}
-
-int8_t parseBe82RecordState(const uint8_t* data, size_t len) {
-  constexpr size_t kMinRecordStateLen = 18;
-  if (data == nullptr || len < kMinRecordStateLen) return -1;
-
-  // X4-VERIFY(sniff): valid be82 responses carry 00 00 04 00 00 at
-  // bytes 2-6; the response code is at byte 7.
-  static const uint8_t kSignature[5] = {0x00, 0x00, 0x04, 0x00, 0x00};
-  if (memcmp(data + 2, kSignature, sizeof(kSignature)) != 0) return -1;
-
-  // X4-VERIFY(sniff): code 0x10 = record-state report, state at byte 17.
-  if (data[7] != 0x10) return -1;
-  return (data[17] > 0) ? 1 : 0;
-}
-
-// -----------------------------------------------------------------------
-// Chunker
-// -----------------------------------------------------------------------
-
-size_t nextChunk(Chunker& c, uint8_t out[kChunkSize]) {
-  if (c.buf == nullptr || c.offset >= c.len) return 0;
-  size_t n = c.len - c.offset;
-  if (n > kChunkSize) n = kChunkSize;
-  memcpy(out, c.buf + c.offset, n);
-  c.offset += n;
-  return n;
 }
 
 }  // namespace insta360_protocol
