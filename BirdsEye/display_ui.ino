@@ -337,36 +337,31 @@ void handleMenuPageSelection() {
   } else if (currentPage == PAGE_CAMERA_TEST) {
     // Bench-test controls for the paired camera. Items:
     //   0 Wake      — standby wake burst (no effect on a fully-off camera)
-    //   1 Connect   — present remote advert (R) + central-connect be80 (C)
-    //   2 Rec Start — be81 start-video (needs C link)
-    //   3 Rec Stop  — be81 stop-video (needs C link)
-    //   4 Power Off — ce82 power button (needs R link)
-    //   5 Back
+    //   1 Record    — ce82 shutter toggle (needs R link + ce82 subscribed)
+    //   2 Power Off — ce82 power hold (needs R link + ce82 subscribed)
+    //   3 Back
+    // Record and Power Off both ride the ce82 button characteristic, so
+    // both need the camera connected to us (R) and subscribed. Share the
+    // failure-diagnosis path.
     if (menuSelectionIndex == 0) {
       debugln(F("Camera Test: Wake"));
       cameraTestWake();
-    } else if (menuSelectionIndex == 1) {
-      debugln(F("Camera Test: Connect"));
-      cameraTestConnect();
-    } else if (menuSelectionIndex == 2) {
-      debugln(F("Camera Test: Rec Start"));
-      cameraTestStartRecording();
-    } else if (menuSelectionIndex == 3) {
-      debugln(F("Camera Test: Rec Stop"));
-      cameraTestStopRecording();
-    } else if (menuSelectionIndex == 4) {
-      debugln(F("Camera Test: Power Off"));
-      if (!cameraTestPowerOff()) {
+    } else if (menuSelectionIndex == 1 || menuSelectionIndex == 2) {
+      const bool ok = (menuSelectionIndex == 1) ? cameraTestRecord()
+                                                : cameraTestPowerOff();
+      debugln(menuSelectionIndex == 1 ? F("Camera Test: Record")
+                                      : F("Camera Test: Power Off"));
+      if (!ok) {
         // Distinguish the failure for the tester: no R-link at all vs
         // connected-but-never-subscribed (camera ignoring our buttons).
         if (!cameraRemoteLinkUp()) {
-          strncpy(internalNotification, "No remote link -\nrun Connect first",
+          strncpy(internalNotification, "No remote link -\nrun Wake first",
                   sizeof(internalNotification) - 1);
         } else if (!cameraCe82Subscribed()) {
           strncpy(internalNotification, "Camera not subbed\nto buttons (ce82)",
                   sizeof(internalNotification) - 1);
         } else {
-          strncpy(internalNotification, "Power-off send\nrejected by stack",
+          strncpy(internalNotification, "Button send\nrejected by stack",
                   sizeof(internalNotification) - 1);
         }
         internalNotification[sizeof(internalNotification) - 1] = '\0';
@@ -656,7 +651,7 @@ void displayLoop() {
     } else if (currentPage == PAGE_PAIR_CAMERA) {
       menuLimit = 3; // Back, Test, Unpair
     } else if (currentPage == PAGE_CAMERA_TEST) {
-      menuLimit = 6; // Wake, Connect, Rec Start, Rec Stop, Power Off, Back
+      menuLimit = 4; // Wake, Record, Power Off, Back
     } else if (
       currentPage == LOGGING_STOP_CONFIRM ||
       currentPage == PAGE_REPLAY_EXIT

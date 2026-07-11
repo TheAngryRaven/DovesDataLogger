@@ -3,13 +3,6 @@
 #include <math.h>
 #include <string.h>
 
-// The GPS frame stores doubles as raw IEEE-754 binary64 little-endian
-// bytes. Both the nRF52840 (Cortex-M4F) and the CI test hosts are
-// little-endian machines with 8-byte IEEE-754 doubles, so a memcpy of
-// the in-memory representation IS the wire format.
-static_assert(sizeof(double) == 8,
-              "insta360_protocol requires 8-byte IEEE-754 doubles");
-
 namespace insta360_protocol {
 
 namespace {
@@ -20,79 +13,19 @@ namespace {
 
 constexpr size_t kButtonFrameLen = 9;
 
-// X4-VERIFY(sniff): ce82 button-frame preamble.
+// X4-CONFIRMED (2026-07-10 remote capture): ce82 button-frame preamble.
+// byte[4] is a running sequence counter, filled in per-call below.
 constexpr uint8_t kButtonPreamble[7] = {0xFC, 0xEF, 0xFE, 0x86,
                                         0x00, 0x03, 0x01};
 
-size_t buildButtonFrame(uint8_t* out, size_t cap, uint8_t button,
-                        uint8_t press) {
+size_t buildButtonFrame(uint8_t* out, size_t cap, uint8_t seq,
+                        uint8_t button, uint8_t press) {
   if (out == nullptr || cap < kButtonFrameLen) return 0;
   memcpy(out, kButtonPreamble, sizeof(kButtonPreamble));
+  out[4] = seq;  // running counter, +2 per frame on the real remote
   out[7] = button;
   out[8] = press;
   return kButtonFrameLen;
-}
-
-// ---------------------------------------------------------------------
-// be81 control frames. 16-byte header:
-//   bytes 0-3   total frame length, u32 LE (includes the length field)
-//   bytes 4-6   04 00 00
-//   byte  7     command
-//   bytes 8-9   00 02
-//   bytes 10-11 message counter, u16 LE
-//   bytes 12-15 00 80 00 00
-// Payload follows from byte 16.
-// ---------------------------------------------------------------------
-
-constexpr size_t kVideoFrameLen = 18;  // 16-byte header + 2-byte payload
-constexpr size_t kKeepAliveLen = 7;
-constexpr size_t kGpsFrameLen = 71;
-
-// X4-VERIFY(sniff): be81 command bytes.
-constexpr uint8_t kCmdStartVideo = 0x04;
-constexpr uint8_t kCmdStopVideo = 0x05;
-constexpr uint8_t kCmdGps = 0x35;
-
-void writeBe81Header(uint8_t* out, uint32_t totalLen, uint8_t command,
-                     uint16_t counter) {
-  out[0] = static_cast<uint8_t>(totalLen & 0xFFu);
-  out[1] = static_cast<uint8_t>((totalLen >> 8) & 0xFFu);
-  out[2] = static_cast<uint8_t>((totalLen >> 16) & 0xFFu);
-  out[3] = static_cast<uint8_t>((totalLen >> 24) & 0xFFu);
-  out[4] = 0x04;  // X4-VERIFY(sniff): fixed 04 00 00 at bytes 4-6
-  out[5] = 0x00;
-  out[6] = 0x00;
-  out[7] = command;
-  out[8] = 0x00;  // X4-VERIFY(sniff): fixed 00 02 at bytes 8-9
-  out[9] = 0x02;
-  out[10] = static_cast<uint8_t>(counter & 0xFFu);
-  out[11] = static_cast<uint8_t>((counter >> 8) & 0xFFu);
-  out[12] = 0x00;  // X4-VERIFY(sniff): fixed 00 80 00 00 at bytes 12-15
-  out[13] = 0x80;
-  out[14] = 0x00;
-  out[15] = 0x00;
-}
-
-size_t buildVideoFrame(uint8_t* out, size_t cap, uint8_t command,
-                       uint16_t counter, uint8_t payload0,
-                       uint8_t payload1) {
-  if (out == nullptr || cap < kVideoFrameLen) return 0;
-  writeBe81Header(out, kVideoFrameLen, command, counter);
-  out[16] = payload0;
-  out[17] = payload1;
-  return kVideoFrameLen;
-}
-
-void writeU32LE(uint8_t* out, uint32_t v) {
-  out[0] = static_cast<uint8_t>(v & 0xFFu);
-  out[1] = static_cast<uint8_t>((v >> 8) & 0xFFu);
-  out[2] = static_cast<uint8_t>((v >> 16) & 0xFFu);
-  out[3] = static_cast<uint8_t>((v >> 24) & 0xFFu);
-}
-
-void writeDoubleLE(uint8_t* out, double v) {
-  memcpy(out, &v, sizeof(v));  // host is little-endian IEEE-754 (see
-                               // static_assert above)
 }
 
 }  // namespace
@@ -188,73 +121,150 @@ size_t buildRemoteScanResponse(uint8_t out[kRemoteScanRspLen]) {
 // ce82 button frames
 // -----------------------------------------------------------------------
 
-size_t buildShutterToggle(uint8_t* out, size_t cap) {
-  // X4-VERIFY(sniff): button 0x02, press 0x00.
-  return buildButtonFrame(out, cap, 0x02, 0x00);
+size_t buildShutterToggle(uint8_t* out, size_t cap, uint8_t seq) {
+  // X4-CONFIRMED: FC EF FE 86 <seq> 03 01 02 00 (button 0x02, tap).
+  return buildButtonFrame(out, cap, seq, 0x02, 0x00);
 }
 
-size_t buildModeCycle(uint8_t* out, size_t cap) {
-  // X4-VERIFY(sniff): button 0x01, press 0x00.
-  return buildButtonFrame(out, cap, 0x01, 0x00);
+size_t buildModeCycle(uint8_t* out, size_t cap, uint8_t seq) {
+  // X4-CONFIRMED: FC EF FE 86 <seq> 03 01 01 00 (button 0x01, tap).
+  return buildButtonFrame(out, cap, seq, 0x01, 0x00);
 }
 
-size_t buildScreenToggle(uint8_t* out, size_t cap) {
-  // X4-VERIFY(sniff): button 0x00, press 0x00.
-  return buildButtonFrame(out, cap, 0x00, 0x00);
+size_t buildScreenToggle(uint8_t* out, size_t cap, uint8_t seq) {
+  // X4-CONFIRMED: FC EF FE 86 <seq> 03 01 00 00 (power button, single
+  // tap — toggles the screen on/off; a full boot uses this too).
+  return buildButtonFrame(out, cap, seq, 0x00, 0x00);
 }
 
-size_t buildPowerOff(uint8_t* out, size_t cap) {
-  // X4-VERIFY(sniff): button 0x00, press 0x03 (3-second hold).
-  return buildButtonFrame(out, cap, 0x00, 0x03);
+size_t buildPowerOff(uint8_t* out, size_t cap, uint8_t seq) {
+  // X4-CONFIRMED: FC EF FE 86 <seq> 03 01 00 03 (power button, 3-second
+  // HOLD). The real remote STREAMS this frame continuously with an
+  // incrementing seq while the button is held — the camera powers off
+  // after receiving the sustained hold; a single frame does nothing.
+  return buildButtonFrame(out, cap, seq, 0x00, 0x03);
 }
 
 // -----------------------------------------------------------------------
-// be81 control frames
+// ce82 GPS telemetry frame (RMC-in-ASCII). Integer-only formatting so it
+// is portable to Arduino (newlib-nano lacks %f) and host alike.
 // -----------------------------------------------------------------------
 
-size_t buildStartVideo(uint8_t* out, size_t cap, uint16_t counter) {
-  // X4-VERIFY(sniff): start-video payload 08 01.
-  return buildVideoFrame(out, cap, kCmdStartVideo, counter, 0x08, 0x01);
+namespace {
+
+// Append a NUL-terminated string; returns the number of chars written.
+size_t appendStr(char* buf, size_t pos, const char* s) {
+  size_t n = 0;
+  while (s[n] != '\0') { buf[pos + n] = s[n]; n++; }
+  return n;
 }
 
-size_t buildStopVideo(uint8_t* out, size_t cap, uint16_t counter) {
-  // X4-VERIFY(sniff): stop-video payload 10 01.
-  return buildVideoFrame(out, cap, kCmdStopVideo, counter, 0x10, 0x01);
+// Append `value` zero-padded to `width` digits (value assumed < 10^width).
+size_t appendUintPadded(char* buf, size_t pos, uint32_t value, int width) {
+  char tmp[12];
+  int i = 0;
+  for (int w = 0; w < width; w++) { tmp[i++] = char('0' + value % 10); value /= 10; }
+  for (int j = 0; j < i; j++) buf[pos + j] = tmp[i - 1 - j];
+  return (size_t)i;
 }
 
-size_t buildKeepAlive(uint8_t* out, size_t cap) {
-  // X4-VERIFY(sniff): keep-alive is 07 00 00 00 05 00 00 — length,
-  // command 0x05 variant with no counter or payload.
-  static const uint8_t kKeepAlive[kKeepAliveLen] = {0x07, 0x00, 0x00, 0x00,
-                                                    0x05, 0x00, 0x00};
-  if (out == nullptr || cap < kKeepAliveLen) return 0;
-  memcpy(out, kKeepAlive, kKeepAliveLen);
-  return kKeepAliveLen;
+// Append a signed fixed-point value: [-]<int>.<frac zero-padded to `dec`>.
+size_t appendFixed(char* buf, size_t pos, double value, int dec) {
+  const size_t start = pos;
+  const bool neg = value < 0.0;
+  const double a = neg ? -value : value;
+  uint64_t scale = 1;
+  for (int i = 0; i < dec; i++) scale *= 10;
+  const uint64_t scaled = (uint64_t)llround(a * (double)scale);  // nearest
+  uint64_t ip = scaled / scale;
+  const uint64_t fp = scaled % scale;
+  if (neg) buf[pos++] = '-';
+  // integer part (at least one digit)
+  char tmp[24];
+  int i = 0;
+  do { tmp[i++] = char('0' + ip % 10); ip /= 10; } while (ip > 0);
+  for (int j = 0; j < i; j++) buf[pos++] = tmp[i - 1 - j];
+  buf[pos++] = '.';
+  pos += appendUintPadded(buf, pos, (uint32_t)fp, dec);
+  return pos - start;
 }
 
-size_t buildGpsFrame(uint8_t* out, size_t cap, uint16_t counter,
-                     const GpsSample& s) {
-  if (out == nullptr || cap < kGpsFrameLen) return 0;
+// decimal degrees -> ddmm.mmmm as a double (sign preserved).
+double toDegMin(double deg) {
+  const bool neg = deg < 0.0;
+  const double a = neg ? -deg : deg;
+  const double d = (double)(long)a;      // whole degrees
+  const double m = (a - d) * 60.0;       // decimal minutes
+  const double dm = d * 100.0 + m;
+  return neg ? -dm : dm;
+}
 
-  writeBe81Header(out, kGpsFrameLen, kCmdGps, counter);
+}  // namespace
 
-  // X4-VERIFY(sniff): protobuf field-1 length-delimited wrapper, 0x35 =
-  // 53 payload bytes (bytes 18-70).
-  out[16] = 0x0A;
-  out[17] = 0x35;
+size_t buildGpsRmcFrame(uint8_t* out, size_t cap, const GpsRmc& s) {
+  if (out == nullptr) return 0;
 
-  writeU32LE(out + 18, s.unixTimeSec);
-  memset(out + 22, 0x00, 6);  // X4-VERIFY(sniff): bytes 22-27 zero
-  out[28] = 0x41;             // X4-VERIFY(sniff): fixed 0x41 at byte 28
+  // Build the RMC body (everything between '$' and '*', exclusive) so the
+  // checksum can XOR over it, then assemble the full sentence + payload.
+  char body[96];
+  size_t b = 0;
+  b += appendStr(body, b, "GNRMC,");
+  // UTC hhmmss.sss
+  b += appendUintPadded(body, b, s.hour, 2);
+  b += appendUintPadded(body, b, s.minute, 2);
+  b += appendUintPadded(body, b, s.second, 2);
+  body[b++] = '.';
+  b += appendUintPadded(body, b, s.milli, 3);
+  body[b++] = ',';
+  body[b++] = s.valid ? 'A' : 'V';
+  body[b++] = ',';
+  // latitude ddmm.mmmm + N/S
+  b += appendFixed(body, b, toDegMin(s.latitudeDeg) < 0 ? -toDegMin(s.latitudeDeg)
+                                                        : toDegMin(s.latitudeDeg),
+                   4);
+  body[b++] = ',';
+  body[b++] = s.latitudeDeg < 0.0 ? 'S' : 'N';
+  body[b++] = ',';
+  // longitude: SIGNED ddmm.mmmm, hemisphere letter always 'E' (the quirk)
+  b += appendFixed(body, b, toDegMin(s.longitudeDeg), 4);
+  b += appendStr(body, b, ",E,");
+  b += appendFixed(body, b, s.speedKnots, 2);
+  body[b++] = ',';
+  b += appendFixed(body, b, s.courseDeg, 2);
+  body[b++] = ',';
+  // date ddmmyy
+  b += appendUintPadded(body, b, s.day, 2);
+  b += appendUintPadded(body, b, s.month, 2);
+  b += appendUintPadded(body, b, s.year, 2);
+  // constant magvar 0.0 W, mode A, extra V
+  b += appendStr(body, b, ",0.0,W,A,V");
 
-  writeDoubleLE(out + 29, fabs(s.latitudeDeg));
-  out[37] = (s.latitudeDeg >= 0.0) ? 0x4E : 0x53;  // 'N' / 'S'
-  writeDoubleLE(out + 38, fabs(s.longitudeDeg));
-  out[46] = (s.longitudeDeg >= 0.0) ? 0x45 : 0x57;  // 'E' / 'W'
-  writeDoubleLE(out + 47, fabs(s.speedMps));
-  writeDoubleLE(out + 55, s.headingDeg);
-  writeDoubleLE(out + 63, s.altitudeM);
-  return kGpsFrameLen;
+  // NMEA checksum: XOR of every char in the body.
+  uint8_t cksum = 0;
+  for (size_t i = 0; i < b; i++) cksum ^= (uint8_t)body[i];
+
+  // Payload = ,26.7,<0x07>,$<body>*HH
+  char payload[112];
+  size_t p = 0;
+  p += appendStr(payload, p, ",26.7,");
+  payload[p++] = 0x07;
+  payload[p++] = ',';
+  payload[p++] = '$';
+  memcpy(payload + p, body, b); p += b;
+  payload[p++] = '*';
+  static const char kHex[] = "0123456789ABCDEF";
+  payload[p++] = kHex[(cksum >> 4) & 0xF];
+  payload[p++] = kHex[cksum & 0xF];
+
+  // Frame = FC EF FE 83 00 <len> <payload>
+  const size_t frameLen = 6 + p;
+  if (cap < frameLen) return 0;
+  out[0] = 0xFC; out[1] = 0xEF; out[2] = 0xFE;
+  out[3] = 0x83;   // GPS/sensor type
+  out[4] = 0x00;   // SN slot: always 0 for GPS
+  out[5] = (uint8_t)p;
+  memcpy(out + 6, payload, p);
+  return frameLen;
 }
 
 // -----------------------------------------------------------------------
@@ -279,33 +289,6 @@ Ce81Frame parseCe81Frame(const uint8_t* data, size_t len,
     return Ce81Frame::kSerial;
   }
   return Ce81Frame::kStatus;
-}
-
-int8_t parseBe82RecordState(const uint8_t* data, size_t len) {
-  constexpr size_t kMinRecordStateLen = 18;
-  if (data == nullptr || len < kMinRecordStateLen) return -1;
-
-  // X4-VERIFY(sniff): valid be82 responses carry 00 00 04 00 00 at
-  // bytes 2-6; the response code is at byte 7.
-  static const uint8_t kSignature[5] = {0x00, 0x00, 0x04, 0x00, 0x00};
-  if (memcmp(data + 2, kSignature, sizeof(kSignature)) != 0) return -1;
-
-  // X4-VERIFY(sniff): code 0x10 = record-state report, state at byte 17.
-  if (data[7] != 0x10) return -1;
-  return (data[17] > 0) ? 1 : 0;
-}
-
-// -----------------------------------------------------------------------
-// Chunker
-// -----------------------------------------------------------------------
-
-size_t nextChunk(Chunker& c, uint8_t out[kChunkSize]) {
-  if (c.buf == nullptr || c.offset >= c.len) return 0;
-  size_t n = c.len - c.offset;
-  if (n > kChunkSize) n = kChunkSize;
-  memcpy(out, c.buf + c.offset, n);
-  c.offset += n;
-  return n;
 }
 
 }  // namespace insta360_protocol

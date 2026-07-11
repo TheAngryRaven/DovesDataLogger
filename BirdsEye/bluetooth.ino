@@ -580,6 +580,15 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
   }
 }
 
+// Just-Works pairing result trace (Bluefruit pair-complete callback).
+// Signature is plain integers, so no Bluefruit-type forward declaration is
+// needed. auth_status == BLE_GAP_SEC_STATUS_SUCCESS (0) means bonded.
+void blePairCompleteCallback(uint16_t conn_hdl, uint8_t auth_status) {
+  (void)conn_hdl;
+  debug(F("BLE: pairing complete, auth_status=0x"));
+  debugln(auth_status, HEX);
+}
+
 void bleCoreEnsureInit() {
   if (bleInitialized) return;
 
@@ -590,14 +599,32 @@ void bleCoreEnsureInit() {
   // HVN TX queue 10 (up from BANDWIDTH_MAX's 3 — deeper notification pipeline),
   // WrCmd queue 1 (default, we don't use write commands).
   Bluefruit.configPrphConn(247, 100, 10, 1);
-  // 1 peripheral + 1 central: the central slot carries the camera control
-  // link (camera_ble connecting to the X4's be80 service). Central conn
-  // parameters stay at Bluefruit defaults.
-  Bluefruit.begin(1, 1);
+  // 1 peripheral + 0 central: the camera feature is now a pure PERIPHERAL
+  // remote emulation (the camera connects to US and we notify our ce82
+  // buttons), so the old central slot for the X4's be80 control link is
+  // gone. Both the transfer service and the camera remote are peripherals
+  // sharing the single peripheral slot via bleOwner.
+  Bluefruit.begin(1, 0);
   Bluefruit.setTxPower(4);
 
   Bluefruit.Periph.setConnectCallback(bleConnectCallback);
   Bluefruit.Periph.setDisconnectCallback(bleDisconnectCallback);
+
+  // Just-Works pairing acceptance (peripheral). The genuine Insta360 GPS
+  // Remote link is encrypted + bonded, and a captured X4 brings up
+  // encryption immediately on connect, so the camera (as central) may
+  // withhold its ce82 CCCD subscription until the link is secured. Advertise
+  // NoInputNoOutput I/O capabilities and no MITM requirement so the
+  // SoftDevice completes Just-Works pairing without any on-device prompt.
+  // This is link-level only — NO characteristic is marked encrypted
+  // (SECMODE_OPEN everywhere), so the file-transfer service keeps working
+  // fully open/unbonded. NOTE (Bluefruit 0.21.0 assumption): NoInputNoOutput
+  // + MITM-off is already Bluefruit's default and yields Just-Works; setting
+  // it explicitly documents intent and guards against a future default
+  // change. The pair-complete callback is trace-only.
+  Bluefruit.Security.setIOCaps(false, false, false);  // display, yes/no, keyboard
+  Bluefruit.Security.setMITM(false);
+  Bluefruit.Security.setPairCompleteCallback(blePairCompleteCallback);
 
   // Set connection interval (7.5-15ms)
   Bluefruit.Periph.setConnInterval(6, 12);

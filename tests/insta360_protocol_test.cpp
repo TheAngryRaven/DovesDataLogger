@@ -10,15 +10,6 @@ using namespace insta360_protocol;
 // implementations. If a builder changes shape, a golden vector below
 // must change with it — deliberately.
 
-namespace {
-
-// Copy a double's IEEE-754 binary64 little-endian bytes into `out`.
-// The goldens compute expected double bytes this way rather than
-// hand-transcribing hex.
-void doubleBytes(double v, uint8_t out[8]) { std::memcpy(out, &v, 8); }
-
-}  // namespace
-
 // ---------------------------------------------------------------------------
 // Serial parse / format
 // ---------------------------------------------------------------------------
@@ -124,199 +115,124 @@ TEST_CASE("insta360_protocol - remote scan response golden bytes") {
 // ce82 button frames
 // ---------------------------------------------------------------------------
 
+// Golden bytes are the exact frames captured from a genuine remote
+// (2026-07-10 nRF Connect log): shutter seq 0x00, mode seq 0x02,
+// power-tap seq 0x04, power-hold stream seq 0x06+.
 TEST_CASE("insta360_protocol - shutter toggle golden bytes") {
     uint8_t frame[9];
-    CHECK(buildShutterToggle(frame, sizeof(frame)) == 9);
+    CHECK(buildShutterToggle(frame, sizeof(frame), 0x00) == 9);
     const uint8_t expected[9] = {0xFC, 0xEF, 0xFE, 0x86, 0x00,
                                  0x03, 0x01, 0x02, 0x00};
     CHECK(std::memcmp(frame, expected, 9) == 0);
-    CHECK(buildShutterToggle(frame, 8) == 0);
+    CHECK(buildShutterToggle(frame, 8, 0x00) == 0);
 }
 
 TEST_CASE("insta360_protocol - mode cycle golden bytes") {
     uint8_t frame[9];
-    CHECK(buildModeCycle(frame, sizeof(frame)) == 9);
-    const uint8_t expected[9] = {0xFC, 0xEF, 0xFE, 0x86, 0x00,
+    CHECK(buildModeCycle(frame, sizeof(frame), 0x02) == 9);
+    const uint8_t expected[9] = {0xFC, 0xEF, 0xFE, 0x86, 0x02,
                                  0x03, 0x01, 0x01, 0x00};
     CHECK(std::memcmp(frame, expected, 9) == 0);
-    CHECK(buildModeCycle(frame, 8) == 0);
+    CHECK(buildModeCycle(frame, 8, 0x02) == 0);
 }
 
-TEST_CASE("insta360_protocol - screen toggle golden bytes") {
+TEST_CASE("insta360_protocol - screen toggle (power tap) golden bytes") {
     uint8_t frame[9];
-    CHECK(buildScreenToggle(frame, sizeof(frame)) == 9);
-    const uint8_t expected[9] = {0xFC, 0xEF, 0xFE, 0x86, 0x00,
+    CHECK(buildScreenToggle(frame, sizeof(frame), 0x04) == 9);
+    const uint8_t expected[9] = {0xFC, 0xEF, 0xFE, 0x86, 0x04,
                                  0x03, 0x01, 0x00, 0x00};
     CHECK(std::memcmp(frame, expected, 9) == 0);
-    CHECK(buildScreenToggle(frame, 8) == 0);
+    CHECK(buildScreenToggle(frame, 8, 0x04) == 0);
 }
 
-TEST_CASE("insta360_protocol - power off golden bytes") {
+TEST_CASE("insta360_protocol - power off (hold) golden bytes") {
     uint8_t frame[9];
-    CHECK(buildPowerOff(frame, sizeof(frame)) == 9);
-    const uint8_t expected[9] = {0xFC, 0xEF, 0xFE, 0x86, 0x00,
+    // First hold frame in the captured stream: seq 0x06.
+    CHECK(buildPowerOff(frame, sizeof(frame), 0x06) == 9);
+    const uint8_t expected[9] = {0xFC, 0xEF, 0xFE, 0x86, 0x06,
                                  0x03, 0x01, 0x00, 0x03};
     CHECK(std::memcmp(frame, expected, 9) == 0);
-    CHECK(buildPowerOff(frame, 8) == 0);
+    CHECK(buildPowerOff(frame, 8, 0x06) == 0);
 }
 
-// ---------------------------------------------------------------------------
-// be81 control frames
-// ---------------------------------------------------------------------------
-
-TEST_CASE("insta360_protocol - start video golden vector, counter 0x0200") {
-    uint8_t frame[18];
-    CHECK(buildStartVideo(frame, sizeof(frame), 0x0200) == 18);
-    const uint8_t expected[18] = {0x12, 0x00, 0x00, 0x00, 0x04, 0x00,
-                                  0x00, 0x04, 0x00, 0x02, 0x00, 0x02,
-                                  0x00, 0x80, 0x00, 0x00, 0x08, 0x01};
-    CHECK(std::memcmp(frame, expected, 18) == 0);
-    CHECK(buildStartVideo(frame, 17, 0x0200) == 0);
-}
-
-TEST_CASE("insta360_protocol - stop video golden vector, counter 0x0200") {
-    uint8_t frame[18];
-    CHECK(buildStopVideo(frame, sizeof(frame), 0x0200) == 18);
-    const uint8_t expected[18] = {0x12, 0x00, 0x00, 0x00, 0x04, 0x00,
-                                  0x00, 0x05, 0x00, 0x02, 0x00, 0x02,
-                                  0x00, 0x80, 0x00, 0x00, 0x10, 0x01};
-    CHECK(std::memcmp(frame, expected, 18) == 0);
-    CHECK(buildStopVideo(frame, 17, 0x0200) == 0);
-}
-
-TEST_CASE("insta360_protocol - counter changes only bytes 10-11") {
-    uint8_t a[18];
-    uint8_t b[18];
-    REQUIRE(buildStartVideo(a, sizeof(a), 0x0200) == 18);
-    REQUIRE(buildStartVideo(b, sizeof(b), 0x0201) == 18);
-
-    for (size_t i = 0; i < 18; ++i) {
-        if (i == 10 || i == 11) continue;
+TEST_CASE("insta360_protocol - button seq lands at byte 4 and only there") {
+    uint8_t a[9], b[9];
+    CHECK(buildPowerOff(a, sizeof(a), 0x06) == 9);
+    CHECK(buildPowerOff(b, sizeof(b), 0x08) == 9);  // next hold frame
+    CHECK(a[4] == 0x06);
+    CHECK(b[4] == 0x08);
+    // Everything but byte 4 is identical between consecutive hold frames.
+    for (int i = 0; i < 9; i++) {
+        if (i == 4) continue;
         CHECK(a[i] == b[i]);
     }
-    // Counter is little-endian u16.
-    CHECK(b[10] == 0x01);
-    CHECK(b[11] == 0x02);
-    CHECK((a[10] != b[10] || a[11] != b[11]));
-}
-
-TEST_CASE("insta360_protocol - be81 length byte matches returned size") {
-    uint8_t frame[71];
-
-    CHECK(buildStartVideo(frame, sizeof(frame), kInitialMsgCounter) == 18);
-    CHECK(frame[0] == 18);
-
-    CHECK(buildStopVideo(frame, sizeof(frame), kInitialMsgCounter) == 18);
-    CHECK(frame[0] == 18);
-
-    CHECK(buildKeepAlive(frame, sizeof(frame)) == 7);
-    CHECK(frame[0] == 7);
-
-    const GpsSample s;
-    CHECK(buildGpsFrame(frame, sizeof(frame), kInitialMsgCounter, s) == 71);
-    CHECK(frame[0] == 71);
-}
-
-TEST_CASE("insta360_protocol - keep-alive golden bytes") {
-    uint8_t frame[7];
-    CHECK(buildKeepAlive(frame, sizeof(frame)) == 7);
-    const uint8_t expected[7] = {0x07, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00};
-    CHECK(std::memcmp(frame, expected, 7) == 0);
-    CHECK(buildKeepAlive(frame, 6) == 0);
 }
 
 // ---------------------------------------------------------------------------
-// GPS frame
+// buildGpsRmcFrame — golden vector from the 2026-07-10 Wireshark capture
 // ---------------------------------------------------------------------------
 
-TEST_CASE("insta360_protocol - GPS frame golden vector") {
-    GpsSample s;
-    s.unixTimeSec = 1710512400;
-    s.latitudeDeg = 28.4127081705638;
-    s.longitudeDeg = -81.4622;
-    s.speedMps = 17.88;
-    s.headingDeg = 123.4;
-    s.altitudeM = 25.0;
-
-    uint8_t frame[71];
-    CHECK(buildGpsFrame(frame, sizeof(frame), 0x0200, s) == 71);
-
-    uint8_t expected[71];
-    std::memset(expected, 0x00, sizeof(expected));
-    const uint8_t header[18] = {0x47, 0x00, 0x00, 0x00, 0x04, 0x00,
-                                0x00, 0x35, 0x00, 0x02, 0x00, 0x02,
-                                0x00, 0x80, 0x00, 0x00, 0x0A, 0x35};
-    std::memcpy(expected, header, sizeof(header));
-    // u32 LE unix epoch seconds.
-    expected[18] = static_cast<uint8_t>(s.unixTimeSec & 0xFFu);
-    expected[19] = static_cast<uint8_t>((s.unixTimeSec >> 8) & 0xFFu);
-    expected[20] = static_cast<uint8_t>((s.unixTimeSec >> 16) & 0xFFu);
-    expected[21] = static_cast<uint8_t>((s.unixTimeSec >> 24) & 0xFFu);
-    // Bytes 22-27 stay zero.
-    expected[28] = 0x41;
-    doubleBytes(28.4127081705638, expected + 29);  // abs(lat)
-    expected[37] = 0x4E;                           // 'N'
-    doubleBytes(81.4622, expected + 38);           // abs(lon)
-    expected[46] = 0x57;                           // 'W'
-    doubleBytes(17.88, expected + 47);
-    doubleBytes(123.4, expected + 55);
-    doubleBytes(25.0, expected + 63);
-
-    CHECK(std::memcmp(frame, expected, 71) == 0);
-    CHECK(frame[0] == 71);  // length field = total frame length
-}
-
-TEST_CASE("insta360_protocol - GPS frame hemisphere quadrants") {
-    struct Quadrant {
-        double lat;
-        double lon;
-        uint8_t latChar;
-        uint8_t lonChar;
-    };
-    const Quadrant quadrants[] = {
-        {28.4127, -81.4622, 'N', 'W'},   // Orlando
-        {-37.8497, 144.9680, 'S', 'E'},  // Melbourne
-        {51.0577, -1.0170, 'N', 'W'},    // Thruxton
-        {-33.0472, -71.6127, 'S', 'W'},  // Valparaiso
+TEST_CASE("insta360_protocol - GPS RMC frame matches the captured bytes") {
+    // The exact ce82 notification captured from the genuine remote:
+    //   ,26.7,\x07,$GNRMC,033113.000,A,2845.0938,N,-8156.0570,E,
+    //   0.06,0.00,110726,0.0,W,A,V*69
+    const uint8_t expected[] = {
+        0xFC, 0xEF, 0xFE, 0x83, 0x00, 0x52,
+        0x2C, 0x32, 0x36, 0x2E, 0x37, 0x2C, 0x07, 0x2C, 0x24, 0x47,
+        0x4E, 0x52, 0x4D, 0x43, 0x2C, 0x30, 0x33, 0x33, 0x31, 0x31,
+        0x33, 0x2E, 0x30, 0x30, 0x30, 0x2C, 0x41, 0x2C, 0x32, 0x38,
+        0x34, 0x35, 0x2E, 0x30, 0x39, 0x33, 0x38, 0x2C, 0x4E, 0x2C,
+        0x2D, 0x38, 0x31, 0x35, 0x36, 0x2E, 0x30, 0x35, 0x37, 0x30,
+        0x2C, 0x45, 0x2C, 0x30, 0x2E, 0x30, 0x36, 0x2C, 0x30, 0x2E,
+        0x30, 0x30, 0x2C, 0x31, 0x31, 0x30, 0x37, 0x32, 0x36, 0x2C,
+        0x30, 0x2E, 0x30, 0x2C, 0x57, 0x2C, 0x41, 0x2C, 0x56, 0x2A,
+        0x36, 0x39,
     };
 
-    for (const Quadrant& q : quadrants) {
-        GpsSample s;
-        s.unixTimeSec = 1710512400;
-        s.latitudeDeg = q.lat;
-        s.longitudeDeg = q.lon;
+    GpsRmc s;
+    s.valid = true;
+    s.hour = 3; s.minute = 31; s.second = 13; s.milli = 0;
+    s.day = 11; s.month = 7; s.year = 26;
+    // 2845.0938 N = 28 deg 45.0938 min; -8156.0570 E = 81 deg 56.0570 min W.
+    s.latitudeDeg = 28.0 + 45.0938 / 60.0;
+    s.longitudeDeg = -(81.0 + 56.0570 / 60.0);
+    s.speedKnots = 0.06;
+    s.courseDeg = 0.00;
 
-        uint8_t frame[71];
-        REQUIRE(buildGpsFrame(frame, sizeof(frame), 0x0200, s) == 71);
-        CHECK(frame[37] == q.latChar);
-        CHECK(frame[46] == q.lonChar);
+    uint8_t out[kMaxGpsFrameLen];
+    const size_t n = buildGpsRmcFrame(out, sizeof(out), s);
+    CHECK(n == sizeof(expected));
+    CHECK(std::memcmp(out, expected, sizeof(expected)) == 0);
 
-        // Stored doubles are absolute values.
-        uint8_t absLat[8];
-        uint8_t absLon[8];
-        doubleBytes(q.lat < 0.0 ? -q.lat : q.lat, absLat);
-        doubleBytes(q.lon < 0.0 ? -q.lon : q.lon, absLon);
-        CHECK(std::memcmp(frame + 29, absLat, 8) == 0);
-        CHECK(std::memcmp(frame + 38, absLon, 8) == 0);
-    }
-
-    // Positive-lon quadrant explicit 'E' check (both positive).
-    GpsSample s;
-    s.latitudeDeg = 35.3606;
-    s.longitudeDeg = 138.7274;  // Fuji
-    uint8_t frame[71];
-    REQUIRE(buildGpsFrame(frame, sizeof(frame), 0x0200, s) == 71);
-    CHECK(frame[37] == 'N');
-    CHECK(frame[46] == 'E');
+    // Length byte (offset 5) equals the ASCII payload length.
+    CHECK(out[5] == n - 6);
+    // SN slot stays 0 for GPS (buttons own the counter).
+    CHECK(out[4] == 0x00);
+    // Too-small buffer writes nothing.
+    CHECK(buildGpsRmcFrame(out, 10, s) == 0);
 }
 
-TEST_CASE("insta360_protocol - GPS frame cap 70 returns 0") {
-    const GpsSample s;
-    uint8_t frame[71];
-    std::memset(frame, 0xAA, sizeof(frame));
-    CHECK(buildGpsFrame(frame, 70, 0x0200, s) == 0);
-    // Nothing written.
-    for (uint8_t byte : frame) CHECK(byte == 0xAA);
+TEST_CASE("insta360_protocol - GPS RMC void status and hemispheres") {
+    GpsRmc s;
+    s.valid = false;             // no fix -> 'V'
+    s.latitudeDeg = -12.5;       // south
+    s.longitudeDeg = 7.25;       // east (positive)
+    uint8_t out[kMaxGpsFrameLen];
+    const size_t n = buildGpsRmcFrame(out, sizeof(out), s);
+    REQUIRE(n > 6);
+    // Copy the ASCII payload (after the 6-byte header, which contains a NUL
+    // at the SN slot) into a NUL-terminated buffer for substring checks.
+    char payload[kMaxGpsFrameLen];
+    const size_t plen = out[5];
+    std::memcpy(payload, out + 6, plen);
+    payload[plen] = '\0';
+    // Status field 'V' present; south latitude -> 'S'; longitude letter is
+    // ALWAYS 'E' even for a positive (eastern) value.
+    CHECK(std::strstr(payload, ",V,") != nullptr);
+    CHECK(std::strstr(payload, ",S,") != nullptr);
+    CHECK(std::strstr(payload, ",E,") != nullptr);
+    // The extra 'V' + checksum tail is present.
+    CHECK(std::strstr(payload, ",A,V*") != nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -374,122 +290,4 @@ TEST_CASE("insta360_protocol - ce81 short or garbage frames are unknown") {
 
     CHECK(parseCe81Frame(nullptr, 12, nullptr) == Ce81Frame::kUnknown);
     CHECK(parseCe81Frame(garbage, 0, nullptr) == Ce81Frame::kUnknown);
-}
-
-// ---------------------------------------------------------------------------
-// parseBe82RecordState
-// ---------------------------------------------------------------------------
-
-namespace {
-
-// Build a minimal well-formed be82 record-state frame.
-void makeBe82Frame(uint8_t out[18], uint8_t code, uint8_t state) {
-    std::memset(out, 0x00, 18);
-    out[0] = 0x12;  // length-ish leader; parser ignores bytes 0-1
-    out[2] = 0x00;
-    out[3] = 0x00;
-    out[4] = 0x04;
-    out[5] = 0x00;
-    out[6] = 0x00;
-    out[7] = code;
-    out[17] = state;
-}
-
-}  // namespace
-
-TEST_CASE("insta360_protocol - be82 recording frame returns 1") {
-    uint8_t frame[18];
-    makeBe82Frame(frame, 0x10, 0x01);
-    CHECK(parseBe82RecordState(frame, sizeof(frame)) == 1);
-
-    // Any non-zero state byte counts as recording.
-    makeBe82Frame(frame, 0x10, 0x03);
-    CHECK(parseBe82RecordState(frame, sizeof(frame)) == 1);
-}
-
-TEST_CASE("insta360_protocol - be82 stopped frame returns 0") {
-    uint8_t frame[18];
-    makeBe82Frame(frame, 0x10, 0x00);
-    CHECK(parseBe82RecordState(frame, sizeof(frame)) == 0);
-}
-
-TEST_CASE("insta360_protocol - be82 wrong code returns -1") {
-    uint8_t frame[18];
-    makeBe82Frame(frame, 0x11, 0x01);
-    CHECK(parseBe82RecordState(frame, sizeof(frame)) == -1);
-}
-
-TEST_CASE("insta360_protocol - be82 short frame returns -1") {
-    uint8_t frame[18];
-    makeBe82Frame(frame, 0x10, 0x01);
-    CHECK(parseBe82RecordState(frame, 17) == -1);
-    CHECK(parseBe82RecordState(frame, 0) == -1);
-    CHECK(parseBe82RecordState(nullptr, 18) == -1);
-}
-
-TEST_CASE("insta360_protocol - be82 wrong signature returns -1") {
-    uint8_t frame[18];
-    makeBe82Frame(frame, 0x10, 0x01);
-    frame[4] = 0x05;  // corrupt the 00 00 04 00 00 signature
-    CHECK(parseBe82RecordState(frame, sizeof(frame)) == -1);
-}
-
-// ---------------------------------------------------------------------------
-// Chunker
-// ---------------------------------------------------------------------------
-
-TEST_CASE("insta360_protocol - chunker empty input yields nothing") {
-    Chunker c;
-    uint8_t out[kChunkSize];
-    CHECK(nextChunk(c, out) == 0);
-
-    uint8_t buf[4] = {1, 2, 3, 4};
-    Chunker zero{buf, 0, 0};
-    CHECK(nextChunk(zero, out) == 0);
-}
-
-TEST_CASE("insta360_protocol - chunker exact one chunk") {
-    uint8_t buf[kChunkSize];
-    for (size_t i = 0; i < kChunkSize; ++i) buf[i] = static_cast<uint8_t>(i);
-
-    Chunker c{buf, sizeof(buf), 0};
-    uint8_t out[kChunkSize];
-    CHECK(nextChunk(c, out) == kChunkSize);
-    CHECK(std::memcmp(out, buf, kChunkSize) == 0);
-    CHECK(nextChunk(c, out) == 0);
-}
-
-TEST_CASE("insta360_protocol - chunker 21 bytes splits 20 + 1") {
-    uint8_t buf[21];
-    for (size_t i = 0; i < sizeof(buf); ++i) buf[i] = static_cast<uint8_t>(i);
-
-    Chunker c{buf, sizeof(buf), 0};
-    uint8_t out[kChunkSize];
-    CHECK(nextChunk(c, out) == 20);
-    CHECK(std::memcmp(out, buf, 20) == 0);
-    CHECK(nextChunk(c, out) == 1);
-    CHECK(out[0] == buf[20]);
-    CHECK(nextChunk(c, out) == 0);
-}
-
-TEST_CASE("insta360_protocol - chunker 71-byte GPS frame splits 20/20/20/11") {
-    uint8_t buf[71];
-    for (size_t i = 0; i < sizeof(buf); ++i) {
-        buf[i] = static_cast<uint8_t>(i * 3);
-    }
-
-    Chunker c{buf, sizeof(buf), 0};
-    uint8_t out[kChunkSize];
-    const size_t expectedSizes[4] = {20, 20, 20, 11};
-    size_t offset = 0;
-    for (size_t want : expectedSizes) {
-        CHECK(nextChunk(c, out) == want);
-        CHECK(std::memcmp(out, buf + offset, want) == 0);
-        offset += want;
-    }
-    CHECK(offset == sizeof(buf));
-
-    // Once done, it keeps returning 0.
-    CHECK(nextChunk(c, out) == 0);
-    CHECK(nextChunk(c, out) == 0);
 }
