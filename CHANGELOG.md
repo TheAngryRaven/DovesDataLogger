@@ -43,9 +43,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   start/stop-video plus a 1 Hz GPS-overlay frame) — but one BLE link holds
   one role, and power-off exists only as a remote `ce82` hold, so central
   and remote could never coexist and power-off was impossible. Committing
-  to the remote role fixes that; the in-camera GPS overlay is dropped with
-  it (its remote→camera transport is unidentified — deferred pending a
-  sniff), though **GPS still logs to SD** exactly as before.
+  to the remote role fixes that. The in-camera GPS overlay rides the same
+  remote channel after all: a Wireshark capture of the genuine
+  remote↔camera link revealed the remote streams GPS on `ce82` at **10 Hz**
+  as a (non-standard, signed-longitude) NMEA-RMC frame — so the firmware
+  now streams that continuously while the camera is connected (it doubles
+  as the remote's liveness heartbeat; status `V` with no fix, never
+  silent), golden-tested byte-for-byte against the capture. **GPS still
+  logs to SD** exactly as before, independently.
 - **USB mass-storage file transfer.** The Transfer screen now opens a
   submenu offering **Bluetooth** (the existing BLE file-transfer flow,
   unchanged) or **USB**. Choosing USB presents the SD card to a connected

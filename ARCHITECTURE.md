@@ -189,8 +189,10 @@ only exists as a remote `ce82` hold, and one BLE link can hold only one
 role — you cannot be central to the camera and have the camera be central
 to you at once. The role conflict is what made power-off impossible, so
 the device commits fully to the remote role. The in-camera GPS overlay
-went with it: its true remote→camera transport is unidentified. GPS still
-logs to SD exactly as before.)
+rides that same remote channel: a capture of the genuine link showed the
+remote streams GPS on `ce82` at 10 Hz as a non-standard NMEA-RMC frame,
+which the firmware now emits continuously while connected — doubling as
+the remote's liveness heartbeat. GPS still logs to SD independently.)
 
 The single peripheral slot is shared with the file-transfer service via
 an explicit `bleOwner` (NONE/TRANSFER/CAMERA); the owner model keeps a
@@ -221,10 +223,11 @@ Two guarantees bound the feature's blast radius. First, the FSM is a
 camera is paired or not, and camera mode never parks the main loop the
 way BLE transfer and USB MSC do. Second, the protocol bytes live in the
 host-tested `insta360_protocol` unit with golden-byte tests. The wake
-advert + scan response are **X4-confirmed** — captured from a genuine
-remote and replayed to wake a sleeping X4; the ce82 button frames are
-captured from a live remote too. The camera's own `ce81` state pushes and
-the eventual GPS transport remain to be sniffed.
+advert + scan response, the ce82 button frames, and the ce82 GPS/RMC frame
+are all **X4-confirmed** — captured from a genuine remote (the wake advert
+was even replayed to wake a sleeping X4). Only the camera's own `ce81`
+state pushes remain to be decoded (accepted and ACKed, parsed only if we
+want LED-style feedback).
 
 ## Data formats
 

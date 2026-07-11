@@ -68,6 +68,32 @@ size_t buildModeCycle(uint8_t* out, size_t cap, uint8_t seq);
 size_t buildScreenToggle(uint8_t* out, size_t cap, uint8_t seq);  // power tap
 size_t buildPowerOff(uint8_t* out, size_t cap, uint8_t seq);      // power hold
 
+// ce82 GPS telemetry frame (X4-CONFIRMED, Wireshark capture 2026-07-10).
+// The remote streams GPS to the camera on ce82 at 10 Hz as a notification:
+//   FC EF FE 83 00 <len> ,26.7,<0x07>,$GNRMC,...*HH
+// The payload is ASCII: a leading empty field, a constant "26.7", a raw
+// 0x07 byte, then a NON-STANDARD RMC sentence with the remote's quirks:
+//   - longitude is a SIGNED ddmm.mmmm number with the hemisphere letter
+//     always 'E' (west = negative), while latitude uses a normal N/S letter
+//   - an extra 'V' field sits between the mode and the checksum
+//   - coordinates are ddmm.mmmm (degrees + decimal minutes), not degrees
+// The SN byte (offset 4) is ALWAYS 0x00 for GPS (only buttons increment it).
+// Per the liveness rule, the caller streams this continuously while
+// connected — status 'V' (void) with last-known coords when there is no
+// fix, never going silent. Longest frame ~90 bytes; size `out` >= 96.
+constexpr size_t kMaxGpsFrameLen = 96;
+struct GpsRmc {
+  bool     valid = false;        // A (fix) vs V (void)
+  uint8_t  hour = 0, minute = 0, second = 0;  // UTC
+  uint16_t milli = 0;            // sub-second, 0-999, rendered as .sss
+  uint8_t  day = 0, month = 0, year = 0;       // date, year is 2-digit (ddmmyy)
+  double   latitudeDeg = 0.0;    // signed decimal degrees
+  double   longitudeDeg = 0.0;   // signed decimal degrees
+  double   speedKnots = 0.0;
+  double   courseDeg = 0.0;
+};
+size_t buildGpsRmcFrame(uint8_t* out, size_t cap, const GpsRmc& s);
+
 // ce81: frames the camera writes to our remote service.
 enum class Ce81Frame : uint8_t { kUnknown, kSerial, kStatus };
 

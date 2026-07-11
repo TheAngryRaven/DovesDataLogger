@@ -114,7 +114,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `lap_format.{h,cpp}` | ms → `M:SS.mmm` lap-time rendering (three zero-minutes styles), used by all display pages |
 | `tach_filter.{h,cpp}` | Tachometer 1-D Kalman filter (predict/update math + Q/R tuning constants) |
 | `camera_fsm.{h,cpp}` | Insta360 auto-record lifecycle FSM (8 states, all debounce/retry/timeout timing + tunables); board-portable core shared with the nRF54 "Falcon" target |
-| `insta360_protocol.{h,cpp}` | Insta360 X4 BLE frame builders/parsers (wake advert, remote scan response, ce82 buttons, ce81 serial parsing) with golden-byte tests |
+| `insta360_protocol.{h,cpp}` | Insta360 X4 BLE frame builders/parsers (wake advert, remote scan response, ce82 buttons, ce82 GPS/RMC frame, ce81 serial parsing) with golden-byte tests |
 
 ### Non-Source
 
@@ -586,12 +586,19 @@ loop()  ~250 Hz
   physical remote's frames: recording toggles via the shutter button, and
   power-off streams the 3-second power-hold. We never act as central: no
   scanning, no `be80` client, no `be81` writes. (The old central role held
-  a `be80` link to the camera *and* pushed a 1 Hz `be81` GPS-overlay feed
-  for the camera's Stats Dashboard — both are removed. That design also
-  made power-off impossible: power-off only exists as a remote `ce82` hold,
-  which cannot coexist with being the camera's `be80` client. The overlay's
-  true remote→camera transport is unidentified, so it is dropped; GPS still
-  logs to SD independently.)
+  a `be80` link to the camera for start/stop-video — removed. It made
+  power-off impossible: power-off only exists as a remote `ce82` hold,
+  which cannot coexist with being the camera's `be80` client.)
+- **GPS overlay** (`cameraServiceGpsStream()`): a Wireshark capture of the
+  genuine remote↔camera link showed the remote streams GPS on **`ce82` at
+  10 Hz** as a non-standard NMEA-RMC frame (`FC EF FE 83 00 <len>
+  ,26.7,\x07,$GNRMC,...` — signed longitude with a constant `E`, an extra
+  `V` field; built + golden-tested in `insta360_protocol::buildGpsRmcFrame`).
+  The firmware streams it continuously while the camera is connected +
+  subscribed — this doubles as the remote's **liveness heartbeat** (never
+  go silent or the camera drops us; status `V` with last-known coords when
+  there's no fix), paused only during a power-off hold. GPS still logs to
+  SD independently.
 - **Lifecycle FSM** (`camera_fsm` pure unit, host-tested): 8 states —
   UNPAIRED / IDLE / WAKING / AWAIT_READY / RECORDING / COOLDOWN /
   POWERING_OFF / PAIRING (`kConnecting`/`kAwaitGps` are gone, folded into

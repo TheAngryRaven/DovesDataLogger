@@ -169,6 +169,73 @@ TEST_CASE("insta360_protocol - button seq lands at byte 4 and only there") {
 }
 
 // ---------------------------------------------------------------------------
+// buildGpsRmcFrame — golden vector from the 2026-07-10 Wireshark capture
+// ---------------------------------------------------------------------------
+
+TEST_CASE("insta360_protocol - GPS RMC frame matches the captured bytes") {
+    // The exact ce82 notification captured from the genuine remote:
+    //   ,26.7,\x07,$GNRMC,033113.000,A,2845.0938,N,-8156.0570,E,
+    //   0.06,0.00,110726,0.0,W,A,V*69
+    const uint8_t expected[] = {
+        0xFC, 0xEF, 0xFE, 0x83, 0x00, 0x52,
+        0x2C, 0x32, 0x36, 0x2E, 0x37, 0x2C, 0x07, 0x2C, 0x24, 0x47,
+        0x4E, 0x52, 0x4D, 0x43, 0x2C, 0x30, 0x33, 0x33, 0x31, 0x31,
+        0x33, 0x2E, 0x30, 0x30, 0x30, 0x2C, 0x41, 0x2C, 0x32, 0x38,
+        0x34, 0x35, 0x2E, 0x30, 0x39, 0x33, 0x38, 0x2C, 0x4E, 0x2C,
+        0x2D, 0x38, 0x31, 0x35, 0x36, 0x2E, 0x30, 0x35, 0x37, 0x30,
+        0x2C, 0x45, 0x2C, 0x30, 0x2E, 0x30, 0x36, 0x2C, 0x30, 0x2E,
+        0x30, 0x30, 0x2C, 0x31, 0x31, 0x30, 0x37, 0x32, 0x36, 0x2C,
+        0x30, 0x2E, 0x30, 0x2C, 0x57, 0x2C, 0x41, 0x2C, 0x56, 0x2A,
+        0x36, 0x39,
+    };
+
+    GpsRmc s;
+    s.valid = true;
+    s.hour = 3; s.minute = 31; s.second = 13; s.milli = 0;
+    s.day = 11; s.month = 7; s.year = 26;
+    // 2845.0938 N = 28 deg 45.0938 min; -8156.0570 E = 81 deg 56.0570 min W.
+    s.latitudeDeg = 28.0 + 45.0938 / 60.0;
+    s.longitudeDeg = -(81.0 + 56.0570 / 60.0);
+    s.speedKnots = 0.06;
+    s.courseDeg = 0.00;
+
+    uint8_t out[kMaxGpsFrameLen];
+    const size_t n = buildGpsRmcFrame(out, sizeof(out), s);
+    CHECK(n == sizeof(expected));
+    CHECK(std::memcmp(out, expected, sizeof(expected)) == 0);
+
+    // Length byte (offset 5) equals the ASCII payload length.
+    CHECK(out[5] == n - 6);
+    // SN slot stays 0 for GPS (buttons own the counter).
+    CHECK(out[4] == 0x00);
+    // Too-small buffer writes nothing.
+    CHECK(buildGpsRmcFrame(out, 10, s) == 0);
+}
+
+TEST_CASE("insta360_protocol - GPS RMC void status and hemispheres") {
+    GpsRmc s;
+    s.valid = false;             // no fix -> 'V'
+    s.latitudeDeg = -12.5;       // south
+    s.longitudeDeg = 7.25;       // east (positive)
+    uint8_t out[kMaxGpsFrameLen];
+    const size_t n = buildGpsRmcFrame(out, sizeof(out), s);
+    REQUIRE(n > 6);
+    // Copy the ASCII payload (after the 6-byte header, which contains a NUL
+    // at the SN slot) into a NUL-terminated buffer for substring checks.
+    char payload[kMaxGpsFrameLen];
+    const size_t plen = out[5];
+    std::memcpy(payload, out + 6, plen);
+    payload[plen] = '\0';
+    // Status field 'V' present; south latitude -> 'S'; longitude letter is
+    // ALWAYS 'E' even for a positive (eastern) value.
+    CHECK(std::strstr(payload, ",V,") != nullptr);
+    CHECK(std::strstr(payload, ",S,") != nullptr);
+    CHECK(std::strstr(payload, ",E,") != nullptr);
+    // The extra 'V' + checksum tail is present.
+    CHECK(std::strstr(payload, ",A,V*") != nullptr);
+}
+
+// ---------------------------------------------------------------------------
 // parseCe81Frame
 // ---------------------------------------------------------------------------
 

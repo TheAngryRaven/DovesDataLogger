@@ -73,6 +73,14 @@ static uint32_t ce82HoldNextAt = 0;   // next frame due at
 constexpr uint32_t kCe82PowerHoldMs   = 3500;  // stream a >3 s hold
 constexpr uint32_t kCe82HoldIntervalMs = 30;   // ~30 ms/frame (remote ~25 ms)
 
+// GPS telemetry: the real remote streams RMC on ce82 at 10 Hz the WHOLE
+// time the camera is connected+subscribed — it is the remote's liveness
+// heartbeat (never go silent, or the camera treats us as dead and drops
+// the link). Streamed continuously regardless of recording state, with
+// status 'V' when there's no fix. Paused only during a power-off hold.
+static uint32_t gpsStreamNextAt = 0;
+constexpr uint32_t kGpsStreamIntervalMs = 100;  // 10 Hz
+
 // ---- Link flags (written from Bluefruit-task callbacks -> volatile) ----
 static volatile bool     remoteLinkUp = false;   // camera holds our ce80 remote service
 static volatile uint16_t remoteConnHandle = BLE_CONN_HANDLE_INVALID;
@@ -230,7 +238,7 @@ void cameraBleRegisterServices() {
   // deliverable" gate.
   cameraCe82Char.setProperties(CHR_PROPS_NOTIFY);
   cameraCe82Char.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
-  cameraCe82Char.setMaxLen(20);
+  cameraCe82Char.setMaxLen(insta360_protocol::kMaxGpsFrameLen);  // fits the ~90-byte GPS frame
   cameraCe82Char.setCccdWriteCallback(cameraCe82CccdCallback);
   cameraCe82Char.begin();
   uint8_t ce82Initial = 0x00;
@@ -301,6 +309,37 @@ static void cameraServiceCe82Hold() {
   uint8_t buf[9];
   size_t n = insta360_protocol::buildPowerOff(buf, sizeof(buf), ce82Seq);
   ce82Seq += 2;
+  if (n > 0) cameraCe82Char.notify(buf, (uint16_t)n);
+}
+
+// Stream the 10 Hz GPS/RMC liveness frame while the camera is connected +
+// subscribed (see kGpsStreamIntervalMs). Runs every CAMERA_LOOP iteration
+// (before any early return) in both bench-test and FSM modes. Paused
+// during a power-off hold so the hold frames aren't diluted. Always emits
+// (status 'V' with last-known coords) when there's no fix — never silent.
+static void cameraServiceGpsStream() {
+  if (!bleInitialized || !remoteLinkUp || !cameraCe82Char.notifyEnabled()) return;
+  if (ce82HoldUntil != 0) return;  // a power-off hold owns ce82 right now
+  const uint32_t now = millis();
+  if ((int32_t)(now - gpsStreamNextAt) < 0) return;
+  gpsStreamNextAt = now + kGpsStreamIntervalMs;
+
+  insta360_protocol::GpsRmc s;
+  s.valid = gpsData.fix;
+  s.hour = gpsData.hour;
+  s.minute = gpsData.minute;
+  s.second = gpsData.seconds;
+  s.milli = gpsData.milliseconds;
+  s.day = gpsData.day;
+  s.month = gpsData.month;
+  s.year = (uint8_t)(gpsData.year % 100);  // ddmmyy wants 2-digit year
+  s.latitudeDeg = gpsData.latitudeDegrees;
+  s.longitudeDeg = gpsData.longitudeDegrees;
+  s.speedKnots = gpsData.speed;            // gpsData.speed is already knots
+  s.courseDeg = gpsData.heading;
+
+  uint8_t buf[insta360_protocol::kMaxGpsFrameLen];
+  size_t n = insta360_protocol::buildGpsRmcFrame(buf, sizeof(buf), s);
   if (n > 0) cameraCe82Char.notify(buf, (uint16_t)n);
 }
 
@@ -499,9 +538,10 @@ static void cameraDrainCe81() {
 void CAMERA_LOOP() {
   // 1. Drain camera writes first so a captured serial feeds this step.
   cameraDrainCe81();
-  // Stream an in-flight power-off hold in BOTH bench-test and FSM modes
-  // (runs before the test-mode early return below).
+  // Stream an in-flight power-off hold, then the 10 Hz GPS liveness feed,
+  // in BOTH bench-test and FSM modes (before the test-mode early return).
   cameraServiceCe82Hold();
+  cameraServiceGpsStream();
 
   // Manual bench-test mode: the tester drives wake/record/power directly
   // (see cameraTest*() below), so the FSM is suppressed here — stepping it

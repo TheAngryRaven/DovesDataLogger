@@ -1,5 +1,6 @@
 #include "insta360_protocol.h"
 
+#include <math.h>
 #include <string.h>
 
 namespace insta360_protocol {
@@ -142,6 +143,128 @@ size_t buildPowerOff(uint8_t* out, size_t cap, uint8_t seq) {
   // incrementing seq while the button is held — the camera powers off
   // after receiving the sustained hold; a single frame does nothing.
   return buildButtonFrame(out, cap, seq, 0x00, 0x03);
+}
+
+// -----------------------------------------------------------------------
+// ce82 GPS telemetry frame (RMC-in-ASCII). Integer-only formatting so it
+// is portable to Arduino (newlib-nano lacks %f) and host alike.
+// -----------------------------------------------------------------------
+
+namespace {
+
+// Append a NUL-terminated string; returns the number of chars written.
+size_t appendStr(char* buf, size_t pos, const char* s) {
+  size_t n = 0;
+  while (s[n] != '\0') { buf[pos + n] = s[n]; n++; }
+  return n;
+}
+
+// Append `value` zero-padded to `width` digits (value assumed < 10^width).
+size_t appendUintPadded(char* buf, size_t pos, uint32_t value, int width) {
+  char tmp[12];
+  int i = 0;
+  for (int w = 0; w < width; w++) { tmp[i++] = char('0' + value % 10); value /= 10; }
+  for (int j = 0; j < i; j++) buf[pos + j] = tmp[i - 1 - j];
+  return (size_t)i;
+}
+
+// Append a signed fixed-point value: [-]<int>.<frac zero-padded to `dec`>.
+size_t appendFixed(char* buf, size_t pos, double value, int dec) {
+  const size_t start = pos;
+  const bool neg = value < 0.0;
+  const double a = neg ? -value : value;
+  uint64_t scale = 1;
+  for (int i = 0; i < dec; i++) scale *= 10;
+  const uint64_t scaled = (uint64_t)llround(a * (double)scale);  // nearest
+  uint64_t ip = scaled / scale;
+  const uint64_t fp = scaled % scale;
+  if (neg) buf[pos++] = '-';
+  // integer part (at least one digit)
+  char tmp[24];
+  int i = 0;
+  do { tmp[i++] = char('0' + ip % 10); ip /= 10; } while (ip > 0);
+  for (int j = 0; j < i; j++) buf[pos++] = tmp[i - 1 - j];
+  buf[pos++] = '.';
+  pos += appendUintPadded(buf, pos, (uint32_t)fp, dec);
+  return pos - start;
+}
+
+// decimal degrees -> ddmm.mmmm as a double (sign preserved).
+double toDegMin(double deg) {
+  const bool neg = deg < 0.0;
+  const double a = neg ? -deg : deg;
+  const double d = (double)(long)a;      // whole degrees
+  const double m = (a - d) * 60.0;       // decimal minutes
+  const double dm = d * 100.0 + m;
+  return neg ? -dm : dm;
+}
+
+}  // namespace
+
+size_t buildGpsRmcFrame(uint8_t* out, size_t cap, const GpsRmc& s) {
+  if (out == nullptr) return 0;
+
+  // Build the RMC body (everything between '$' and '*', exclusive) so the
+  // checksum can XOR over it, then assemble the full sentence + payload.
+  char body[96];
+  size_t b = 0;
+  b += appendStr(body, b, "GNRMC,");
+  // UTC hhmmss.sss
+  b += appendUintPadded(body, b, s.hour, 2);
+  b += appendUintPadded(body, b, s.minute, 2);
+  b += appendUintPadded(body, b, s.second, 2);
+  body[b++] = '.';
+  b += appendUintPadded(body, b, s.milli, 3);
+  body[b++] = ',';
+  body[b++] = s.valid ? 'A' : 'V';
+  body[b++] = ',';
+  // latitude ddmm.mmmm + N/S
+  b += appendFixed(body, b, toDegMin(s.latitudeDeg) < 0 ? -toDegMin(s.latitudeDeg)
+                                                        : toDegMin(s.latitudeDeg),
+                   4);
+  body[b++] = ',';
+  body[b++] = s.latitudeDeg < 0.0 ? 'S' : 'N';
+  body[b++] = ',';
+  // longitude: SIGNED ddmm.mmmm, hemisphere letter always 'E' (the quirk)
+  b += appendFixed(body, b, toDegMin(s.longitudeDeg), 4);
+  b += appendStr(body, b, ",E,");
+  b += appendFixed(body, b, s.speedKnots, 2);
+  body[b++] = ',';
+  b += appendFixed(body, b, s.courseDeg, 2);
+  body[b++] = ',';
+  // date ddmmyy
+  b += appendUintPadded(body, b, s.day, 2);
+  b += appendUintPadded(body, b, s.month, 2);
+  b += appendUintPadded(body, b, s.year, 2);
+  // constant magvar 0.0 W, mode A, extra V
+  b += appendStr(body, b, ",0.0,W,A,V");
+
+  // NMEA checksum: XOR of every char in the body.
+  uint8_t cksum = 0;
+  for (size_t i = 0; i < b; i++) cksum ^= (uint8_t)body[i];
+
+  // Payload = ,26.7,<0x07>,$<body>*HH
+  char payload[112];
+  size_t p = 0;
+  p += appendStr(payload, p, ",26.7,");
+  payload[p++] = 0x07;
+  payload[p++] = ',';
+  payload[p++] = '$';
+  memcpy(payload + p, body, b); p += b;
+  payload[p++] = '*';
+  static const char kHex[] = "0123456789ABCDEF";
+  payload[p++] = kHex[(cksum >> 4) & 0xF];
+  payload[p++] = kHex[cksum & 0xF];
+
+  // Frame = FC EF FE 83 00 <len> <payload>
+  const size_t frameLen = 6 + p;
+  if (cap < frameLen) return 0;
+  out[0] = 0xFC; out[1] = 0xEF; out[2] = 0xFE;
+  out[3] = 0x83;   // GPS/sensor type
+  out[4] = 0x00;   // SN slot: always 0 for GPS
+  out[5] = (uint8_t)p;
+  memcpy(out + 6, payload, p);
+  return frameLen;
 }
 
 // -----------------------------------------------------------------------
