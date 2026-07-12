@@ -86,6 +86,7 @@
 #include "gps_functions.h"
 #include "haversine.h"
 #include "replay.h"
+#include "sat_bars.h"
 #include "sd_functions.h"
 #include "settings.h"
 #include "tachometer.h"
@@ -332,12 +333,29 @@ struct GpsData {
 
 volatile bool gpsDataFresh = false;  // Set by PVT callback, cleared by GPS_LOOP()
 
-// GPS wake validation: tracks whether GPS is producing data after wake from sleep.
-// GPS_WAKE() sets gpsWakeTime and clears gpsWakeValidated. GPS_LOOP() sets
-// gpsWakeValidated=true on first PVT arrival. If 5 seconds pass without PVT,
-// GPS_LOOP() triggers baud recovery and reconfiguration.
+// GPS nav-rate target: the rate GPS_RECONFIGURE() (and every wake/recovery
+// path that calls it) re-asserts. Race mode (25 Hz PVT-only) until the GPS
+// status boot page lands; that change flips the boot default to status
+// mode (5 Hz + NAV-SAT). Owned by gps_functions.ino.
+uint8_t gpsNavRateTarget = GPS_NAV_RATE_HZ;
+bool gpsNavSatWanted = false;
+
+// Per-satellite CNO snapshot for the GPS status page's signal bars.
+// Written by onNAVSATReceived() (main-loop context via checkCallbacks()),
+// read by displayPage_gps_status(). Selection/ordering rules live in the
+// host-tested sat_bars unit.
+uint8_t gpsSatCnos[sat_bars::kMaxSats];
+uint8_t gpsSatCnoCount = 0;   // entries in gpsSatCnos
+uint8_t gpsSatUsedCount = 0;  // satellites participating in the nav solution
+
+// GPS PVT-arrival validation: tracks whether GPS is producing data after
+// GPS_SETUP() / GPS_WAKE(). Both set gpsWakeTime and clear gpsWakeValidated;
+// GPS_LOOP() sets gpsWakeValidated=true on first PVT arrival. If 5 seconds
+// pass without PVT, GPS_LOOP() triggers baud recovery and reconfiguration —
+// this is how a module that silently lost its config (V_BCKP drop, full
+// power cycle) gets caught even when the begin() probe succeeded.
 unsigned long gpsWakeTime = 0;
-bool gpsWakeValidated = true;  // Start true (validated at boot by GPS_SETUP)
+bool gpsWakeValidated = true;  // Armed (set false) by GPS_SETUP at boot
 
 float gps_speed_mph = 0.0;
 
@@ -1254,23 +1272,6 @@ void loop() {
         DISPLAY_SLEEP();
       }
       chargeDisplayOnAt = 0;
-    }
-
-    // Periodic GPS fix (every SLEEP_GPS_WAKE_INTERVAL)
-    if (!sleepGpsWakeActive &&
-        (millis() - sleepLastGpsWake >= SLEEP_GPS_WAKE_INTERVAL)) {
-      GPS_SLEEP_PERIODIC_CHECK();
-    }
-
-    // GPS periodic wake: check for fix or timeout
-    if (sleepGpsWakeActive) {
-      myGNSS.checkUblox();
-      myGNSS.checkCallbacks();
-      if (gpsData.fix || (millis() - sleepGpsWakeStartedAt >= SLEEP_GPS_FIX_TIMEOUT)) {
-        GPS_SLEEP();
-        sleepGpsWakeActive = false;
-        sleepLastGpsWake = millis();
-      }
     }
 
     // CPU idle (SoftDevice-safe WFE — any interrupt wakes CPU)

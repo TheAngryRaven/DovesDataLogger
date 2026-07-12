@@ -14,10 +14,31 @@
 // gpsDataFresh = true.
 void onPVTReceived(UBX_NAV_PVT_data_t *pvt);
 
-// One-shot GPS bring-up — baud autoneg, VALSET config, PVT callback,
-// start of the TIMER3 serial-drain ISR. Sets gpsInitialized on
-// success.
+// NAV-SAT callback fired by checkCallbacks() while status mode has
+// NAV-SAT enabled — snapshots per-satellite CNO into gpsSatCnos for the
+// GPS status page's signal bars.
+void onNAVSATReceived(UBX_NAV_SAT_data_t *sat);
+
+// GPS bring-up — backup-mode wake byte, 57600-first baud probe ladder
+// (with one delayed cold-power retry), VALSET config, PVT + NAV-SAT
+// callbacks, start of the TIMER3 serial-drain ISR, and arming of the
+// PVT-arrival watchdog. Sets gpsInitialized on success.
 void GPS_SETUP();
+
+// Bounded re-detect while the GPS status page is showing "NO GPS":
+// re-runs the fast probe ladder up to 3 times, 10 s apart. Call only
+// from the status page driver — each attempt blocks ~2.5 s.
+void GPS_STATUS_RETRY_LOOP();
+// True once GPS_STATUS_RETRY_LOOP() has exhausted its retries — the
+// status page switches to a permanent "CHECK WIRING" message.
+bool gpsRetriesExhausted();
+
+// Runtime GPS mode switches. Both set the persistent targets that
+// GPS_RECONFIGURE()/GPS_WAKE()/recovery re-assert AND apply them live.
+// Status mode: GPS_NAV_RATE_STATUS_HZ + NAV-SAT (boot default).
+// Race mode: GPS_NAV_RATE_HZ, NAV-SAT off (menu/race steady state).
+void gpsEnterStatusMode();
+void gpsEnterRaceMode();
 
 // Service GPS: drain the buffer, dispatch PVT callbacks, run the
 // PVT-arrival watchdog, feed CourseManager, and (when enabled) write
@@ -29,8 +50,9 @@ void GPS_LOOP();
 // path when V_BCKP drops.
 void GPS_SLEEP();
 
-// Re-apply the full VALSET configuration. Idempotent. Called by
-// GPS_WAKE and GPS_BAUD_RECOVERY.
+// Re-apply the full VALSET configuration (at the current
+// gpsNavRateTarget / gpsNavSatWanted). Idempotent. Called by GPS_WAKE
+// and GPS_BAUD_RECOVERY.
 void GPS_RECONFIGURE();
 
 // Recover communication when the module reverted to 9600 baud / NMEA
@@ -40,10 +62,6 @@ bool GPS_BAUD_RECOVERY();
 // Wake the GPS from backup mode, restart the serial-drain timer,
 // re-apply config, and arm the PVT-arrival watchdog.
 void GPS_WAKE();
-
-// Periodic sleep-mode wake to keep ephemeris fresh (called from the
-// sleep loop every SLEEP_GPS_WAKE_INTERVAL ms).
-void GPS_SLEEP_PERIODIC_CHECK();
 
 // GPS time helpers (require an active fix and gpsInitialized=true).
 unsigned long      getGpsTimeInMilliseconds();
