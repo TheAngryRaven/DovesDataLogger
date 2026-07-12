@@ -48,7 +48,6 @@ early-return short-circuits:
 ```
 loop()
  ├─ wdtPet()                     feed the 4 s hardware watchdog
- ├─ if sleeping  -> handle wake triggers / charge screen / WFE; return
  ├─ if BLE active -> BLUETOOTH_LOOP(); minimal UI; return
  ├─ GPS_LOOP()                   drain buffer, fire PVT callback, feed timer, log
  ├─ TACH_LOOP()                  drain pulse ring buffer, Kalman-filter RPM
@@ -59,8 +58,8 @@ loop()
  ├─ checkAutoIdle()              60 s < 2 mph -> end session
  ├─ autoRaceModeCheck()          RPM/speed on menu -> enter race
  ├─ CAMERA_LOOP()                step the Insta360 auto-record FSM
- ├─ button hold combos           sleep / reboot
- ├─ readButtons() / displayLoop() / resetButtons()
+ ├─ button hold combos           shutdown / reboot; menu idle -> shutdown
+ ├─ readButtons() / gpsStatusPageLoop() / displayLoop() / resetButtons()
 ```
 
 Each subsystem exposes `*_SETUP()` (called once from `setup()`) and
@@ -147,12 +146,43 @@ ISR jitter, a reduced 2 MHz SD SPI clock, an I2C bus-recovery routine that
 bit-bangs the display bus free if it hangs, and a 4 s hardware watchdog as
 the last resort.
 
-### GPS sleep/wake recovery
-The SAM-M10Q keeps its config in volatile RAM backed by V_BCKP. If that
-rail sags (cranking brownout, loose connector) the module reverts to
-9600 baud NMEA. `GPS_WAKE()` re-applies config and arms a 5 s PVT
-watchdog; if no fix data arrives, `GPS_BAUD_RECOVERY()` renegotiates the
-baud rate and reconfigures.
+### Shutdown is System OFF, wake is a reboot
+There is no power switch (deliberately — the next hardware revision drops
+it), so "off" is nRF52 **System OFF** at ~µA with GPIO SENSE armed on the
+tach pin and the three buttons, plus VBUS. Waking is a full chip reset:
+`setup()` runs fresh, and the very first thing it does is read (then
+clear) the sticky `RESETREAS` + GPIO `LATCH` registers to decode *why* it
+booted (the host-tested `wake_cause` unit). An engine-start (tach) wake
+routes the GPS status page's exit straight into race mode with logging —
+the old software sleep loop's RPM wake, rebuilt on hardware. GPREGRET is
+never touched; register 0 belongs to the OTA/bootloader handoff. The one
+soft exception is charging: the fast-charge (HICHG) pin is software-held,
+so while VBUS is present the device parks in a live charging loop instead
+of System OFF, wakes fully on any button, and powers off when unplugged.
+
+### GPS boot recovery
+The SAM-M10Q keeps its config in volatile RAM (backed by V_BCKP), and
+with shutdown being a real power-down the module can be in **any** state
+at boot: software backup mode holding a 57600 config (the normal wake),
+already configured and running (an MCU-only reset), or factory 9600 NMEA
+(true cold power / brownout). Boot therefore sends the u-blox backup-wake
+byte first (harmless if awake), probes 57600 before 9600 so warm boots
+connect near-instantly, and pays a cold-boot delay only when nothing
+answers. A `begin()` ping proves the module answers — not that data
+flows — so boot also arms a 5 s PVT-arrival watchdog; if no fix data
+arrives, `GPS_BAUD_RECOVERY()` renegotiates the baud rate and
+reconfigures. A GPS that never appears is re-probed a bounded number of
+times from the status page and surfaced as "CHECK WIRING".
+
+### GPS status boot page
+Every boot lands on a MyChron-style satellite status page: sat counts,
+HDOP, lock state, and per-satellite CNO signal bars (UBX-NAV-SAT). The
+GPS runs a 5 Hz status config while the page is up and switches to the
+25 Hz PVT-only race config on exit. The page holds until a stable lock
+(fix + fully-resolved time held 3 s) then auto-advances; any button skips
+it immediately; a tach-wake boot or a running engine turns the exit into
+race-mode entry. Its hold/auto-close/destination logic is the host-tested
+`gps_status_page` unit, and the bar selection/geometry is `sat_bars`.
 
 ### OTA firmware updates
 The board has no internet radio — only BLE — so it cannot pull a release
@@ -220,7 +250,7 @@ stops** after ~30 s of engine-off (RPM only — a stationary but running grid
 idle keeps recording), returning to WATCHING. WATCHING keeps the camera on
 and connected so a brief on-track stall recovers straight back into
 recording when RPM returns; the camera powers off **only** when the device
-sleeps (there is no post-record cooldown/power-off timeout). All temporal
+shuts down (there is no post-record cooldown/power-off timeout). All temporal
 behavior lives inside the FSM, host-tested with a fake clock, and it is the
 board-portable core intended to move unchanged to the nRF54 ("Falcon")
 target.
