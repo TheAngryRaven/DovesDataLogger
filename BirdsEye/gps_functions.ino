@@ -204,12 +204,18 @@ void onNAVSATReceived(UBX_NAV_SAT_data_t *sat) {
 // after every myGNSS.begin() — begin() resets library state, dropping
 // previously registered callbacks.
 static void gpsRegisterCallbacks() {
+  // Runs under the armed WDT when re-registering after a baud recovery —
+  // each call is a blocking VALSET/ACK exchange (see GPS_RECONFIGURE).
+  wdtPet();
   myGNSS.setAutoPVTcallbackPtr(&onPVTReceived);
+  wdtPet();
   if (gpsNavSatWanted) {
     myGNSS.setAutoNAVSATcallbackPtr(&onNAVSATReceived);
+    wdtPet();
     // NAV-SAT frames are big (8 + 12*numSvs bytes); divide them down to
     // ~1 Hz instead of one per nav solution. Plenty for signal bars.
     myGNSS.setAutoNAVSATrate(GPS_NAV_RATE_STATUS_HZ);
+    wdtPet();
   }
 }
 
@@ -246,12 +252,16 @@ static bool gpsSetupProbe(bool coldRetry) {
   GPS_SERIAL.write(0xFF);
   delay(100);
 
-  // 57600 first — warm module answers immediately.
-  wdtPet();  // each begin() probe burns ~1.1 s of ping timeouts
-  if (myGNSS.begin(gpsStream)) {
+  // 57600 first — warm module answers immediately. Short maxWait: a
+  // failing begin() is 3 internal ping retries back-to-back with no way
+  // to pet the WDT in between (see GPS_PROBE_MAXWAIT_MS).
+  wdtPet();
+  if (myGNSS.begin(gpsStream, GPS_PROBE_MAXWAIT_MS)) {
+    wdtPet();
     debugln(F("GPS found at 57600 (config retained)"));
     return true;
   }
+  wdtPet();
 
   // 9600 fallback — factory default after a full config loss.
   debugln(F("GPS not at 57600, trying 9600..."));
@@ -260,20 +270,24 @@ static bool gpsSetupProbe(bool coldRetry) {
   GPS_SERIAL.write(0xFF);  // wake again in case the first byte was eaten at the wrong baud
   delay(100);
   wdtPet();
-  if (myGNSS.begin(gpsStream)) {
+  if (myGNSS.begin(gpsStream, GPS_PROBE_MAXWAIT_MS)) {
+    wdtPet();
     debugln(F("GPS found at 9600, switching to 57600..."));
     myGNSS.setSerialRate(GPS_BAUD_RATE);
     delay(100);
     gpsSerialRestart(GPS_BAUD_RATE);
     delay(100);
     wdtPet();
-    if (myGNSS.begin(gpsStream)) {
+    if (myGNSS.begin(gpsStream, GPS_PROBE_MAXWAIT_MS)) {
+      wdtPet();
       debugln(F("GPS reconnected at 57600"));
       return true;
     }
+    wdtPet();
     debugln(F("GPS lost after baud switch!"));
     return false;
   }
+  wdtPet();
 
   // Neither baud answered. A module on true cold power may still be
   // booting — give it the boot time the old fixed delay(2250) paid up
@@ -620,16 +634,31 @@ void GPS_SLEEP() {
  * (~50ms total) and idempotent — safe to call even if config was retained.
  */
 void GPS_RECONFIGURE() {
+  // This runs under the armed ~4 s WDT when called from GPS_BAUD_RECOVERY
+  // or GPS_WAKE. Each call below is a VALSET + ACK wait that can block up
+  // to ~1.1 s on a module that answers the connection ping but responds
+  // slowly (cold acquisition, marginal wiring) — 8 of them back-to-back
+  // is a guaranteed watchdog reset. Pet between every exchange.
+  wdtPet();
   myGNSS.setUART1Output(COM_TYPE_UBX);
+  wdtPet();
   myGNSS.setNavigationFrequency(gpsNavRateTarget);
+  wdtPet();
   myGNSS.setDynamicModel(DYN_MODEL_AUTOMOTIVE);
+  wdtPet();
   myGNSS.enableGNSS(true, SFE_UBLOX_GNSS_ID_GPS);
+  wdtPet();
   myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_SBAS);
+  wdtPet();
   myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_GALILEO);
+  wdtPet();
   myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_BEIDOU);
+  wdtPet();
   myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_GLONASS);
+  wdtPet();
   if (!gpsNavSatWanted) {
     myGNSS.setAutoNAVSAT(false);  // no periodic NAV-SAT output in race mode
+    wdtPet();
   }
   debugln(F("GPS config re-applied (VALSET)"));
 }
@@ -681,12 +710,13 @@ bool GPS_BAUD_RECOVERY() {
   debugln(F("GPS baud recovery: attempting..."));
 
   // This path runs from GPS_LOOP() under the armed ~4 s hardware watchdog,
-  // and it is the slowest thing in the firmware short of the OTA apply:
-  // up to three myGNSS.begin() probes (~1.1 s of ping timeouts each) plus
-  // ~500 ms of explicit delay(). Against a genuinely hung module that
-  // out-waits the WDT → reset → re-setup → recovery → reset boot loop —
-  // the one path built to revive a sick GPS must not trip the watchdog.
-  // Pet before every blocking probe (same rationale as fwStageToFlash()).
+  // and it is the slowest thing in the firmware short of the OTA apply.
+  // A failing myGNSS.begin() is 3 internal ping retries with no pet
+  // opportunity in between, so every probe uses GPS_PROBE_MAXWAIT_MS
+  // (3 x 550 ms = ~1.65 s worst case) and is bracketed by pets — against
+  // a genuinely hung module that out-waits the WDT → reset → re-setup →
+  // recovery → reset boot loop, the one path built to revive a sick GPS
+  // must not trip the watchdog.
   wdtPet();
 
   // Stop timer so GpsBufferedStream passes through to Serial1 directly.
@@ -694,10 +724,11 @@ bool GPS_BAUD_RECOVERY() {
   stopGpsSerialTimer();
 
   // First: try at current baud — module might be fine, just slow to start
-  if (myGNSS.begin(gpsStream)) {
+  if (myGNSS.begin(gpsStream, GPS_PROBE_MAXWAIT_MS)) {
+    wdtPet();
     debugln(F("GPS baud recovery: module responding at 57600"));
-    GPS_RECONFIGURE();
-    gpsRegisterCallbacks();  // begin() resets library state
+    GPS_RECONFIGURE();       // pets internally per VALSET exchange
+    gpsRegisterCallbacks();  // begin() resets library state; pets internally
     gpsRxHead = 0;
     gpsRxTail = 0;
     startGpsSerialTimer();
@@ -706,13 +737,13 @@ bool GPS_BAUD_RECOVERY() {
 
   // Module not responding at 57600 — try 9600 (factory default)
   debugln(F("GPS baud recovery: trying 9600..."));
-  wdtPet();  // the first begin() just burned ~1 s of the 4 s budget
+  wdtPet();  // the first begin() just burned ~1.65 s of the 4 s budget
   GPS_SERIAL.end();
   delay(50);
   GPS_SERIAL.begin(9600);
   delay(100);
 
-  if (myGNSS.begin(gpsStream)) {
+  if (myGNSS.begin(gpsStream, GPS_PROBE_MAXWAIT_MS)) {
     // Found at 9600 — switch it back to 57600
     debugln(F("GPS baud recovery: found at 9600, switching to 57600"));
     wdtPet();  // second begin() done; baud switch + final probe still ahead
@@ -724,7 +755,8 @@ bool GPS_BAUD_RECOVERY() {
     delay(100);
     wdtPet();
 
-    if (myGNSS.begin(gpsStream)) {
+    if (myGNSS.begin(gpsStream, GPS_PROBE_MAXWAIT_MS)) {
+      wdtPet();
       debugln(F("GPS baud recovery: reconnected at 57600"));
       GPS_RECONFIGURE();
       gpsRegisterCallbacks();

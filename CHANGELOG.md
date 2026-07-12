@@ -65,6 +65,17 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   never-enabled UART can't produce — hanging `setup()` forever (before
   the watchdog is armed). Baud switches now go through a guard that only
   closes a port we actually opened.
+- **Watchdog resets from the GPS status page** (device reboots a few
+  seconds after boot): the GPS connection probes and the baud-recovery
+  path could block past the ~4 s hardware watchdog. A failing
+  `myGNSS.begin()` is 3 internal ping retries at the library's 1100 ms
+  default (~3.3 s, un-pettable), and a recovery on a slow-responding
+  module ran up to 11 back-to-back VALSET/ACK exchanges with no pets at
+  all. All probes now use a 550 ms maxWait (halving worst-case blocking)
+  and every blocking GPS exchange in the probe/recovery/reconfigure
+  paths is bracketed by watchdog pets. The status page also shows an
+  uptime readout so any remaining reboot can be timed against the GPS
+  watchdog (5 s) and re-detect retry (10 s) schedules.
 - **Insta360 X4 camera auto-record (remote emulation).** The device
   emulates the physical Insta360 GPS Remote as a pure BLE **peripheral**
   to drive an X4 hands-free. Engine start (RPM > 500 held 2 s) wakes a

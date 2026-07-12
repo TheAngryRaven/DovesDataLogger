@@ -37,6 +37,9 @@ void displayPage_gps_status() {
       display.println(F("\nRetrying..."));
     }
     display.println(F("\nAny button: menu"));
+    display.print(F("\nup:"));
+    display.print(millis() / 1000);
+    display.println(F("s"));
     safeDisplayUpdate();
     return;
   }
@@ -58,10 +61,17 @@ void displayPage_gps_status() {
   if (countdown > 0) {
     display.print(F("LOCKED - ready in "));
     display.println(countdown);
-  } else if (gpsData.fix) {
-    display.println(F("FIX (time sync...)"));
   } else {
-    display.println(F("ACQUIRING..."));
+    if (gpsData.fix) {
+      display.print(F("FIX (time sync) "));
+    } else {
+      display.print(F("ACQUIRING "));
+    }
+    // Uptime breadcrumb: if the device ever reboots off this page, the
+    // last seconds value on screen identifies which timed path fired
+    // (~5 s = PVT watchdog -> baud recovery, ~10 s = GPS re-detect retry).
+    display.print(millis() / 1000);
+    display.println(F("s"));
   }
 
   display.print(F("Mode:GPS "));
