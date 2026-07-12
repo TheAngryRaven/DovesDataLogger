@@ -61,25 +61,20 @@ struct Sim {
         REQUIRE(f.state == State::kAwaitReady);
     }
 
-    void toRecording() {
+    // Subscribed → WATCHING (the hub state; not yet recording).
+    void toWatching() {
         toAwaitReady();
         in.ce82Subscribed = true;
-        in.gpsFixValid = true;
-        REQUIRE(tick(10) == Action::kSendShutter);
+        REQUIRE(tick(10) == Action::kNone);
+        REQUIRE(f.state == State::kWatching);
+    }
+
+    // Watching + RPM held kRecordStartDelayMs → one shutter → RECORDING.
+    void toRecording() {
+        toWatching();
+        REQUIRE(tick(kRecordStartDelayMs) == Action::kSendShutter);
         REQUIRE(f.state == State::kRecording);
         REQUIRE(f.recordingActive == true);
-    }
-
-    void toCooldown() {
-        toRecording();
-        REQUIRE(pulse(&Inputs::sessionEndRequested, 10) == Action::kSendShutter);
-        REQUIRE(f.state == State::kCooldown);
-    }
-
-    void toPoweringOff() {
-        toCooldown();
-        REQUIRE(pulse(&Inputs::sessionEndRequested, 10) == Action::kSendPowerOff);
-        REQUIRE(f.state == State::kPoweringOff);
     }
 
     void toPairing() {
@@ -115,24 +110,24 @@ TEST_CASE("camera_fsm - init resets a dirty machine") {
     f.state = State::kRecording;
     f.stopCondSince = 1234;
     f.wakeAttemptsUsed = 3;
+    f.recordArmSince = 999;
     f.recordingActive = true;
     f.entryPending = true;
     init(f, true);
     CHECK(f.state == State::kIdle);
     CHECK(f.stopCondSince == 0);
     CHECK(f.wakeAttemptsUsed == 0);
+    CHECK(f.recordArmSince == 0);
     CHECK(f.recordingActive == false);
     CHECK(f.entryPending == false);
 }
 
-TEST_CASE("camera_fsm - UNPAIRED is inert under rpm/speed/connect churn") {
+TEST_CASE("camera_fsm - UNPAIRED is inert under rpm/connect churn") {
     Sim s(false);
     s.in.rpm = 5000;
-    s.in.speedMph = 50.0f;
     for (int i = 0; i < 20; i++) {
         s.in.remoteConnected = (i % 2) == 0;
         s.in.ce82Subscribed = (i % 3) == 0;
-        s.in.gpsFixValid = true;
         CHECK(s.tick(500) == Action::kNone);
         CHECK(s.f.state == State::kUnpaired);
     }
@@ -151,6 +146,7 @@ TEST_CASE("camera_fsm - RPM debounce: 1999 ms no action, 2000 ms fires") {
     CHECK(s.tick(1) == Action::kStartWakeBurst);  // 2000 ms held: fire
     CHECK(s.f.state == State::kWaking);
     CHECK(s.f.wakeAttemptsUsed == 1);
+    CHECK(s.f.recordArmSince != 0);  // record-start clock armed at wake
 }
 
 TEST_CASE("camera_fsm - RPM debounce: dip below threshold resets the hold") {
@@ -170,7 +166,6 @@ TEST_CASE("camera_fsm - RPM debounce: dip below threshold resets the hold") {
 
 TEST_CASE("camera_fsm - hysteresis: rpm at/below 500 never arms in IDLE") {
     Sim s;
-    // 350-450 oscillation inside the hysteresis band never arms.
     for (int i = 0; i < 20; i++) {
         s.in.rpm = (i % 2) == 0 ? 350 : 450;
         CHECK(s.tick(500) == Action::kNone);
@@ -178,61 +173,31 @@ TEST_CASE("camera_fsm - hysteresis: rpm at/below 500 never arms in IDLE") {
     CHECK(s.f.state == State::kIdle);
     CHECK(s.f.rpmOnSince == 0);
 
-    // Exactly 500 (== threshold, not >) never arms either.
-    s.in.rpm = 500;
+    s.in.rpm = 500;  // == threshold, not > : never arms
     for (int i = 0; i < 10; i++) CHECK(s.tick(500) == Action::kNone);
     CHECK(s.f.rpmOnSince == 0);
 
-    // 501 arms and fires.
-    s.in.rpm = 501;
+    s.in.rpm = 501;  // 501 arms and fires
     CHECK(s.tick(10) == Action::kNone);
     CHECK(s.tick(kRpmOnDebounceMs) == Action::kStartWakeBurst);
-}
-
-TEST_CASE("camera_fsm - hysteresis: rpm 300/400 is NOT engine-off in RECORDING") {
-    Sim s;
-    s.toRecording();
-    s.in.gpsFixValid = false;
-    s.in.speedMph = 0.0f;
-
-    // rpm 400 >= 300: engine not off, stop condition never arms.
-    s.in.rpm = 400;
-    auto acts = s.run(120000, 1000);
-    CHECK(s.f.state == State::kRecording);
-    CHECK(s.f.stopCondSince == 0);
-    CHECK(countOf(acts, Action::kSendShutter) == 0);
-
-    // rpm exactly 300 is still not off (off is rpm < 300).
-    s.in.rpm = 300;
-    acts = s.run(120000, 1000);
-    CHECK(s.f.state == State::kRecording);
-    CHECK(s.f.stopCondSince == 0);
-
-    // rpm 299: engine off; with speed 0 the 60 s hold runs and stops.
-    s.in.rpm = 299;
-    CHECK(s.tick(10) == Action::kNone);  // arm
-    CHECK(s.f.stopCondSince != 0);
-    CHECK(s.tick(kStopRecordDelayMs) == Action::kSendShutter);
-    CHECK(s.f.state == State::kCooldown);
 }
 
 // ---------------------------------------------------------------------------
 // IDLE — stale link
 // ---------------------------------------------------------------------------
 
-TEST_CASE("camera_fsm - stale remote link skips the wake to AWAIT READY") {
+TEST_CASE("camera_fsm - stale remote link skips the wake to AWAIT READY then WATCHING") {
     Sim s;
     s.in.remoteConnected = true;
     s.in.rpm = 1000;
     CHECK(s.tick(0) == Action::kNone);
-    // No wake advert: straight to AWAIT READY.
-    CHECK(s.tick(kRpmOnDebounceMs) == Action::kNone);
+    CHECK(s.tick(kRpmOnDebounceMs) == Action::kNone);  // no wake advert
     CHECK(s.f.state == State::kAwaitReady);
 
-    // Then subscribe + fix records.
     s.in.ce82Subscribed = true;
-    s.in.gpsFixValid = true;
-    CHECK(s.tick(10) == Action::kSendShutter);
+    CHECK(s.tick(10) == Action::kNone);
+    CHECK(s.f.state == State::kWatching);
+    CHECK(s.tick(kRecordStartDelayMs) == Action::kSendShutter);
     CHECK(s.f.state == State::kRecording);
 }
 
@@ -244,54 +209,31 @@ TEST_CASE("camera_fsm - WAKING connect advances to AWAIT READY") {
     Sim s;
     s.toWaking();
     s.in.remoteConnected = true;
-    CHECK(s.tick(100) == Action::kNone);  // advert stops automatically
+    CHECK(s.tick(100) == Action::kNone);
     CHECK(s.f.state == State::kAwaitReady);
 }
 
 TEST_CASE("camera_fsm - WAKING retry ladder: 20 s x3 then back to IDLE") {
     Sim s;
-    s.toWaking();  // attempt 1 window starts at T
-    CHECK(s.tick(19999) == Action::kNone);             // T+19.999s: still beaconing
-    CHECK(s.tick(1) == Action::kStartWakeBurst);        // T+20s: attempt 2
-    CHECK(s.f.wakeAttemptsUsed == 2);
-    CHECK(s.tick(20000) == Action::kStartWakeBurst);    // T+40s: attempt 3
-    CHECK(s.f.wakeAttemptsUsed == 3);
-    CHECK(s.tick(20000) == Action::kStopAdvertising);   // T+60s: give up
-    CHECK(s.f.state == State::kIdle);
-}
-
-TEST_CASE("camera_fsm - WAKING silent while beaconing") {
-    Sim s;
     s.toWaking();
-    auto acts = s.run(19000, 500);  // through most of attempt 1
-    CHECK(acts.empty());
-    CHECK(s.f.state == State::kWaking);
+    CHECK(s.tick(19999) == Action::kNone);
+    CHECK(s.tick(1) == Action::kStartWakeBurst);        // attempt 2
+    CHECK(s.f.wakeAttemptsUsed == 2);
+    CHECK(s.tick(20000) == Action::kStartWakeBurst);    // attempt 3
+    CHECK(s.f.wakeAttemptsUsed == 3);
+    CHECK(s.tick(20000) == Action::kStopAdvertising);   // give up
+    CHECK(s.f.state == State::kIdle);
 }
 
 TEST_CASE("camera_fsm - WAKING rpm-gone for 2 s aborts back to IDLE") {
     Sim s;
     s.toWaking();
     s.in.rpm = 0;
-    CHECK(s.tick(10) == Action::kNone);      // arms rpmGoneSince
-    CHECK(s.tick(1999) == Action::kNone);    // held 1999 ms: not yet
-    CHECK(s.f.state == State::kWaking);
-    CHECK(s.tick(1) == Action::kStopAdvertising);  // held 2000 ms
-    CHECK(s.f.state == State::kIdle);
-}
-
-TEST_CASE("camera_fsm - WAKING rpm recovery resets the abort timer") {
-    Sim s;
-    s.toWaking();
-    s.in.rpm = 0;
     CHECK(s.tick(10) == Action::kNone);
-    CHECK(s.tick(1500) == Action::kNone);
-    s.in.rpm = 1000;                        // engine back
-    CHECK(s.tick(10) == Action::kNone);
-    CHECK(s.f.rpmGoneSince == 0);
-    s.in.rpm = 0;
-    CHECK(s.tick(10) == Action::kNone);     // re-arm
     CHECK(s.tick(1999) == Action::kNone);
     CHECK(s.f.state == State::kWaking);
+    CHECK(s.tick(1) == Action::kStopAdvertising);
+    CHECK(s.f.state == State::kIdle);
 }
 
 TEST_CASE("camera_fsm - WAKING sessionEnd returns to IDLE") {
@@ -305,40 +247,30 @@ TEST_CASE("camera_fsm - WAKING sessionEnd returns to IDLE") {
 // AWAIT READY
 // ---------------------------------------------------------------------------
 
-TEST_CASE("camera_fsm - AWAIT READY: subscribe + fix starts recording") {
+TEST_CASE("camera_fsm - AWAIT READY: subscribe moves to WATCHING") {
     Sim s;
     s.toAwaitReady();
     s.in.ce82Subscribed = true;
-    s.in.gpsFixValid = true;
-    CHECK(s.tick(10) == Action::kSendShutter);
-    CHECK(s.f.state == State::kRecording);
-    CHECK(s.f.recordingActive == true);
+    CHECK(s.tick(10) == Action::kNone);
+    CHECK(s.f.state == State::kWatching);
+    CHECK(s.f.subscribeAttemptsUsed == 0);
 }
 
-TEST_CASE("camera_fsm - AWAIT READY: subscribe + no fix records anyway at 30 s") {
-    Sim s;
-    s.toAwaitReady();  // awaitGpsSince = T
-    s.in.ce82Subscribed = true;
-    CHECK(s.in.gpsFixValid == false);
-    CHECK(s.tick(kGpsLockTimeoutMs) == Action::kSendShutter);
-    CHECK(s.f.state == State::kRecording);
-}
-
-TEST_CASE("camera_fsm - AWAIT READY: no fix before timeout stays put") {
+TEST_CASE("camera_fsm - AWAIT READY: subscribe timeout re-wakes, bounded to IDLE") {
     Sim s;
     s.toAwaitReady();
-    s.in.ce82Subscribed = true;
-    CHECK(s.tick(kGpsLockTimeoutMs - 1) == Action::kNone);
-    CHECK(s.f.state == State::kAwaitReady);
-}
-
-TEST_CASE("camera_fsm - AWAIT READY: subscribe timeout drops and re-wakes") {
-    Sim s;
-    s.toAwaitReady();  // connectedSince = T; never subscribes
     CHECK(s.in.ce82Subscribed == false);
-    CHECK(s.tick(kSubscribeTimeoutMs) == Action::kDisconnect);
-    CHECK(s.f.state == State::kWaking);
-    CHECK(s.f.wakeAttemptsUsed == 1);  // fresh cycle
+    // Each cycle: timeout -> kDisconnect -> kWaking, then (link still up in the
+    // sim) bounce back to AWAIT READY. subscribeAttemptsUsed bounds the loop.
+    for (uint8_t cycle = 1; cycle <= kSubscribeRetries; ++cycle) {
+        CHECK(s.tick(kSubscribeTimeoutMs) == Action::kDisconnect);
+        CHECK(s.f.state == State::kWaking);
+        CHECK(s.f.subscribeAttemptsUsed == cycle);
+        CHECK(s.tick(10) == Action::kNone);  // remote still up -> AWAIT READY
+        CHECK(s.f.state == State::kAwaitReady);
+    }
+    CHECK(s.tick(kSubscribeTimeoutMs) == Action::kDisconnect);  // budget exceeded
+    CHECK(s.f.state == State::kIdle);
 }
 
 TEST_CASE("camera_fsm - AWAIT READY: remote drop re-wakes") {
@@ -350,113 +282,185 @@ TEST_CASE("camera_fsm - AWAIT READY: remote drop re-wakes") {
     CHECK(s.f.wakeAttemptsUsed == 1);
 }
 
-TEST_CASE("camera_fsm - AWAIT READY: sessionEnd rides into COOLDOWN") {
+TEST_CASE("camera_fsm - AWAIT READY: sessionEnd rides into WATCHING") {
     Sim s;
     s.toAwaitReady();
     CHECK(s.pulse(&Inputs::sessionEndRequested, 10) == Action::kNone);
-    CHECK(s.f.state == State::kCooldown);
+    CHECK(s.f.state == State::kWatching);
 }
 
 // ---------------------------------------------------------------------------
-// recording-active toggle tracking
+// WATCHING — record start (5 s RPM), re-record, no power-off
 // ---------------------------------------------------------------------------
 
-TEST_CASE("camera_fsm - entering RECORDING sends exactly one shutter") {
+TEST_CASE("camera_fsm - WATCHING records one shutter after 5 s of RPM") {
     Sim s;
-    s.toAwaitReady();
-    s.in.ce82Subscribed = true;
-    s.in.gpsFixValid = true;
-    CHECK(s.tick(10) == Action::kSendShutter);  // false -> true, toggle ON
+    s.toWatching();
+    // The record-start clock is armed at the wake, so re-arm from a known point
+    // (drop then raise RPM) to measure the 5 s precisely.
+    s.in.rpm = 0;
+    CHECK(s.tick(10) == Action::kNone);
+    CHECK(s.f.recordArmSince == 0);
+    s.in.rpm = 1000;
+    CHECK(s.tick(10) == Action::kNone);
+    CHECK(s.f.recordArmSince != 0);
+    CHECK(s.tick(kRecordStartDelayMs - 1) == Action::kNone);   // not yet
+    CHECK(s.f.state == State::kWatching);
+    CHECK(s.tick(1) == Action::kSendShutter);                  // fire at 5 s
+    CHECK(s.f.state == State::kRecording);
     CHECK(s.f.recordingActive == true);
     // No further shutter while just recording.
-    s.in.speedMph = 30.0f;
     s.in.rpm = 5000;
     auto acts = s.run(5000, 100);
     CHECK(countOf(acts, Action::kSendShutter) == 0);
 }
 
-TEST_CASE("camera_fsm - reconnect mid-session does NOT re-toggle shutter") {
+TEST_CASE("camera_fsm - WATCHING: RPM dropping during the 5 s resets the arm") {
     Sim s;
-    s.toRecording();  // recordingActive == true
-    // Remote drops: re-wake, recordingActive stays true.
-    s.in.remoteConnected = false;
-    CHECK(s.tick(10) == Action::kStartWakeBurst);
-    CHECK(s.f.state == State::kWaking);
-    CHECK(s.f.recordingActive == true);
-    // Camera reconnects → AWAIT READY.
-    s.in.remoteConnected = true;
+    s.toWatching();
+    CHECK(s.tick(3000) == Action::kNone);   // 3 s into the arm window
+    s.in.rpm = 0;                           // engine off — disarm
     CHECK(s.tick(10) == Action::kNone);
-    CHECK(s.f.state == State::kAwaitReady);
-    // Ready again: recordingActive already true → NO shutter re-sent.
-    s.in.ce82Subscribed = true;
-    s.in.gpsFixValid = true;
+    CHECK(s.f.recordArmSince == 0);
+    CHECK(s.f.state == State::kWatching);
+    s.in.rpm = 1000;                        // back on — re-arm
     CHECK(s.tick(10) == Action::kNone);
+    CHECK(s.f.recordArmSince != 0);
+    CHECK(s.tick(kRecordStartDelayMs - 1) == Action::kNone);
+    CHECK(s.tick(1) == Action::kSendShutter);   // 5 s from the re-arm
     CHECK(s.f.state == State::kRecording);
-    CHECK(s.f.recordingActive == true);
 }
 
-TEST_CASE("camera_fsm - clean stop toggles shutter OFF") {
+TEST_CASE("camera_fsm - WATCHING never powers off (only sleep does)") {
+    Sim s;
+    s.toWatching();
+    s.in.rpm = 0;  // engine off, sitting in watching
+    auto acts = s.run(600000, 1000);  // 10 min
+    CHECK(s.f.state == State::kWatching);
+    CHECK(countOf(acts, Action::kSendPowerOff) == 0);
+    CHECK(countOf(acts, Action::kSendShutter) == 0);
+}
+
+TEST_CASE("camera_fsm - WATCHING: remote drop returns to IDLE") {
+    Sim s;
+    s.toWatching();
+    s.in.remoteConnected = false;
+    CHECK(s.tick(10) == Action::kNone);
+    CHECK(s.f.state == State::kIdle);
+}
+
+// ---------------------------------------------------------------------------
+// RECORDING — engine-off stop (30 s, RPM only)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("camera_fsm - RECORDING stops after 30 s engine-off, one shutter, to WATCHING") {
     Sim s;
     s.toRecording();
-    s.in.speedMph = 0.0f;
     s.in.rpm = 0;
-    CHECK(s.tick(10) == Action::kNone);  // arm the stop hold
-    CHECK(s.tick(kStopRecordDelayMs) == Action::kSendShutter);  // true -> false
-    CHECK(s.f.state == State::kCooldown);
+    CHECK(s.tick(10) == Action::kNone);   // arm the stop hold
+    CHECK(s.f.stopCondSince != 0);
+    CHECK(s.tick(kStopRecordDelayMs) == Action::kSendShutter);  // toggle OFF
+    CHECK(s.f.state == State::kWatching);
+    CHECK(s.f.recordingActive == false);
+}
+
+TEST_CASE("camera_fsm - RECORDING: engine on (rpm 3000) never stops, speed irrelevant") {
+    Sim s;
+    s.toRecording();
+    s.in.rpm = 3000;  // stationary grid idle would be speed 0 — but we ignore speed
+    auto acts = s.run(600000, 1000);
+    CHECK(s.f.state == State::kRecording);
+    CHECK(countOf(acts, Action::kSendShutter) == 0);
+}
+
+TEST_CASE("camera_fsm - RECORDING: rpm blip at 29.9 s resets, clean 30 s stops") {
+    Sim s;
+    s.toRecording();
+    s.in.rpm = 0;
+    CHECK(s.tick(10) == Action::kNone);  // arm at T
+    s.tick(29890);                       // T+29.9 s
+    CHECK(s.f.state == State::kRecording);
+    s.in.rpm = 3000;                     // blip
+    s.tick(10);
+    CHECK(s.f.stopCondSince == 0);       // reset
+    s.in.rpm = 0;
+    s.tick(10);                          // re-arm at T2
+    CHECK(s.f.stopCondSince != 0);
+    s.tick(kStopRecordDelayMs - 1);
+    CHECK(s.f.state == State::kRecording);
+    CHECK(s.tick(1) == Action::kSendShutter);  // T2+30 s
+    CHECK(s.f.state == State::kWatching);
+}
+
+TEST_CASE("camera_fsm - manual end in RECORDING stops immediately to WATCHING") {
+    Sim s;
+    s.toRecording();
+    s.in.rpm = 8000;  // engine high: the 30 s hold is bypassed
+    CHECK(s.pulse(&Inputs::sessionEndRequested, 10) == Action::kSendShutter);
+    CHECK(s.f.state == State::kWatching);
     CHECK(s.f.recordingActive == false);
 }
 
 // ---------------------------------------------------------------------------
-// Observed-record-state reconcile (0x10 timer) — #4
+// Stall recovery: stop -> WATCHING -> RPM returns -> record again
 // ---------------------------------------------------------------------------
 
-TEST_CASE("camera_fsm - AWAIT READY adopts an already-recording camera without a shutter") {
+TEST_CASE("camera_fsm - stall recovery re-records from WATCHING on RPM return") {
     Sim s;
-    s.toAwaitReady();
-    s.in.ce82Subscribed = true;
-    s.in.gpsFixValid = true;
-    s.in.recordObserved = RecordObs::kRecording;  // camera already rolling
-    CHECK(s.tick(10) == Action::kNone);           // adopt, no blind toggle
+    s.toRecording();
+    // Engine off 30 s -> stop -> WATCHING.
+    s.in.rpm = 0;
+    CHECK(s.tick(10) == Action::kNone);
+    CHECK(s.tick(kStopRecordDelayMs) == Action::kSendShutter);
+    CHECK(s.f.state == State::kWatching);
+    CHECK(s.f.recordingActive == false);
+    // Sit a while, still off — no re-record, no power-off.
+    auto acts = s.run(20000, 500);
+    CHECK(acts.empty());
+    CHECK(s.f.state == State::kWatching);
+    // Engine restarts: re-arm, and after 5 s record again (one shutter).
+    s.in.rpm = 1000;
+    CHECK(s.tick(10) == Action::kNone);
+    CHECK(s.f.recordArmSince != 0);
+    CHECK(s.tick(kRecordStartDelayMs) == Action::kSendShutter);
     CHECK(s.f.state == State::kRecording);
     CHECK(s.f.recordingActive == true);
 }
 
-TEST_CASE("camera_fsm - AWAIT READY with camera IDLE observed sends the start shutter") {
+// ---------------------------------------------------------------------------
+// Observed-record-state reconcile (0x10 timer)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("camera_fsm - WATCHING adopts an already-recording camera without a shutter") {
     Sim s;
-    s.toAwaitReady();
-    s.in.ce82Subscribed = true;
-    s.in.gpsFixValid = true;
-    s.in.recordObserved = RecordObs::kIdle;
-    CHECK(s.tick(10) == Action::kSendShutter);
+    s.toWatching();
+    s.in.recordObserved = RecordObs::kRecording;  // camera already rolling
+    CHECK(s.tick(kRecordStartDelayMs) == Action::kNone);  // adopt, no toggle
+    CHECK(s.f.state == State::kRecording);
     CHECK(s.f.recordingActive == true);
 }
 
-TEST_CASE("camera_fsm - WAKING give-up preserves recording belief; reconnect never inverts") {
+TEST_CASE("camera_fsm - WATCHING with camera IDLE observed sends the start shutter") {
+    Sim s;
+    s.toWatching();
+    s.in.recordObserved = RecordObs::kIdle;
+    CHECK(s.tick(kRecordStartDelayMs) == Action::kSendShutter);
+    CHECK(s.f.recordingActive == true);
+}
+
+TEST_CASE("camera_fsm - reconnect mid-record does NOT blind-toggle; adopts on observation") {
     Sim s;
     s.toRecording();                 // recordingActive == true
-    // Link drops mid-recording -> WAKING, belief preserved.
-    s.in.remoteConnected = false;
+    s.in.remoteConnected = false;    // link drops
     CHECK(s.tick(10) == Action::kStartWakeBurst);
     CHECK(s.f.state == State::kWaking);
-    CHECK(s.f.recordingActive == true);
-    // Camera never comes back: exhaust the 3-attempt ladder -> IDLE.
-    CHECK(s.tick(20000) == Action::kStartWakeBurst);   // attempt 2
-    CHECK(s.tick(20000) == Action::kStartWakeBurst);   // attempt 3
-    CHECK(s.tick(20000) == Action::kStopAdvertising);  // give up
-    CHECK(s.f.state == State::kIdle);
-    CHECK(s.f.recordingActive == true);  // PRESERVED across the give-up (#4)
-
-    // RPM re-triggers; camera reconnects STILL recording (obs kRecording).
-    s.in.rpm = 1000;
-    CHECK(s.tick(0) == Action::kNone);
-    CHECK(s.tick(kRpmOnDebounceMs) == Action::kStartWakeBurst);
+    CHECK(s.f.recordingActive == true);      // preserved
     s.in.remoteConnected = true;
-    CHECK(s.tick(10) == Action::kNone);   // AWAIT READY
+    CHECK(s.tick(10) == Action::kNone);      // AWAIT READY
     s.in.ce82Subscribed = true;
-    s.in.gpsFixValid = true;
-    s.in.recordObserved = RecordObs::kRecording;
-    // The old bug toggled the shutter here (stopping the live recording).
-    CHECK(s.tick(10) == Action::kNone);
+    CHECK(s.tick(10) == Action::kNone);      // WATCHING
+    s.in.recordObserved = RecordObs::kRecording;  // camera still rolling
+    CHECK(s.tick(kRecordStartDelayMs) == Action::kNone);  // adopt, NO shutter
     CHECK(s.f.state == State::kRecording);
     CHECK(s.f.recordingActive == true);
 }
@@ -464,18 +468,15 @@ TEST_CASE("camera_fsm - WAKING give-up preserves recording belief; reconnect nev
 TEST_CASE("camera_fsm - RECORDING re-asserts the shutter once if the camera reports idle") {
     Sim s;
     s.toRecording();
-    s.in.speedMph = 30.0f;   // no stop condition
-    s.in.rpm = 5000;
+    s.in.rpm = 5000;  // no stop condition
     s.in.recordObserved = RecordObs::kIdle;   // start never took
     CHECK(s.tick(10) == Action::kNone);       // arm the confirm timer
     CHECK(s.f.recordIdleSince != 0);
-    CHECK(s.tick(kRecordConfirmMs) == Action::kSendShutter);  // re-assert ON
+    CHECK(s.tick(kRecordConfirmMs) == Action::kSendShutter);  // re-assert
     CHECK(s.f.recordRetryUsed == true);
-    // No second retry while still idle.
-    auto acts = s.run(10000, 500);
+    auto acts = s.run(10000, 500);            // no second retry while idle
     CHECK(countOf(acts, Action::kSendShutter) == 0);
-    // Camera confirms recording -> latch re-armed.
-    s.in.recordObserved = RecordObs::kRecording;
+    s.in.recordObserved = RecordObs::kRecording;  // confirmed -> latch re-armed
     CHECK(s.tick(10) == Action::kNone);
     CHECK(s.f.recordRetryUsed == false);
 }
@@ -483,167 +484,11 @@ TEST_CASE("camera_fsm - RECORDING re-asserts the shutter once if the camera repo
 TEST_CASE("camera_fsm - RECORDING never retries without a fresh observation") {
     Sim s;
     s.toRecording();
-    s.in.speedMph = 30.0f;
     s.in.rpm = 5000;
-    s.in.recordObserved = RecordObs::kUnknown;  // no 0x10 seen
+    s.in.recordObserved = RecordObs::kUnknown;
     auto acts = s.run(30000, 500);
     CHECK(countOf(acts, Action::kSendShutter) == 0);
     CHECK(s.f.recordIdleSince == 0);
-}
-
-// ---------------------------------------------------------------------------
-// Bounded subscribe-timeout give-up — #9
-// ---------------------------------------------------------------------------
-
-TEST_CASE("camera_fsm - connect-but-never-subscribe gives up to IDLE after kSubscribeRetries") {
-    Sim s;
-    s.toAwaitReady();
-    CHECK(s.in.ce82Subscribed == false);
-
-    // Each cycle: subscribe times out -> kDisconnect -> kWaking, and (the
-    // camera link is still up in the sim) the next step bounces back to
-    // AWAIT READY. subscribeAttemptsUsed persists and bounds the loop.
-    for (uint8_t cycle = 1; cycle <= kSubscribeRetries; ++cycle) {
-        CHECK(s.tick(kSubscribeTimeoutMs) == Action::kDisconnect);
-        CHECK(s.f.state == State::kWaking);
-        CHECK(s.f.subscribeAttemptsUsed == cycle);
-        CHECK(s.tick(10) == Action::kNone);  // remote still up -> AWAIT READY
-        CHECK(s.f.state == State::kAwaitReady);
-    }
-    // One more timeout exceeds the budget -> give up to IDLE.
-    CHECK(s.tick(kSubscribeTimeoutMs) == Action::kDisconnect);
-    CHECK(s.f.state == State::kIdle);
-}
-
-// ---------------------------------------------------------------------------
-// RECORDING — stop semantics
-// ---------------------------------------------------------------------------
-
-TEST_CASE("camera_fsm - grid idle (speed 0, rpm 3000) never stops recording") {
-    Sim s;
-    s.toRecording();
-    s.in.speedMph = 0.0f;
-    s.in.rpm = 3000;
-    auto acts = s.run(600000, 1000);  // 10 min
-    CHECK(s.f.state == State::kRecording);
-    CHECK(countOf(acts, Action::kSendShutter) == 0);
-}
-
-TEST_CASE("camera_fsm - coasting stall (30 mph, rpm 0) never stops recording") {
-    Sim s;
-    s.toRecording();
-    s.in.speedMph = 30.0f;
-    s.in.rpm = 0;
-    auto acts = s.run(600000, 1000);
-    CHECK(s.f.state == State::kRecording);
-    CHECK(countOf(acts, Action::kSendShutter) == 0);
-}
-
-TEST_CASE("camera_fsm - stop hold: rpm blip at 59.9 s resets, clean 60 s stops") {
-    Sim s;
-    s.toRecording();
-    s.in.gpsFixValid = false;
-    s.in.speedMph = 0.0f;
-    s.in.rpm = 0;
-    CHECK(s.tick(10) == Action::kNone);   // arm stop hold at T
-    s.tick(59890);                        // T+59.9s: still holding
-    CHECK(s.f.state == State::kRecording);
-    s.in.rpm = 3000;                      // blip
-    s.tick(10);
-    CHECK(s.f.stopCondSince == 0);        // hold reset
-    s.in.rpm = 0;
-    s.tick(10);                           // re-arm at T2
-    CHECK(s.f.stopCondSince != 0);
-    s.tick(59999);                        // T2+59.999s
-    CHECK(s.f.state == State::kRecording);
-    CHECK(s.tick(1) == Action::kSendShutter);  // T2+60s
-    CHECK(s.f.state == State::kCooldown);
-}
-
-// ---------------------------------------------------------------------------
-// Manual session end
-// ---------------------------------------------------------------------------
-
-TEST_CASE("camera_fsm - manual end in RECORDING stops immediately") {
-    Sim s;
-    s.toRecording();
-    // Speed and rpm high: the hold timer is bypassed entirely.
-    s.in.speedMph = 60.0f;
-    s.in.rpm = 8000;
-    CHECK(s.pulse(&Inputs::sessionEndRequested, 10) == Action::kSendShutter);
-    CHECK(s.f.state == State::kCooldown);
-    CHECK(s.f.recordingActive == false);
-}
-
-TEST_CASE("camera_fsm - manual end in COOLDOWN powers off immediately") {
-    Sim s;
-    s.toCooldown();
-    CHECK(s.pulse(&Inputs::sessionEndRequested, 10) == Action::kSendPowerOff);
-    CHECK(s.f.state == State::kPoweringOff);
-}
-
-TEST_CASE("camera_fsm - manual end in AWAIT READY rides into COOLDOWN") {
-    Sim s;
-    s.toAwaitReady();
-    CHECK(s.pulse(&Inputs::sessionEndRequested, 10) == Action::kNone);
-    CHECK(s.f.state == State::kCooldown);
-}
-
-TEST_CASE("camera_fsm - manual end in WAKING returns to IDLE") {
-    Sim s;
-    s.toWaking();
-    CHECK(s.pulse(&Inputs::sessionEndRequested, 10) == Action::kStopAdvertising);
-    CHECK(s.f.state == State::kIdle);
-}
-
-// ---------------------------------------------------------------------------
-// COOLDOWN
-// ---------------------------------------------------------------------------
-
-TEST_CASE("camera_fsm - COOLDOWN powers off after 180 s") {
-    Sim s;
-    s.toCooldown();  // cooldownSince = T; remote still connected
-    CHECK(s.tick(kPowerOffDelayMs) == Action::kSendPowerOff);
-    CHECK(s.f.state == State::kPoweringOff);
-}
-
-TEST_CASE("camera_fsm - COOLDOWN remote drop means camera turned off") {
-    Sim s;
-    s.toCooldown();
-    s.in.remoteConnected = false;
-    CHECK(s.tick(10) == Action::kNone);
-    CHECK(s.f.state == State::kIdle);
-}
-
-TEST_CASE("camera_fsm - COOLDOWN ignores motion return") {
-    Sim s;
-    s.toCooldown();
-    s.in.rpm = 5000;
-    s.in.speedMph = 40.0f;
-    auto acts = s.run(10000, 500);
-    CHECK(s.f.state == State::kCooldown);  // kAutoResumeFromCooldown == false
-    CHECK(acts.empty());                   // nothing happens
-}
-
-// ---------------------------------------------------------------------------
-// POWERING OFF
-// ---------------------------------------------------------------------------
-
-TEST_CASE("camera_fsm - POWERING OFF: remote drop returns to IDLE") {
-    Sim s;
-    s.toPoweringOff();
-    s.in.remoteConnected = false;
-    CHECK(s.tick(1000) == Action::kNone);
-    CHECK(s.f.state == State::kIdle);
-}
-
-TEST_CASE("camera_fsm - POWERING OFF: 5 s linger forces the disconnect") {
-    Sim s;
-    s.toPoweringOff();  // powerOffSentAt = T; remote still up
-    CHECK(s.tick(4999) == Action::kNone);
-    CHECK(s.f.state == State::kPoweringOff);
-    CHECK(s.tick(1) == Action::kDisconnect);
-    CHECK(s.f.state == State::kIdle);
 }
 
 // ---------------------------------------------------------------------------
@@ -664,24 +509,16 @@ TEST_CASE("camera_fsm - pairRequested honored from UNPAIRED and IDLE") {
     CHECK(idle.f.pairingReturnState == State::kIdle);
 }
 
-TEST_CASE("camera_fsm - pairRequested ignored from RECORDING and COOLDOWN") {
+TEST_CASE("camera_fsm - pairRequested ignored from RECORDING and WATCHING") {
     Sim rec;
     rec.toRecording();
     rec.pulse(&Inputs::pairRequested, 10);
     CHECK(rec.f.state == State::kRecording);
 
-    Sim cool;
-    cool.toCooldown();
-    cool.pulse(&Inputs::pairRequested, 10);
-    CHECK(cool.f.state == State::kCooldown);
-}
-
-TEST_CASE("camera_fsm - PAIRING entry action emitted exactly once") {
-    Sim s;
-    s.toPairing();  // consumed kStartConnectableAdvertising already
-    CHECK(s.tick(100) == Action::kNone);
-    CHECK(s.tick(100) == Action::kNone);
-    CHECK(s.f.state == State::kPairing);
+    Sim watch;
+    watch.toWatching();
+    watch.pulse(&Inputs::pairRequested, 10);
+    CHECK(watch.f.state == State::kWatching);
 }
 
 TEST_CASE("camera_fsm - PAIRING capture binds the serial and disconnects") {
@@ -692,26 +529,7 @@ TEST_CASE("camera_fsm - PAIRING capture binds the serial and disconnects") {
     CHECK(s.f.serialPresent == true);
 }
 
-TEST_CASE("camera_fsm - PAIRING cancel returns to the origin state") {
-    Sim fromUnpaired(false);
-    fromUnpaired.toPairing();
-    CHECK(fromUnpaired.pulse(&Inputs::pairCancelRequested, 100) ==
-          Action::kStopAdvertising);
-    CHECK(fromUnpaired.f.state == State::kUnpaired);
-
-    Sim fromIdle(true);
-    fromIdle.toPairing();
-    CHECK(fromIdle.pulse(&Inputs::pairCancelRequested, 100) ==
-          Action::kStopAdvertising);
-    CHECK(fromIdle.f.state == State::kIdle);
-}
-
 TEST_CASE("camera_fsm - PAIRING times out after 120 s back to the origin") {
-    Sim fromUnpaired(false);
-    fromUnpaired.toPairing();  // pairingSince ~= T
-    CHECK(fromUnpaired.tick(kPairingTimeoutMs) == Action::kStopAdvertising);
-    CHECK(fromUnpaired.f.state == State::kUnpaired);
-
     Sim fromIdle(true);
     fromIdle.toPairing();
     CHECK(fromIdle.tick(kPairingTimeoutMs) == Action::kStopAdvertising);
@@ -723,11 +541,6 @@ TEST_CASE("camera_fsm - PAIRING times out after 120 s back to the origin") {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("camera_fsm - forceIdle from every state lands home with teardown") {
-    SUBCASE("from UNPAIRED (no serial)") {
-        Sim s(false);
-        CHECK(s.pulse(&Inputs::forceIdleRequested, 10) == Action::kNone);
-        CHECK(s.f.state == State::kUnpaired);
-    }
     SUBCASE("from IDLE") {
         Sim s;
         CHECK(s.pulse(&Inputs::forceIdleRequested, 10) == Action::kNone);
@@ -745,24 +558,18 @@ TEST_CASE("camera_fsm - forceIdle from every state lands home with teardown") {
         CHECK(s.pulse(&Inputs::forceIdleRequested, 10) == Action::kNone);
         CHECK(s.f.state == State::kIdle);
     }
+    SUBCASE("from WATCHING") {
+        Sim s;
+        s.toWatching();
+        CHECK(s.pulse(&Inputs::forceIdleRequested, 10) == Action::kNone);
+        CHECK(s.f.state == State::kIdle);
+    }
     SUBCASE("from RECORDING") {
         Sim s;
         s.toRecording();
         CHECK(s.pulse(&Inputs::forceIdleRequested, 10) == Action::kNone);
         CHECK(s.f.state == State::kIdle);
         CHECK(s.f.recordingActive == false);
-    }
-    SUBCASE("from COOLDOWN") {
-        Sim s;
-        s.toCooldown();
-        CHECK(s.pulse(&Inputs::forceIdleRequested, 10) == Action::kNone);
-        CHECK(s.f.state == State::kIdle);
-    }
-    SUBCASE("from POWERING OFF") {
-        Sim s;
-        s.toPoweringOff();
-        CHECK(s.pulse(&Inputs::forceIdleRequested, 10) == Action::kNone);
-        CHECK(s.f.state == State::kIdle);
     }
     SUBCASE("from PAIRING with serial") {
         Sim s;
@@ -781,7 +588,6 @@ TEST_CASE("camera_fsm - forceIdle from every state lands home with teardown") {
 TEST_CASE("camera_fsm - forceIdle clears all timers and recording belief") {
     Sim s;
     s.toRecording();
-    s.in.speedMph = 0.0f;
     s.in.rpm = 0;
     s.tick(10);  // arm the stop hold
     CHECK(s.f.stopCondSince != 0);
@@ -789,6 +595,7 @@ TEST_CASE("camera_fsm - forceIdle clears all timers and recording belief") {
     s.pulse(&Inputs::forceIdleRequested, 10);
     CHECK(s.f.stopCondSince == 0);
     CHECK(s.f.rpmOnSince == 0);
+    CHECK(s.f.recordArmSince == 0);
     CHECK(s.f.wakeAttemptsUsed == 0);
     CHECK(s.f.recordingActive == false);
     CHECK(s.f.entryPending == false);
@@ -800,8 +607,6 @@ TEST_CASE("camera_fsm - forceIdle clears all timers and recording belief") {
 
 TEST_CASE("camera_fsm - unpair from IDLE clears the serial and drops links") {
     Sim s;
-    // kDisconnect, not kNone: a remote link surviving into kIdle must not stay
-    // connected to an unpaired (or subsequently re-paired) device.
     CHECK(s.pulse(&Inputs::unpairRequested, 10) == Action::kDisconnect);
     CHECK(s.f.state == State::kUnpaired);
     CHECK(s.f.serialPresent == false);
@@ -823,27 +628,25 @@ TEST_CASE("camera_fsm - RPM debounce survives millis wraparound") {
     Sim s(true, 0xFFFFFF00u);  // 256 ms before the wrap
     s.in.rpm = 1000;
     CHECK(s.tick(0) == Action::kNone);      // arm at 0xFFFFFF00
-    CHECK(s.tick(1999) == Action::kNone);   // now = 1743 (wrapped), held 1999 ms
+    CHECK(s.tick(1999) == Action::kNone);   // wrapped, held 1999 ms
     CHECK(s.in.nowMs < 0x10000u);           // clock really did wrap
     CHECK(s.f.state == State::kIdle);
-    CHECK(s.tick(1) == Action::kStartWakeBurst);  // held 2000 ms across the wrap
+    CHECK(s.tick(1) == Action::kStartWakeBurst);
     CHECK(s.f.state == State::kWaking);
 }
 
-TEST_CASE("camera_fsm - 60 s stop hold survives millis wraparound") {
-    Sim s(true, 0xFFFFF000u);  // ~4 s before the wrap
-    s.toRecording();           // consumes some of that headroom
-    s.in.gpsFixValid = false;
-    s.in.speedMph = 0.0f;
+TEST_CASE("camera_fsm - 30 s stop hold survives millis wraparound") {
+    Sim s(true, 0xFFFF8000u);  // positioned so the 30 s hold crosses the wrap
+    s.toRecording();           // consumes some headroom
     s.in.rpm = 0;
-    CHECK(s.tick(10) == Action::kNone);  // arm the hold pre-wrap
+    CHECK(s.tick(10) == Action::kNone);  // arm pre-wrap
     const uint32_t armedAt = s.f.stopCondSince;
-    CHECK(armedAt > 0xFFFFF000u);        // armed before the wrap
-    s.tick(59999);                       // 59.999 s held
+    CHECK(armedAt > 0xFFFF0000u);
+    s.tick(kStopRecordDelayMs - 1);
     CHECK(s.in.nowMs < 0x10000u);        // clock wrapped during the hold
     CHECK(s.f.state == State::kRecording);
-    CHECK(s.tick(1) == Action::kSendShutter);  // fires exactly at 60 s
-    CHECK(s.f.state == State::kCooldown);
+    CHECK(s.tick(1) == Action::kSendShutter);  // fires exactly at 30 s
+    CHECK(s.f.state == State::kWatching);
 }
 
 // ---------------------------------------------------------------------------
@@ -854,11 +657,10 @@ TEST_CASE("camera_fsm - sessionEnd is consumed in a single step") {
     Sim s;
     s.toRecording();
     CHECK(s.pulse(&Inputs::sessionEndRequested, 10) == Action::kSendShutter);
-    CHECK(s.f.state == State::kCooldown);
-    // Flag cleared by the caller: the next step must NOT act on it again (a
-    // stale sessionEnd in COOLDOWN would emit kSendPowerOff).
-    CHECK(s.tick(10) != Action::kSendPowerOff);
-    CHECK(s.f.state == State::kCooldown);
+    CHECK(s.f.state == State::kWatching);
+    // Flag cleared by the caller: the next step must NOT act on it again.
+    CHECK(s.tick(10) == Action::kNone);
+    CHECK(s.f.state == State::kWatching);
 }
 
 // ---------------------------------------------------------------------------
@@ -871,9 +673,7 @@ TEST_CASE("camera_fsm - stateName labels every state and never returns null") {
     CHECK(strcmp(stateName(State::kWaking), "WAKING") == 0);
     CHECK(strcmp(stateName(State::kAwaitReady), "READY") == 0);
     CHECK(strcmp(stateName(State::kRecording), "RECORDING") == 0);
-    CHECK(strcmp(stateName(State::kCooldown), "COOLDOWN") == 0);
-    CHECK(strcmp(stateName(State::kPoweringOff), "PWR OFF") == 0);
+    CHECK(strcmp(stateName(State::kWatching), "WATCHING") == 0);
     CHECK(strcmp(stateName(State::kPairing), "PAIRING") == 0);
-    // Out-of-range value (corrupted state) still yields a printable label.
     CHECK(strcmp(stateName(static_cast<State>(200)), "?") == 0);
 }

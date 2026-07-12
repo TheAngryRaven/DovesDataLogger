@@ -123,6 +123,10 @@ static volatile bool    ce81Ready[2] = {false, false};
 static volatile uint8_t ce81WriteIdx = 0;  // callback writes (Bluefruit task)
 static uint8_t          ce81ReadIdx = 0;   // main loop reads
 
+// Set by CAMERA_LOOP() when the FSM auto-stops recording (30 s engine-off) —
+// consumed by the main sketch to end + save the race session. Main-loop only.
+static bool cameraAutoStopped = false;
+
 // ---- One-shot pending events (main-loop context only, consumed by
 // CAMERA_LOOP as camera_fsm::Inputs one-shots) ----
 static bool sessionEndPending = false;
@@ -660,16 +664,16 @@ void CAMERA_LOOP() {
     return;
   }
 
-  // 2. Fresh Inputs snapshot.
+  // 2. Fresh Inputs snapshot. Recording is now driven purely by RPM — GPS fix
+  //    and ground speed no longer gate it (GPS still streams to the camera).
   camera_fsm::Inputs in;
   in.nowMs = millis();
   in.rpm = tachLastReported;
-  in.speedMph = gps_speed_mph;
-  in.gpsFixValid = gpsData.fix;
   in.remoteConnected = remoteLinkUp;
   in.ce82Subscribed = remoteLinkUp && ce82NotifyOn;
   in.recordObserved = cameraObservedRecordForFsm();
   // One-shots: consume (clear) each pending flag as it is handed over.
+  const bool fedSessionEnd = sessionEndPending;
   in.sessionEndRequested = sessionEndPending;
   sessionEndPending = false;
   in.pairRequested = pairRequestPending;
@@ -682,8 +686,18 @@ void CAMERA_LOOP() {
   unpairPending = false;
 
   // 3. Step the FSM and execute the (single) returned action.
+  const camera_fsm::State prevState = cameraFsm.state;
   camera_fsm::Action action = camera_fsm::step(cameraFsm, in);
   cameraExecuteAction(action);
+
+  // 4. Auto-stop → end the log session. When RECORDING falls to WATCHING on the
+  //    30 s engine-off condition (NOT a manual logging-stop, which already ended
+  //    the log), signal the main sketch to end + save the race session. The
+  //    camera stays connected in WATCHING for a possible stall-recovery record.
+  if (prevState == camera_fsm::State::kRecording &&
+      cameraFsm.state == camera_fsm::State::kWatching && !fedSessionEnd) {
+    cameraAutoStopped = true;
+  }
 }
 
 ///////////////////////////////////////////
@@ -773,6 +787,7 @@ static void cameraTeardown(bool sendPowerOff) {
   cameraTestActive = false;    // any release path leaves bench-test mode
   cameraTestRecording = false; // and clears the bench record belief
   testAdvertWanted = false;    // and stops the bench advert re-arm
+  cameraAutoStopped = false;   // drop any un-consumed auto-stop signal
   cameraRecordObs = insta360_protocol::RecordObs::kUnknown;  // fresh for next session
 
   // Force the FSM to IDLE/UNPAIRED with one explicit step. The physical
@@ -834,6 +849,16 @@ bool cameraGpsStreaming() {
 bool cameraObservedRecording() {
   return cameraRecordObs == insta360_protocol::RecordObs::kRecording &&
          (uint32_t)(millis() - cameraRecordObsAtMs) <= kRecordObsFreshMs;
+}
+
+bool cameraActivelyRecording() {
+  return cameraFsm.state == camera_fsm::State::kRecording;
+}
+
+bool cameraConsumeAutoStop() {
+  const bool v = cameraAutoStopped;
+  cameraAutoStopped = false;
+  return v;
 }
 
 bool cameraRecordObservationFresh() {

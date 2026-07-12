@@ -22,14 +22,23 @@ void clearTimers(Fsm& f) {
   f.wakeAttemptsUsed = 0;
   f.subscribeAttemptsUsed = 0;
   f.connectedSince = 0;
-  f.awaitGpsSince = 0;
+  f.recordArmSince = 0;
   f.stopCondSince = 0;
   f.recordIdleSince = 0;
   f.recordRetryUsed = false;
-  f.cooldownSince = 0;
-  f.powerOffSentAt = 0;
   f.pairingSince = 0;
   f.entryPending = false;
+}
+
+// RPM-continuously-up tracker for the record-start gate: arm on the rise
+// above ON, disarm on a fall below OFF, hold through the hysteresis band.
+// The record-start clock (kRecordStartDelayMs) runs from recordArmSince.
+void maintainRecordArm(Fsm& f, const Inputs& in) {
+  if (in.rpm > kRpmOnThreshold) {
+    if (f.recordArmSince == 0) f.recordArmSince = seedNow(in.nowMs);
+  } else if (in.rpm < kRpmOffThreshold) {
+    f.recordArmSince = 0;  // engine off — disarm
+  }
 }
 
 // ---- Shared transitions -------------------------------------------------
@@ -56,12 +65,24 @@ void enterIdlePreserveRecording(Fsm& f) {
 }
 
 // Camera is connected to our remote service; wait for its ce82 subscription
-// (and a GPS fix) before recording. Reached from IDLE (stale link) or WAKING.
+// before moving to WATCHING. Reached from IDLE (stale link) or WAKING.
 void enterAwaitReady(Fsm& f, uint32_t nowMs) {
   f.state = State::kAwaitReady;
   f.connectedSince = seedNow(nowMs);
-  f.awaitGpsSince = seedNow(nowMs);
   f.entryPending = false;
+}
+
+// Camera ON + connected but NOT recording: the hub state. Re-records when RPM
+// has held long enough, and powers off ONLY when the glue tears down on sleep.
+// `resetArm` clears the record-start clock: true after a STOP so a stall-
+// recovery record needs a fresh run of sustained RPM (not the stale arm from
+// the session that just ended); false on the first connect so the record-start
+// delay keeps measuring from the wake.
+Action enterWatching(Fsm& f, Action action, bool resetArm) {
+  f.state = State::kWatching;
+  if (resetArm) f.recordArmSince = 0;
+  f.stopCondSince = 0;
+  return action;
 }
 
 // Begin a fresh wake cycle (attempt 1 of kConnectRetries).
@@ -71,18 +92,6 @@ Action enterWakingFresh(Fsm& f, uint32_t nowMs) {
   f.wakeAttemptStarted = seedNow(nowMs);
   f.rpmGoneSince = 0;
   return Action::kStartWakeBurst;
-}
-
-Action enterCooldown(Fsm& f, uint32_t nowMs, Action action) {
-  f.state = State::kCooldown;
-  f.cooldownSince = seedNow(nowMs);
-  return action;
-}
-
-Action enterPoweringOff(Fsm& f, uint32_t nowMs) {
-  f.state = State::kPoweringOff;
-  f.powerOffSentAt = seedNow(nowMs);
-  return Action::kSendPowerOff;
 }
 
 // ---- Per-state step logic ------------------------------------------------
@@ -99,6 +108,10 @@ Action stepIdle(Fsm& f, const Inputs& in) {
   }
   if (!elapsed(in.nowMs, f.rpmOnSince, kRpmOnDebounceMs)) return Action::kNone;
   f.rpmOnSince = 0;
+  // RPM is confirmed up — start the record-arm clock now so the 5 s
+  // record-start delay is measured from the wake, not from when the camera
+  // finally connects.
+  f.recordArmSince = seedNow(in.nowMs);
 
   if (in.remoteConnected) {
     // Stale remote link from a previous session: the camera is already on
@@ -116,6 +129,7 @@ Action stepWaking(Fsm& f, const Inputs& in) {
     enterAwaitReady(f, in.nowMs);
     return Action::kNone;
   }
+  maintainRecordArm(f, in);  // keep the 5 s record-start clock accurate
   // Engine gone again before the camera showed up: abort the wake. Preserve
   // the recording belief — the camera is unreachable, so we can't have
   // stopped it (see enterIdlePreserveRecording).
@@ -161,19 +175,19 @@ Action enterRecording(Fsm& f, bool sendShutter) {
 }
 
 Action stepAwaitReady(Fsm& f, const Inputs& in) {
-  // Camera dropped before recording started: re-wake it (fresh cycle).
+  maintainRecordArm(f, in);  // keep the record-start clock accurate while connecting
+  // Camera dropped before we were ready: re-wake it (fresh cycle).
   if (!in.remoteConnected) {
     return enterWakingFresh(f, in.nowMs);
   }
   if (in.sessionEndRequested) {
-    // If we came in resuming a recording (belief preserved across a drop),
-    // stop the camera on the way into cooldown; a fresh not-yet-recording
-    // session just rides cooldown then powers off.
-    if (f.recordingActive) {
+    // Manual end while connecting: if we were resuming a recording (belief
+    // preserved across a drop), stop it; then WATCH (camera stays on).
+    if (f.recordingActive && in.ce82Subscribed) {
       f.recordingActive = false;
-      return enterCooldown(f, in.nowMs, Action::kSendShutter);  // toggle OFF
+      return enterWatching(f, Action::kSendShutter, /*resetArm=*/true);  // toggle OFF
     }
-    return enterCooldown(f, in.nowMs, Action::kNone);
+    return enterWatching(f, Action::kNone, /*resetArm=*/true);
   }
   // Connected but never subscribed to ce82: we can't send button frames, so
   // drop the link and re-wake — BOUNDED by kSubscribeRetries so a camera that
@@ -191,40 +205,46 @@ Action stepAwaitReady(Fsm& f, const Inputs& in) {
     enterWakingFresh(f, in.nowMs);  // re-wake; its kStartWakeBurst is intentionally
     return Action::kDisconnect;     // dropped — drop the useless link first
   }
-  // Ready to record: subscribed, and either a GPS fix or the lock wait timed
-  // out (record-anyway policy).
-  const bool lockTimedOut =
-      kRecordWithoutGpsOnTimeout &&
-      elapsed(in.nowMs, f.awaitGpsSince, kGpsLockTimeoutMs);
-  if (in.ce82Subscribed && (in.gpsFixValid || lockTimedOut)) {
-    // Reconcile against the camera's OBSERVED record state so we drive the
-    // shutter toward the target instead of blind-toggling on belief:
-    //  - kRecording: camera already rolling (resumed session) -> adopt, no shutter.
-    //  - kIdle:      camera confirmed stopped -> shutter to start.
-    //  - kUnknown:   no fresh 0x10 yet -> fall back to belief. If we already
-    //                believe we're recording (belief preserved across a drop),
-    //                adopt WITHOUT toggling — the observation confirms shortly;
-    //                only a not-recording belief starts. This closes the #4
-    //                inversion during the brief post-reconnect observation gap.
-    if (in.recordObserved == RecordObs::kRecording) {
-      return enterRecording(f, /*sendShutter=*/false);
-    }
-    if (in.recordObserved == RecordObs::kIdle) {
-      return enterRecording(f, /*sendShutter=*/true);
-    }
-    return enterRecording(f, /*sendShutter=*/!f.recordingActive);
+  // Subscribed — the camera can take our buttons. Move to WATCHING, the hub
+  // that arms recording once RPM has held long enough (no GPS-lock gate). Keep
+  // the wake-set arm (resetArm=false) so the record-start delay measures from
+  // the wake, not from when the camera finally connected.
+  if (in.ce82Subscribed) {
+    f.subscribeAttemptsUsed = 0;
+    return enterWatching(f, Action::kNone, /*resetArm=*/false);
   }
   return Action::kNone;
 }
 
+// Shared record-start gate used by WATCHING: RPM held above ON for
+// kRecordStartDelayMs, camera subscribed. Reconciles against the camera's
+// OBSERVED record state so we drive the shutter toward the target instead of
+// blind-toggling on belief (adopt-if-already-rolling; #4). Returns kNone with
+// no state change when the gate isn't met.
+Action tryStartRecording(Fsm& f, const Inputs& in) {
+  if (!in.ce82Subscribed || f.recordArmSince == 0 ||
+      !elapsed(in.nowMs, f.recordArmSince, kRecordStartDelayMs)) {
+    return Action::kNone;
+  }
+  if (in.recordObserved == RecordObs::kRecording) {
+    return enterRecording(f, /*sendShutter=*/false);  // already rolling — adopt
+  }
+  if (in.recordObserved == RecordObs::kIdle) {
+    return enterRecording(f, /*sendShutter=*/true);   // confirmed stopped — start
+  }
+  return enterRecording(f, /*sendShutter=*/!f.recordingActive);  // no obs — trust belief
+}
+
 Action stepRecording(Fsm& f, const Inputs& in) {
-  // 1. Manual session end: stop immediately, bypassing the hold timer.
+  // 1. Manual session end (user's explicit logging-stop): stop recording, then
+  //    WATCH — the camera stays on, ready to re-record; it powers off only on
+  //    sleep. The main sketch already ended the log, so no auto-stop signal.
   if (in.sessionEndRequested) {
     if (f.recordingActive) {
       f.recordingActive = false;
-      return enterCooldown(f, in.nowMs, Action::kSendShutter);  // toggle OFF
+      return enterWatching(f, Action::kSendShutter, /*resetArm=*/true);  // toggle OFF
     }
-    return enterCooldown(f, in.nowMs, Action::kNone);
+    return enterWatching(f, Action::kNone, /*resetArm=*/true);
   }
   // 2. Remote drop: re-wake and resume. recordingActive stays as-is so a
   //    reconnect mid-session does NOT blind-toggle the shutter. Logs untouched.
@@ -254,60 +274,41 @@ Action stepRecording(Fsm& f, const Inputs& in) {
   } else {
     f.recordIdleSince = 0;  // kUnknown (or belief already false): no retry in flight
   }
-  // 4. Sustained stop condition.
-  const bool speedStopped = in.speedMph < kSpeedStopThresholdMph;
-  const bool rpmStopped = in.rpm < kRpmOffThreshold;
-  const bool stopped = kStopOnEither ? (speedStopped || rpmStopped)
-                                     : (speedStopped && rpmStopped);
-  if (stopped) {
+  // 4. Engine-off stop: RPM below OFF for kStopRecordDelayMs (30 s) — RPM only,
+  //    no speed, so a stationary-but-running grid idle keeps recording. On stop
+  //    the glue sees kRecording -> kWatching (no manual sessionEnd this step) and
+  //    ends the log session.
+  if (in.rpm < kRpmOffThreshold) {
     if (f.stopCondSince == 0) {
       f.stopCondSince = seedNow(in.nowMs);
     } else if (elapsed(in.nowMs, f.stopCondSince, kStopRecordDelayMs)) {
       f.stopCondSince = 0;
       if (f.recordingActive) {
         f.recordingActive = false;
-        return enterCooldown(f, in.nowMs, Action::kSendShutter);  // toggle OFF
+        return enterWatching(f, Action::kSendShutter, /*resetArm=*/true);  // toggle OFF
       }
-      return enterCooldown(f, in.nowMs, Action::kNone);
+      return enterWatching(f, Action::kNone, /*resetArm=*/true);
     }
   } else {
     f.stopCondSince = 0;
   }
-  return Action::kNone;  // no GPS feed, no keep-alive — those are gone
+  return Action::kNone;
 }
 
-Action stepCooldown(Fsm& f, const Inputs& in) {
+Action stepWatching(Fsm& f, const Inputs& in) {
+  maintainRecordArm(f, in);  // arm/disarm the record-start clock on RPM
+  // Camera dropped / turned itself off: back to IDLE (re-wakes on the next
+  // engine start). Preserve nothing — the camera is gone.
+  if (!in.remoteConnected) {
+    enterIdle(f);
+    return Action::kNone;
+  }
+  // Manual session end while already watching: nothing to stop, stay put.
   if (in.sessionEndRequested) {
-    // Manual end during cooldown powers the camera off immediately.
-    return enterPoweringOff(f, in.nowMs);
-  }
-  if (!in.remoteConnected) {
-    // Camera dropped / turned itself off.
-    enterIdle(f);
     return Action::kNone;
   }
-  if (elapsed(in.nowMs, f.cooldownSince, kPowerOffDelayMs)) {
-    return enterPoweringOff(f, in.nowMs);
-  }
-  if (kAutoResumeFromCooldown) {
-    // DEFERRED v1 (kAutoResumeFromCooldown == false): motion/RPM return during
-    // cooldown is deliberately ignored. When the flag flips, add the re-arm
-    // transition back to kRecording here.
-  }
-  return Action::kNone;
-}
-
-Action stepPoweringOff(Fsm& f, const Inputs& in) {
-  if (!in.remoteConnected) {
-    enterIdle(f);
-    return Action::kNone;
-  }
-  if (elapsed(in.nowMs, f.powerOffSentAt, kPowerOffLingerMs)) {
-    // Camera never dropped the link: force it down ourselves.
-    enterIdle(f);
-    return Action::kDisconnect;
-  }
-  return Action::kNone;
+  // Re-record once RPM has held long enough again (stall recovery / next run).
+  return tryStartRecording(f, in);
 }
 
 Action stepPairing(Fsm& f, const Inputs& in) {
@@ -392,10 +393,8 @@ Action step(Fsm& f, const Inputs& in) {
       return stepAwaitReady(f, in);
     case State::kRecording:
       return stepRecording(f, in);
-    case State::kCooldown:
-      return stepCooldown(f, in);
-    case State::kPoweringOff:
-      return stepPoweringOff(f, in);
+    case State::kWatching:
+      return stepWatching(f, in);
     case State::kPairing:
       return stepPairing(f, in);
   }
@@ -409,8 +408,7 @@ const char* stateName(State s) {
     case State::kWaking:      return "WAKING";
     case State::kAwaitReady:  return "READY";
     case State::kRecording:   return "RECORDING";
-    case State::kCooldown:    return "COOLDOWN";
-    case State::kPoweringOff: return "PWR OFF";
+    case State::kWatching:    return "WATCHING";
     case State::kPairing:     return "PAIRING";
   }
   return "?";

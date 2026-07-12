@@ -73,6 +73,18 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   backwards compatible with the reserved 1 KB header.
 
 ### Changed
+- **Camera auto-record is now a simple, RPM-driven lifecycle.** Recording is
+  no longer gated on a GPS lock and no longer stops on a speed+engine combo
+  with a cooldown/power-off tail. Instead: the engine starting wakes+connects
+  the camera; ~5 s of sustained RPM starts recording (one shutter); 30 s of
+  engine-off (RPM only — a stationary but running grid idle keeps rolling)
+  stops recording (one shutter) **and** ends+saves the race log session,
+  returning to the menu. The camera then enters a **watching** state — it
+  stays on and connected, so a brief on-track stall recovers straight back
+  into recording when RPM returns — and powers off only when the device
+  sleeps. GPS still streams to the camera the whole time (voided RMC until a
+  lock, real data after). While the camera is recording, the speed-based log
+  auto-idle yields to it; with no camera paired, logging is unchanged.
 - **CI now controls which DovesLapTimer the firmware is built against.**
   Builds targeting (or running on) the `BETA` branch track the library's own
   `BETA` branch, so the two beta channels move together; `master` CI and the

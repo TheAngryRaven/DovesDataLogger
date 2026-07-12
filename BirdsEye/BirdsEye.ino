@@ -993,6 +993,13 @@ void createLapAnythingCourseManager() {
 void checkAutoIdle() {
   if (!raceActive) return;
 
+  // Yield to an active camera recording: while the camera is recording, IT owns
+  // the end (30 s engine-off -> cameraConsumeAutoStop() above), so the
+  // speed-based idle must not cut the log out from under it during a stationary
+  // but engine-running stint (grid/paddock). No camera, or not recording, keeps
+  // the original speed-only behavior below.
+  if (cameraActivelyRecording()) return;
+
   // Grace period: don't auto-idle within first 3 minutes of a session.
   // After RPM wake the car is often stationary (warming up, waiting for
   // track session) and GPS needs time to reacquire. Without this, the
@@ -1344,6 +1351,16 @@ void loop() {
   autoRaceModeCheck();
   updateGpsLockHold();
   CAMERA_LOOP();  // step the Insta360 auto-record FSM (GPS/tach fresh above)
+
+  // Camera auto-stopped recording (30 s engine-off): end + save the race
+  // session and return to the menu — the camera stays connected in WATCHING,
+  // ready to re-record if the engine restarts. endRaceSession() is idempotent
+  // and does not switch pages itself, so we do (mirrors checkAutoIdle). A
+  // manual logging-stop does not set this — that path already ended the log.
+  if (raceActive && cameraConsumeAutoStop()) {
+    endRaceSession();
+    switchToDisplayPage(PAGE_MAIN_MENU);
+  }
 
   // Button hold detection for sleep/reboot combos
   updateButtonHoldState();
