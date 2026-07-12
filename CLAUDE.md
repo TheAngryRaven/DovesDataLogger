@@ -555,7 +555,11 @@ loop()  ~250 Hz
 - **Opt-in enumeration**: `USB_MSC_SETUP()` (called from `setup()` after a
   successful `SD_SETUP()`) only registers the callbacks — no drive is
   presented at boot, so charging/plug-in behaves as before.
-  `USB_MSC_ENABLE()` acquires `SD_ACCESS_USB_MSC`, sets the capacity from
+  `USB_MSC_ENABLE()` first requires **VBUS present** (`isUsbConnected()`) —
+  without a cable there is nothing to mount and the parked loop would read
+  absent VBUS as a cable-pull and instantly reset, so it bails before taking
+  the lock or enumerating (the menu shows "Plug in USB cable first"). It then
+  acquires `SD_ACCESS_USB_MSC`, sets the capacity from
   `sectorCount()`, marks the unit ready, `begin()`s the interface (bailing
   out — restoring the clock and releasing the lock — if `begin()` fails),
   and forces a `TinyUSBDevice.detach()` / 50 ms / `attach()` re-enumeration
@@ -568,7 +572,11 @@ loop()  ~250 Hz
   page, and watches VBUS: if the cable is unplugged it calls
   `USB_MSC_DISABLE()` so the SD lock and fast SPI clock can't leak past the
   session.
-- **Exit = reboot**: `USB_MSC_DISABLE()` drops media-ready, `syncDevice()`s
+- **Exit = reboot**: `USB_MSC_DISABLE()` drops media-ready, **quiesces** (waits
+  up to 1 s for the write block callback to go quiet — `setUnitReady(false)`
+  only blocks *new* SCSI commands, so an in-flight `WRITE10` keeps calling
+  `msc_write_cb` on the USBD task, and resetting mid-write would truncate a
+  file / corrupt the FAT), `syncDevice()`s
   the card, then calls `NVIC_SystemReset()` (mirrors the BLE auto-reboot on
   disconnect). The reboot drops the MSC interface and remounts a clean
   filesystem, so host edits are picked up without any SdFat cache-coherency
