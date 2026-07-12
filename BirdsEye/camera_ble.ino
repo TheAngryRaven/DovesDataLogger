@@ -77,13 +77,40 @@ constexpr uint32_t kCe82HoldIntervalMs = 30;   // ~30 ms/frame (remote ~25 ms)
 // time the camera is connected+subscribed — it is the remote's liveness
 // heartbeat (never go silent, or the camera treats us as dead and drops
 // the link). Streamed continuously regardless of recording state, with
-// status 'V' when there's no fix. Paused only during a power-off hold.
+// status 'V' when there's no fix (spec §7.6). Paused only during a power-off hold.
 static uint32_t gpsStreamNextAt = 0;
 constexpr uint32_t kGpsStreamIntervalMs = 100;  // 10 Hz
 
 // ---- Link flags (written from Bluefruit-task callbacks -> volatile) ----
 static volatile bool     remoteLinkUp = false;   // camera holds our ce80 remote service
 static volatile uint16_t remoteConnHandle = BLE_CONN_HANDLE_INVALID;
+
+// Cached ce82 subscription state. cameraCe82Char.notifyEnabled() is a
+// SoftDevice SVC round-trip; calling it ~500x/s (once per loop snapshot +
+// once per GPS-stream tick) burned latency in the loop that must sustain
+// 25 Hz GPS logging. Instead the ce82 CCCD callback latches this, and while
+// linked-but-not-yet-subscribed CAMERA_LOOP re-reads notifyEnabled() at a
+// low rate (a bonded peer's sys-attr CCCD restore fires NO CCCD write, so
+// the callback alone can miss it). Once true we stop calling the SVC.
+static volatile bool ce82NotifyOn = false;
+static uint32_t      ce82SubSyncAt = 0;   // next lazy notifyEnabled() re-read (main loop)
+
+// Camera-reported record state, parsed from its 0x10 ce81 display-string
+// frames (insta360_protocol::parseRecordingState — the ".HH:MM:SS" timer).
+// The camera exposes no clean record flag, so this is how we CONFIRM the
+// shutter actually took. Latched by the ce81 drain and read when building
+// the FSM Inputs — both main-loop context, so no volatile needed. Fed to
+// the FSM only while fresh (a stale observation must not drive the shutter).
+static insta360_protocol::RecordObs cameraRecordObs =
+    insta360_protocol::RecordObs::kUnknown;
+static uint32_t cameraRecordObsAtMs = 0;
+constexpr uint32_t kRecordObsFreshMs = 3000;  // older than this -> kUnknown to the FSM
+
+// Bench-test record belief. The FSM is suppressed in bench mode, so its
+// recordingActive isn't updated by the manual Record toggles — track the
+// toggle here so cameraTestExitMode() can GUARANTEE the camera is left
+// stopped (else it records an orphaned clip and inverts the next session).
+static bool cameraTestRecording = false;
 
 // ---- ce81 RX double-buffer (BLE callback fills, CAMERA_LOOP drains) ----
 // Mirrors firmware_ota's fill/flush idiom, sized for the short serial /
@@ -169,6 +196,9 @@ static void cameraCe82CccdCallback(uint16_t conn_hdl, BLECharacteristic* chr,
                                    uint16_t value) {
   (void)conn_hdl;
   (void)chr;
+  // Cache the subscription so the hot paths don't SVC into the SoftDevice.
+  // Bit 0 (0x0001) = notifications enabled; 0 = unsubscribed.
+  ce82NotifyOn = (value & 0x0001) != 0;
   debug(F("CAM: ce82 CCCD write = "));
   debugln(value);
 }
@@ -183,6 +213,7 @@ static void cameraCe82CccdCallback(uint16_t conn_hdl, BLECharacteristic* chr,
 void cameraBleOnConnect(uint16_t connHandle) {
   remoteConnHandle = connHandle;
   remoteLinkUp = true;
+  ce82NotifyOn = false;  // fresh link starts unsubscribed until the camera's CCCD write
   // Trace matters: the camera has been seen connecting and dropping
   // faster than the display refresh — without this line those attempts
   // are completely invisible.
@@ -199,6 +230,7 @@ void cameraBleOnDisconnect(uint16_t connHandle, uint8_t reason) {
   if (connHandle == remoteConnHandle) {
     remoteLinkUp = false;
     remoteConnHandle = BLE_CONN_HANDLE_INVALID;
+    ce82NotifyOn = false;  // subscription doesn't survive the link
   }
 }
 
@@ -269,7 +301,7 @@ static bool cameraSendCe82(const uint8_t* buf, uint16_t n) {
     debugln(F("CAM: ce82 send failed - no remote link (R)"));
     return false;
   }
-  if (!cameraCe82Char.notifyEnabled()) {
+  if (!ce82NotifyOn) {
     debugln(F("CAM: ce82 send failed - camera never subscribed (CCCD off)"));
     return false;
   }
@@ -282,7 +314,7 @@ static bool cameraSendCe82(const uint8_t* buf, uint16_t n) {
 // cameraServiceCe82Hold in CAMERA_LOOP). Returns false if the camera
 // isn't connected/subscribed, so the bench menu can report the real reason.
 static bool cameraSendPowerOff() {
-  if (!remoteLinkUp || !cameraCe82Char.notifyEnabled()) {
+  if (!remoteLinkUp || !ce82NotifyOn) {
     debugln(F("CAM: power-off not armed - no R-link / not subscribed"));
     return false;
   }
@@ -290,6 +322,29 @@ static bool cameraSendPowerOff() {
   ce82HoldNextAt = millis();  // first frame immediately
   debugln(F("CAM: power-off hold armed (streaming ce82)"));
   return true;
+}
+
+// Synchronous streamed power-off hold for SLEEP entry. The non-blocking
+// cameraServiceCe82Hold() (in CAMERA_LOOP) never runs on the sleep path —
+// the loop parks the moment we sleep — so the arm-then-disconnect teardown
+// used to transmit ZERO power-off frames and leave the camera running all
+// night. Here we stream the hold inline, blocking ~kCe82PowerHoldMs (fine:
+// sleep entry is a deliberate action and we're powering down anyway), then
+// return so the caller can disconnect. Aborts early if the camera drops the
+// link — that drop IS the camera powering off.
+static void cameraStreamPowerOffBlocking() {
+  if (!remoteLinkUp || !ce82NotifyOn) return;
+  const uint32_t deadline = millis() + kCe82PowerHoldMs;
+  while ((int32_t)(millis() - deadline) < 0) {
+    if (!remoteLinkUp) break;  // camera powered off / dropped the link
+    uint8_t buf[9];
+    size_t n = insta360_protocol::buildPowerOff(buf, sizeof(buf), ce82Seq);
+    ce82Seq += 2;
+    if (n > 0) cameraCe82Char.notify(buf, (uint16_t)n);
+    wdtPet();  // this hold (~3.5 s) approaches the ~4 s WDT — keep it fed
+    delay(kCe82HoldIntervalMs);  // let the SoftDevice TX the notify
+  }
+  debugln(F("CAM: sleep power-off hold streamed"));
 }
 
 // Stream the power-off hold frame while armed. Called every CAMERA_LOOP
@@ -318,11 +373,13 @@ static void cameraServiceCe82Hold() {
 // during a power-off hold so the hold frames aren't diluted. Always emits
 // (status 'V' with last-known coords) when there's no fix — never silent.
 static void cameraServiceGpsStream() {
-  if (!bleInitialized || !remoteLinkUp || !cameraCe82Char.notifyEnabled()) return;
-  if (ce82HoldUntil != 0) return;  // a power-off hold owns ce82 right now
+  // Rate gate FIRST (cheap), so the ~96% of ticks between 10 Hz frames cost
+  // nothing. Subscription comes from the cached flag — no SVC round-trip.
   const uint32_t now = millis();
   if ((int32_t)(now - gpsStreamNextAt) < 0) return;
   gpsStreamNextAt = now + kGpsStreamIntervalMs;
+  if (!bleInitialized || !remoteLinkUp || !ce82NotifyOn) return;
+  if (ce82HoldUntil != 0) return;  // a power-off hold owns ce82 right now
 
   insta360_protocol::GpsRmc s;
   s.valid = gpsData.fix;
@@ -496,6 +553,16 @@ static void cameraDrainCe81() {
     ce81Ready[ce81ReadIdx] = false;  // slot free for the callback again
     ce81ReadIdx ^= 1;
 
+    // Record-state observation: the camera's 0x10 display-string frame
+    // carries a ".HH:MM:SS" timer while recording (the only reliable record
+    // signal — see parseRecordingState). Latch it for the FSM reconcile.
+    const insta360_protocol::RecordObs obs =
+        insta360_protocol::parseRecordingState(local, len);
+    if (obs != insta360_protocol::RecordObs::kUnknown) {
+      cameraRecordObs = obs;
+      cameraRecordObsAtMs = millis();
+    }
+
     uint8_t rawSerial[insta360_protocol::kSerialLen];
     insta360_protocol::Ce81Frame frame =
         insta360_protocol::parseCe81Frame(local, len, rawSerial);
@@ -535,8 +602,37 @@ static void cameraDrainCe81() {
 // MAIN LOOP
 ///////////////////////////////////////////
 
+// Map the latched camera record observation into the FSM's tri-state,
+// honouring the freshness window: a stale 0x10 (link idle / dropped) must
+// read as kUnknown so it can't drive a shutter toggle.
+static camera_fsm::RecordObs cameraObservedRecordForFsm() {
+  if (cameraRecordObs == insta360_protocol::RecordObs::kUnknown) {
+    return camera_fsm::RecordObs::kUnknown;
+  }
+  if ((uint32_t)(millis() - cameraRecordObsAtMs) > kRecordObsFreshMs) {
+    return camera_fsm::RecordObs::kUnknown;
+  }
+  return cameraRecordObs == insta360_protocol::RecordObs::kRecording
+             ? camera_fsm::RecordObs::kRecording
+             : camera_fsm::RecordObs::kIdle;
+}
+
 void CAMERA_LOOP() {
-  // 1. Drain camera writes first so a captured serial feeds this step.
+  // Reconcile the cached ce82 subscription. The CCCD callback catches an
+  // explicit subscribe, but a bonded peer's sys-attr restore enables
+  // notifications with NO CCCD write — so while linked but not yet
+  // known-subscribed, poll notifyEnabled() at a low rate to catch it. Once
+  // subscribed, we never call into the SoftDevice for this again.
+  if (remoteLinkUp && !ce82NotifyOn) {
+    const uint32_t now = millis();
+    if ((int32_t)(now - ce82SubSyncAt) >= 0) {
+      ce82SubSyncAt = now + 250;
+      if (cameraCe82Char.notifyEnabled()) ce82NotifyOn = true;
+    }
+  }
+
+  // 1. Drain camera writes first so a captured serial / record observation
+  //    feeds this step.
   cameraDrainCe81();
   // Stream an in-flight power-off hold, then the 10 Hz GPS liveness feed,
   // in BOTH bench-test and FSM modes (before the test-mode early return).
@@ -571,7 +667,8 @@ void CAMERA_LOOP() {
   in.speedMph = gps_speed_mph;
   in.gpsFixValid = gpsData.fix;
   in.remoteConnected = remoteLinkUp;
-  in.ce82Subscribed = remoteLinkUp && cameraCe82Char.notifyEnabled();
+  in.ce82Subscribed = remoteLinkUp && ce82NotifyOn;
+  in.recordObserved = cameraObservedRecordForFsm();
   // One-shots: consume (clear) each pending flag as it is handed over.
   in.sessionEndRequested = sessionEndPending;
   sessionEndPending = false;
@@ -624,16 +721,27 @@ void CAMERA_NOTIFY_SESSION_END() {
 // then one forced-idle FSM step. `sendPowerOff` is the sleep variant's
 // extra ce82 power-off.
 static void cameraTeardown(bool sendPowerOff) {
+  // Whether we could actually reach the camera to stop/power it off. If not,
+  // we must NOT let the forced-idle step below clear recordingActive — the
+  // camera may still be rolling, and lying about it would make the next
+  // reconnect blind-toggle a live recording OFF (#4).
+  const bool wasRecording = cameraFsm.recordingActive;
+  bool cameraStopped = false;
+
   if (bleInitialized) {
     // Best-effort stop recording so the camera doesn't record an orphaned
     // clip. The shutter TOGGLES, so send it only if we believe recording
-    // is active (the FSM tracks this).
-    if (cameraFsm.recordingActive && remoteLinkUp &&
-        cameraCe82Char.notifyEnabled()) {
+    // is active (the FSM tracks this) AND we can actually reach the camera.
+    if (wasRecording && remoteLinkUp && ce82NotifyOn) {
       cameraSendShutter();
+      cameraStopped = true;
     }
-    if (sendPowerOff && remoteLinkUp) {
-      cameraSendPowerOff();
+    // SLEEP variant: stream the power-off hold SYNCHRONOUSLY here — the loop
+    // parks on sleep, so the non-blocking cameraServiceCe82Hold() would never
+    // run and no frame would go out. Powering off also stops any recording.
+    if (sendPowerOff && remoteLinkUp && ce82NotifyOn) {
+      cameraStreamPowerOffBlocking();
+      cameraStopped = true;
     }
 
     if (remoteLinkUp && remoteConnHandle != BLE_CONN_HANDLE_INVALID) {
@@ -662,8 +770,10 @@ static void cameraTeardown(bool sendPowerOff) {
   pairCancelPending = false;
   pairSerialCapturedPending = false;
   unpairPending = false;
-  cameraTestActive = false;  // any release path leaves bench-test mode
-  testAdvertWanted = false;  // and stops the bench advert re-arm
+  cameraTestActive = false;    // any release path leaves bench-test mode
+  cameraTestRecording = false; // and clears the bench record belief
+  testAdvertWanted = false;    // and stops the bench advert re-arm
+  cameraRecordObs = insta360_protocol::RecordObs::kUnknown;  // fresh for next session
 
   // Force the FSM to IDLE/UNPAIRED with one explicit step. The physical
   // teardown above already happened; the returned action is
@@ -673,6 +783,13 @@ static void cameraTeardown(bool sendPowerOff) {
   in.remoteConnected = remoteLinkUp;    // async disconnects may lag
   in.forceIdleRequested = true;
   cameraExecuteAction(camera_fsm::step(cameraFsm, in));
+
+  // forceIdle clears recordingActive; if we could NOT reach the camera to
+  // stop it, restore the belief so the next reconnect reconciles against the
+  // camera's real 0x10 state instead of blind-toggling a live recording OFF.
+  if (wasRecording && !cameraStopped) {
+    cameraFsm.recordingActive = true;
+  }
 
   debugln(F("CAM: released"));
 }
@@ -706,7 +823,22 @@ bool cameraAdvertisingUp() {
 }
 
 bool cameraCe82Subscribed() {
-  return bleInitialized && remoteLinkUp && cameraCe82Char.notifyEnabled();
+  return bleInitialized && remoteLinkUp && ce82NotifyOn;
+}
+
+bool cameraGpsStreaming() {
+  // The exact gate under which cameraServiceGpsStream() emits an RMC frame.
+  return bleInitialized && remoteLinkUp && ce82NotifyOn && ce82HoldUntil == 0;
+}
+
+bool cameraObservedRecording() {
+  return cameraRecordObs == insta360_protocol::RecordObs::kRecording &&
+         (uint32_t)(millis() - cameraRecordObsAtMs) <= kRecordObsFreshMs;
+}
+
+bool cameraRecordObservationFresh() {
+  return cameraRecordObs != insta360_protocol::RecordObs::kUnknown &&
+         (uint32_t)(millis() - cameraRecordObsAtMs) <= kRecordObsFreshMs;
 }
 
 bool cameraPairedSerial(char* buf, size_t bufSize) {
@@ -787,14 +919,14 @@ void cameraTestEnterMode() {
 }
 
 void cameraTestExitMode() {
-  // Best-effort stop before dropping the link so we never leave the camera
-  // recording an orphaned clip after a test. The bench doesn't track record
-  // state, so gate the shutter on the FSM's belief (which stays IDLE in
-  // bench mode) — practically this just drops the link and releases radio.
-  if (cameraFsm.recordingActive && remoteLinkUp &&
-      cameraCe82Char.notifyEnabled()) {
-    cameraSendShutter();
+  // GUARANTEE the camera is left stopped on exit — otherwise it records an
+  // orphaned clip AND the next real session's belief (false) is inverted
+  // relative to reality. Bench tracks its own toggle (cameraTestRecording),
+  // since the FSM is suppressed and stays IDLE in bench mode.
+  if (cameraTestRecording && remoteLinkUp && ce82NotifyOn) {
+    cameraSendShutter();  // toggle recording OFF
   }
+  cameraTestRecording = false;
   cameraTestActive = false;
   cameraTeardown(false);  // drop link, stop advert, release the radio
   debugln(F("CAM: bench-test mode exited"));
@@ -814,8 +946,12 @@ bool cameraTestRecord() {
   if (!cameraTestActive) return false;
   // ce82 shutter — TOGGLES recording. Same code path the FSM's kSendShutter
   // takes, so the wire bytes match. Returns true only when the frame could
-  // actually reach the camera (connected + subscribed to ce82).
-  return cameraSendShutter();
+  // actually reach the camera (connected + subscribed to ce82). Track the
+  // toggle in the bench belief so cameraTestExitMode() can leave the camera
+  // stopped.
+  const bool sent = cameraSendShutter();
+  if (sent) cameraTestRecording = !cameraTestRecording;
+  return sent;
 }
 
 bool cameraTestPowerOff() {

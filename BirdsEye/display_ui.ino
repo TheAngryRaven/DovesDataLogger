@@ -682,9 +682,15 @@ void displayLoop() {
   // menu operator
   if (insideMenu && !buttonsDisabled) {
     // we are in a menu do weird menu things
-    // Main menu has static display (items top-to-bottom = index 0,1,2,3)
-    // so button direction needs to be reversed compared to scrolling menus
-    bool reverseDirection = (currentPage == PAGE_MAIN_MENU);
+    // Statically-rendered menus list their items top-to-bottom (index
+    // 0,1,2,3 down the panel), so the physical up/down buttons must be
+    // reversed vs the scrolling menus. The main menu AND the camera pages
+    // (Pair / Test) render this way — without the camera pages here, their
+    // first "down" press wrapped straight to the last item (e.g. Unpair /
+    // Power Off) (#7).
+    bool reverseDirection = (currentPage == PAGE_MAIN_MENU ||
+                             currentPage == PAGE_PAIR_CAMERA ||
+                             currentPage == PAGE_CAMERA_TEST);
 
     // BUTTON UP (or DOWN for reversed menus)
     if (btn1->pressed) {

@@ -183,7 +183,17 @@ void displayPage_camera_test() {
   resetDisplay();
 
   display.setTextSize(1);
-  display.println(F("    CAMERA TEST"));
+  // Title, with the camera's OWN reported record state (its 0x10 timer) on
+  // the right as an explicit rec:yes/no — proves a Record press actually
+  // started the camera, not just that we sent a frame. (`rec:--` when there's
+  // no fresh observation at all: no R-link, or the camera hasn't pushed a
+  // 0x10 frame yet.)
+  display.print(F("CAMERA TEST rec:"));
+  if (!cameraRecordObservationFresh()) {
+    display.println(F("--"));   // no fresh 0x10 (no link, or camera hasn't reported yet)
+  } else {
+    display.println(cameraObservedRecording() ? F("yes") : F("no"));
+  }
 
   // Live link status so the tester can see what's actually connected:
   // R = remote (peripheral) link — the camera connects to us and must be
@@ -199,7 +209,17 @@ void displayPage_camera_test() {
   // Adv: our advert actually on air — a silently-rejected wake/connect
   // advert shows Adv:-- (the "no blue LED" symptom).
   display.print(F(" Adv:"));
-  display.println(cameraAdvertisingUp() ? F("UP") : F("--"));
+  display.print(cameraAdvertisingUp() ? F("UP") : F("--"));
+  // G: the 10 Hz GPS/RMC feed to the camera. SYNC = streaming with a fix,
+  // V = streaming but no lock (voided RMC — still a valid heartbeat), -- =
+  // not streaming. Confirms the GPS link end-to-end. ("R:UP+ Adv:UP G:SYNC"
+  // is 19 chars — fits the 21-char panel width.)
+  display.print(F(" G:"));
+  if (cameraGpsStreaming()) {
+    display.println(gpsData.fix ? F("SYNC") : F("V"));
+  } else {
+    display.println(F("--"));
+  }
 
   // Four size-1 rows follow — no blank line, so "Back" stays on-panel.
   // Wake burst only wakes a standby camera (see camera_ble.ino).

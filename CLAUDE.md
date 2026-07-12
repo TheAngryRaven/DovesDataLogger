@@ -114,7 +114,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `lap_format.{h,cpp}` | ms → `M:SS.mmm` lap-time rendering (three zero-minutes styles), used by all display pages |
 | `tach_filter.{h,cpp}` | Tachometer 1-D Kalman filter (predict/update math + Q/R tuning constants) |
 | `camera_fsm.{h,cpp}` | Insta360 auto-record lifecycle FSM (8 states, all debounce/retry/timeout timing + tunables); board-portable core shared with the nRF54 "Falcon" target |
-| `insta360_protocol.{h,cpp}` | Insta360 X4 BLE frame builders/parsers (wake advert, remote scan response, ce82 buttons, ce82 GPS/RMC frame, ce81 serial parsing) with golden-byte tests |
+| `insta360_protocol.{h,cpp}` | Insta360 X4 BLE frame builders/parsers (wake advert, remote scan response, ce82 buttons, ce82 GPS/RMC frame, ce81 serial parsing, ce81 `0x10` record-timer state parse) with golden-byte tests |
 
 ### Non-Source
 
@@ -320,6 +320,17 @@ loop()  ~250 Hz
   the transfer service owns the radio. `bleActive` / `bleConnected` keep
   their transfer-only meanings — camera mode never sets them. Owner
   transitions happen only on the main loop, never in a Bluefruit callback.
+  - **Reboot gate (`bleTransferEngaged`)**: the radio has one BD_ADDR, so a
+    bonded camera can connect to the *transfer* advert and be routed as "the
+    phone". The auto-reboot-on-disconnect is therefore gated on the peer
+    having actually written the file/settings/OTA service — a camera that
+    only vets our GATT and drops never reboots the logger out of a transfer
+    session (and held no SD, so there's nothing to tear down).
+  - **Advert teardown**: `BLE_STOP()` disarms `restartOnDisconnect(false)`
+    *before* its async disconnect, so Bluefruit's core handler can't restart
+    a stale ownerless transfer advert after the stop (which would let a phone
+    reconnect into a mute session and occupy the slot camera auto-record
+    needs).
 - BLE service UUID `0x1820`.
 - Characteristics: file list (0x2A3D), file request (0x2A3E),
   file data (0x2A3F), file status (0x2A40).
@@ -625,8 +636,16 @@ loop()  ~250 Hz
   nothing can wake it. Every advert goes through `bleAdvFinalizePadded()`
   — see bluetooth.ino — to defeat the Bluefruit 0.21.0 frozen-packet-length
   core bug.) Recording starts on GPS fix (or after 30 s regardless) by
-  sending one shutter-toggle ce82 frame; the FSM tracks `recordingActive`
-  so it never blind-toggles on a reconnect. It stops after 60 s of
+  sending one shutter-toggle ce82 frame. The shutter is a stateful TOGGLE, so
+  the FSM never blind-fires it: it **confirms** record state from the camera's
+  own `0x10` ce81 display-string frame (a live `.HH:MM:SS` timer while
+  recording — the `0x02` status word is not reliable;
+  `insta360_protocol::parseRecordingState`) and reconciles `recordingActive`
+  against that observation (`RecordObs` Input). On reconnect it adopts the
+  camera's real state instead of toggling; if the camera reports idle while we
+  believe we're recording it re-asserts the shutter once; and the belief is
+  preserved (never cleared) on any path where the camera is unreachable, so a
+  dropped link can't invert on reconnect. It stops after 60 s of
   stationary (<2 mph) **AND** engine-off (<300 rpm) — grid idling and
   coasting stalls keep recording; a manual session end
   (`CAMERA_NOTIFY_SESSION_END()` from the logging-stop confirm —
@@ -657,7 +676,10 @@ loop()  ~250 Hz
   the Bluetooth transfer page calls `CAMERA_FORCE_RELEASE()` before
   `BLE_SETUP()` — best-effort stop recording, drop the camera link, stop
   camera-owned advertising, force the FSM to IDLE, release the radio. Sleep
-  entry runs `CAMERA_SLEEP()` (same, plus a best-effort power-off). BLE
+  entry runs `CAMERA_SLEEP()` (same, plus a power-off that is **streamed
+  synchronously** before the disconnect — the loop parks on sleep, so the
+  non-blocking ce82 hold would otherwise never transmit a frame and the
+  camera would run all night). BLE
   comes up **lazily** on the first camera action (first advertising
   `Action`), so unpaired users pay zero RAM/power cost.
 - **Threading**: same deferred pattern as `firmware_ota` — Bluefruit
@@ -665,7 +687,11 @@ loop()  ~250 Hz
   into RAM and set volatile flags; `CAMERA_LOOP()` on the main loop
   consumes them, steps the FSM, and does all real work (including the one
   `setSetting()` that persists a captured serial and streaming the
-  power-off hold).
+  power-off hold). The ce82 CCCD callback latches a cached `ce82NotifyOn`
+  flag so the hot paths (per-loop Inputs snapshot + 10 Hz GPS tick) never
+  SVC into the SoftDevice for the subscription state; `CAMERA_LOOP()`
+  re-reads `notifyEnabled()` only at a low rate while linked-but-not-yet-known-
+  subscribed, to catch a bonded peer's silent sys-attr CCCD restore.
 - **X4-VERIFY posture**: all frame bytes live in the host-tested
   `insta360_protocol` pure unit with golden-byte tests. The **wake
   advert + scan response are X4-CONFIRMED ground truth** — captured from
@@ -679,16 +705,22 @@ loop()  ~250 Hz
   **Test** entry opening a manual-control menu (Wake / Record / Power Off /
   Back) plus live remote (**R**) link status (`R:UP+` when the camera is
   connected AND subscribed to ce82, `R:UP` when connected but ignoring our
-  buttons) and advert (**Adv:**) status, so the remote link can be
-  exercised without staging RPM/GPS to drive the FSM. **Wake** presents the
+  buttons), advert (**Adv:**) status, a **G:** GPS-feed indicator (`SYNC`
+  with a fix / `V` voided-but-streaming / `--` not streaming) and a
+  **rec:yes/no** state driven by the camera's own `0x10` record timer
+  (`rec:--` when there's no fresh observation — no link, or the camera hasn't
+  pushed a `0x10` yet — so a missing signal isn't misread as "not recording")
+  — so both the GPS link and that a Record press actually started the camera
+  can be verified without staging RPM/GPS to drive the FSM. **Wake** presents the
   wake / remote-identity advert so a standby camera wakes and an on camera
   connects back to us; **Record** sends the ce82 shutter toggle; **Power
   Off** streams the ce82 hold — both need the camera connected + subscribed.
   `cameraTestEnterMode()` forces the FSM to IDLE and sets `cameraTestActive`,
   which makes `CAMERA_LOOP()` suppress the FSM step (so auto-record can't
   fight the manual actions) while the Bluefruit callbacks keep the link
-  serviced; `cameraTestExitMode()` stops any recording and tears the session
-  down. The `cameraTest*()` action helpers reuse the exact
+  serviced; `cameraTestExitMode()` stops any recording (tracked in a
+  bench-local belief so the camera is **guaranteed** left stopped on exit)
+  and tears the session down. The `cameraTest*()` action helpers reuse the exact
   `cameraExecuteAction()` code paths the FSM would run — no new FSM states,
   so the board-portable pure unit is untouched.
 - **X4 field notes** (from live bench testing, informing the above): the
@@ -841,7 +873,9 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | Camera power-off cooldown | 180 s | `camera_fsm.h` |
 | Camera RPM on/off thresholds | 500 / 300 (2 s on-debounce) | `camera_fsm.h` |
 | Camera wake attempt window | 20 s ×3 (beacon) | `camera_fsm.h` |
-| Camera connect / subscribe timeouts | 20 s connect / 10 s ce82 subscribe, 3 retries | `camera_fsm.h` |
+| Camera connect / subscribe timeouts | 20 s connect / 10 s ce82 subscribe, 3 retries each | `camera_fsm.h` |
+| Camera record-confirm re-assert | 2.5 s camera-idle before re-shutter | `camera_fsm.h` |
+| Camera record-obs freshness | 3 s (stale 0x10 → kUnknown) | `camera_ble.ino` |
 | Camera GPS-lock wait | 30 s, then record anyway | `camera_fsm.h` |
 | Camera pairing timeout | 120 s | `camera_fsm.h` |
 

@@ -103,4 +103,24 @@ enum class Ce81Frame : uint8_t { kUnknown, kSerial, kStatus };
 Ce81Frame parseCe81Frame(const uint8_t* data, size_t len,
                          uint8_t serialOut[kSerialLen]);
 
+// Camera record state, observed INDIRECTLY from the 0x10 display-string
+// frame (X4-CONFIRMED, spec §6.1 / README_2.md). The camera exposes no
+// clean record flag: while recording, its ~1 Hz 0x10 frame carries an
+// elapsed ".HH:MM:SS" timer; idle it carries the mode ("4K|30|UW") or
+// battery (" 13h09m") string. The 0x02 status word is NOT a reliable record
+// signal (confirmed in the capture), so the 0x10 timer is the dependable
+// source. A device that SENDS the shutter still can't know whether the
+// camera actually started — this parse closes that loop.
+//
+//   FE EF FE 10 <flag> <len> <4 control bytes> <ASCII display string>
+//
+enum class RecordObs : uint8_t { kUnknown, kIdle, kRecording };
+
+// Classify a ce81 write as a record-state observation. Returns kRecording
+// when the 0x10 display string is the elapsed-time counter (a leading '.'
+// and, uniquely vs the mode/battery strings, two ':' separators), kIdle for
+// any other 0x10 display string, and kUnknown when the frame is not a
+// parseable 0x10 frame (wrong magic/type, or truncated).
+RecordObs parseRecordingState(const uint8_t* data, size_t len);
+
 }  // namespace insta360_protocol

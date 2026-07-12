@@ -407,6 +407,115 @@ TEST_CASE("camera_fsm - clean stop toggles shutter OFF") {
 }
 
 // ---------------------------------------------------------------------------
+// Observed-record-state reconcile (0x10 timer) — #4
+// ---------------------------------------------------------------------------
+
+TEST_CASE("camera_fsm - AWAIT READY adopts an already-recording camera without a shutter") {
+    Sim s;
+    s.toAwaitReady();
+    s.in.ce82Subscribed = true;
+    s.in.gpsFixValid = true;
+    s.in.recordObserved = RecordObs::kRecording;  // camera already rolling
+    CHECK(s.tick(10) == Action::kNone);           // adopt, no blind toggle
+    CHECK(s.f.state == State::kRecording);
+    CHECK(s.f.recordingActive == true);
+}
+
+TEST_CASE("camera_fsm - AWAIT READY with camera IDLE observed sends the start shutter") {
+    Sim s;
+    s.toAwaitReady();
+    s.in.ce82Subscribed = true;
+    s.in.gpsFixValid = true;
+    s.in.recordObserved = RecordObs::kIdle;
+    CHECK(s.tick(10) == Action::kSendShutter);
+    CHECK(s.f.recordingActive == true);
+}
+
+TEST_CASE("camera_fsm - WAKING give-up preserves recording belief; reconnect never inverts") {
+    Sim s;
+    s.toRecording();                 // recordingActive == true
+    // Link drops mid-recording -> WAKING, belief preserved.
+    s.in.remoteConnected = false;
+    CHECK(s.tick(10) == Action::kStartWakeBurst);
+    CHECK(s.f.state == State::kWaking);
+    CHECK(s.f.recordingActive == true);
+    // Camera never comes back: exhaust the 3-attempt ladder -> IDLE.
+    CHECK(s.tick(20000) == Action::kStartWakeBurst);   // attempt 2
+    CHECK(s.tick(20000) == Action::kStartWakeBurst);   // attempt 3
+    CHECK(s.tick(20000) == Action::kStopAdvertising);  // give up
+    CHECK(s.f.state == State::kIdle);
+    CHECK(s.f.recordingActive == true);  // PRESERVED across the give-up (#4)
+
+    // RPM re-triggers; camera reconnects STILL recording (obs kRecording).
+    s.in.rpm = 1000;
+    CHECK(s.tick(0) == Action::kNone);
+    CHECK(s.tick(kRpmOnDebounceMs) == Action::kStartWakeBurst);
+    s.in.remoteConnected = true;
+    CHECK(s.tick(10) == Action::kNone);   // AWAIT READY
+    s.in.ce82Subscribed = true;
+    s.in.gpsFixValid = true;
+    s.in.recordObserved = RecordObs::kRecording;
+    // The old bug toggled the shutter here (stopping the live recording).
+    CHECK(s.tick(10) == Action::kNone);
+    CHECK(s.f.state == State::kRecording);
+    CHECK(s.f.recordingActive == true);
+}
+
+TEST_CASE("camera_fsm - RECORDING re-asserts the shutter once if the camera reports idle") {
+    Sim s;
+    s.toRecording();
+    s.in.speedMph = 30.0f;   // no stop condition
+    s.in.rpm = 5000;
+    s.in.recordObserved = RecordObs::kIdle;   // start never took
+    CHECK(s.tick(10) == Action::kNone);       // arm the confirm timer
+    CHECK(s.f.recordIdleSince != 0);
+    CHECK(s.tick(kRecordConfirmMs) == Action::kSendShutter);  // re-assert ON
+    CHECK(s.f.recordRetryUsed == true);
+    // No second retry while still idle.
+    auto acts = s.run(10000, 500);
+    CHECK(countOf(acts, Action::kSendShutter) == 0);
+    // Camera confirms recording -> latch re-armed.
+    s.in.recordObserved = RecordObs::kRecording;
+    CHECK(s.tick(10) == Action::kNone);
+    CHECK(s.f.recordRetryUsed == false);
+}
+
+TEST_CASE("camera_fsm - RECORDING never retries without a fresh observation") {
+    Sim s;
+    s.toRecording();
+    s.in.speedMph = 30.0f;
+    s.in.rpm = 5000;
+    s.in.recordObserved = RecordObs::kUnknown;  // no 0x10 seen
+    auto acts = s.run(30000, 500);
+    CHECK(countOf(acts, Action::kSendShutter) == 0);
+    CHECK(s.f.recordIdleSince == 0);
+}
+
+// ---------------------------------------------------------------------------
+// Bounded subscribe-timeout give-up — #9
+// ---------------------------------------------------------------------------
+
+TEST_CASE("camera_fsm - connect-but-never-subscribe gives up to IDLE after kSubscribeRetries") {
+    Sim s;
+    s.toAwaitReady();
+    CHECK(s.in.ce82Subscribed == false);
+
+    // Each cycle: subscribe times out -> kDisconnect -> kWaking, and (the
+    // camera link is still up in the sim) the next step bounces back to
+    // AWAIT READY. subscribeAttemptsUsed persists and bounds the loop.
+    for (uint8_t cycle = 1; cycle <= kSubscribeRetries; ++cycle) {
+        CHECK(s.tick(kSubscribeTimeoutMs) == Action::kDisconnect);
+        CHECK(s.f.state == State::kWaking);
+        CHECK(s.f.subscribeAttemptsUsed == cycle);
+        CHECK(s.tick(10) == Action::kNone);  // remote still up -> AWAIT READY
+        CHECK(s.f.state == State::kAwaitReady);
+    }
+    // One more timeout exceeds the budget -> give up to IDLE.
+    CHECK(s.tick(kSubscribeTimeoutMs) == Action::kDisconnect);
+    CHECK(s.f.state == State::kIdle);
+}
+
+// ---------------------------------------------------------------------------
 // RECORDING — stop semantics
 // ---------------------------------------------------------------------------
 

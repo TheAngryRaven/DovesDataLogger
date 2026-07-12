@@ -88,6 +88,51 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   to 2 MHz automatically if the fast re-init fails.
 
 ### Fixed
+- **Camera record state is now confirmed from the camera, not just believed.**
+  The shutter is a stateful toggle, so a lost or mistimed frame used to
+  *invert* our belief and stop a live recording (or start one in the paddock).
+  A Wireshark capture of the genuine remote link showed the camera reports its
+  state implicitly through its `0x10` display-string frame — a live
+  `.HH:MM:SS` timer while recording, the mode/battery string when idle (the
+  `0x02` status word is not reliable). The firmware now parses that timer and
+  **reconciles** its record belief against it: on reconnect it adopts the
+  camera's real state instead of blind-toggling, and if the camera reports
+  idle while we think we're recording it re-asserts the shutter once. The
+  belief is preserved (not cleared) whenever the camera is unreachable, so a
+  dropped link mid-session can never invert on reconnect. The bench **Test**
+  page gains a `rec:yes/no` state (the camera's own timer; `rec:--` when there
+  is no fresh observation) and a `G:SYNC` / `G:V`
+  GPS indicator so the link can be verified end-to-end. (Parser is golden-
+  tested in the `insta360_protocol` unit; the reconcile in the `camera_fsm`
+  unit.)
+- **Camera now powers off on sleep instead of running all night.** Entering
+  sleep armed the streamed power-off hold and then immediately disconnected —
+  but the loop parks on sleep, so the hold was never serviced and *zero*
+  power-off frames were sent. Sleep entry now streams the hold synchronously
+  (feeding the watchdog) before dropping the link.
+- **A nearby paired camera no longer reboots the logger out of a transfer
+  session.** The radio has one address, so a bonded X4 can connect to the
+  transfer advert and get routed as "the phone"; its sub-second drop hit the
+  transfer auto-reboot, kicking the user out of Bluetooth/USB transfer
+  repeatedly. The reboot is now gated on the peer actually having used the
+  file/settings/OTA service — a camera that only vets our GATT and leaves is
+  ignored. Relatedly, exiting Bluetooth no longer leaves a stale transfer
+  advert on air (`restartOnDisconnect` is disarmed before the teardown
+  disconnect), which had let a phone reconnect into a mute session and
+  blocked camera auto-record until a power cycle.
+- **A camera that connects but never subscribes no longer loops forever.**
+  The ce82 subscribe-timeout re-advertised without counting attempts, so a
+  stale bond (encryption never comes up) span connect→timeout→re-advertise
+  indefinitely. It is now bounded — after a few cycles the FSM gives up back
+  to IDLE.
+- **Camera Pair/Test menus scroll the right way.** The new pages render a
+  static top-to-bottom list like the main menu, but weren't in the
+  direction-reversal set, so the first "down" press wrapped to the last item
+  (once landing on Unpair). They now move with the buttons.
+- **ce82 subscription is cached off the hot loop.** The subscription check was
+  a SoftDevice round-trip called ~500×/s (per loop + per GPS tick); it is now
+  latched from the CCCD callback (with a low-rate re-read to catch a bonded
+  peer's silent sys-attr restore), keeping the 25 Hz logging loop clear.
 - **USB mass-storage exit no longer risks truncating a host write.** Exiting
   USB mode syncs the card and reboots, but `setUnitReady(false)` only stops
   *new* SCSI commands — a `WRITE10` already in flight keeps calling the write
