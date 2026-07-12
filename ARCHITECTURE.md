@@ -202,39 +202,41 @@ the camera first. The link is Just-Works bonded (the genuine remote link
 is encrypted), and BLE comes up lazily on the first camera action, so an
 unpaired device pays nothing.
 
-The entire lifecycle — wake on engine start, wait for the camera to
-connect and subscribe, record on GPS lock (or a 30 s timeout), stop, cool
-down, power off — is a **pure FSM** (`camera_fsm`): it consumes a
-telemetry snapshot each loop tick and returns at most one action for the
-glue to execute. Because the shutter is a *toggle*, a wrong record belief
-flips the camera the wrong way — so the FSM does not merely believe: it
-**confirms** record state from the camera's own `0x10` status frame (a live
-`.HH:MM:SS` timer while recording; the `0x02` word is unreliable) and
-reconciles its `recordingActive` belief against that observation. On a
-mid-session BLE drop it preserves the belief (the camera is unreachable, so
-we can't have stopped it) and on reconnect adopts the camera's real state
-instead of blind-toggling; if the camera reports idle while we think we're
-recording, it re-asserts the shutter once. All the temporal behavior (debounce,
-retries, timeouts) lives inside it, so every path is host-tested with a
-fake clock rather than discovered at the track; it is also the
+The lifecycle is a **pure FSM** (`camera_fsm`), deliberately RPM-driven and
+simple: wake on engine start, connect+subscribe, record once RPM has held a
+few seconds, stop after the engine has been off a while, then WATCH. It
+consumes a telemetry snapshot each loop tick and returns at most one action
+for the glue to execute. **Recording starts** from the WATCHING hub once RPM
+has held above the ON threshold for ~5 s — there is **no GPS-lock gate**
+(GPS still streams to the camera continuously). Because the shutter is a
+*toggle*, a wrong record belief flips the camera the wrong way — so the FSM
+does not merely believe: it **confirms** record state from the camera's own
+`0x10` status frame (a live `.HH:MM:SS` timer while recording; the `0x02`
+word is unreliable) and reconciles `recordingActive` against it. On a
+mid-session BLE drop it preserves the belief and on reconnect adopts the
+camera's real state instead of blind-toggling; if the camera reports idle
+while we think we're recording, it re-asserts the shutter once. **Recording
+stops** after ~30 s of engine-off (RPM only — a stationary but running grid
+idle keeps recording), returning to WATCHING. WATCHING keeps the camera on
+and connected so a brief on-track stall recovers straight back into
+recording when RPM returns; the camera powers off **only** when the device
+sleeps (there is no post-record cooldown/power-off timeout). All temporal
+behavior lives inside the FSM, host-tested with a fake clock, and it is the
 board-portable core intended to move unchanged to the nRF54 ("Falcon")
-target. The stop condition is deliberately **AND, not OR**: recording
-ends only after 60 s of stationary *and* engine-off, because either
-signal alone lies — a kart idles on the grid at 0 mph, and a coasting
-stall has speed but no RPM. Both together mean the session is really over
-(a manual session end stops the camera immediately).
+target.
 
-Two guarantees bound the feature's blast radius. First, the FSM is a
-*read-only* consumer of telemetry — logs are byte-identical whether a
-camera is paired or not, and camera mode never parks the main loop the
-way BLE transfer and USB MSC do. Second, the protocol bytes live in the
-host-tested `insta360_protocol` unit with golden-byte tests. The wake
-advert + scan response, the ce82 button frames, and the ce82 GPS/RMC frame
-are all **X4-confirmed** — captured from a genuine remote (the wake advert
-was even replayed to wake a sleeping X4). The camera's own `ce81` state
-pushes are now partly decoded too: the `0x10` display-string frame carries
-the record timer used for the confirmation above; the remaining status
-types are accepted and ACKed, parsed only if we want richer feedback.
+One deliberate coupling bounds the feature: the camera's 30 s-engine-off
+auto-stop also **ends the race log session** (the glue latches it and the
+main sketch calls `endRaceSession()` + returns to the menu), and while the
+camera is recording `checkAutoIdle()` yields so the speed-based log idle
+can't cut the log out from under it. So with a camera paired+recording the
+log ends on engine-off, not on 60 s-stationary; without a camera, logging is
+unchanged (a tach-less setup reads RPM≈0, which is why the RPM-idle can't be
+made universal). The protocol bytes live in the host-tested
+`insta360_protocol` unit with golden-byte tests: the wake advert + scan
+response, the ce82 button frames, the ce82 GPS/RMC frame, and the `0x10`
+record-timer parse are all captured from a genuine remote (the wake advert
+was even replayed to wake a sleeping X4).
 
 ## Data formats
 

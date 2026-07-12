@@ -164,9 +164,10 @@ loop()  ~250 Hz
  ├─ BLUETOOTH_LOOP()        stream file chunks if transfer active
  ├─ trackDetectionLoop()    haversine scan → create CourseManager on match
  ├─ checkForNewLapData()    reads from active timer (CourseManager or lapTimer)
- ├─ checkAutoIdle()         60s at <2mph → end session, write DOVEX header
+ ├─ checkAutoIdle()         60s at <2mph → end session (yields while camera recording)
  ├─ updateGpsLockHold()     pin user to tach page until GPS time lock
  ├─ CAMERA_LOOP()           step Insta360 auto-record FSM (GPS/tach fresh)
+ ├─ cameraConsumeAutoStop() camera 30s-engine-off stop → endRaceSession + menu
  ├─ calculateGPSFrameRate() 1-second PVT counter
  ├─ readButtons()           multi-sample debounce + edge detection
  ├─ displayLoop()           pages read from active timer helpers
@@ -618,51 +619,56 @@ loop()  ~250 Hz
   go silent or the camera drops us; status `V` with last-known coords when
   there's no fix), paused only during a power-off hold. GPS still logs to
   SD independently.
-- **Lifecycle FSM** (`camera_fsm` pure unit, host-tested): 8 states —
-  UNPAIRED / IDLE / WAKING / AWAIT_READY / RECORDING / COOLDOWN /
-  POWERING_OFF / PAIRING (`kConnecting`/`kAwaitGps` are gone, folded into
-  `kAwaitReady`). RPM > 500 held 2 s enters WAKING, which broadcasts the
-  31-byte CONNECTABLE wake advert — the sniffed GPS-Action-Remote
-  manufacturer payload (serial at mfg[14..19], per the primary
-  `pchwalek/insta360_ble_esp32` source; the earlier `insta360ctl`
-  "idealized iBeacon" form was wrong) in the primary PDU with the
-  "Insta360 GPS Remote" name in the scan response, both set as raw bytes so
-  the stack can't reshape them (retry ×3). The woken camera connects back
-  to us and the FSM moves to AWAIT_READY, which waits for the camera to
-  connect, subscribe to ce82, and (best-effort) get a GPS fix before
-  recording. (Wake only reaches an ARMED camera: on the X4, Bluetooth
-  Wakeup is armed when **QuickCapture is OFF** — an armed camera keeps its
-  radio scanning even fully powered off; an un-armed one is BLE-dead and
-  nothing can wake it. Every advert goes through `bleAdvFinalizePadded()`
-  — see bluetooth.ino — to defeat the Bluefruit 0.21.0 frozen-packet-length
-  core bug.) Recording starts on GPS fix (or after 30 s regardless) by
-  sending one shutter-toggle ce82 frame. The shutter is a stateful TOGGLE, so
-  the FSM never blind-fires it: it **confirms** record state from the camera's
-  own `0x10` ce81 display-string frame (a live `.HH:MM:SS` timer while
-  recording — the `0x02` status word is not reliable;
+- **Lifecycle FSM** (`camera_fsm` pure unit, host-tested): the race-mode
+  lifecycle is deliberately **RPM-driven and simple**. 7 states — UNPAIRED /
+  IDLE / WAKING / AWAIT_READY / RECORDING / **WATCHING** / PAIRING (the old
+  COOLDOWN/POWERING_OFF tail is gone — power-off is now sleep-only).
+  RPM > 500 held 2 s enters WAKING, which broadcasts the 31-byte CONNECTABLE
+  wake advert — the sniffed GPS-Action-Remote manufacturer payload (serial at
+  mfg[14..19], per the primary `pchwalek/insta360_ble_esp32` source) in the
+  primary PDU with the "Insta360 GPS Remote" name in the scan response, both
+  set as raw bytes so the stack can't reshape them (retry ×3). The woken
+  camera connects back and the FSM moves to AWAIT_READY (wait for the ce82
+  subscription; bounded re-wake if it never subscribes) → **WATCHING**.
+  (Wake only reaches an ARMED camera: on the X4, Bluetooth Wakeup is armed
+  when **QuickCapture is OFF** — an armed camera keeps its radio scanning even
+  fully powered off. Every advert goes through `bleAdvFinalizePadded()` — see
+  bluetooth.ino — to defeat the Bluefruit 0.21.0 frozen-packet-length core
+  bug.) **Recording starts** from WATCHING once RPM has held above ON for
+  `kRecordStartDelayMs` (5 s) — **no GPS-lock gate** (GPS still streams the
+  whole time) — by sending one shutter-toggle ce82 frame. The shutter is a
+  stateful TOGGLE, so the FSM never blind-fires it: it **confirms** record
+  state from the camera's own `0x10` ce81 display-string frame (a live
+  `.HH:MM:SS` timer while recording — the `0x02` status word is not reliable;
   `insta360_protocol::parseRecordingState`) and reconciles `recordingActive`
   against that observation (`RecordObs` Input). On reconnect it adopts the
   camera's real state instead of toggling; if the camera reports idle while we
   believe we're recording it re-asserts the shutter once; and the belief is
-  preserved (never cleared) on any path where the camera is unreachable, so a
-  dropped link can't invert on reconnect. It stops after 60 s of
-  stationary (<2 mph) **AND** engine-off (<300 rpm) — grid idling and
-  coasting stalls keep recording; a manual session end
-  (`CAMERA_NOTIFY_SESSION_END()` from the logging-stop confirm —
-  deliberately NOT from `endRaceSession()`, whose auto-idle caller ends the
-  log on speed alone and must not cut footage during a grid idle) stops the
-  camera immediately; power-off (streamed ce82 3-s power-button hold) fires
-  after a 3-min cooldown. All timing (debounce, retries, timeouts) lives in
-  the FSM so the entire temporal behavior is host-testable; every tunable
-  is a single-point `constexpr` in `camera_fsm.h`. The unit is also the
-  board-portable core shared with the nRF54 ("Falcon") target — nothing in
-  it may `#ifdef` on the platform.
-- **Read-only telemetry guarantee**: the FSM consumes an `Inputs`
-  snapshot (RPM, speed, fix, link state, one-shot events) built fresh
-  each `CAMERA_LOOP()` and returns at most one `Action` for the glue to
-  execute. It never writes to logging state — logs are byte-identical
-  with the feature on or off, and camera mode never parks the main loop
-  (unlike the `bleActive` / `usbMscActive` branches).
+  preserved on any path where the camera is unreachable, so a dropped link
+  can't invert on reconnect. **Recording stops** after `kStopRecordDelayMs`
+  (30 s) of engine-off (RPM < 300) — **RPM only, no speed**, so a
+  stationary-but-running grid idle keeps recording — sending one shutter
+  toggle and returning to WATCHING. The 30 s-engine-off auto-stop also **ends
+  the race log session** (see the read-only note below). A manual session end
+  (`CAMERA_NOTIFY_SESSION_END()` from the logging-stop confirm) stops the
+  camera immediately, also to WATCHING. **WATCHING** keeps the camera ON and
+  connected: if RPM returns it re-records (stall recovery), and it powers the
+  camera off **only when the device sleeps** (`CAMERA_SLEEP()` streams the
+  ce82 power-hold synchronously) — there is no post-record cooldown/power-off
+  timeout. All timing lives in the FSM so the temporal behavior is
+  host-testable; every tunable is a single-point `constexpr` in
+  `camera_fsm.h`. The unit is the board-portable core shared with the nRF54
+  ("Falcon") target — nothing in it may `#ifdef` on the platform.
+- **Telemetry consumer, with one deliberate write-back**: the FSM consumes an
+  `Inputs` snapshot (RPM, link state, observed record state, one-shot events)
+  built fresh each `CAMERA_LOOP()` and returns at most one `Action`. Camera
+  mode never parks the main loop (unlike `bleActive` / `usbMscActive`). The
+  ONE exception to the old read-only guarantee: when the camera auto-stops
+  (30 s engine-off), the glue latches `cameraConsumeAutoStop()` and the main
+  sketch calls `endRaceSession()` + returns to the menu — so with a camera
+  paired+recording the log ends on 30 s-no-RPM instead of the speed-based
+  auto-idle (which `checkAutoIdle()` suppresses while `cameraActivelyRecording()`).
+  Without a camera, logging is unchanged.
 - **Pairing / bonding**: entering pairing from `PAGE_PAIR_CAMERA`
   advertises connectably as "Insta360 GPS Remote"; after connecting, the
   camera writes its 6-char ASCII serial to ce81, which is captured and
@@ -869,14 +875,14 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | OTA staging flash base | `0xA4000` | `firmware_ota.ino` |
 | OTA max image size | 320 KB | `firmware_ota.ino` |
 | OTA min apply voltage | 3.6 V | `firmware_ota.ino` |
-| Camera stop-record delay | 60 s stationary AND engine-off | `camera_fsm.h` |
-| Camera power-off cooldown | 180 s | `camera_fsm.h` |
+| Camera record-start delay | 5 s RPM held above ON (no GPS gate) | `camera_fsm.h` |
+| Camera stop-record delay | 30 s engine-off (RPM only) → also ends log session | `camera_fsm.h` |
+| Camera power-off | sleep only (no post-record cooldown/timeout) | `camera_ble.ino` (`CAMERA_SLEEP`) |
 | Camera RPM on/off thresholds | 500 / 300 (2 s on-debounce) | `camera_fsm.h` |
 | Camera wake attempt window | 20 s ×3 (beacon) | `camera_fsm.h` |
 | Camera connect / subscribe timeouts | 20 s connect / 10 s ce82 subscribe, 3 retries each | `camera_fsm.h` |
 | Camera record-confirm re-assert | 2.5 s camera-idle before re-shutter | `camera_fsm.h` |
 | Camera record-obs freshness | 3 s (stale 0x10 → kUnknown) | `camera_ble.ino` |
-| Camera GPS-lock wait | 30 s, then record anyway | `camera_fsm.h` |
 | Camera pairing timeout | 120 s | `camera_fsm.h` |
 
 ---

@@ -134,6 +134,16 @@ bool cameraObservedRecording();
 // actively reports idle), so a missing signal isn't misread as "not recording".
 bool cameraRecordObservationFresh();
 
+// True while the camera FSM is in RECORDING. `checkAutoIdle()` reads this so the
+// speed-based log-idle yields to an active recording (the camera owns the end).
+bool cameraActivelyRecording();
+
+// Returns true ONCE after the camera auto-stops recording on the 30 s engine-off
+// condition (clears the latch). The main sketch calls `endRaceSession()` +
+// returns to the menu in response. A manual logging-stop does NOT set this (that
+// path already ends the session).
+bool cameraConsumeAutoStop();
+
 // Copy the stored 6-char serial into buf (NUL-terminated; bufSize >= 7).
 // Returns false (buf = "") when unpaired.
 bool cameraPairedSerial(char* buf, size_t bufSize);
