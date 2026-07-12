@@ -57,6 +57,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   OFF to schedule it; the GPS warm-starts on wake instead.
 - **RPM sleep-wake latch (`tachHavePeriod` / `TACH_SLEEP()`)** —
   superseded by the tach pin's GPIO SENSE wake from System OFF.
+
+### Fixed
+- **Boot hang on "Initializing..."** introduced by the GPS boot probe
+  ladder: it called `Serial1.end()` before the port had ever been opened,
+  and the nRF52 core's `Uart::end()` spin-waits on stop events a
+  never-enabled UART can't produce — hanging `setup()` forever (before
+  the watchdog is armed). Baud switches now go through a guard that only
+  closes a port we actually opened.
 - **Insta360 X4 camera auto-record (remote emulation).** The device
   emulates the physical Insta360 GPS Remote as a pure BLE **peripheral**
   to drive an X4 hands-free. Engine start (RPM > 500 held 2 s) wakes a

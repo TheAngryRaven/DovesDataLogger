@@ -213,6 +213,22 @@ static void gpsRegisterCallbacks() {
   }
 }
 
+// Serial1 open-state guard for baud switches. The core's Uart::end()
+// spin-waits on the TXSTOPPED + RXTO events, but a never-begun UARTE is
+// disabled and ignores the STOPRX/STOPTX task writes — the events can
+// never fire and end() loops forever. (end() has no _begun check; begin()
+// does, and is a no-op on an open port, so a baud change NEEDS the end().)
+// Track open state ourselves and only end() a port we actually opened.
+static bool gpsSerialBegun = false;
+static void gpsSerialRestart(unsigned long baud) {
+  if (gpsSerialBegun) {
+    GPS_SERIAL.end();
+    delay(20);
+  }
+  GPS_SERIAL.begin(baud);
+  gpsSerialBegun = true;
+}
+
 // The baud probe ladder. The module can be in ANY state at boot — every
 // boot is a cold start now that sleep is System OFF:
 //   (1) software backup mode holding a 57600 config (the normal wake),
@@ -225,9 +241,7 @@ static void gpsRegisterCallbacks() {
 // Caller owns gpsInitialized and the serial timer.
 static bool gpsSetupProbe(bool coldRetry) {
   // Any UART activity on RX wakes u-blox from powerOff backup mode.
-  GPS_SERIAL.end();
-  delay(20);
-  GPS_SERIAL.begin(GPS_BAUD_RATE);
+  gpsSerialRestart(GPS_BAUD_RATE);
   delay(50);
   GPS_SERIAL.write(0xFF);
   delay(100);
@@ -241,9 +255,7 @@ static bool gpsSetupProbe(bool coldRetry) {
 
   // 9600 fallback — factory default after a full config loss.
   debugln(F("GPS not at 57600, trying 9600..."));
-  GPS_SERIAL.end();
-  delay(50);
-  GPS_SERIAL.begin(9600);
+  gpsSerialRestart(9600);
   delay(100);
   GPS_SERIAL.write(0xFF);  // wake again in case the first byte was eaten at the wrong baud
   delay(100);
@@ -252,9 +264,7 @@ static bool gpsSetupProbe(bool coldRetry) {
     debugln(F("GPS found at 9600, switching to 57600..."));
     myGNSS.setSerialRate(GPS_BAUD_RATE);
     delay(100);
-    GPS_SERIAL.end();
-    delay(50);
-    GPS_SERIAL.begin(GPS_BAUD_RATE);
+    gpsSerialRestart(GPS_BAUD_RATE);
     delay(100);
     wdtPet();
     if (myGNSS.begin(gpsStream)) {
