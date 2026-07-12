@@ -7,6 +7,7 @@
 #include "gps_functions.h"
 #include "gps_time.h"
 #include "gps_validation.h"
+#include "sat_bars.h"
 
 ///////////////////////////////////////////
 // GPS SERIAL BUFFER
@@ -180,81 +181,141 @@ void onPVTReceived(UBX_NAV_PVT_data_t *pvt) {
   gpsFrameCounter++;
 }
 
+// NAV-SAT callback — fired by checkCallbacks() while status mode has
+// NAV-SAT enabled. Snapshots per-satellite CNO (used-in-nav first,
+// strongest first — rules in the host-tested sat_bars unit) for the GPS
+// status page's signal bars.
+void onNAVSATReceived(UBX_NAV_SAT_data_t *sat) {
+  sat_bars::SatObs obs[64];
+  uint8_t n = sat->header.numSvs;
+  if (n > 64) n = 64;
+  uint8_t used = 0;
+  for (uint8_t i = 0; i < n; i++) {
+    obs[i].cno = sat->blocks[i].cno;
+    obs[i].used = (sat->blocks[i].flags.bits.svUsed != 0);
+    if (obs[i].used) used++;
+  }
+  gpsSatUsedCount = used;
+  gpsSatCnoCount = (uint8_t)sat_bars::selectCnos(obs, n, gpsSatCnos,
+                                                 sat_bars::kMaxSats);
+}
+
+// Register the message callbacks with the SparkFun library. Needed
+// after every myGNSS.begin() — begin() resets library state, dropping
+// previously registered callbacks.
+static void gpsRegisterCallbacks() {
+  myGNSS.setAutoPVTcallbackPtr(&onPVTReceived);
+  if (gpsNavSatWanted) {
+    myGNSS.setAutoNAVSATcallbackPtr(&onNAVSATReceived);
+    // NAV-SAT frames are big (8 + 12*numSvs bytes); divide them down to
+    // ~1 Hz instead of one per nav solution. Plenty for signal bars.
+    myGNSS.setAutoNAVSATrate(GPS_NAV_RATE_STATUS_HZ);
+  }
+}
+
+// The baud probe ladder. The module can be in ANY state at boot — every
+// boot is a cold start now that sleep is System OFF:
+//   (1) software backup mode holding a 57600 config (the normal wake),
+//   (2) already-configured 57600 and running (MCU-only reset: reboot
+//       combo, watchdog, OTA),
+//   (3) factory 9600 NMEA (true cold power, or V_BCKP/VCC brownout).
+// Sequence: backup-wake byte first (harmless if awake), probe 57600
+// (the common warm case, ~instant), fall back to 9600 + rate switch,
+// and only if all that fails pay a cold-boot delay and retry once.
+// Caller owns gpsInitialized and the serial timer.
+static bool gpsSetupProbe(bool coldRetry) {
+  // Any UART activity on RX wakes u-blox from powerOff backup mode.
+  GPS_SERIAL.end();
+  delay(20);
+  GPS_SERIAL.begin(GPS_BAUD_RATE);
+  delay(50);
+  GPS_SERIAL.write(0xFF);
+  delay(100);
+
+  // 57600 first — warm module answers immediately.
+  wdtPet();  // each begin() probe burns ~1.1 s of ping timeouts
+  if (myGNSS.begin(gpsStream)) {
+    debugln(F("GPS found at 57600 (config retained)"));
+    return true;
+  }
+
+  // 9600 fallback — factory default after a full config loss.
+  debugln(F("GPS not at 57600, trying 9600..."));
+  GPS_SERIAL.end();
+  delay(50);
+  GPS_SERIAL.begin(9600);
+  delay(100);
+  GPS_SERIAL.write(0xFF);  // wake again in case the first byte was eaten at the wrong baud
+  delay(100);
+  wdtPet();
+  if (myGNSS.begin(gpsStream)) {
+    debugln(F("GPS found at 9600, switching to 57600..."));
+    myGNSS.setSerialRate(GPS_BAUD_RATE);
+    delay(100);
+    GPS_SERIAL.end();
+    delay(50);
+    GPS_SERIAL.begin(GPS_BAUD_RATE);
+    delay(100);
+    wdtPet();
+    if (myGNSS.begin(gpsStream)) {
+      debugln(F("GPS reconnected at 57600"));
+      return true;
+    }
+    debugln(F("GPS lost after baud switch!"));
+    return false;
+  }
+
+  // Neither baud answered. A module on true cold power may still be
+  // booting — give it the boot time the old fixed delay(2250) paid up
+  // front, then run the ladder once more.
+  if (coldRetry) {
+    debugln(F("GPS not detected, waiting for cold boot..."));
+    for (int i = 0; i < 3; i++) {
+      wdtPet();
+      delay(500);
+    }
+    return gpsSetupProbe(false);
+  }
+  return false;
+}
+
 void GPS_SETUP() {
   gpsInitialized = false;  // Reset flag at start of setup
 
   #ifndef WOKWI
     debugln(F("ACTUAL GPS SETUP"));
 
-    // Start at u-blox default baud rate (9600 for fresh modules)
-    GPS_SERIAL.begin(9600);
-    // Wait for the GPS to boot
-    delay(2250);
-
-    if (GPS_SERIAL) {
-      // Connect to GPS at default baud
-      // gpsStream wraps GPS_SERIAL: before timer starts, reads pass
-      // through directly so myGNSS.begin() can communicate with module.
-      if (!myGNSS.begin(gpsStream)) {
-        debugln(F("GPS not detected at 9600 baud, trying 57600..."));
-        GPS_SERIAL.end();
-        delay(100);
-
-        // Module may already be configured to 57600 from a previous session
-        GPS_SERIAL.begin(GPS_BAUD_RATE);
-        delay(100);
-        if (!myGNSS.begin(gpsStream)) {
-          debugln(F("ERROR: GPS not detected at any baud rate!"));
-          return;  // Leave gpsInitialized = false
-        }
-        debugln(F("GPS found at 57600 baud (already configured)"));
-      } else {
-        // Connected at 9600, switch module to 57600
-        debugln(F("GPS found at 9600, switching to 57600..."));
-        myGNSS.setSerialRate(GPS_BAUD_RATE);
-        delay(100);
-        GPS_SERIAL.end();
-        delay(100);
-        GPS_SERIAL.begin(GPS_BAUD_RATE);
-        delay(100);
-
-        if (!myGNSS.begin(gpsStream)) {
-          debugln(F("ERROR: GPS lost after baud switch!"));
-          return;
-        }
-        debugln(F("GPS reconnected at 57600"));
-      }
-
-      // Configure via VALSET API
-      myGNSS.setUART1Output(COM_TYPE_UBX);          // UBX only, disable NMEA output
-      myGNSS.setNavigationFrequency(GPS_NAV_RATE_HZ); // 25 Hz
-      myGNSS.setDynamicModel(DYN_MODEL_AUTOMOTIVE);
-
-      // Enable GPS only (disable GLONASS/Galileo/BeiDou/SBAS/QZSS for max nav rate)
-      myGNSS.enableGNSS(true, SFE_UBLOX_GNSS_ID_GPS);
-      myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_SBAS);
-      myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_GALILEO);
-      myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_BEIDOU);
-      myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_GLONASS);
-
-      // Register PVT callback (called from checkCallbacks())
-      myGNSS.setAutoPVTcallbackPtr(&onPVTReceived);
-
-      gpsInitialized = true;
-      debugln(F("GPS initialized successfully (SparkFun UBX PVT)"));
-
-      // Drain any remaining bytes from Serial1 into our buffer, then
-      // start the timer ISR for continuous background serial drain.
-      while (GPS_SERIAL.available()) {
-        uint16_t nextHead = (gpsRxHead + 1) % GPS_RX_BUF_SIZE;
-        if (nextHead == gpsRxTail) break;
-        gpsRxBuf[gpsRxHead] = GPS_SERIAL.read();
-        gpsRxHead = nextHead;
-      }
-      startGpsSerialTimer();
-    } else {
-      debugln(F("ERROR: GPS Serial not available!"));
+    // gpsStream wraps GPS_SERIAL: before the timer starts, reads pass
+    // through directly so myGNSS.begin() can communicate with the module.
+    if (!gpsSetupProbe(/*coldRetry=*/true)) {
+      debugln(F("ERROR: GPS not detected at any baud rate!"));
+      return;  // Leave gpsInitialized = false; GPS_STATUS_RETRY_LOOP may re-probe
     }
+
+    // Apply config at the current mode targets (boot = status mode:
+    // 5 Hz + NAV-SAT for the GPS status page) and register callbacks.
+    GPS_RECONFIGURE();
+    gpsRegisterCallbacks();
+
+    gpsInitialized = true;
+    debugln(F("GPS initialized successfully (SparkFun UBX PVT)"));
+
+    // Drain any remaining bytes from Serial1 into our buffer, then
+    // start the timer ISR for continuous background serial drain.
+    while (GPS_SERIAL.available()) {
+      uint16_t nextHead = (gpsRxHead + 1) % GPS_RX_BUF_SIZE;
+      if (nextHead == gpsRxTail) break;
+      gpsRxBuf[gpsRxHead] = GPS_SERIAL.read();
+      gpsRxHead = nextHead;
+    }
+    startGpsSerialTimer();
+
+    // Arm the PVT-arrival watchdog for boot too: a begin() ping proves
+    // the module answers, not that PVT flows. If nothing arrives within
+    // 5 s, GPS_LOOP() runs GPS_BAUD_RECOVERY() — the "make sure we are
+    // actually connected" check for a module in a weird state.
+    gpsWakeTime = millis();
+    gpsWakeValidated = false;
   #else
     debugln(F("WOKWI GPS SETUP"));
     GPS_SERIAL.begin(19200);
@@ -265,6 +326,44 @@ void GPS_SETUP() {
     } else {
       debugln(F("ERROR: WOKWI GPS not detected!"));
     }
+  #endif
+}
+
+// Bounded background re-detect for a GPS that failed GPS_SETUP().
+// Called only while the GPS status page is up — each attempt blocks the
+// UI ~2.5 s, so it's capped and spaced out. After the retries are spent
+// the page shows a permanent "CHECK WIRING" and the device stays usable
+// (race mode degrades gracefully without GPS).
+static uint8_t gpsSetupRetryCount = 0;
+static unsigned long gpsSetupLastRetry = 0;
+#define GPS_SETUP_MAX_RETRIES 3
+#define GPS_SETUP_RETRY_INTERVAL_MS 10000
+
+bool gpsRetriesExhausted() {
+  return !gpsInitialized && gpsSetupRetryCount >= GPS_SETUP_MAX_RETRIES;
+}
+
+void GPS_STATUS_RETRY_LOOP() {
+  #ifndef WOKWI
+  if (gpsInitialized) return;
+  if (gpsSetupRetryCount >= GPS_SETUP_MAX_RETRIES) return;
+  if (millis() - gpsSetupLastRetry < GPS_SETUP_RETRY_INTERVAL_MS) return;
+  gpsSetupLastRetry = millis();
+  gpsSetupRetryCount++;
+  debug(F("GPS re-detect attempt "));
+  debugln(gpsSetupRetryCount);
+
+  if (!gpsSetupProbe(/*coldRetry=*/false)) return;
+
+  GPS_RECONFIGURE();
+  gpsRegisterCallbacks();
+  gpsInitialized = true;
+  gpsRxHead = 0;
+  gpsRxTail = 0;
+  startGpsSerialTimer();
+  gpsWakeTime = millis();
+  gpsWakeValidated = false;
+  debugln(F("GPS re-detect succeeded"));
   #endif
 }
 
@@ -280,16 +379,17 @@ void GPS_LOOP() {
   myGNSS.checkUblox();
   myGNSS.checkCallbacks();
 
-  // PVT arrival watchdog: after GPS_WAKE(), if no PVT data arrives within
-  // 5 seconds, the module likely lost its config during backup (V_BCKP
-  // dropped → reverted to 9600 baud NMEA). Attempt baud recovery.
+  // PVT arrival watchdog: after GPS_SETUP() or GPS_WAKE(), if no PVT data
+  // arrives within 5 seconds, the module likely lost its config (V_BCKP
+  // dropped → reverted to 9600 baud NMEA, or answered the begin() ping in
+  // some odd state). Attempt baud recovery.
   if (!gpsWakeValidated) {
     if (gpsDataFresh) {
       // PVT arrived — module is alive and configured correctly
       gpsWakeValidated = true;
-      debugln(F("GPS wake validated: PVT received"));
+      debugln(F("GPS validated: PVT received"));
     } else if (millis() - gpsWakeTime >= 5000) {
-      debugln(F("GPS wake FAILED: no PVT after 5s, attempting recovery"));
+      debugln(F("GPS validation FAILED: no PVT after 5s, attempting recovery"));
       if (GPS_BAUD_RECOVERY()) {
         // Recovery succeeded — restart the watchdog for validation
         gpsWakeTime = millis();
@@ -504,19 +604,55 @@ void GPS_SLEEP() {
  * The SAM-M10Q has no flash — all config lives in volatile RAM. If V_BCKP
  * drops during backup mode (battery sag, loose connector, cranking brownout),
  * the module reverts to factory defaults (9600 baud, NMEA, 1Hz). This
- * function re-applies the full configuration. It's fast (~50ms total) and
- * idempotent — safe to call even if config was retained.
+ * function re-applies the full configuration at the CURRENT mode targets
+ * (gpsNavRateTarget / gpsNavSatWanted) so wake/recovery paths re-assert
+ * whatever mode we're actually in instead of clobbering it. It's fast
+ * (~50ms total) and idempotent — safe to call even if config was retained.
  */
 void GPS_RECONFIGURE() {
   myGNSS.setUART1Output(COM_TYPE_UBX);
-  myGNSS.setNavigationFrequency(GPS_NAV_RATE_HZ);
+  myGNSS.setNavigationFrequency(gpsNavRateTarget);
   myGNSS.setDynamicModel(DYN_MODEL_AUTOMOTIVE);
   myGNSS.enableGNSS(true, SFE_UBLOX_GNSS_ID_GPS);
   myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_SBAS);
   myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_GALILEO);
   myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_BEIDOU);
   myGNSS.enableGNSS(false, SFE_UBLOX_GNSS_ID_GLONASS);
+  if (!gpsNavSatWanted) {
+    myGNSS.setAutoNAVSAT(false);  // no periodic NAV-SAT output in race mode
+  }
   debugln(F("GPS config re-applied (VALSET)"));
+}
+
+/**
+ * @brief Switch to status mode: GPS_NAV_RATE_STATUS_HZ nav solutions with
+ *        NAV-SAT output for the GPS status page's signal bars. This is
+ *        also the boot default (the targets initialize to it).
+ */
+void gpsEnterStatusMode() {
+  gpsNavRateTarget = GPS_NAV_RATE_STATUS_HZ;
+  gpsNavSatWanted = true;
+  if (!gpsInitialized) return;
+  myGNSS.setNavigationFrequency(gpsNavRateTarget);
+  myGNSS.setAutoNAVSATcallbackPtr(&onNAVSATReceived);
+  myGNSS.setAutoNAVSATrate(GPS_NAV_RATE_STATUS_HZ);  // ~1 Hz NAV-SAT frames
+  debugln(F("GPS status mode (5Hz + NAV-SAT)"));
+}
+
+/**
+ * @brief Switch to race mode: GPS_NAV_RATE_HZ PVT-only. Called when the
+ *        GPS status page exits — this is the steady state for the menu
+ *        and racing.
+ */
+void gpsEnterRaceMode() {
+  gpsNavRateTarget = GPS_NAV_RATE_HZ;
+  gpsNavSatWanted = false;
+  gpsSatCnoCount = 0;  // stale bars must not outlive the mode
+  gpsSatUsedCount = 0;
+  if (!gpsInitialized) return;
+  myGNSS.setAutoNAVSAT(false);
+  myGNSS.setNavigationFrequency(gpsNavRateTarget);
+  debugln(F("GPS race mode (25Hz PVT-only)"));
 }
 
 /**
@@ -551,7 +687,7 @@ bool GPS_BAUD_RECOVERY() {
   if (myGNSS.begin(gpsStream)) {
     debugln(F("GPS baud recovery: module responding at 57600"));
     GPS_RECONFIGURE();
-    myGNSS.setAutoPVTcallbackPtr(&onPVTReceived);  // begin() resets library state
+    gpsRegisterCallbacks();  // begin() resets library state
     gpsRxHead = 0;
     gpsRxTail = 0;
     startGpsSerialTimer();
@@ -581,7 +717,7 @@ bool GPS_BAUD_RECOVERY() {
     if (myGNSS.begin(gpsStream)) {
       debugln(F("GPS baud recovery: reconnected at 57600"));
       GPS_RECONFIGURE();
-      myGNSS.setAutoPVTcallbackPtr(&onPVTReceived);
+      gpsRegisterCallbacks();
       gpsRxHead = 0;
       gpsRxTail = 0;
       startGpsSerialTimer();
@@ -631,12 +767,6 @@ void GPS_WAKE() {
   // and trigger baud recovery if no PVT data arrives.
   gpsWakeTime = millis();
   gpsWakeValidated = false;
-}
-
-void GPS_SLEEP_PERIODIC_CHECK() {
-  GPS_WAKE();
-  sleepGpsWakeActive = true;
-  sleepGpsWakeStartedAt = millis();
 }
 
 void calculateGPSFrameRate() {

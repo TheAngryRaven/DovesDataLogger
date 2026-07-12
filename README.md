@@ -25,7 +25,8 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
 - **Pace Comparison** - Real-time pace difference vs. best lap
 - **Lap History** - Session-based lap history (up to 1000 laps)
 - **Speed Display** - Large, easy-to-read speed display
-- **Sleep Mode** - Low-power sleep with display/GPS/IMU off (~2-4 mA), instant wake on button press or engine start
+- **Auto Power-Off** - Full shutdown (nRF52 System OFF, ~µA) instead of sleep — wakes on button press, engine start (tach pulse), or USB plug-in; no power switch needed
+- **GPS Status Page** - Every boot shows a MyChron-style satellite view (sat count, HDOP, per-satellite signal bars) until GPS locks; any button skips it
 - **DOVEX Format** - Crash-safe logging with reserved header for instant replay
 - **Review Data** - Instant replay of DOVEX session headers on-device
 
@@ -41,6 +42,7 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
 - **Pin Lock** - require pin to pull logs from device
 
 ### Display Pages
+- GPS Status (boot page: satellites, HDOP, lock state, per-satellite signal bars)
 - GPS Statistics (battery, satellites, HDOP, logging status)
 - Speed (with current lap number)
 - Tachometer (RPM with max RPM tracking)
@@ -61,7 +63,7 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
 
 ### Core Components
 - **MCU**: Seeed XIAO nRF52840 Sense (64MHz ARM Cortex-M4 with FPU + BLE 5.0 + 6-axis IMU)
-  - ~120 mA active draw with 2.45" screen, ~2-4 mA sleep
+  - ~120 mA active draw with 2.45" screen; System OFF when powered down (µA-class + GPS backup draw)
   - Built-in battery charging circuit (BQ25101)
 - **GPS**: u-blox SAM-M10Q (Matek SAM-M10Q recommended, found from most RC hobby shops)
   - Configured for 25Hz UBX binary (PVT) update rate
@@ -74,7 +76,7 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
   - FAT16/FAT32 formatted
   - 1 MHz SPI for EMI resistance
 - **Battery**: 1500mAh 103050 LiPo
-  - ~12.5 hours active, ~15-30 days in sleep mode
+  - ~12.5 hours active; weeks-to-months powered down (System OFF)
 - **Buttons**: 3x momentary pushbuttons for navigation
   - Left, Select/Enter, Right
   - RC low-pass filters recommended (10K + 100nF) for EMI rejection
@@ -89,8 +91,9 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
 ### Power Usage
 - Active draw: ~120 mA with 2.45" OLED display
 - Active battery life: ~12.5 hours continuous on 1500 mAh
-- Sleep draw: ~2-4 mA (display, GPS, IMU off)
-- Sleep battery life: ~15-30 days on 1500 mAh
+- Powered down: nRF52 System OFF (µA-class MCU draw; GPS backup mode + board
+  quiescent draw dominate) — expected weeks-to-months on 1500 mAh (bench
+  measurement pending)
 - Battery percentage and voltage displayed on stats page and charging screen
 
 ## Track Loading System
@@ -330,11 +333,14 @@ DovesDataLogger/                  # repo root
 **Button Controls:**
 - **Left/Right Buttons**: Navigate between pages
 - **Middle Button**: Select/Enter (in menus), Quick-jump to Pace/Best Lap (while racing)
-- **Hold Left + Right (5s)**: Enter sleep mode (from main menu)
+- **Hold Left + Right (5s)**: Power off (from main menu)
 - **Hold Select + Side (5s)**: Reboot device (from any page)
 
 **Startup Sequence ("Just Drive" mode):**
-1. Power on → Boot screen → Main menu
+1. Wake (button / engine start / USB) → Boot screen → **GPS Status page**
+   (satellite count, HDOP, signal bars). Any button skips to the main menu;
+   3 seconds after a stable GPS time lock it advances automatically —
+   straight into race mode if the engine woke the device or is running
 2. Start driving — device auto-enters race mode at 10+ mph or 500+ RPM
 3. GPS fix acquired → DOVEX logging starts immediately
 4. Track auto-detected via GPS proximity → course detection begins
@@ -345,23 +351,31 @@ DovesDataLogger/                  # repo root
 - **Manual**: navigate to "END RACE" page (only accessible when speed < 2 mph), confirm to stop
 - Returns to main menu
 
-**Sleep Mode:**
-- Activates via 5-second left+right hold on main menu, or automatically after 5 minutes idle on main menu
-- Turns off display, GPS (backup mode), and IMU — draws ~2-4 mA vs ~120 mA active
-- Wakes instantly on any button press or tachometer pulse (engine start)
-- GPS retains ephemeris in backup RAM for fast warm-start on wake (seconds, not minutes)
-- Daily GPS wake keeps ephemeris fresh (~2 min every 24 hours)
-- Shows charging screen with battery percentage when USB is plugged in during sleep
-- Estimated sleep runtime: ~15-30 days on 1500 mAh battery
+**Power Off (System OFF):**
+- Activates via 5-second left+right hold on the main menu, or automatically
+  after 5 minutes idle on the main menu (or 5 minutes on the GPS status page
+  with no lock and no engine)
+- Everything powers down — display, GPS (µA backup mode, config/ephemeris
+  retained), IMU, and the MCU itself (nRF52 System OFF) — no power switch needed
+- Wakes on any button press, a tachometer pulse (engine start boots straight
+  toward race mode via the GPS status page), or plugging in USB
+- Waking is a fresh boot (~1-2 s); the GPS warm-starts from backup RAM in
+  seconds
+- **Charging**: plugging in USB wakes the device into a charging screen
+  (10 s, then dark); any button fully wakes it — replay/transfer work while
+  plugged in, and it returns to charging after 60 s of no buttons. Unplugging
+  powers it off
 
 ## Technical Details
 
 ### GPS Configuration
 - **Protocol**: UBX binary (PVT messages via SparkFun callback)
-- **Update Rate**: 25Hz (40ms between fixes)
+- **Update Rate**: 25Hz racing (40ms between fixes); 5Hz + NAV-SAT during the boot GPS status page
 - **Mode**: Automotive dynamic model
 - **Constellations**: GPS-only (max nav rate, no multi-constellation overhead)
-- **Baud Rate**: 57600 (auto-configured from 9600 default on first boot)
+- **Baud Rate**: 57600 (auto-configured from 9600 default on first boot; boot
+  probes 57600 first and sends the backup-mode wake byte, so warm boots
+  reconnect near-instantly and a misbehaving module is auto-recovered)
 
 ### SD Card Logging
 - **Write Frequency**: Every PVT update (~25Hz)

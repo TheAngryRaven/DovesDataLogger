@@ -13,6 +13,50 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **GPS status boot page (MyChron-style).** Every boot now lands on a
+  satellite status page after the splash instead of the main menu: the
+  top half shows used/seen satellite count, HDOP, lock state,
+  constellation mode and the configured + live nav rate plus battery;
+  the bottom half draws one vertical signal bar per satellite (height =
+  carrier-to-noise, from UBX-NAV-SAT). During the page the GPS runs a
+  5 Hz status config; leaving it switches to the 25 Hz PVT-only race
+  config. The page **holds but never locks**: any button skips it
+  immediately, and once a stable lock (position fix + fully-resolved
+  time, held 3 s) is acquired it auto-advances. It exits to the main
+  menu — or straight into race mode with logging when the engine-start
+  (tach) wake booted the device or the engine is running. Five minutes
+  with no lock and no engine activity powers the device back down. A GPS
+  that fails to initialize is re-probed up to 3 times in the background
+  and surfaced as `NOT DETECTED` / `CHECK WIRING` instead of failing
+  silently.
+
+### Changed
+- **Sleep is now a full shutdown (nRF52 System OFF).** Replacing the
+  software sleep loop, the device tears everything down and powers off
+  to µA-level System OFF; a tachometer pulse (engine start), any button,
+  or plugging in USB wakes it with a fresh boot, making a power switch
+  unnecessary. The engine-start wake boots through the GPS status page
+  and auto-enters race mode; wake cause is decoded from the reset-reason
+  and GPIO latch registers. **Charging is the one exception**: while USB
+  power is present the device stays in a live charging loop (software
+  holds the fast-charge pin) — screen on for 10 s then dark, any button
+  fully wakes to the main menu, and unplugging powers off. USB connected
+  on the main menu now enters the charging loop after 60 s of button
+  inactivity (previously immediate sleep), so the device remains usable
+  for replay/transfer while plugged in.
+- **GPS boot connection hardening.** Boot now sends the u-blox
+  backup-mode wake byte before probing (a module left in backup mode by
+  the shutdown wakes correctly), probes the configured 57600 baud first
+  (warm boots connect near-instantly; the old fixed 2.25 s boot delay is
+  only paid when nothing answers), and validates that PVT data actually
+  flows within 5 s of boot — recovering via the existing baud-recovery
+  ladder if the module answered the probe but was silently misconfigured.
+
+### Removed
+- **24-hour periodic GPS fix during sleep** — nothing runs during System
+  OFF to schedule it; the GPS warm-starts on wake instead.
+- **RPM sleep-wake latch (`tachHavePeriod` / `TACH_SLEEP()`)** —
+  superseded by the tach pin's GPIO SENSE wake from System OFF.
 - **Insta360 X4 camera auto-record (remote emulation).** The device
   emulates the physical Insta360 GPS Remote as a pure BLE **peripheral**
   to drive an X4 hands-free. Engine start (RPM > 500 held 2 s) wakes a

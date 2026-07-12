@@ -62,7 +62,7 @@ void CAMERA_LOOP();
 // user's explicit "I'm done") — deliberately NOT from auto-idle, which
 // ends the log on speed alone and must not cut camera footage during a
 // grid idle. Queues the one-shot sessionEndRequested event for the next
-// CAMERA_LOOP() step. Sleep entry uses CAMERA_SLEEP() instead.
+// CAMERA_LOOP() step. Shutdown entry uses CAMERA_SLEEP() instead.
 void CAMERA_NOTIFY_SESSION_END();
 
 // Transfer takeover: best-effort stop recording if active, drop the camera
@@ -71,8 +71,8 @@ void CAMERA_NOTIFY_SESSION_END();
 // transfer page (and the USB page).
 void CAMERA_FORCE_RELEASE();
 
-// Sleep hook: best-effort power-off if the camera is connected, then the
-// same teardown as CAMERA_FORCE_RELEASE(). Called from enterSleepMode()
+// Shutdown hook: best-effort power-off if the camera is connected, then
+// the same teardown as CAMERA_FORCE_RELEASE(). Called from enterShutdown()
 // before BLE_STOP().
 void CAMERA_SLEEP();
 

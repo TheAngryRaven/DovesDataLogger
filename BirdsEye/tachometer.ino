@@ -49,10 +49,6 @@ void TACH_COUNT_PULSE() {
 
   tachLastPulseUs = now;
 
-  // Wake trigger for sleep mode (BirdsEye.ino reads this). Set even when
-  // the ring is full below — a dropped timestamp is still a real pulse.
-  tachHavePeriod = true;
-
   // SPSC full check (one slot is sacrificed so head==tail is unambiguously
   // "empty"). TACH_LOOP can be blocked for 100 ms–2 s by the same SD GC
   // stalls the GPS serial ring exists for; at 6000 RPM a 200 ms stall
@@ -167,30 +163,4 @@ void TACH_LOOP() {
 
   // ---- Step 5: Update reported value ----
   tachLastReported = (int)(tachKalman.x + 0.5f);
-}
-
-/**
- * Prepare the tachometer for sleep mode — call from enterSleepMode().
- *
- * Re-arms the RPM wake trigger and discards pre-sleep pulse state. Without
- * this, tachHavePeriod stays true forever after the first engine pulse
- * since boot, and every sleep entry (long-press, menu idle, USB) instantly
- * bounces through the RPM-wake path back into race mode with logging
- * enabled — silently starting a session and draining the pack overnight.
- *
- * The ISR stays attached during sleep: the next valid pulse sets
- * tachHavePeriod again, and THAT is the legitimate RPM wake.
- */
-void TACH_SLEEP() {
-  tachHavePeriod = false;
-
-  // Drop any buffered pre-sleep pulses and filter state so the wake's RPM
-  // computation starts clean instead of chewing on stale timestamps (the
-  // first post-wake period would otherwise span the whole sleep).
-  tachRingTail = tachRingHead;
-  tachRingOverflow = false;
-  tachHavePrevTimestamp = false;
-  tachNeedFirstPulseDiscard = true;
-  tach_filter::reset(tachKalman);
-  tachLastReported = 0;
 }

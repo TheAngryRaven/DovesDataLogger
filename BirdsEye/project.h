@@ -97,13 +97,11 @@ inline void dummy_debug(...) {
 #define DOVEX_HEADER_SIZE 1024  // Reserved header bytes in .dovex files (1 KB)
 #define TRACK_DETECT_RADIUS_MILES 5.0  // Haversine threshold for live track detection
 
-// Sleep mode constants
-#define SLEEP_IDLE_TIMEOUT_MS     300000   // 5 min menu idle -> auto-sleep
-#define SLEEP_LONG_PRESS_MS       5000     // 5s hold for sleep/reboot combos
-#define SLEEP_GPS_WAKE_INTERVAL   86400000 // 24 hours between GPS fix attempts
-#define SLEEP_GPS_FIX_TIMEOUT     120000   // 2 min max for GPS fix attempt
-#define SLEEP_RPM_WAKE_THRESHOLD  100      // RPM above this wakes from sleep
+// Shutdown (System OFF) constants
+#define SLEEP_IDLE_TIMEOUT_MS     300000   // 5 min menu idle -> auto-shutdown
+#define SLEEP_LONG_PRESS_MS       5000     // 5s hold for shutdown/reboot combos
 #define CHARGE_DISPLAY_TIMEOUT_MS 10000    // Show charging screen for 10s then display off
+#define USB_MENU_CHARGE_IDLE_MS   60000    // USB on menu: charging loop after 60s of no buttons
 
 ///////////////////////////////////////////
 // BLE RADIO OWNERSHIP

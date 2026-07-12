@@ -9,6 +9,7 @@
 
 // Menu / chrome.
 void displayPage_boot();
+void displayPage_gps_status();
 void displayPage_main_menu();
 void displayPage_bluetooth();
 void displayPage_transfer_menu();

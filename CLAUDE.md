@@ -115,6 +115,9 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `tach_filter.{h,cpp}` | Tachometer 1-D Kalman filter (predict/update math + Q/R tuning constants) |
 | `camera_fsm.{h,cpp}` | Insta360 auto-record lifecycle FSM (8 states, all debounce/retry/timeout timing + tunables); board-portable core shared with the nRF54 "Falcon" target |
 | `insta360_protocol.{h,cpp}` | Insta360 X4 BLE frame builders/parsers (wake advert, remote scan response, ce82 buttons, ce82 GPS/RMC frame, ce81 serial parsing, ce81 `0x10` record-timer state parse) with golden-byte tests |
+| `wake_cause.{h,cpp}` | Boot wake-cause decode: RESETREAS + GPIO LATCH register snapshots → tach / button / USB / watchdog / soft-reset / cold boot (System OFF shutdown, subsystem 10) |
+| `gps_status_page.{h,cpp}` | GPS status boot page state machine: hold, 3 s auto-close after fix+timeValid, button skip, exit destination (menu vs race), idle → shutdown |
+| `sat_bars.{h,cpp}` | Status-page satellite signal bars: NAV-SAT CNO selection (used-in-nav first, strongest first) + bar x/w/h layout math for the 128×~30 px bottom half |
 
 ### Non-Source
 
@@ -170,6 +173,7 @@ loop()  ~250 Hz
  ├─ cameraConsumeAutoStop() camera 30s-engine-off stop → endRaceSession + menu
  ├─ calculateGPSFrameRate() 1-second PVT counter
  ├─ readButtons()           multi-sample debounce + edge detection
+ ├─ gpsStatusPageLoop()     boot GPS status page: GPS re-detect + hold/auto-close/exit
  ├─ displayLoop()           pages read from active timer helpers
  ├─ autoRaceModeCheck()     RPM>500 or speed>=10 → enter race from menu
  └─ resetButtons()          clear pressed flags
@@ -179,15 +183,34 @@ loop()  ~250 Hz
 
 - Uses SparkFun u-blox GNSS v3 library with UBX binary protocol.
 - `myGNSS` (SFE_UBLOX_GNSS_SERIAL) is stack-allocated in `BirdsEye.ino`.
-- `GPS_SETUP()` configures module via VALSET API: 57600 baud, 25 Hz nav,
-  GPS-only constellation, automotive dynamic model, PVT callback registered.
+- **Boot probe ladder** (`GPS_SETUP()` → `gpsSetupProbe()`): the SAM-M10Q
+  has no flash and every boot is a cold start (sleep = System OFF), so the
+  module can be in backup mode, configured-57600, or factory-9600. Setup
+  sends the `0xFF` backup-wake byte FIRST (harmless if awake), probes 57600
+  (warm case ≈ instant), falls back to 9600 + `setSerialRate`, and only
+  pays a 1.5 s cold-boot delay + one retry when nothing answers. Config is
+  applied via the VALSET API (GPS-only constellation, automotive dynamic
+  model) at the current rate target, PVT (+ NAV-SAT when wanted) callbacks
+  registered, and the **5 s PVT-arrival watchdog is armed at boot too** —
+  a module that answers the ping but streams nothing gets
+  `GPS_BAUD_RECOVERY()`. A GPS missing entirely is re-probed by
+  `GPS_STATUS_RETRY_LOOP()` (3×, 10 s apart) while the status page shows
+  `NOT DETECTED` / `CHECK WIRING`.
+- **Two rate modes** (`gpsEnterStatusMode()` / `gpsEnterRaceMode()`): boot
+  starts in status mode — `GPS_NAV_RATE_STATUS_HZ` (5 Hz) with UBX-NAV-SAT
+  at ~1 Hz feeding per-satellite CNO into `gpsSatCnos[]` for the status
+  page's bars. Leaving the page switches to race mode: `GPS_NAV_RATE_HZ`
+  (25 Hz) PVT-only. `GPS_RECONFIGURE()` and every wake/recovery path
+  re-assert the *current* targets (`gpsNavRateTarget` / `gpsNavSatWanted`)
+  — never hardcode a rate.
 - **GPS serial buffer**: A 4 KB RAM ring buffer (`gpsRxBuf`) sits between
   Serial1 and the SparkFun library. A TIMER3 ISR drains Serial1 into this
   buffer every 10 ms, independent of the main loop. This prevents GPS data
   loss during SD card write stalls (GC pauses can block 100 ms–2 s).
   The SparkFun library reads from the buffer via `GpsBufferedStream` (a
   `Stream` wrapper). During `GPS_SETUP()` (before timer starts), reads pass
-  through to Serial1 directly. Timer stopped during sleep, restarted on wake.
+  through to Serial1 directly. Timer stopped on shutdown/charging entry,
+  restarted on the charging-loop resume (`GPS_WAKE()`).
 - `GPS_LOOP()` calls `checkUblox()` + `checkCallbacks()`. The registered
   `onPVTReceived()` callback fires with the full `UBX_NAV_PVT_data_t` struct,
   populates `gpsData`, and sets `gpsDataFresh` flag for downstream processing.
@@ -207,8 +230,9 @@ loop()  ~250 Hz
   at 1 Hz and a write failure stops logging — **none fault out of race mode**.
 - Time helpers: `getGpsTimeInMilliseconds()`, `getGpsUnixTimestampMillis()`.
 - 64-bit timestamps are manually converted to strings (Arduino lacks `%llu`).
-- **Sleep wake hardening**: `GPS_WAKE()` clears stale `gpsDataFresh`/`gpsData.fix`,
-  re-applies VALSET config via `GPS_RECONFIGURE()`, and arms a 5 s PVT watchdog.
+- **Wake hardening**: `GPS_WAKE()` (charging-loop resume) clears stale
+  `gpsDataFresh`/`gpsData.fix`, re-applies VALSET config via
+  `GPS_RECONFIGURE()`, and arms the same 5 s PVT watchdog as boot.
   If no PVT arrives, `GPS_BAUD_RECOVERY()` re-negotiates baud (9600→57600) and
   reconfigures. The SAM-M10Q has no flash; all config is volatile RAM only.
 
@@ -234,9 +258,9 @@ loop()  ~250 Hz
 - `tachLastReported` updates every main-loop call (~250 Hz). Consumers
   (display at 3 Hz, logging at 25 Hz) rate-limit themselves.
 - 500 ms timeout sets RPM to 0 (engine stopped), resets Kalman state.
-- `TACH_SLEEP()` (called from `enterSleepMode()`) clears the latched
-  `tachHavePeriod` wake flag and drops ring/Kalman state so the RPM wake
-  trigger is re-armed for the *next* pulse instead of firing instantly.
+- The engine-start wake from shutdown is NOT this module's job: System OFF
+  wakes on the tach pin's GPIO SENSE and the boot decodes the LATCH bit via
+  `wake_cause` (the old `tachHavePeriod` latch + `TACH_SLEEP()` are gone).
 
 ### 3. Accelerometer (`accelerometer.ino`)
 
@@ -290,7 +314,9 @@ loop()  ~250 Hz
   replay results, `kShow` for the lap list, `kSpace` column-stable for the
   big-font live pages). Never hand-roll the `60000`/`%1000` math inline.
 - Pages are integer constants; key pages:
-  - Boot/menu: `PAGE_BOOT` (999), `PAGE_MAIN_MENU` (-1).
+  - Boot/menu: `PAGE_BOOT` (999), `PAGE_GPS_STATUS` (900, satellite status
+    page every boot lands on — driven by `gpsStatusPageLoop()`, buttons
+    deliberately no-op'd in `displayLoop()`), `PAGE_MAIN_MENU` (-1).
   - Racing: `GPS_STATS` (4) through `LOGGING_STOP` (12).
   - Replay: `PAGE_REPLAY_FILE_SELECT` (-3), `PAGE_REPLAY_RESULTS` (-8),
     `PAGE_REPLAY_EXIT` (-9).
@@ -455,37 +481,48 @@ loop()  ~250 Hz
   continuously, writes DOVEX header, closes file, cleans up CourseManager,
   and returns to main menu.
 
-### 10. Sleep Mode
+### 10. Shutdown (System OFF)
 
-- **Entry**: long-press left+right (5 s) on main menu, 5-min menu idle,
-  or USB connected on main menu.
-- **`enterSleepMode()`**: ends active race session, stops BLE, display off
-  (I2C `DISPLAYOFF`), GPS backup mode (`powerOff(0)`), IMU power off,
-  GPS serial timer stopped, and `TACH_SLEEP()` re-arms the RPM wake
-  trigger (clears the latched `tachHavePeriod` + stale ring/Kalman state
-  — without this, one engine pulse since boot made every sleep entry
-  bounce straight back into race mode with logging on).
-- **Wake triggers** (checked every loop in sleep):
-  - **RPM wake**: tach ISR sets `tachHavePeriod` on the next valid pulse →
-    `exitSleepMode(true)` → straight into race mode with logging enabled,
-    Lap Anything CourseManager created.
-  - **Button wake**: any button → `exitSleepMode(false)` → main menu.
-- **`exitSleepMode()`**: re-enables IMU, GPS wake, display on, GPS serial
-  timer restarted. RPM wake skips menu and goes directly to race mode.
-- **GPS wake hardening** (`GPS_WAKE()`): clears stale `gpsDataFresh` and
-  `gpsData.fix`, wakes module (0xFF + 100 ms), re-applies full VALSET
-  config via `GPS_RECONFIGURE()` (idempotent), starts PVT watchdog.
-  The SAM-M10Q has no flash — all config is volatile RAM. If V_BCKP drops
-  during backup (cranking brownout, loose connector), module reverts to
-  9600 baud NMEA. The watchdog in `GPS_LOOP()` detects missing PVT after
-  5 s and triggers `GPS_BAUD_RECOVERY()` which re-negotiates baud rate
-  (tries 57600, falls back to 9600 → switch → reconfigure).
-- **Charging mode**: USB detected during sleep → show battery screen for
-  10 s, then display off. Button re-shows for another 10 s. GPS periodic
-  checks and WFE skipped while charging.
-- **Periodic GPS fix**: `SLEEP_GPS_WAKE_INTERVAL` (24 h) — rarely fires
-  in practice. Wakes GPS briefly, checks fix, re-sleeps.
-- CPU idle via `sd_app_evt_wait()` (SoftDevice-safe WFE).
+"Sleep" is a full power-down: nRF52 **System OFF** (~µA), designed so the
+hardware needs no power switch. Wake = chip reset = fresh `setup()`.
+
+- **Entry** (`enterShutdown()`): long-press left+right (5 s) on main menu,
+  5-min menu idle, the GPS status page's idle timeout, or USB present on
+  the main menu after 60 s of button inactivity (`USB_MENU_CHARGE_IDLE_MS`
+  — not immediate, so a charging-loop button wake doesn't bounce and the
+  device stays usable for replay/transfer while plugged in).
+- **Teardown order** (wdtPet-bracketed — `CAMERA_SLEEP()`'s 3 s ce82
+  power-off hold is the longest step under the armed ~4 s WDT): end race
+  session → `CAMERA_SLEEP()` → `BLE_STOP()` if active → `DISPLAY_SLEEP()`
+  → `GPS_SLEEP()` (u-blox software backup, µA, config retained while
+  powered; TIMER3 stopped) → IMU power rail off.
+- **System OFF entry** (`shutdownSystemOff()`, no return): wait for the
+  entry combo's buttons to release (a held button = SENSE satisfied =
+  instant wake-reset), configure `nrf_gpio_cfg_sense_input(pull-up,
+  SENSE-LOW)` on the tach pin + all 3 buttons (P-numbers via
+  `g_ADigitalPinMap`, never hardcoded), clear the GPIO LATCH registers
+  (a set latch = pending DETECT = instant re-wake), clear pending FPU
+  exceptions, then `sd_power_system_off()` when the SoftDevice is enabled
+  (BLE is lazy — check `sd_softdevice_is_enabled()`) else raw
+  `NRF_POWER->SYSTEMOFF`. **GPREGRET is untouched** — register 0 belongs
+  to the OTA/bootloader handoff (subsystem 11). The WDT halts in System
+  OFF (all clocks stop); `wdtSetup()` re-arms on the fresh boot.
+- **Wake sources**: tach pulse (D0 falling, engine start), any button,
+  or VBUS (USB plug-in, always armed on nRF52840).
+- **Wake-cause decode** (`captureBootWakeCause()`, FIRST thing in
+  `setup()`): reads then clears `RESETREAS` + `NRF_P0/P1->LATCH` (sticky,
+  cumulative) and decodes via the host-tested `wake_cause` unit. A tach
+  wake makes the GPS status page exit into race mode with logging; a USB
+  wake skips the status page straight into the charging loop.
+- **Charging loop — the one soft-sleep survivor** (`runChargingShutdownLoop()`):
+  System OFF is never entered while VBUS is present, because the HICHG
+  fast-charge pin (`PIN_CHARGING_CURRENT`) is software-held. After the
+  same full teardown, the loop shows the charging screen for 10 s then
+  turns the display off; **any button is a full wake to the main menu**
+  (`softResumeFromCharging()`: IMU re-init, race-mode GPS targets +
+  `GPS_WAKE()`, display on); unplugging drops to System OFF. CPU idles
+  via `shutdownIdleWait()` — `sd_app_evt_wait()` only when the SoftDevice
+  is actually enabled, `__WFE()` otherwise.
 
 ### 11. Firmware OTA (`firmware_ota.ino`, `crc32.{h,cpp}`)
 
@@ -586,7 +623,7 @@ loop()  ~250 Hz
   replay, and BLE transfer are locked out (and vice-versa) — though loop
   parking, not the mutex, is the primary guarantee the firmware stays off
   the card. The transfer/USB pages are not the main menu, so the
-  USB-on-main-menu auto-sleep never fires while transferring.
+  USB-on-main-menu charge-mode entry never fires while transferring.
 - **No pure unit test**: the block-callback glue is TinyUSB/Arduino-bound
   (hardware), so there is no host-testable logic here — only the
   `sd_access_policy` mode addition is unit-tested.
@@ -653,7 +690,7 @@ loop()  ~250 Hz
   (`CAMERA_NOTIFY_SESSION_END()` from the logging-stop confirm) stops the
   camera immediately, also to WATCHING. **WATCHING** keeps the camera ON and
   connected: if RPM returns it re-records (stall recovery), and it powers the
-  camera off **only when the device sleeps** (`CAMERA_SLEEP()` streams the
+  camera off **only when the device shuts down** (`CAMERA_SLEEP()` streams the
   ce82 power-hold synchronously) — there is no post-record cooldown/power-off
   timeout. All timing lives in the FSM so the temporal behavior is
   host-testable; every tunable is a single-point `constexpr` in
@@ -681,11 +718,11 @@ loop()  ~250 Hz
   single advert set + peripheral slot with the transfer service. Opening
   the Bluetooth transfer page calls `CAMERA_FORCE_RELEASE()` before
   `BLE_SETUP()` — best-effort stop recording, drop the camera link, stop
-  camera-owned advertising, force the FSM to IDLE, release the radio. Sleep
-  entry runs `CAMERA_SLEEP()` (same, plus a power-off that is **streamed
-  synchronously** before the disconnect — the loop parks on sleep, so the
-  non-blocking ce82 hold would otherwise never transmit a frame and the
-  camera would run all night). BLE
+  camera-owned advertising, force the FSM to IDLE, release the radio.
+  Shutdown entry runs `CAMERA_SLEEP()` (same, plus a power-off that is
+  **streamed synchronously** before the disconnect — the chip powers off
+  right after, so the non-blocking ce82 hold would otherwise never transmit
+  a frame and the camera would run all night). BLE
   comes up **lazily** on the first camera action (first advertising
   `Action`), so unpaired users pay zero RAM/power cost.
 - **Threading**: same deferred pattern as `firmware_ota` — Bluefruit
@@ -842,7 +879,15 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | Constant | Value | Location |
 |---|---|---|
 | GPS baud | 57 600 | `gps_config.h` |
-| GPS nav rate | 25 Hz | `gps_config.h` |
+| GPS nav rate (race) | 25 Hz | `gps_config.h` |
+| GPS nav rate (boot/status page) | 5 Hz + NAV-SAT ~1 Hz | `gps_config.h` |
+| Status page auto-close | 3 s after fix+timeValid | `gps_status_page.h` |
+| Status page idle shutdown | 5 min (no lock, no engine) | `gps_status_page.h` |
+| GPS boot re-detect | 3 tries, 10 s apart | `gps_functions.ino` |
+| Menu idle shutdown | 5 min (`SLEEP_IDLE_TIMEOUT_MS`) | `project.h` |
+| USB-on-menu charge idle | 60 s (`USB_MENU_CHARGE_IDLE_MS`) | `project.h` |
+| Charging screen timeout | 10 s (`CHARGE_DISPLAY_TIMEOUT_MS`) | `project.h` |
+| Sat bars display cap / CNO ceiling | 16 bars / 50 dB-Hz | `sat_bars.h` |
 | Crossing threshold | 7.0 m | `BirdsEye.ino` |
 | Max laps/session | 1 000 | `BirdsEye.ino` |
 | Max locations | 200 | `project.h` |
@@ -877,7 +922,7 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | OTA min apply voltage | 3.6 V | `firmware_ota.ino` |
 | Camera record-start delay | 5 s RPM held above ON (no GPS gate) | `camera_fsm.h` |
 | Camera stop-record delay | 30 s engine-off (RPM only) → also ends log session | `camera_fsm.h` |
-| Camera power-off | sleep only (no post-record cooldown/timeout) | `camera_ble.ino` (`CAMERA_SLEEP`) |
+| Camera power-off | shutdown only (no post-record cooldown/timeout) | `camera_ble.ino` (`CAMERA_SLEEP`) |
 | Camera RPM on/off thresholds | 500 / 300 (2 s on-debounce) | `camera_fsm.h` |
 | Camera wake attempt window | 20 s ×3 (beacon) | `camera_fsm.h` |
 | Camera connect / subscribe timeouts | 20 s connect / 10 s ce82 subscribe, 3 retries each | `camera_fsm.h` |
