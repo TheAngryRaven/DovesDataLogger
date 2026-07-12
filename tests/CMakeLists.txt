@@ -22,6 +22,9 @@ add_executable(birdseye_tests
   tach_filter_test.cpp
   camera_fsm_test.cpp
   insta360_protocol_test.cpp
+  wake_cause_test.cpp
+  gps_status_page_test.cpp
+  sat_bars_test.cpp
   ${BIRDSEYE_DIR}/haversine.cpp
   ${BIRDSEYE_DIR}/gps_time.cpp
   ${BIRDSEYE_DIR}/gps_validation.cpp
@@ -33,6 +36,9 @@ add_executable(birdseye_tests
   ${BIRDSEYE_DIR}/tach_filter.cpp
   ${BIRDSEYE_DIR}/camera_fsm.cpp
   ${BIRDSEYE_DIR}/insta360_protocol.cpp
+  ${BIRDSEYE_DIR}/wake_cause.cpp
+  ${BIRDSEYE_DIR}/gps_status_page.cpp
+  ${BIRDSEYE_DIR}/sat_bars.cpp
 )
 
 target_include_directories(birdseye_tests PRIVATE
