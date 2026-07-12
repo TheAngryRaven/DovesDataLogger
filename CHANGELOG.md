@@ -100,7 +100,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   idle while we think we're recording it re-asserts the shutter once. The
   belief is preserved (not cleared) whenever the camera is unreachable, so a
   dropped link mid-session can never invert on reconnect. The bench **Test**
-  page gains a live `REC` tag (the camera's own timer) and a `G:SYNC` / `G:V`
+  page gains a `rec:yes/no` state (the camera's own timer; `rec:--` when there
+  is no fresh observation) and a `G:SYNC` / `G:V`
   GPS indicator so the link can be verified end-to-end. (Parser is golden-
   tested in the `insta360_protocol` unit; the reconcile in the `camera_fsm`
   unit.)

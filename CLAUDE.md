@@ -706,10 +706,12 @@ loop()  ~250 Hz
   Back) plus live remote (**R**) link status (`R:UP+` when the camera is
   connected AND subscribed to ce82, `R:UP` when connected but ignoring our
   buttons), advert (**Adv:**) status, a **G:** GPS-feed indicator (`SYNC`
-  with a fix / `V` voided-but-streaming / `--` not streaming) and a **REC**
-  tag driven by the camera's own `0x10` record timer — so both the GPS link
-  and that a Record press actually started the camera can be verified without
-  staging RPM/GPS to drive the FSM. **Wake** presents the
+  with a fix / `V` voided-but-streaming / `--` not streaming) and a
+  **rec:yes/no** state driven by the camera's own `0x10` record timer
+  (`rec:--` when there's no fresh observation — no link, or the camera hasn't
+  pushed a `0x10` yet — so a missing signal isn't misread as "not recording")
+  — so both the GPS link and that a Record press actually started the camera
+  can be verified without staging RPM/GPS to drive the FSM. **Wake** presents the
   wake / remote-identity advert so a standby camera wakes and an on camera
   connects back to us; **Record** sends the ce82 shutter toggle; **Power
   Off** streams the ce82 hold — both need the camera connected + subscribed.

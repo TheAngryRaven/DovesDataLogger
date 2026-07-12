@@ -184,10 +184,16 @@ void displayPage_camera_test() {
 
   display.setTextSize(1);
   // Title, with the camera's OWN reported record state (its 0x10 timer) on
-  // the right — proves a Record press actually started the camera, not just
-  // that we sent a frame.
-  display.print(F("  CAMERA TEST"));
-  display.println(cameraObservedRecording() ? F("  REC") : F(""));
+  // the right as an explicit rec:yes/no — proves a Record press actually
+  // started the camera, not just that we sent a frame. (`rec:--` when there's
+  // no fresh observation at all: no R-link, or the camera hasn't pushed a
+  // 0x10 frame yet.)
+  display.print(F("CAMERA TEST rec:"));
+  if (!cameraRecordObservationFresh()) {
+    display.println(F("--"));   // no fresh 0x10 (no link, or camera hasn't reported yet)
+  } else {
+    display.println(cameraObservedRecording() ? F("yes") : F("no"));
+  }
 
   // Live link status so the tester can see what's actually connected:
   // R = remote (peripheral) link — the camera connects to us and must be

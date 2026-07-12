@@ -836,6 +836,11 @@ bool cameraObservedRecording() {
          (uint32_t)(millis() - cameraRecordObsAtMs) <= kRecordObsFreshMs;
 }
 
+bool cameraRecordObservationFresh() {
+  return cameraRecordObs != insta360_protocol::RecordObs::kUnknown &&
+         (uint32_t)(millis() - cameraRecordObsAtMs) <= kRecordObsFreshMs;
+}
+
 bool cameraPairedSerial(char* buf, size_t bufSize) {
   if (buf == nullptr || bufSize == 0) return false;
   buf[0] = '\0';

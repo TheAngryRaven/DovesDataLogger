@@ -129,6 +129,11 @@ bool cameraGpsStreaming();
 // (a fresh ".HH:MM:SS" timer). Lets the bench page confirm the shutter took.
 bool cameraObservedRecording();
 
+// True when we have ANY fresh 0x10 observation (recording OR idle). Lets the
+// bench page show `rec:--` (no data yet) distinctly from `rec:no` (the camera
+// actively reports idle), so a missing signal isn't misread as "not recording".
+bool cameraRecordObservationFresh();
+
 // Copy the stored 6-char serial into buf (NUL-terminated; bufSize >= 7).
 // Returns false (buf = "") when unpaired.
 bool cameraPairedSerial(char* buf, size_t bufSize);
