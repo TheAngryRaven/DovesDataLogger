@@ -11,13 +11,11 @@
 #include <stdint.h>
 
 // Latest filtered RPM (rounded). Written by TACH_LOOP, read by
-// display/logging/sleep — volatile so cross-context reads are coherent.
+// display/logging — volatile so cross-context reads are coherent.
+// (The engine-start wake from shutdown is NOT this module's job anymore:
+// System OFF wakes on the tach pin's GPIO SENSE, and the boot decodes it
+// from the LATCH register — see wake_cause.)
 extern volatile int tachLastReported;
-
-// Set true by the ISR on any valid pulse — sleep mode uses this as a
-// wake trigger. Cleared ONLY by TACH_SLEEP() on sleep entry (re-arming
-// the trigger); never clear it from the awake main loop.
-extern volatile bool tachHavePeriod;
 
 // ISR — must have C-style linkage for attachInterrupt().
 void TACH_COUNT_PULSE();
@@ -25,9 +23,3 @@ void TACH_COUNT_PULSE();
 // Drain ring buffer, update Kalman estimate, apply engine-stop timeout.
 // Call once per main-loop iteration (~250 Hz).
 void TACH_LOOP();
-
-// Re-arm the RPM wake trigger and discard pre-sleep pulse/filter state.
-// MUST be called from enterSleepMode() — otherwise a single engine pulse
-// since boot leaves tachHavePeriod latched true and every sleep entry
-// immediately RPM-wakes back into race mode with logging enabled.
-void TACH_SLEEP();

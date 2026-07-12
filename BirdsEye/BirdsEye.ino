@@ -19,6 +19,7 @@
 
 #include <avr/dtostrf.h>
 #include <SPI.h>
+#include <nrf_gpio.h>  // SENSE-wake pin config for System OFF shutdown
 #include <nrf_wdt.h>
 
 // #define WOKWI
@@ -162,16 +163,10 @@ char dovexReplayShortName[16];
 char dovexReplayBestLap[16];
 char dovexReplayOptimal[16];
 
-// Sleep mode state
-bool sleepModeActive = false;
-bool sleepGpsWakeActive = false;         // GPS periodic fix in progress
-unsigned long sleepEnteredAt = 0;
-unsigned long sleepLastGpsWake = 0;
-unsigned long sleepGpsWakeStartedAt = 0;
-unsigned long menuIdleStartTime = 0;     // For 5-min auto-sleep
+// Main-menu idle tracking (drives auto-shutdown and the USB charge-mode
+// entry — see the trigger block at the end of loop()).
+unsigned long menuIdleStartTime = 0;
 bool menuIdleTimerRunning = false;
-bool chargingModeActive = false;           // USB connected during sleep
-unsigned long chargeDisplayOnAt = 0;       // 0 = display off, >0 = millis() when turned on
 
 // Button hold tracking (for long-press combos)
 unsigned long btn1HoldStart = 0;
@@ -275,9 +270,6 @@ int topTachReported = 0;
 // 3000us = 3ms minimum gap, allows up to 20,000 RPM max (333Hz)
 static const uint32_t tachMinPulseGapUs = 3000;
 volatile uint32_t tachLastPulseUs = 0;
-
-// Sleep wake detection: set true by ISR on any valid pulse
-volatile bool tachHavePeriod = false;
 
 // Ring buffer: ISR writes pulse timestamps, TACH_LOOP reads and computes periods.
 // Single-producer (ISR writes head), single-consumer (TACH_LOOP writes tail).
@@ -768,6 +760,12 @@ void setup() {
     strncpy(internalNotification, "SD Init failed!\n\nlogging not possible!", sizeof(internalNotification) - 1);
     internalNotification[sizeof(internalNotification) - 1] = '\0';
     switchToDisplayPage(PAGE_INTERNAL_FAULT);
+  } else if (bootWakeCause == wake_cause::Cause::kUsbWake) {
+    // Plugged in while off: VBUS woke the chip so software can hold the
+    // fast-charge pin. Skip the GPS status page and drop straight into
+    // the charging loop; a button press there resumes to the main menu
+    // (in which case setup() continues below), unplugging powers back off.
+    enterShutdown();
   } else {
     // No TRACKS folder is fine — Lap Anything will handle it
     if (!sdTrackSuccess) {
@@ -1021,8 +1019,8 @@ void endRaceSession() {
   // keep recording through a stationary grid idle — its own
   // stationary-AND-engine-off rule decides the recording stop. The
   // camera is stopped explicitly where the user means "I'm done":
-  // the manual stop confirm (display_ui.ino) and sleep entry
-  // (CAMERA_SLEEP() in enterSleepMode()).
+  // the manual stop confirm (display_ui.ino) and shutdown entry
+  // (CAMERA_SLEEP() in enterShutdown()).
 
   // Write DOVEX metadata header into the reserved region
   if (sdDataLogInitComplete && dataFile.isOpen()) {
@@ -1182,7 +1180,7 @@ void gpsStatusPageLoop() {
     case gps_status_page::Exit::kToShutdown:
       // Nothing locked, engine silent for the idle timeout — a spurious
       // wake or a shelf queen. Power back down.
-      enterSleepMode();
+      enterShutdown();
       break;
     case gps_status_page::Exit::kStay:
       break;
@@ -1250,82 +1248,214 @@ void writeDovexHeader() {
 }
 
 ///////////////////////////////////////////
-// SLEEP MODE
+// SHUTDOWN (System OFF)
+//
+// "Sleep" is a full power-down: tear everything down, arm GPIO SENSE on
+// the tach + buttons as wake sources, and enter nRF52 System OFF (~µA).
+// Wake is a chip reset — setup() runs fresh and captureBootWakeCause()
+// reads why (tach pulse -> the GPS status page exits into race mode).
+//
+// The ONE soft exception is charging: while VBUS is present the device
+// must stay alive because the HICHG fast-charge pin is software-held, so
+// enterShutdown() parks in a live charging loop instead and only drops
+// to System OFF when the cable is pulled. VBUS itself is a System OFF
+// wake source (always armed on nRF52840), so plugging in a dark device
+// boots it straight back into that loop.
 ///////////////////////////////////////////
 
 bool isUsbConnected() {
   return (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
 }
 
-void enterSleepMode() {
-  // 1. End race session if active (safety net)
-  if (raceActive) endRaceSession();
-
-  // 1b. Power off / release the camera before the SoftDevice goes down
-  CAMERA_SLEEP();
-
-  // 2. Stop BLE if active (prevents SoftDevice power waste during sleep)
-  if (bleActive) BLE_STOP();
-
-  // 3. Turn off display (I2C command, ~10uA sleep current)
-  DISPLAY_SLEEP();
-
-  // 3. Put GPS to backup mode
-  GPS_SLEEP();
-
-  // 4. Power down IMU (~1mA savings)
-  if (accelAvailable) {
-    pinMode(PIN_LSM6DS3TR_C_POWER, OUTPUT);
-    digitalWrite(PIN_LSM6DS3TR_C_POWER, HIGH);  // HIGH = disable power
+// Raw multi-sampled poll until every button is released (or timeout).
+// A held button at System OFF entry = SENSE already satisfied = instant
+// wake-reset, so the entry combo must be released before we commit.
+static void waitAllButtonsReleased(unsigned long timeoutMs) {
+  unsigned long start = millis();
+  while (anyButtonPressed() && millis() - start < timeoutMs) {
+    wdtPet();
+    delay(10);
   }
-
-  // 5. Re-arm the tach RPM wake trigger and drop pre-sleep pulse state.
-  // The ISR stays attached — the NEXT valid pulse sets tachHavePeriod and
-  // wakes straight into race mode. Without this clear, the flag stays
-  // latched from the first pulse since boot and sleep instantly bounces.
-  TACH_SLEEP();
-
-  // 6. Set state
-  sleepModeActive = true;
-  sleepEnteredAt = millis();
-  sleepLastGpsWake = millis();
 }
 
-void exitSleepMode(bool rpmWake = false) {
-  // 1. Re-enable IMU
+// CPU idle for the charging loop. sd_app_evt_wait() is an SVC into the
+// SoftDevice and hard-faults when it isn't enabled — BLE is lazily
+// initialized, so ask the SoftDevice itself (the old sleep loop called
+// it unconditionally, a latent fault).
+static void shutdownIdleWait() {
+  uint8_t sdEnabled = 0;
+  (void)sd_softdevice_is_enabled(&sdEnabled);
+  if (sdEnabled) {
+    sd_app_evt_wait();
+  } else {
+    __WFE();
+  }
+}
+
+// Configure wake sources and enter System OFF. Does not return: wake is
+// a full reset (RESETREAS.OFF + the pin's LATCH bit record the cause),
+// and the WDT stops with every other clock — wdtSetup() re-arms on the
+// fresh boot (nRF52840 PS: System OFF halts all clocks/peripherals).
+static void shutdownSystemOff() {
+  #ifdef WOKWI
+  // Simulator has no System OFF emulation worth trusting — plain reset.
+  NVIC_SystemReset();
+  #else
+  waitAllButtonsReleased(3000);
+  delay(50);  // contact settle
+  wdtPet();
+
+  // Wake sources: SENSE-LOW with pull-up on the tach (idle-high, pulse =
+  // falling) and all three buttons (active-low). Pull + SENSE config is
+  // retained in System OFF. P-numbers via the board variant's pin map.
+  nrf_gpio_cfg_sense_input(g_ADigitalPinMap[tachInputPin],
+                           NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
+  nrf_gpio_cfg_sense_input(g_ADigitalPinMap[btn1->pin],
+                           NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
+  nrf_gpio_cfg_sense_input(g_ADigitalPinMap[btn2->pin],
+                           NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
+  nrf_gpio_cfg_sense_input(g_ADigitalPinMap[btn3->pin],
+                           NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
+  // VBUS wake needs no configuration on the nRF52840 — always armed.
+
+  // A set LATCH bit is a pending DETECT = instant re-wake; clear last,
+  // right before entering OFF. (Boot already cleared RESETREAS, but the
+  // SoftDevice path below clears again to be unambiguous.)
+  NRF_P0->LATCH = 0xFFFFFFFF;
+  NRF_P1->LATCH = 0xFFFFFFFF;
+
+  // Cortex-M4F: a pending FPU exception can inhibit low-power entry —
+  // clear lazily-stacked FP state before OFF (standard Nordic guidance).
+  __set_FPSCR(__get_FPSCR() & ~0x9F);
+  NVIC_ClearPendingIRQ(FPU_IRQn);
+
+  // NRF_POWER is a restricted peripheral while the SoftDevice is enabled
+  // (BLE is lazy — it may or may not be up). GPREGRET is deliberately
+  // untouched: register 0 belongs to the OTA/bootloader handoff.
+  uint8_t sdEnabled = 0;
+  (void)sd_softdevice_is_enabled(&sdEnabled);
+  if (sdEnabled) {
+    sd_power_reset_reason_clr(0xFFFFFFFF);
+    (void)sd_power_system_off();
+  } else {
+    NRF_POWER->RESETREAS = 0xFFFFFFFF;
+    NRF_POWER->SYSTEMOFF = 1;
+  }
+  // Only reachable in emulated System OFF (debugger attached).
+  while (true) { __WFE(); }
+  #endif
+}
+
+// The charging loop — runs after full teardown whenever VBUS is present
+// at shutdown (or woke us). Shows the charging screen for 10 s, then
+// display off; ANY button press is a full wake back to the main menu
+// (the USB-on-menu trigger waits USB_MENU_CHARGE_IDLE_MS before pulling
+// the device back here, so wake doesn't bounce). Returns true to resume
+// to the menu, false when the cable was pulled (caller enters System OFF).
+static bool runChargingShutdownLoop() {
+  debugln(F("Charging loop (VBUS present)"));
+  DISPLAY_WAKE();
+  waitAllButtonsReleased(2000);  // shutdown entry combo may still be held
+  unsigned long shownAt = millis();
+  if (shownAt == 0) shownAt = 1;  // 0 is the display-off sentinel
+
+  while (true) {
+    wdtPet();
+
+    if (!isUsbConnected()) {
+      if (shownAt != 0) DISPLAY_SLEEP();
+      return false;  // unplugged — fall through to System OFF
+    }
+
+    if (anyButtonPressed()) {
+      waitAllButtonsReleased(2000);
+      return true;  // full wake to the main menu
+    }
+
+    if (shownAt != 0 && millis() - shownAt >= CHARGE_DISPLAY_TIMEOUT_MS) {
+      DISPLAY_SLEEP();
+      shownAt = 0;
+    }
+    if (shownAt != 0 &&
+        millis() - displayLastUpdate > (1000 / displayUpdateRateHz)) {
+      displayLastUpdate = millis();
+      displayPage_sleep_charging();
+    }
+
+    shutdownIdleWait();
+  }
+}
+
+// Bring the subsystems back after the charging loop — the chip never
+// powered down, so this is the minimal mirror of the cold-boot bring-up.
+// BLE and the camera stay down (both come up lazily on demand).
+static void softResumeFromCharging() {
   if (accelAvailable) {
     digitalWrite(PIN_LSM6DS3TR_C_POWER, LOW);
     delay(50);
     if (accelIMU.begin() != 0) {
-      debugln(F("IMU failed to reinitialize after sleep"));
+      debugln(F("IMU failed to reinitialize after charging"));
       accelAvailable = false;
     }
   }
 
-  // 2. Wake GPS
+  // The menu's steady state is race config. Set the targets directly so
+  // GPS_WAKE()'s GPS_RECONFIGURE() applies them (a shutdown from the GPS
+  // status page would otherwise resume at 5 Hz with NAV-SAT on).
+  gpsNavRateTarget = GPS_NAV_RATE_HZ;
+  gpsNavSatWanted = false;
+  gpsSatCnoCount = 0;
+  gpsSatUsedCount = 0;
   GPS_WAKE();
 
-  // 3. Wake display
   DISPLAY_WAKE();
-
-  // 4. Reset state
-  sleepModeActive = false;
-  sleepGpsWakeActive = false;
   menuIdleTimerRunning = false;
-  chargingModeActive = false;
-  chargeDisplayOnAt = 0;
+  switchToDisplayPage(PAGE_MAIN_MENU);
+}
 
-  // 5. RPM wake → skip main menu, go straight to race mode
-  if (rpmWake) {
-    debugln(F("RPM wake — entering race mode directly"));
-    raceActive = true;
-    enableLogging = true;
-    raceSessionStartedAt = millis();
-    createLapAnythingCourseManager();
-    switchToDisplayPage(TACHOMETER);
-  } else {
-    switchToDisplayPage(PAGE_MAIN_MENU);
+// Full shutdown: tear down every subsystem, then System OFF — or the
+// charging loop when VBUS is present. May return (charging resume);
+// callers in loop() must `return` right after so the frame restarts.
+void enterShutdown() {
+  debugln(F("Shutdown"));
+
+  // End race session if active (safety net — may write the DOVEX header)
+  if (raceActive) endRaceSession();
+  wdtPet();
+
+  // Camera power-off streams a synchronous 3 s ce82 hold — the longest
+  // single teardown step, bracketed by pets against the ~4 s WDT.
+  CAMERA_SLEEP();
+  wdtPet();
+
+  // Stop BLE if active (advertising/connection teardown)
+  if (bleActive) BLE_STOP();
+
+  // Display off (I2C command, ~10 µA panel sleep)
+  DISPLAY_SLEEP();
+
+  // GPS to software backup mode (µA; config retained while powered) and
+  // TIMER3 serial-drain stopped
+  GPS_SLEEP();
+
+  // IMU rail off (HIGH = power disabled)
+  if (accelAvailable) {
+    pinMode(PIN_LSM6DS3TR_C_POWER, OUTPUT);
+    digitalWrite(PIN_LSM6DS3TR_C_POWER, HIGH);
   }
+  wdtPet();
+
+  // Charging exception: never System OFF while VBUS is present — the
+  // HICHG charge-rate pin needs software alive.
+  if (isUsbConnected()) {
+    if (runChargingShutdownLoop()) {
+      softResumeFromCharging();
+      return;
+    }
+    // Cable pulled during the charging loop — power down for real.
+  }
+
+  shutdownSystemOff();  // does not return
 }
 
 ///////////////////////////////////////////
@@ -1340,66 +1470,6 @@ void loop() {
   #ifndef WOKWI
   wdtPet();
   #endif
-
-  if (sleepModeActive) {
-    // Check wake triggers
-    bool wakeButton = anyButtonPressed();
-    bool wakeRpm = tachHavePeriod;  // ISR sets this directly on any valid pulse
-
-    if (wakeRpm) {
-      exitSleepMode(true);
-      return;
-    }
-    if (wakeButton && !chargingModeActive) {
-      exitSleepMode(false);
-      return;
-    }
-
-    // ---- CHARGE MODE (USB connected during sleep) ----
-    if (isUsbConnected()) {
-      if (!chargingModeActive) {
-        // First detection of USB: show charging screen for 10s
-        chargingModeActive = true;
-        DISPLAY_WAKE();
-        chargeDisplayOnAt = millis();
-        if (chargeDisplayOnAt == 0) chargeDisplayOnAt = 1; // avoid 0 sentinel
-      }
-
-      // Button press: re-show display for another 10s
-      if (wakeButton && chargeDisplayOnAt == 0) {
-        DISPLAY_WAKE();
-        chargeDisplayOnAt = millis();
-        if (chargeDisplayOnAt == 0) chargeDisplayOnAt = 1;
-      }
-
-      // Display management
-      if (chargeDisplayOnAt != 0) {
-        if (millis() - chargeDisplayOnAt >= CHARGE_DISPLAY_TIMEOUT_MS) {
-          DISPLAY_SLEEP();
-          chargeDisplayOnAt = 0;
-        } else if (millis() - displayLastUpdate > (1000 / displayUpdateRateHz)) {
-          displayLastUpdate = millis();
-          displayPage_sleep_charging();
-        }
-      }
-
-      // Skip GPS periodic checks and WFE while charging — just loop
-      return;
-    }
-
-    // USB disconnected: clean up charge mode
-    if (chargingModeActive) {
-      chargingModeActive = false;
-      if (chargeDisplayOnAt != 0) {
-        DISPLAY_SLEEP();
-      }
-      chargeDisplayOnAt = 0;
-    }
-
-    // CPU idle (SoftDevice-safe WFE — any interrupt wakes CPU)
-    sd_app_evt_wait();
-    return;  // Skip entire normal loop
-  }
 
   #ifdef HAS_DEBUG
   unsigned long loopStart = millis();
@@ -1485,14 +1555,14 @@ void loop() {
     switchToDisplayPage(PAGE_MAIN_MENU);
   }
 
-  // Button hold detection for sleep/reboot combos
+  // Button hold detection for shutdown/reboot combos
   updateButtonHoldState();
 
-  // Long-press left+right (5s) on main menu -> sleep
+  // Long-press left+right (5s) on main menu -> shutdown
   if (currentPage == PAGE_MAIN_MENU &&
       isButtonHeld(1, SLEEP_LONG_PRESS_MS) &&
       isButtonHeld(3, SLEEP_LONG_PRESS_MS)) {
-    enterSleepMode();
+    enterShutdown();
     return;
   }
 
@@ -1502,23 +1572,25 @@ void loop() {
     NVIC_SystemReset();
   }
 
-  // USB connected on main menu -> auto-sleep for efficient charging
-  if (currentPage == PAGE_MAIN_MENU && isUsbConnected()) {
-    enterSleepMode();
-    return;
-  }
-
-  // 5-minute menu idle -> auto-sleep
+  // Main-menu idle tracking. Two consumers:
+  //  - USB present: enter the charging loop after USB_MENU_CHARGE_IDLE_MS
+  //    of no button activity. Not immediate — a charging-loop button wake
+  //    lands here, and an instant re-entry would bounce it right back.
+  //    The window is what lets replay/transfer be used while plugged in.
+  //  - No USB: full shutdown after SLEEP_IDLE_TIMEOUT_MS.
   if (currentPage == PAGE_MAIN_MENU) {
     if (!menuIdleTimerRunning) {
       menuIdleTimerRunning = true;
       menuIdleStartTime = millis();
-    } else if (millis() - menuIdleStartTime >= SLEEP_IDLE_TIMEOUT_MS) {
-      enterSleepMode();
-      return;
     }
     if (btn1->pressed || btn2->pressed || btn3->pressed) {
       menuIdleStartTime = millis();  // Reset on any button
+    }
+    unsigned long idleFor = millis() - menuIdleStartTime;
+    if ((isUsbConnected() && idleFor >= USB_MENU_CHARGE_IDLE_MS) ||
+        idleFor >= SLEEP_IDLE_TIMEOUT_MS) {
+      enterShutdown();
+      return;
     }
   } else {
     menuIdleTimerRunning = false;
