@@ -84,6 +84,7 @@
 #include "display_ui.h"
 #include "dovex_header.h"
 #include "gps_functions.h"
+#include "gps_status_page.h"
 #include "haversine.h"
 #include "replay.h"
 #include "sat_bars.h"
@@ -91,6 +92,7 @@
 #include "settings.h"
 #include "tachometer.h"
 #include "usb_msc.h"
+#include "wake_cause.h"
 
 ///////////////////////////////////////////
 // BATTERY CONFIGURATION
@@ -334,11 +336,19 @@ struct GpsData {
 volatile bool gpsDataFresh = false;  // Set by PVT callback, cleared by GPS_LOOP()
 
 // GPS nav-rate target: the rate GPS_RECONFIGURE() (and every wake/recovery
-// path that calls it) re-asserts. Race mode (25 Hz PVT-only) until the GPS
-// status boot page lands; that change flips the boot default to status
-// mode (5 Hz + NAV-SAT). Owned by gps_functions.ino.
-uint8_t gpsNavRateTarget = GPS_NAV_RATE_HZ;
-bool gpsNavSatWanted = false;
+// path that calls it) re-asserts. Boot starts in status mode (5 Hz +
+// NAV-SAT for the GPS status page); gpsEnterRaceMode() moves it to 25 Hz
+// PVT-only when the page exits. Owned by gps_functions.ino.
+uint8_t gpsNavRateTarget = GPS_NAV_RATE_STATUS_HZ;
+bool gpsNavSatWanted = true;
+
+// Why this boot happened — decoded from RESETREAS + GPIO LATCH first thing
+// in setup(). Routes the GPS status page's exit (tach wake -> race mode)
+// and the USB-wake charging shortcut once sleep is a full System OFF.
+wake_cause::Cause bootWakeCause = wake_cause::Cause::kColdBoot;
+
+// GPS status boot page hold/auto-close state (host-tested pure unit).
+gps_status_page::State gpsStatusState;
 
 // Per-satellite CNO snapshot for the GPS status page's signal bars.
 // Written by onNAVSATReceived() (main-loop context via checkCallbacks()),
@@ -525,6 +535,9 @@ unsigned long displayLastUpdate;
 const int PAGE_BOOT = 999;
 const int PAGE_TEST = 995;
 const int PAGE_RC_ERROR = 990;
+// GPS status boot page — every boot lands here after the splash. Outside
+// the ENDURANCE_MODE-reshuffled 3-12 running block and not arrow-navigable.
+const int PAGE_GPS_STATUS = 900;
 
 // main menu (shown after boot)
 const int PAGE_MAIN_MENU = -1;
@@ -612,10 +625,61 @@ void wdtPet() {
 }
 
 ///////////////////////////////////////////
+// BOOT WAKE CAUSE
+///////////////////////////////////////////
+
+// Bit mask for an Arduino pin on the given GPIO port (0/1), or 0 if the
+// pin lives on the other port. Uses the board variant's pin map so raw
+// P-numbers never get hardcoded.
+static uint32_t pinPortMask(uint32_t arduinoPin, int port) {
+  const uint32_t p = g_ADigitalPinMap[arduinoPin];
+  if ((int)(p >> 5) != port) return 0;
+  return 1u << (p & 31);
+}
+
+// Per-port masks of the System OFF wake pins for the wake_cause decoder.
+// The button pin literals mirror setupButtons() in display_ui.ino (kept in
+// sync by hand) — buttons aren't assigned to the ButtonState structs until
+// displaySetup(), which runs after the boot decode needs these.
+static wake_cause::PinMasks shutdownWakePinMasks() {
+  #ifndef WOKWI
+  const uint32_t buttonPins[3] = {1, 2, 3};
+  #else
+  const uint32_t buttonPins[3] = {4, 5, 6};
+  #endif
+  wake_cause::PinMasks m = {};
+  m.tach0 = pinPortMask(tachInputPin, 0);
+  m.tach1 = pinPortMask(tachInputPin, 1);
+  for (int i = 0; i < 3; i++) {
+    m.buttons0 |= pinPortMask(buttonPins[i], 0);
+    m.buttons1 |= pinPortMask(buttonPins[i], 1);
+  }
+  return m;
+}
+
+// Read (then clear) the sticky boot registers and decode why we booted.
+// Must run before anything else touches them; RESETREAS is cumulative and
+// LATCH survives System OFF, so stale bits would corrupt the next decode.
+// The SoftDevice is never enabled this early (BLE init is lazy), so raw
+// register access is safe.
+static void captureBootWakeCause() {
+  wake_cause::Regs regs;
+  regs.resetreas = NRF_POWER->RESETREAS;
+  regs.latch0 = NRF_P0->LATCH;
+  regs.latch1 = NRF_P1->LATCH;
+  NRF_POWER->RESETREAS = 0xFFFFFFFF;  // write-1-to-clear
+  NRF_P0->LATCH = 0xFFFFFFFF;
+  NRF_P1->LATCH = 0xFFFFFFFF;
+  bootWakeCause = wake_cause::decode(regs, shutdownWakePinMasks());
+}
+
+///////////////////////////////////////////
 // SETUP
 ///////////////////////////////////////////
 
 void setup() {
+  captureBootWakeCause();
+
 #ifdef HAS_DEBUG
   Serial.begin(9600);
   while (!Serial);
@@ -704,12 +768,16 @@ void setup() {
     strncpy(internalNotification, "SD Init failed!\n\nlogging not possible!", sizeof(internalNotification) - 1);
     internalNotification[sizeof(internalNotification) - 1] = '\0';
     switchToDisplayPage(PAGE_INTERNAL_FAULT);
-  } else if (sdSetupSuccess && !sdTrackSuccess) {
-    // No TRACKS folder is fine — Lap Anything will handle it
-    debugln(F("No TRACKS folder — Lap Anything will activate"));
-    switchToDisplayPage(PAGE_MAIN_MENU);
   } else {
-    switchToDisplayPage(PAGE_MAIN_MENU);
+    // No TRACKS folder is fine — Lap Anything will handle it
+    if (!sdTrackSuccess) {
+      debugln(F("No TRACKS folder — Lap Anything will activate"));
+    }
+    // Every boot lands on the GPS status page (MyChron-style): hold until
+    // a stable lock (or a button press), then continue to the menu — or
+    // straight into race mode when the tach woke us / the engine runs.
+    gps_status_page::begin(gpsStatusState, millis());
+    switchToDisplayPage(PAGE_GPS_STATUS);
   }
 
   // tachometer
@@ -1068,6 +1136,60 @@ void autoRaceModeCheck() {
 }
 
 /**
+ * @brief Drive the GPS status boot page: bounded GPS re-detect, then step
+ *        the hold/auto-close state machine (host-tested gps_status_page
+ *        unit) and act on its exit verdict. Runs between readButtons()
+ *        and displayLoop() so it consumes this frame's presses — the page
+ *        has an explicit no-op branch in displayLoop()'s button handling.
+ */
+void gpsStatusPageLoop() {
+  if (currentPage != PAGE_GPS_STATUS) return;
+
+  // GPS missing at boot? Re-probe a few times while the page is up.
+  GPS_STATUS_RETRY_LOOP();
+
+  gps_status_page::Inputs in;
+  in.fix = gpsData.fix;
+  in.timeValid = gpsData.timeValid;
+  in.buttonPressed = btn1->pressed || btn2->pressed || btn3->pressed;
+  in.tachWakeBoot = (bootWakeCause == wake_cause::Cause::kTachWake);
+  in.engineRunning = tachLastReported > 500;  // autoRaceModeCheck threshold
+  in.nowMs = millis();
+
+  const gps_status_page::Exit verdict = gps_status_page::step(gpsStatusState, in);
+  if (verdict != gps_status_page::Exit::kStay) {
+    // The press that skipped this page must not also drive the
+    // destination page's button handling in displayLoop() this frame.
+    resetButtons();
+  }
+
+  switch (verdict) {
+    case gps_status_page::Exit::kToMenu:
+      gpsEnterRaceMode();  // 25 Hz PVT-only is the steady state off this page
+      switchToDisplayPage(PAGE_MAIN_MENU);
+      break;
+    case gps_status_page::Exit::kToRace:
+      // Engine is (or was, at wake) running — straight into race mode with
+      // logging, mirroring the old RPM-wake path.
+      gpsEnterRaceMode();
+      debugln(F("GPS status page -> race mode"));
+      raceActive = true;
+      enableLogging = true;
+      raceSessionStartedAt = millis();
+      createLapAnythingCourseManager();
+      switchToDisplayPage(TACHOMETER);
+      break;
+    case gps_status_page::Exit::kToShutdown:
+      // Nothing locked, engine silent for the idle timeout — a spurious
+      // wake or a shelf queen. Power back down.
+      enterSleepMode();
+      break;
+    case gps_status_page::Exit::kStay:
+      break;
+  }
+}
+
+/**
  * @brief Maintain the GPS-lock hold state (see gpsLockHoldActive).
  *
  * While a race session wants to log but has no valid GPS time lock yet — so
@@ -1405,6 +1527,7 @@ void loop() {
   calculateGPSFrameRate();
 
   readButtons();
+  gpsStatusPageLoop();  // boot status page: consume presses, hold/auto-close
   displayLoop();
   resetButtons();
 

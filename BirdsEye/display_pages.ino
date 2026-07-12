@@ -4,7 +4,9 @@
 ///////////////////////////////////////////
 
 #include "display_pages.h"
+#include "gps_status_page.h"
 #include "lap_format.h"
+#include "sat_bars.h"
 
 void displayPage_boot() {
   resetDisplay();
@@ -15,6 +17,81 @@ void displayPage_boot() {
   display.println(F(""));
   display.println(F(" Timer + Data Logger"));
   display.println(F("\n    Initializing..."));
+
+  safeDisplayUpdate();
+}
+
+// GPS status boot page (MyChron-style): top half is fix/satellite stats,
+// bottom half is one vertical signal bar per satellite (height = CNO).
+// Shown on every boot; hold/auto-close logic lives in gpsStatusPageLoop().
+void displayPage_gps_status() {
+  resetDisplay();
+
+  // GPS never came up — GPS_STATUS_RETRY_LOOP() is re-probing in the
+  // background (or has given up). Any button still exits to the menu.
+  if (!gpsInitialized) {
+    display.println(F("GPS: NOT DETECTED"));
+    if (gpsRetriesExhausted()) {
+      display.println(F("\nCHECK WIRING"));
+    } else {
+      display.println(F("\nRetrying..."));
+    }
+    display.println(F("\nAny button: menu"));
+    safeDisplayUpdate();
+    return;
+  }
+
+  // ---- Top half (4 size-1 lines, 32 px) ----
+  display.print(F("Sats:"));
+  display.print(gpsSatUsedCount);
+  display.print(F("/"));
+  display.print(gpsData.satellites);
+  display.print(F("  HDOP:"));
+  if (gpsData.fix) {
+    display.println(gpsData.HDOP, 1);
+  } else {
+    display.println(F("--"));
+  }
+
+  const uint32_t countdown =
+      gps_status_page::countdownSecondsLeft(gpsStatusState, millis());
+  if (countdown > 0) {
+    display.print(F("LOCKED - ready in "));
+    display.println(countdown);
+  } else if (gpsData.fix) {
+    display.println(F("FIX (time sync...)"));
+  } else {
+    display.println(F("ACQUIRING..."));
+  }
+
+  display.print(F("Mode:GPS "));
+  display.print(gpsNavRateTarget);
+  display.print(F("Hz @"));
+  display.print(gpsFrameRate, 1);
+  display.println(F("Hz"));
+
+  if (millis() - lastBatteryCheck > batteryUpdateInterval) {
+    lastBatteryCheck = millis();
+    lastBatteryVoltage = getBatteryVoltage();
+  }
+  display.print(F("Batt:"));
+  display.print(getBatteryPercent(lastBatteryVoltage));
+  display.print(F("% "));
+  display.print(lastBatteryVoltage, 2);
+  display.println(F("V"));
+
+  // ---- Bottom half: per-satellite CNO bars rising from the baseline ----
+  const int kBarAreaH = 28;   // bars live in y [63-kBarAreaH .. 62]
+  const int kBaselineY = 63;
+  display.drawFastHLine(0, kBaselineY, 128, DISPLAY_TEXT_WHITE);
+  sat_bars::Bar bars[sat_bars::kMaxSats];
+  const int barCount = sat_bars::layout(gpsSatCnos, gpsSatCnoCount, 128,
+                                        kBarAreaH, bars, sat_bars::kMaxSats);
+  for (int i = 0; i < barCount; i++) {
+    if (bars[i].h <= 0) continue;
+    display.fillRect(bars[i].x, kBaselineY - bars[i].h, bars[i].w, bars[i].h,
+                     DISPLAY_TEXT_WHITE);
+  }
 
   safeDisplayUpdate();
 }

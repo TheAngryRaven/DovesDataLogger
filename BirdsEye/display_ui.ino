@@ -555,6 +555,8 @@ void displayLoop() {
     ) {
       displayCrossing();
       lastPage = 999;
+    } else if (currentPage == PAGE_GPS_STATUS) {
+      displayPage_gps_status();
     } else if (currentPage == PAGE_MAIN_MENU) {
       displayPage_main_menu();
     } else if (currentPage == PAGE_BLUETOOTH) {
@@ -737,6 +739,11 @@ void displayLoop() {
       debugln(menuSelectionIndex);
       forceDisplayRefresh();
     }
+  } else if (currentPage == PAGE_GPS_STATUS) {
+    // Boot GPS status page: presses are consumed by gpsStatusPageLoop()
+    // (BirdsEye.ino) BEFORE displayLoop() runs — nothing to do here. This
+    // branch exists so the generic running-page navigation below can't
+    // grab the page.
   } else if (currentPage == PAGE_INTERNAL_WARNING) {
     // Warning page: any button returns to main menu
     if (btn1->pressed || btn2->pressed || btn3->pressed) {
