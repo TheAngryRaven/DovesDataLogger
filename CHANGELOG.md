@@ -88,6 +88,20 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   to 2 MHz automatically if the fast re-init fails.
 
 ### Fixed
+- **USB mass-storage exit no longer risks truncating a host write.** Exiting
+  USB mode syncs the card and reboots, but `setUnitReady(false)` only stops
+  *new* SCSI commands — a `WRITE10` already in flight keeps calling the write
+  block callback on the USB task. The exit now waits (bounded to 1 s) for the
+  write callback to go quiet before syncing and resetting, so a reset can't
+  cut an in-progress `writeSectors()` and leave a truncated file or an
+  inconsistent FAT.
+- **Selecting USB storage with no cable plugged in no longer reboots the
+  device.** `USB_MSC_ENABLE()` had no VBUS precondition and the parked USB
+  loop reads "VBUS absent" as "cable pulled" on its first iteration, so
+  choosing USB before plugging in instantly reset the unit. USB mode now
+  requires VBUS: the menu shows "Plug in USB cable first!" instead of
+  entering (and the enable path bails defensively too, taking no SD lock and
+  not enumerating).
 - **Camera Power Off now streams the held-button frame — decoded from a
   live remote capture.** A genuine remote's ce82 traffic (nRF Connect,
   2026-07-10) showed two things we had wrong: the button frame's byte[4]
