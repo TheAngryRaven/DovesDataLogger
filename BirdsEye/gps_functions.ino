@@ -190,12 +190,15 @@ void onNAVSATReceived(UBX_NAV_SAT_data_t *sat) {
   uint8_t n = sat->header.numSvs;
   if (n > 64) n = 64;
   uint8_t used = 0;
+  uint8_t tracked = 0;
   for (uint8_t i = 0; i < n; i++) {
     obs[i].cno = sat->blocks[i].cno;
     obs[i].used = (sat->blocks[i].flags.bits.svUsed != 0);
     if (obs[i].used) used++;
+    if (obs[i].cno > 0) tracked++;  // hearing a signal, used in nav or not
   }
   gpsSatUsedCount = used;
+  gpsSatTrackedCount = tracked;
   gpsSatCnoCount = (uint8_t)sat_bars::selectCnos(obs, n, gpsSatCnos,
                                                  sat_bars::kMaxSats);
 }
@@ -688,6 +691,7 @@ void gpsEnterRaceMode() {
   gpsNavSatWanted = false;
   gpsSatCnoCount = 0;  // stale bars must not outlive the mode
   gpsSatUsedCount = 0;
+  gpsSatTrackedCount = 0;
   if (!gpsInitialized) return;
   myGNSS.setAutoNAVSAT(false);
   myGNSS.setNavigationFrequency(gpsNavRateTarget);
