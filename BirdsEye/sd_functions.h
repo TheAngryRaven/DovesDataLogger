@@ -60,8 +60,9 @@ void makeFullTrackPath(const char* trackName, char* filepath);
 bool SD_SETUP();
 
 // Format the card FAT16/32 (blocking; pets the WDT via the formatter's
-// progress callbacks). Reboots the device on success; drops to the
-// FAULT page on failure. Only call from the PAGE_SD_FORMAT confirm flow.
+// progress callbacks). Reboots the device on success; on failure returns
+// to the confirm page with sdFormatLastFailed set (a fresh full hold is
+// required to retry). Only call from the PAGE_SD_FORMAT confirm flow.
 void sdPerformFormat();
 
 // (Re)initialize the SD card at a specific SPI clock (EMI-tolerant retries).

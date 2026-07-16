@@ -132,12 +132,16 @@ bool sdEnsureTracksFolder() {
 ///////////////////////////////////////////
 
 // FatFormatter reports progress through a Print*: a few text messages plus
-// one '.' per fatSize/32 FAT sectors written. Each write pets the ~4 s WDT
-// (armed since the end of setup(); the format blocks the main loop).
-// 4-64 GB cards emit a dot every ~240 sectors — comfortably inside the
-// WDT budget even at 2 MHz SPI. The static "FORMATTING" screen is painted
-// once before the format starts; repainting it here would only add I2C
-// traffic to the erase window.
+// one '.' per ~(2*fatSize+spc)/32 FAT sectors written. Each write pets the
+// ~4 s WDT (armed since the end of setup(); the format blocks the main
+// loop). A 64 GB card at the 2 MHz EMI clock leaves ~1.4 s between pets,
+// and an SD-internal GC stall can add up to ~2 s — so a huge card on the
+// slow clock CAN brush the WDT. That is accepted deliberately: a WDT reset
+// mid-format reboots straight back to this page (the card is still
+// unmountable — idempotent, not a brick), which is a better backstop than
+// a timer-fed WDT that would mask a true SPI hang. The static "FORMATTING"
+// screen is painted once before the format starts; repainting it here
+// would only add I2C traffic to the erase window.
 class SdFormatProgress : public Print {
  public:
   size_t write(uint8_t) override {
@@ -156,6 +160,15 @@ void sdPerformFormat() {
   if (!acquireSDAccess(SD_ACCESS_FORMAT)) {
     return;  // impossible in practice; stay on the confirm page
   }
+
+  // A paired camera may be recording (camera control is independent of SD
+  // state — a tach-wake boot can have started it). The format blocks the
+  // main loop for minutes (CAMERA_LOOP() and the ce82 GPS heartbeat stop)
+  // and ends in a hard reset with no shutdown teardown, which would leave
+  // the X4 recording until its battery dies. Stop and power it off first —
+  // a no-op when the camera stack never came up.
+  CAMERA_SLEEP();
+  wdtPet();
 
   displayPage_sd_format_progress(F(" Formatting card..."), F(" DO NOT POWER OFF"));
   wdtPet();
@@ -181,9 +194,14 @@ void sdPerformFormat() {
   if (!formatted) {
     releaseSDAccess(SD_ACCESS_FORMAT);
     debugln(F("SD format failed"));
-    strncpy(internalNotification, "SD format failed!\n\ncard may be dead", sizeof(internalNotification) - 1);
-    internalNotification[sizeof(internalNotification) - 1] = '\0';
-    switchToDisplayPage(PAGE_INTERNAL_FAULT);
+    // Stay on the confirm page rather than the buttons-dead FAULT page: an
+    // engine-on EMI failure is transient and retryable, and the confirm
+    // page keeps the idle-timeout battery protection FAULT lacks (this
+    // sealed device has no power switch to escape a dead-end screen).
+    // Re-begin the state machine so a still-held Select can't instantly
+    // re-fire — a fresh release + full 3 s hold is required to retry.
+    sdFormatLastFailed = true;
+    sd_format_page::begin(sdFormatState, millis());
     return;
   }
 

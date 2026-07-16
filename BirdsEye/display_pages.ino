@@ -978,7 +978,11 @@ void displayPage_sd_format() {
   display.setTextWrap(true);
   display.setTextColor(DISPLAY_TEXT_WHITE);
   display.setTextSize(1);
-  display.println(F("Card is not formatted"));
+  if (sdFormatLastFailed) {
+    display.println(F("Format FAILED - retry"));
+  } else {
+    display.println(F("Card is not formatted"));
+  }
 
   uint32_t secondsLeft = sd_format_page::holdSecondsLeft(sdFormatState, millis());
   if (secondsLeft > 0) {

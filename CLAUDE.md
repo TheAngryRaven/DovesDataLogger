@@ -298,7 +298,11 @@ loop()  ~250 Hz
   then `/TRACKS` is provisioned (`sdEnsureTracksFolder()`) and the
   device reboots clean. The confirm can never fire from the wake press
   (Select must be seen released once) nor beat the Select+side reboot
-  combo (a held side button disarms it). Format failure → FAULT page;
+  combo (a held side button disarms it). A paired camera is stopped and
+  powered off (`CAMERA_SLEEP()`) before the format blocks the loop, since
+  the ending hard reset runs no shutdown teardown. Format failure returns
+  to the confirm page (marked `FAILED - retry`; fresh full hold to retry —
+  keeps the idle-timeout battery protection the FAULT dead-end lacks);
   a dead/absent card never offers the format. 5 min idle → shutdown
   (deferred while the engine runs), and a charging-loop resume with the
   card still unformatted returns to the format page, not the menu.

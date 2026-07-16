@@ -450,7 +450,10 @@ bool enableLogging = false;
 // machine lives in the host-tested sd_format_page unit. displayLoop()
 // only ever renders the confirm screen; the running/done screens are
 // painted directly by sdPerformFormat() (which blocks the main loop).
+// A failed attempt returns to the confirm page with sdFormatLastFailed
+// set so the renderer can say so.
 sd_format_page::State sdFormatState;
+bool sdFormatLastFailed = false;
 
 unsigned long lastCardFlush = 0;
 unsigned long lastLogCreateAttempt = 0;  // Throttles log-file open retries (ms)
@@ -1235,7 +1238,8 @@ void sdFormatPageLoop() {
 
   switch (verdict) {
     case sd_format_page::Exit::kFormat:
-      // Blocking. Reboots the device on success; drops to FAULT on failure.
+      // Blocking. Reboots the device on success; returns to this page's
+      // confirm screen on failure (fresh full hold required to retry).
       sdPerformFormat();
       break;
     case sd_format_page::Exit::kToShutdown:
