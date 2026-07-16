@@ -93,8 +93,6 @@ All sketch sources live in `BirdsEye/` so the folder name matches the
 | `settings.{h,ino}` | Persistent JSON settings on SD (`/SETTINGS.json`), `getSetting()`/`setSetting()` |
 | `tachometer.{h,ino}` | Falling-edge ISR on D0, Kalman-filtered RPM calculation |
 | `usb_msc.{h,ino}` | USB Mass Storage (TinyUSB MSC): SD card as a drag-and-drop drive (see subsystem 12) |
-| `diagram.json` | Wokwi simulator wiring |
-| `libraries.txt` | Wokwi simulator library list |
 
 ### Pure-Logic Units (`BirdsEye/*.{h,cpp}`)
 
@@ -941,7 +939,7 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | SD SPI clock (transfer) | 8 MHz (`SD_SPI_SPEED_FAST`) | `BirdsEye.ino` |
 | Battery check interval | 5 s | `BirdsEye.ino` |
 | BLE default MTU | 23 | `bluetooth.ino` |
-| JSON buffer | 4096 (1024 on Wokwi) | `sd_functions.ino` |
+| JSON buffer | 4096 (1024 in SIM builds) | `sd_functions.ino` |
 | Settings JSON buffer | 512 | `settings.ino` |
 | Settings file path | `/SETTINGS.json` | `settings.ino` |
 | Track upload buffer | 4096 | `bluetooth.ino` |
@@ -1027,7 +1025,10 @@ This device operates in ignition-noise environments. Three layers of defense:
 - PROGMEM is used for bitmap images to save RAM.
 - Avoid Arduino `String` in hot paths (heap fragmentation risk on 256 KB).
 - SD chip-select is hardwired to GND; pass `-1` to SdFat.
-- `#define WOKWI` enables simulator-specific tweaks (smaller JSON buffer).
+- `#define SIM` enables simulator-specific tweaks (smaller JSON buffer, no WDT,
+  fixed battery voltage, placeholder GPS setup). Never defined in CI firmware
+  builds — it's the compile flag for the browser/WASM simulator build
+  (sources land under `BirdsEye/sim/`; replaces the old Wokwi target).
 - `#define ENDURANCE_MODE` hides the tachometer page and reshuffles
   page numbers — for endurance racing where RPM isn't relevant.
 - **TIMER3 is reserved** for the GPS serial buffer ISR. Use TIMER4 if another

@@ -64,8 +64,21 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   only paid when nothing answers), and validates that PVT data actually
   flows within 5 s of boot — recovering via the existing baud-recovery
   ladder if the module answered the probe but was silently misconfigured.
+- **Simulator flag renamed: the old Wokwi define is now `SIM`** at every
+  site, ahead of the browser/WASM simulator work. All conditional behavior
+  carries over unchanged (bare-SdFat type, smaller JSON buffer, WDT skip, fixed battery
+  voltage, plain-reset shutdown), except the dead Wokwi GPS setup branch
+  (`myGNSS.begin(gpsStream)` at 19200), whose body is now a placeholder
+  that just sets `gpsInitialized = true` — the simulator will inject PVT
+  data via the real `onPVTReceived()` callback instead. `SIM` is never
+  defined in normal firmware builds; no hardware behavior changes.
 
 ### Removed
+- **Wokwi simulator files** (`BirdsEye/diagram.json`,
+  `BirdsEye/libraries.txt`) — they described a dead Wokwi/Arduino-Mega
+  target with the wrong display (SSD1306 vs the shipped SH1106G) and the
+  wrong GPS library (Adafruit NMEA vs SparkFun UBX). A WASM simulator
+  built from the real firmware replaces them.
 - **24-hour periodic GPS fix during sleep** — nothing runs during System
   OFF to schedule it; the GPS warm-starts on wake instead.
 - **RPM sleep-wake latch (`tachHavePeriod` / `TACH_SLEEP()`)** —
