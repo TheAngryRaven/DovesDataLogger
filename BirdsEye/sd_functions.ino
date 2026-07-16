@@ -120,9 +120,15 @@ bool buildTrackList() {
   }
 
   if (!SD.exists(trackFolder)) {
-    debugln(F("TRACKS folder does not exist."));
-    releaseSDAccess(SD_ACCESS_TRACK_PARSE);
-    return false;
+    // Soldered-in module: first boot is a blank card, and SdFat's open()
+    // never creates parent directories — without this, every BLE TPUT
+    // would fail until the folder exists. Self-provision it.
+    if (!SD.mkdir(trackFolder)) {
+      debugln(F("TRACKS folder missing and could not be created."));
+      releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+      return false;
+    }
+    debugln(F("TRACKS folder created (blank card)."));
   }
 
   // reset lists

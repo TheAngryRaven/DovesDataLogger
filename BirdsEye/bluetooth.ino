@@ -953,6 +953,12 @@ void processTrackUpload() {
   char filepath[FILEPATH_MAX];
   snprintf(filepath, sizeof(filepath), "/TRACKS/%s", trackUploadFilename);
 
+  // SdFat's open() never creates parent directories; a blank card (or a
+  // host deleting the folder over USB MSC) would otherwise fail every
+  // upload. Mirrors the /fw staging path; return deliberately ignored —
+  // mkdir is a no-op false when the folder already exists.
+  SD.mkdir("/TRACKS");
+
   // Delete existing file if present
   if (SD.exists(filepath)) {
     SD.remove(filepath);

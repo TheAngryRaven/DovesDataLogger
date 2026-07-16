@@ -767,9 +767,10 @@ void setup() {
     // (in which case setup() continues below), unplugging powers back off.
     enterShutdown();
   } else {
-    // No TRACKS folder is fine — Lap Anything will handle it
+    // A missing TRACKS folder is auto-created by buildTrackList(); a
+    // false here means even that failed — Lap Anything will handle it.
     if (!sdTrackSuccess) {
-      debugln(F("No TRACKS folder — Lap Anything will activate"));
+      debugln(F("No usable TRACKS folder — Lap Anything will activate"));
     }
     // Every boot lands on the GPS status page (MyChron-style): hold until
     // a stable lock (or a button press), then continue to the menu — or
