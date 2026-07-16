@@ -13,6 +13,16 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **Simulator host build (`BirdsEye/sim/`, internal).** The real firmware
+  sources now also compile and run on a desktop toolchain under the `SIM`
+  flag — one concatenated translation unit against an Arduino/nRF52 shim,
+  an in-memory SD card (fixed settings + example track baked in), a
+  host-driven virtual clock, and the real DovesLapTimer/CourseManager
+  library, with BLE/camera/USB/OTA stubbed out. A new `sim-build` CI
+  workflow boots the firmware for 60 virtual seconds and verifies two
+  runs are byte-identical, so the `SIM` flag can't silently rot. This is
+  the foundation for the browser (WASM) simulator; no firmware behavior
+  changes.
 - **Blank-module first-boot safety.** Aimed at soldered-in SD modules that
   can never be pre-loaded or reformatted on a PC. The `/TRACKS` folder is
   now created automatically when missing (at boot and before a BLE track

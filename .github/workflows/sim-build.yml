@@ -1,0 +1,39 @@
+name: sim-build
+
+# Native host build of the firmware TU under the SIM flag (BirdsEye/sim/).
+# This is what keeps SIM from rotting the way the old WOKWI flag did: the
+# sim compiling — real .ino sources, unmodified — is itself a CI gate.
+#
+# Phase 4 of the simulator plan extends this workflow with the WASM
+# (emscripten) build, golden display fixtures, and the lap-timing oracle
+# test. For now: build native, boot the firmware for 60 s of virtual
+# time, and prove two runs are byte-identical (determinism).
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - BETA
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  native:
+    name: sim native build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S BirdsEye/sim -B BirdsEye/sim/build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build BirdsEye/sim/build --parallel
+
+      - name: Boot soak + determinism tests
+        run: ctest --test-dir BirdsEye/sim/build --output-on-failure
+
+      - name: Show boot transcript
+        run: ./BirdsEye/sim/build/birdseye_sim_native

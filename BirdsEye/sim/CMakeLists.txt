@@ -1,0 +1,162 @@
+cmake_minimum_required(VERSION 3.16)
+project(birdseye_sim LANGUAGES CXX)
+
+# ---------------------------------------------------------------------------
+# BirdsEye WASM/native simulator — Phase 1: native host build.
+#
+# Builds the REAL firmware sources (one concatenated TU, sim_main.cpp) on a
+# desktop toolchain, against:
+#   - arduino_shim/  : Arduino core + nRF52 register surface (virtual clock)
+#   - sdfat_shim/    : in-memory VFS standing in for SdFat
+#   - stubs/         : excluded modules (BLE/camera/USB/OTA) + GNSS driver
+#   - REAL libraries : DovesLapTimer/CourseManager (the point of the sim),
+#                      SparkFun u-blox header (types only), ArduinoJson.
+#
+# The WASM (emcmake) target is Phase 4; this file deliberately builds native
+# first so the whole firmware TU is exercised in CI from day one.
+# ---------------------------------------------------------------------------
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+set(SIM_DIR ${CMAKE_CURRENT_SOURCE_DIR})
+set(BIRDSEYE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+option(SIM_DEBUG_OUTPUT "Enable the firmware's HAS_DEBUG serial prints" ON)
+
+# ---------------------------------------------------------------- libraries
+include(FetchContent)
+
+# Lap timing — the REAL library; its math being real firmware code is the
+# sim's second-highest fidelity priority. Ref policy matches CI: BETA-channel
+# builds track the library's BETA branch (master/release builds pin a tag).
+FetchContent_Declare(doveslaptimer
+  GIT_REPOSITORY https://github.com/TheAngryRaven/DovesLapTimer.git
+  GIT_TAG BETA
+  GIT_SHALLOW TRUE
+)
+
+# u-blox GNSS — header-only use (UBX struct types + the class the sketch
+# instantiates); the driver .cpp is NOT compiled (stubs/gnss_stubs.cpp).
+FetchContent_Declare(sparkfun_gnss
+  GIT_REPOSITORY https://github.com/sparkfun/SparkFun_u-blox_GNSS_v3.git
+  GIT_TAG v3.1.9
+  GIT_SHALLOW TRUE
+)
+
+FetchContent_Declare(arduinojson
+  GIT_REPOSITORY https://github.com/bblanchon/ArduinoJson.git
+  GIT_TAG v6.21.5
+  GIT_SHALLOW TRUE
+)
+
+# DovesLapTimer.h includes ArxTypeTraits.h
+FetchContent_Declare(arxtypetraits
+  GIT_REPOSITORY https://github.com/hideakitai/ArxTypeTraits.git
+  GIT_TAG v0.3.2
+  GIT_SHALLOW TRUE
+)
+
+FetchContent_MakeAvailable(doveslaptimer sparkfun_gnss arduinojson arxtypetraits)
+
+# ------------------------------------------------------------ embed assets
+set(SIM_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
+file(MAKE_DIRECTORY ${SIM_GEN_DIR})
+
+function(sim_embed_asset input output symbol)
+  add_custom_command(
+    OUTPUT ${output}
+    COMMAND ${CMAKE_COMMAND}
+            -DINPUT=${input} -DOUTPUT=${output} -DSYMBOL=${symbol}
+            -P ${SIM_DIR}/cmake/bin2h.cmake
+    DEPENDS ${input} ${SIM_DIR}/cmake/bin2h.cmake
+    COMMENT "Embedding ${input} as ${symbol}"
+  )
+endfunction()
+
+sim_embed_asset(${SIM_DIR}/assets/SETTINGS.json
+                ${SIM_GEN_DIR}/sim_asset_settings.h kAssetSettingsJson)
+sim_embed_asset(${SIM_DIR}/assets/TRACKS/OKC.json
+                ${SIM_GEN_DIR}/sim_asset_track_okc.h kAssetTrackOkcJson)
+
+add_custom_target(sim_assets DEPENDS
+  ${SIM_GEN_DIR}/sim_asset_settings.h
+  ${SIM_GEN_DIR}/sim_asset_track_okc.h
+)
+
+# ------------------------------------------------------------------- sources
+set(SIM_CORE_SOURCES
+  ${SIM_DIR}/sim_main.cpp
+  ${SIM_DIR}/virtual_clock.cpp
+  ${SIM_DIR}/arduino_shim/arduino_shim.cpp
+  ${SIM_DIR}/arduino_shim/shim_objects.cpp
+  ${SIM_DIR}/sdfat_shim/sim_vfs.cpp
+  ${SIM_DIR}/stubs/module_stubs.cpp
+  ${SIM_DIR}/stubs/gnss_stubs.cpp
+  # Real SparkFun bus classes (SfeSerial is a member of the class the
+  # sketch instantiates) — small, portable, compiles against the shim.
+  ${sparkfun_gnss_SOURCE_DIR}/src/sfe_bus.cpp
+  # Pure-logic units the compiled firmware modules call (same files the
+  # host test harness in tests/ builds).
+  ${BIRDSEYE_DIR}/camera_fsm.cpp
+  ${BIRDSEYE_DIR}/dovex_header.cpp
+  ${BIRDSEYE_DIR}/gps_status_page.cpp
+  ${BIRDSEYE_DIR}/gps_time.cpp
+  ${BIRDSEYE_DIR}/gps_validation.cpp
+  ${BIRDSEYE_DIR}/haversine.cpp
+  ${BIRDSEYE_DIR}/lap_format.cpp
+  ${BIRDSEYE_DIR}/sat_bars.cpp
+  ${BIRDSEYE_DIR}/sd_access_policy.cpp
+  ${BIRDSEYE_DIR}/sd_format_page.cpp
+  ${BIRDSEYE_DIR}/tach_filter.cpp
+  ${BIRDSEYE_DIR}/wake_cause.cpp
+  # Real DovesLapTimer sources — the lap/sector timing IS the demo.
+  ${doveslaptimer_SOURCE_DIR}/src/DovesLapTimer.cpp
+  ${doveslaptimer_SOURCE_DIR}/src/WaypointLapTimer.cpp
+  ${doveslaptimer_SOURCE_DIR}/src/CourseDetector.cpp
+  ${doveslaptimer_SOURCE_DIR}/src/CourseManager.cpp
+)
+
+add_executable(birdseye_sim_native
+  ${SIM_CORE_SOURCES}
+  ${SIM_DIR}/native_main.cpp
+)
+add_dependencies(birdseye_sim_native sim_assets)
+
+target_include_directories(birdseye_sim_native PRIVATE
+  ${SIM_DIR}
+  ${SIM_DIR}/arduino_shim
+  ${SIM_DIR}/sdfat_shim
+  ${SIM_GEN_DIR}
+  ${BIRDSEYE_DIR}
+  ${doveslaptimer_SOURCE_DIR}/src
+  ${sparkfun_gnss_SOURCE_DIR}/src
+  ${arduinojson_SOURCE_DIR}/src
+  ${arxtypetraits_SOURCE_DIR}
+)
+
+target_compile_definitions(birdseye_sim_native PRIVATE
+  $<$<BOOL:${SIM_DEBUG_OUTPUT}>:HAS_DEBUG>
+)
+
+# The firmware TU is Arduino-style code compiled far from its home
+# toolchain — keep warnings on but non-fatal for it; the sim's own shims
+# should stay clean.
+target_compile_options(birdseye_sim_native PRIVATE
+  -Wall -Wextra -Wno-unused-parameter
+  # The Arduino build force-includes Arduino.h into every source; the
+  # DovesLapTimer sources rely on that (no explicit include). Replicate.
+  -include ${SIM_DIR}/arduino_shim/Arduino.h
+)
+
+enable_testing()
+
+# Done-criteria checks: boots to menu + survives 60 s of virtual time,
+# and two runs produce byte-identical output (determinism).
+add_test(NAME sim_boot_soak COMMAND birdseye_sim_native)
+add_test(NAME sim_determinism
+  COMMAND ${CMAKE_COMMAND}
+          -DSIM_BIN=$<TARGET_FILE:birdseye_sim_native>
+          -P ${SIM_DIR}/cmake/determinism_test.cmake
+)
