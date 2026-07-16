@@ -267,9 +267,7 @@ DovesDataLogger/                  # repo root
 │   ├── replay.{h,ino}            # Instant DOVEX header replay + haversine helper
 │   ├── sd_functions.{h,ino}      # SD init, track JSON parsing, track manifest
 │   ├── settings.{h,ino}          # Persistent JSON settings (/SETTINGS.json)
-│   ├── tachometer.{h,ino}        # Falling-edge ISR, Kalman-filtered RPM
-│   ├── diagram.json              # Wokwi simulator wiring
-│   └── libraries.txt             # Wokwi simulator library list
+│   └── tachometer.{h,ino}        # Falling-edge ISR, Kalman-filtered RPM
 │
 ├── .github/workflows/            # CI: compile-sketch + arduino-lint
 ├── CASE/                         # 3D printable enclosure files (STL + STEP)
@@ -447,6 +445,12 @@ Look at existing pages like `displayPage_gps_speed()` or `displayPage_tachometer
 
 ## Future Enhancements
 
+- **Browser-based simulator (in progress)**: the old Wokwi simulator files
+  (`diagram.json`, `libraries.txt`) have been removed — they described a dead
+  Arduino-Mega/SSD1306 target. They're being replaced by a WASM build of the
+  real firmware (behind the `SIM` compile flag, sources under `BirdsEye/sim/`)
+  that runs in the browser and replays real `.dovex` sessions, embedded in
+  [DovesDataViewer](https://github.com/TheAngryRaven/DovesDataViewer)
 - Pin lock - require PIN to pull logs from device
 - Additional sensor inputs (exhaust temp, water temp)
 - WiFi automatic data transfer

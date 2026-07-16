@@ -82,7 +82,7 @@ void safeDisplayUpdate() {
 }
 
 void setupButtons() {
-  #ifndef WOKWI
+  #ifndef SIM
   // greybox
   btn1->pin = 1;
   btn2->pin = 2;
@@ -473,9 +473,9 @@ void handleRunningPageSelection() {
   } else if (currentPage == PAGE_REPLAY_RESULTS) {
     // Middle button on results does nothing (use left/right for navigation)
   } else {
-    // wokwi doesnt like fancy page switcher
+    // sim doesnt like fancy page switcher
     // inverted eats too much power
-    #ifdef WOKWI
+    #ifdef SIM
       if(displayInverted == true) {
         displayInverted = false;
         display.invertDisplay(false);

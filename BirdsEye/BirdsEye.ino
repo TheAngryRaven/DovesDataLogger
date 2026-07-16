@@ -22,7 +22,7 @@
 #include <nrf_gpio.h>  // SENSE-wake pin config for System OFF shutdown
 #include <nrf_wdt.h>
 
-// #define WOKWI
+// #define SIM
 // #define HAS_DEBUG
 
 // Hides a couple pages and changes some behavior
@@ -46,11 +46,11 @@
 // SdFat configuration. SD_FAT_TYPE must be defined BEFORE SdFat.h is
 // processed for the first time, which means before any module header
 // that pulls it in (e.g. replay.h).
-//   0 = bare SdFat/File   (Wokwi only)
+//   0 = bare SdFat/File   (SIM only)
 //   1 = SdFat32/File32    (real hardware — FAT16/FAT32)
 //   2 = SdExFat/ExFile
 //   3 = SdFs/FsFile
-#ifdef WOKWI
+#ifdef SIM
 #define SD_FAT_TYPE 0
 #define PIN_SPI_CS -1
 #else
@@ -109,7 +109,7 @@ int batteryUpdateInterval = 5000;
 float lastBatteryVoltage;
 
 float getBatteryVoltage() {
-  #ifdef WOKWI
+  #ifdef SIM
   return 3.75;
   #else
   unsigned int adcCount = analogRead(PIN_VBAT);
@@ -470,7 +470,7 @@ int numOfLocations = 0;
 // JSON PARSING GLOBALS
 ///////////////////////////////////////////
 #include <ArduinoJson.h>
-#ifdef WOKWI
+#ifdef SIM
 #define JSON_BUFFER_SIZE 1024
 #else
 // 4 KB handles tracks with up to 10 courses with full sector data
@@ -528,7 +528,7 @@ bool recentlyChanged = false;
 // uses adafruit display libraries
 #include <Wire.h>
 
-#ifdef WOKWI
+#ifdef SIM
 // #define USE_1306_DISPLAY // remove to use SH110X oled
 #endif
 // #define USE_1306_DISPLAY // remove to use SH110X oled
@@ -653,7 +653,7 @@ static uint32_t pinPortMask(uint32_t arduinoPin, int port) {
 // sync by hand) — buttons aren't assigned to the ButtonState structs until
 // displaySetup(), which runs after the boot decode needs these.
 static wake_cause::PinMasks shutdownWakePinMasks() {
-  #ifndef WOKWI
+  #ifndef SIM
   const uint32_t buttonPins[3] = {1, 2, 3};
   #else
   const uint32_t buttonPins[3] = {4, 5, 6};
@@ -696,7 +696,7 @@ void setup() {
   while (!Serial);
 #endif
 
-  #ifndef WOKWI
+  #ifndef SIM
     analogReadResolution(ADC_RESOLUTION);
     pinMode(PIN_VBAT, INPUT);
     pinMode(VBAT_ENABLE, OUTPUT);
@@ -814,7 +814,7 @@ void setup() {
   // Start hardware watchdog LAST - everything above must complete before
   // the 4-second timeout starts counting. If setup itself hangs, the
   // device won't boot-loop because WDT hasn't started yet.
-  #ifndef WOKWI
+  #ifndef SIM
   wdtSetup();
   debugln(F("Watchdog timer started (~4s timeout)"));
   #endif
@@ -1365,7 +1365,7 @@ static void shutdownIdleWait() {
 // and the WDT stops with every other clock — wdtSetup() re-arms on the
 // fresh boot (nRF52840 PS: System OFF halts all clocks/peripherals).
 static void shutdownSystemOff() {
-  #ifdef WOKWI
+  #ifdef SIM
   // Simulator has no System OFF emulation worth trusting — plain reset.
   NVIC_SystemReset();
   #else
@@ -1543,7 +1543,7 @@ unsigned long loopMaxTime = 0;
 #endif
 
 void loop() {
-  #ifndef WOKWI
+  #ifndef SIM
   wdtPet();
   #endif
 

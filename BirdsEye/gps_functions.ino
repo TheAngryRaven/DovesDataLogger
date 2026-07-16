@@ -309,7 +309,7 @@ static bool gpsSetupProbe(bool coldRetry) {
 void GPS_SETUP() {
   gpsInitialized = false;  // Reset flag at start of setup
 
-  #ifndef WOKWI
+  #ifndef SIM
     debugln(F("ACTUAL GPS SETUP"));
 
     // gpsStream wraps GPS_SERIAL: before the timer starts, reads pass
@@ -344,15 +344,11 @@ void GPS_SETUP() {
     gpsWakeTime = millis();
     gpsWakeValidated = false;
   #else
-    debugln(F("WOKWI GPS SETUP"));
-    GPS_SERIAL.begin(19200);
-    if (myGNSS.begin(gpsStream)) {
-      myGNSS.setAutoPVTcallbackPtr(&onPVTReceived);
-      gpsInitialized = true;
-      startGpsSerialTimer();
-    } else {
-      debugln(F("ERROR: WOKWI GPS not detected!"));
-    }
+    // Simulator placeholder: no u-blox module to probe. The sim host
+    // injects PVT data by calling onPVTReceived() directly, so there is
+    // no serial/library setup to do here.
+    debugln(F("SIM GPS SETUP"));
+    gpsInitialized = true;
   #endif
 }
 
@@ -371,7 +367,7 @@ bool gpsRetriesExhausted() {
 }
 
 void GPS_STATUS_RETRY_LOOP() {
-  #ifndef WOKWI
+  #ifndef SIM
   if (gpsInitialized) return;
   if (gpsSetupRetryCount >= GPS_SETUP_MAX_RETRIES) return;
   if (millis() - gpsSetupLastRetry < GPS_SETUP_RETRY_INTERVAL_MS) return;
