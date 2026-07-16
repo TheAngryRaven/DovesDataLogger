@@ -45,10 +45,12 @@ void displayPage_gps_status() {
   }
 
   // ---- Top half (4 size-1 lines, 32 px) ----
+  // used-in-solution / tracked-with-signal — the second number matches
+  // the bar count below (until it exceeds the 16-bar display cap).
   display.print(F("Sats:"));
   display.print(gpsSatUsedCount);
   display.print(F("/"));
-  display.print(gpsData.satellites);
+  display.print(gpsSatTrackedCount);
   display.print(F("  HDOP:"));
   if (gpsData.fix) {
     display.println(gpsData.HDOP, 1);
@@ -74,11 +76,9 @@ void displayPage_gps_status() {
     display.println(F("s"));
   }
 
-  display.print(F("Mode:GPS "));
-  display.print(gpsNavRateTarget);
-  display.print(F("Hz @"));
-  display.print(gpsFrameRate, 1);
-  display.println(F("Hz"));
+  // Constellation only — the configured/live update rates confused more
+  // than they informed on a boot screen.
+  display.println(F("Mode:GPS-only"));
 
   if (millis() - lastBatteryCheck > batteryUpdateInterval) {
     lastBatteryCheck = millis();

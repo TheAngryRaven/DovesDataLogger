@@ -347,8 +347,12 @@ gps_status_page::State gpsStatusState;
 // read by displayPage_gps_status(). Selection/ordering rules live in the
 // host-tested sat_bars unit.
 uint8_t gpsSatCnos[sat_bars::kMaxSats];
-uint8_t gpsSatCnoCount = 0;   // entries in gpsSatCnos
-uint8_t gpsSatUsedCount = 0;  // satellites participating in the nav solution
+uint8_t gpsSatCnoCount = 0;     // entries in gpsSatCnos (display-capped)
+uint8_t gpsSatUsedCount = 0;    // satellites participating in the nav solution
+uint8_t gpsSatTrackedCount = 0; // satellites tracked with a measurable signal
+                                // (CNO > 0) — the bars' population, NOT capped.
+                                // Note NAV-PVT's numSV is used-in-solution too,
+                                // so it can't serve as the "in view" figure.
 
 // GPS PVT-arrival validation: tracks whether GPS is producing data after
 // GPS_SETUP() / GPS_WAKE(). Both set gpsWakeTime and clear gpsWakeValidated;

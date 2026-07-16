@@ -15,8 +15,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ### Added
 - **GPS status boot page (MyChron-style).** Every boot now lands on a
   satellite status page after the splash instead of the main menu: the
-  top half shows used/seen satellite count, HDOP, lock state,
-  constellation mode and the configured + live nav rate plus battery;
+  top half shows used-in-solution/tracked satellite counts, HDOP, lock
+  state, constellation mode and battery;
   the bottom half draws one vertical signal bar per satellite (height =
   carrier-to-noise, from UBX-NAV-SAT). During the page the GPS runs a
   5 Hz status config; leaving it switches to the 25 Hz PVT-only race
