@@ -953,11 +953,10 @@ void processTrackUpload() {
   char filepath[FILEPATH_MAX];
   snprintf(filepath, sizeof(filepath), "/TRACKS/%s", trackUploadFilename);
 
-  // SdFat's open() never creates parent directories; a blank card (or a
-  // host deleting the folder over USB MSC) would otherwise fail every
-  // upload. Mirrors the /fw staging path; return deliberately ignored —
-  // mkdir is a no-op false when the folder already exists.
-  SD.mkdir("/TRACKS");
+  // Belt-and-suspenders: buildTrackList() provisions the folder at boot,
+  // but re-ensure it before every upload so a missing folder can never
+  // fail a TPUT with WRITE_FAIL. Return deliberately ignored.
+  sdEnsureTracksFolder();
 
   // Delete existing file if present
   if (SD.exists(filepath)) {

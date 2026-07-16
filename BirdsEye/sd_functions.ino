@@ -102,13 +102,29 @@ bool SD_SETUP() {
   // SD.begin() = cardBegin() && volumeBegin(). Distinguish "card answers
   // but no FAT volume mounts" (factory-blank or corrupted soldered-in
   // module — recoverable via the on-device format page) from a dead or
-  // absent card (keeps the existing FAULT dead-end).
+  // absent card (keeps the existing FAULT dead-end). The volumeBegin()
+  // check is what makes the diagnosis safe: if the three begin() attempts
+  // failed at the CARD layer (EMI, marginal contact) the FAT may be
+  // perfectly healthy — offering a format then would invite the user to
+  // erase real data. If the volume mounts here, the card just recovered.
   if (SD.cardBegin(SdSpiConfig(PIN_SPI_CS, SHARED_SPI, SPI_SPEED)) &&
       SD.card() && SD.card()->sectorCount() > 0) {
+    if (SD.volumeBegin()) {
+      debugln(F("SD recovered on probe (transient card-init failure)"));
+      return true;
+    }
     sdCardUnformatted = true;
     debugln(F("SD card responds but has no FAT volume — format candidate"));
   }
   return false;
+}
+
+// Make sure /TRACKS exists (blank soldered-in card; SdFat's open() never
+// creates parent directories). Caller must already hold the SD mutex.
+// Returns true when the folder exists or was created.
+bool sdEnsureTracksFolder() {
+  if (SD.exists(trackFolder)) return true;
+  return SD.mkdir(trackFolder);
 }
 
 ///////////////////////////////////////////
@@ -117,29 +133,21 @@ bool SD_SETUP() {
 
 // FatFormatter reports progress through a Print*: a few text messages plus
 // one '.' per fatSize/32 FAT sectors written. Each write pets the ~4 s WDT
-// (armed since the end of setup(); the format blocks the main loop) and
-// repaints a throttled progress screen. 4-64 GB cards emit a dot every
-// ~240 sectors — comfortably inside the WDT budget even at 2 MHz SPI.
+// (armed since the end of setup(); the format blocks the main loop).
+// 4-64 GB cards emit a dot every ~240 sectors — comfortably inside the
+// WDT budget even at 2 MHz SPI. The static "FORMATTING" screen is painted
+// once before the format starts; repainting it here would only add I2C
+// traffic to the erase window.
 class SdFormatProgress : public Print {
  public:
   size_t write(uint8_t) override {
-    tick();
+    wdtPet();
     return 1;
   }
   size_t write(const uint8_t*, size_t n) override {
-    tick();
+    wdtPet();
     return n;
   }
-
- private:
-  void tick() {
-    wdtPet();
-    if (millis() - lastPaintMs >= 250) {
-      lastPaintMs = millis();
-      displayPage_sd_format();
-    }
-  }
-  unsigned long lastPaintMs = 0;
 };
 
 void sdPerformFormat() {
@@ -149,29 +157,29 @@ void sdPerformFormat() {
     return;  // impossible in practice; stay on the confirm page
   }
 
-  sdFormatPhase = SD_FORMAT_RUNNING;
-  displayPage_sd_format();
+  displayPage_sd_format_progress(F(" Formatting card..."), F(" DO NOT POWER OFF"));
   wdtPet();
 
+  // Clock policy: the fast parked-transfer clock is only safe with the
+  // engine off — ignition EMI corrupts writes SILENTLY (the card ACKs
+  // them and SD.format() has no read-back verify), so a "successful"
+  // 8 MHz format under RPM could produce an unmountable FAT and loop the
+  // user right back here. Engine turning → EMI-safe clock only.
   SdFormatProgress progress;
+  const bool engineTurning = tachLastReported > 0;
+  const uint32_t clocks[2] = {
+      engineTurning ? (uint32_t)SPI_SPEED : (uint32_t)SD_SPI_SPEED_FAST,
+      (uint32_t)SPI_SPEED};
   bool formatted = false;
-  // The device is parked at boot (no session, motor normally off), so use
-  // the fast transfer clock first; retry the whole format once at the
-  // EMI-safe clock — a tach-wake boot means the engine may be running.
-  if (SD.cardBegin(SdSpiConfig(PIN_SPI_CS, SHARED_SPI, SD_SPI_SPEED_FAST))) {
-    formatted = SD.format(&progress);
-  }
-  if (!formatted) {
-    wdtPet();
-    debugln(F("SD format at fast clock failed, retrying at normal speed"));
-    if (SD.cardBegin(SdSpiConfig(PIN_SPI_CS, SHARED_SPI, SPI_SPEED))) {
+  for (int i = 0; i < 2 && !formatted; i++) {
+    if (SD.cardBegin(SdSpiConfig(PIN_SPI_CS, SHARED_SPI, clocks[i]))) {
       formatted = SD.format(&progress);
     }
+    wdtPet();
   }
 
   if (!formatted) {
     releaseSDAccess(SD_ACCESS_FORMAT);
-    sdFormatPhase = SD_FORMAT_CONFIRM;
     debugln(F("SD format failed"));
     strncpy(internalNotification, "SD format failed!\n\ncard may be dead", sizeof(internalNotification) - 1);
     internalNotification[sizeof(internalNotification) - 1] = '\0';
@@ -184,12 +192,11 @@ void sdPerformFormat() {
   // reboot still leaves a usable card.
   wdtPet();
   if (SD.begin(PIN_SPI_CS, SPI_SPEED)) {
-    SD.mkdir(trackFolder);
+    sdEnsureTracksFolder();
   }
 
   debugln(F("SD format complete, rebooting"));
-  sdFormatPhase = SD_FORMAT_DONE;
-  displayPage_sd_format();
+  displayPage_sd_format_progress(F(" Format OK"), F(" Rebooting..."));
   // Let the "FORMAT OK" frame be seen; WDT stays fed. The reboot re-runs
   // SD_SETUP() (mounts clean) and SETTINGS_SETUP() (creates defaults) —
   // mirrors the BLE-disconnect / USB-MSC-exit reset precedent.
@@ -217,16 +224,12 @@ bool buildTrackList() {
     return false;
   }
 
-  if (!SD.exists(trackFolder)) {
-    // Soldered-in module: first boot is a blank card, and SdFat's open()
-    // never creates parent directories — without this, every BLE TPUT
-    // would fail until the folder exists. Self-provision it.
-    if (!SD.mkdir(trackFolder)) {
-      debugln(F("TRACKS folder missing and could not be created."));
-      releaseSDAccess(SD_ACCESS_TRACK_PARSE);
-      return false;
-    }
-    debugln(F("TRACKS folder created (blank card)."));
+  // Soldered-in module: first boot is a blank card — self-provision the
+  // folder so BLE track uploads work without hand-populating the card.
+  if (!sdEnsureTracksFolder()) {
+    debugln(F("TRACKS folder missing and could not be created."));
+    releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+    return false;
   }
 
   // reset lists

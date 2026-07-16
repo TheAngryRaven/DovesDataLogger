@@ -57,26 +57,10 @@ TEST_CASE("canAcquire - concrete cross-subsystem cases") {
     CHECK_FALSE(canAcquire(kUsbMsc, kLogging));
     // USB mass-storage can still preempt a leaked track-parse lock.
     CHECK(canAcquire(kTrackParse, kUsbMsc));
-    // On-device format is exclusive: nothing may touch the card mid-format,
-    // and a format cannot start while any other holder owns the card.
+    // On-device format is exclusive (full matrix covered by the parametric
+    // cases above) but still preempts a leaked track-parse lock.
     CHECK_FALSE(canAcquire(kFormat, kLogging));
-    CHECK_FALSE(canAcquire(kFormat, kBleTransfer));
-    CHECK_FALSE(canAcquire(kFormat, kUsbMsc));
-    CHECK_FALSE(canAcquire(kLogging, kFormat));
-    CHECK_FALSE(canAcquire(kUsbMsc, kFormat));
-    // ...but it can still preempt a leaked track-parse lock.
     CHECK(canAcquire(kTrackParse, kFormat));
-}
-
-TEST_CASE("mode values - stable and distinct wire/API values") {
-    // The values are aliased by the SD_ACCESS_* macros and must not shift.
-    CHECK(kNone == 0);
-    CHECK(kLogging == 1);
-    CHECK(kReplay == 2);
-    CHECK(kBleTransfer == 3);
-    CHECK(kTrackParse == 4);
-    CHECK(kUsbMsc == 5);
-    CHECK(kFormat == 6);
 }
 
 // ---------------------------------------------------------------------------

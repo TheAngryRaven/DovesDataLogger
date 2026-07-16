@@ -3,10 +3,10 @@
 namespace sd_format_page {
 
 void begin(State& s, uint32_t nowMs) {
-  s.enteredAtMs = nowMs;
   s.holdSinceMs = 0;
   s.lastActivityMs = nowMs;
   s.holdArmed = false;
+  s.selectSeenReleased = false;
 }
 
 uint32_t holdSecondsLeft(const State& s, uint32_t nowMs) {
@@ -17,13 +17,25 @@ uint32_t holdSecondsLeft(const State& s, uint32_t nowMs) {
 }
 
 Exit step(State& s, const Inputs& in) {
-  // Any button activity counts as "someone is standing at the device".
-  if (in.selectHeld || in.otherButtonPressed) s.lastActivityMs = in.nowMs;
+  // Any button activity counts as "someone is standing at the device",
+  // and a running engine counts too — shutting down mid-session would
+  // just tach-re-wake into this page in a 5-minute power cycle.
+  if (in.selectHeld || in.otherButtonHeld || in.otherButtonPressed ||
+      in.engineRunning) {
+    s.lastActivityMs = in.nowMs;
+  }
 
-  // Confirm hold: Select held continuously for the full window. A release
-  // disarms and the next hold restarts from scratch — a bump or EMI
-  // flicker never accumulates toward an erase.
-  if (in.selectHeld) {
+  // The wake press itself must never count toward an erase: a Select held
+  // through the dark boot only becomes eligible after it is seen up once.
+  if (!in.selectHeld) s.selectSeenReleased = true;
+
+  // Confirm hold: Select held ALONE continuously for the full window. A
+  // release disarms and the next hold restarts from scratch — a bump or
+  // EMI flicker never accumulates toward an erase. A side button held
+  // alongside Select also disarms: that's the user going for the global
+  // Select+side reboot combo (5 s), which must never lose the race to a
+  // 3 s erase.
+  if (in.selectHeld && !in.otherButtonHeld && s.selectSeenReleased) {
     if (!s.holdArmed) {
       s.holdArmed = true;
       s.holdSinceMs = in.nowMs;

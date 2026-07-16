@@ -72,6 +72,11 @@ bool sdSetSpiClock(uint32_t maxSck);
 // to the normal clock if the fast re-init fails.
 void sdSetTransferSpeed(bool fast);
 
+// Make sure /TRACKS exists, creating it when missing (blank soldered-in
+// card). Caller must already hold the SD mutex. Returns true when the
+// folder exists or was created.
+bool sdEnsureTracksFolder();
+
 // Scan /TRACKS/ and populate locations[] + trackManifest[] (one entry
 // per .json file). Creates the folder when missing (blank soldered-in
 // card). Returns true if the folder existed or was created.

@@ -8,10 +8,17 @@
 // volume will not mount (factory-blank or corrupted card). With the
 // module soldered in there is no pulling the card to format it on a
 // PC, so the device must offer to format it itself — but never without
-// a deliberate confirmation: hold Select continuously for the full
-// confirm window. A release restarts the window from scratch; the
+// a deliberate confirmation: hold Select ALONE continuously for the
+// full confirm window. A release restarts the window from scratch; the
 // other buttons only count as activity (deferring the idle shutdown),
-// they can never confirm. Sitting idle powers the device back off.
+// they can never confirm — and holding one alongside Select DISARMS
+// the confirm, so the global Select+side reboot combo (5 s, any page)
+// can never be beaten to the punch by a 3 s format. A Select that was
+// already down at page entry (the wake press itself, still held through
+// a dark boot) never counts — the hold can only arm after Select has
+// been seen released once. Sitting idle powers the device back off;
+// a running engine counts as activity so a tach-wake with a bad card
+// doesn't shutdown/re-wake in a 5-minute power cycle all session.
 //
 // The rendering, the button sampling, and the actual format stay in
 // the sketch; this unit answers "format now, keep waiting, or give up?".
@@ -40,15 +47,17 @@ enum class Exit : uint8_t {
 // Snapshot built fresh by the sketch each loop iteration.
 struct Inputs {
   bool selectHeld;          // live debounced Select (B2) level
+  bool otherButtonHeld;     // live B1/B3 level — disarms the confirm hold
   bool otherButtonPressed;  // B1/B3 pressed edge this frame (activity only)
+  bool engineRunning;       // live RPM above the auto-race threshold
   uint32_t nowMs;
 };
 
 struct State {
-  uint32_t enteredAtMs = 0;
-  uint32_t holdSinceMs = 0;     // when selectHeld last became true
-  uint32_t lastActivityMs = 0;  // refreshed by any button activity
+  uint32_t holdSinceMs = 0;     // when the confirm hold last armed
+  uint32_t lastActivityMs = 0;  // refreshed by button/engine activity
   bool holdArmed = false;       // confirm hold running
+  bool selectSeenReleased = false;  // Select observed up since page entry
 };
 
 // Countdown progress for the renderer: seconds remaining (1..3) while

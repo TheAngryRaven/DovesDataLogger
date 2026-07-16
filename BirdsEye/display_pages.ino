@@ -960,37 +960,15 @@ void displayPage_internal_fault() {
 }
 
 // Boot format-confirm page (PAGE_SD_FORMAT): the SD card answers but has
-// no mountable FAT volume. Confirm phase renders the hold-Select
-// instructions + live countdown from the sd_format_page unit; the
-// running/done phases are repainted by sdPerformFormat() itself (the
-// format blocks the main loop, so displayLoop() never runs during it).
+// no mountable FAT volume. Renders the hold-Select instructions + live
+// countdown from the sd_format_page unit. The in-progress/done screens
+// are painted by sdPerformFormat() via displayPage_sd_format_progress()
+// (the format blocks the main loop, so displayLoop() never runs then).
 void displayPage_sd_format() {
   resetDisplay();
   display.setCursor(0, 0);
 
-  if (sdFormatPhase == SD_FORMAT_RUNNING) {
-    display.setTextSize(2);
-    display.println(F("SD FORMAT"));
-    display.setTextSize(1);
-    display.println(F(""));
-    display.println(F(" Formatting card..."));
-    display.println(F(" DO NOT POWER OFF"));
-    safeDisplayUpdate();
-    return;
-  }
-
-  if (sdFormatPhase == SD_FORMAT_DONE) {
-    display.setTextSize(2);
-    display.println(F("SD FORMAT"));
-    display.setTextSize(1);
-    display.println(F(""));
-    display.println(F(" Format OK"));
-    display.println(F(" Rebooting..."));
-    safeDisplayUpdate();
-    return;
-  }
-
-  // Confirm phase — flashing header, same idiom as the fault/warning pages.
+  // Flashing header, same idiom as the fault/warning pages.
   notificationFlash = notificationFlash == true ? false : true;
   display.setTextSize(2);
   if (notificationFlash) {
@@ -1014,6 +992,22 @@ void displayPage_sd_format() {
     display.println(F("format the card"));
     display.println(F("(ERASES EVERYTHING)"));
   }
+  safeDisplayUpdate();
+}
+
+// Static two-line status screen used by sdPerformFormat() for its
+// "formatting" and "format OK" frames — painted directly because the
+// format blocks the main loop and displayLoop() cannot run.
+void displayPage_sd_format_progress(const __FlashStringHelper* line1,
+                                    const __FlashStringHelper* line2) {
+  resetDisplay();
+  display.setCursor(0, 0);
+  display.setTextSize(2);
+  display.println(F("SD FORMAT"));
+  display.setTextSize(1);
+  display.println(F(""));
+  display.println(line1);
+  display.println(line2);
   safeDisplayUpdate();
 }
 

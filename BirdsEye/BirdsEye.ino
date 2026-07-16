@@ -446,14 +446,11 @@ bool sdTrackSuccess = false;
 bool sdDataLogInitComplete = false;
 bool enableLogging = false;
 
-// Boot format-confirm page (PAGE_SD_FORMAT) state: the hold-to-confirm
-// state machine lives in the host-tested sd_format_page unit; the render
-// phase drives displayPage_sd_format() (confirm -> running -> done).
+// Boot format-confirm page (PAGE_SD_FORMAT): the hold-to-confirm state
+// machine lives in the host-tested sd_format_page unit. displayLoop()
+// only ever renders the confirm screen; the running/done screens are
+// painted directly by sdPerformFormat() (which blocks the main loop).
 sd_format_page::State sdFormatState;
-const uint8_t SD_FORMAT_CONFIRM = 0;
-const uint8_t SD_FORMAT_RUNNING = 1;
-const uint8_t SD_FORMAT_DONE = 2;
-uint8_t sdFormatPhase = SD_FORMAT_CONFIRM;
 
 unsigned long lastCardFlush = 0;
 unsigned long lastLogCreateAttempt = 0;  // Throttles log-file open retries (ms)
@@ -1224,7 +1221,11 @@ void sdFormatPageLoop() {
 
   sd_format_page::Inputs in;
   in.selectHeld = isButtonHeld(2, 0);  // live level, updated by updateButtonHoldState()
+  // A held side button disarms the confirm — the user is going for the
+  // global Select+side reboot combo (5 s), which must outrank a 3 s erase.
+  in.otherButtonHeld = isButtonHeld(1, 0) || isButtonHeld(3, 0);
   in.otherButtonPressed = btn1->pressed || btn3->pressed;
+  in.engineRunning = tachLastReported > 500;  // autoRaceModeCheck threshold
   in.nowMs = millis();
 
   const sd_format_page::Exit verdict = sd_format_page::step(sdFormatState, in);
@@ -1469,6 +1470,14 @@ static void softResumeFromCharging() {
 
   DISPLAY_WAKE();
   menuIdleTimerRunning = false;
+  if (!sdSetupSuccess && sdCardUnformatted) {
+    // The format page's idle timeout landed us in the charging loop; the
+    // card still has no FAT, so resume back to the format offer — the main
+    // menu is useless (and misleading) when nothing can mount.
+    sd_format_page::begin(sdFormatState, millis());
+    switchToDisplayPage(PAGE_SD_FORMAT);
+    return;
+  }
   switchToDisplayPage(PAGE_MAIN_MENU);
 }
 

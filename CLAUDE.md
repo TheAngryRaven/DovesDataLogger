@@ -288,14 +288,20 @@ loop()  ~250 Hz
   factory-blank soldered-in module can sync tracks over BLE on first boot.
 - **On-device format** (`sdPerformFormat()` + the host-tested
   `sd_format_page` unit): when `SD_SETUP()` finds the card answers at the
-  SPI level (`SD.cardBegin` + `sectorCount()`) but the FAT volume won't
-  mount, boot lands on `PAGE_SD_FORMAT` (buttons live, unlike FAULT) —
-  hold Select 3 s to format FAT16/32 via SdFat's `SD.format()` (zero new
-  RAM; WDT fed + progress screen repainted through the formatter's Print
-  callbacks; 8 MHz clock first, one 2 MHz EMI retry), then `/TRACKS` is
-  provisioned and the device reboots clean. Format failure → FAULT page;
-  a dead/absent card never offers the format. 5 min idle on the page →
-  shutdown.
+  SPI level (`SD.cardBegin` + `sectorCount()`) but `volumeBegin()` fails
+  — the volume re-check matters: a transient card-level failure with a
+  healthy FAT must remount, not be offered an erase — boot lands on
+  `PAGE_SD_FORMAT` (buttons live, unlike FAULT). Hold Select ALONE 3 s
+  to format FAT16/32 via SdFat's `SD.format()` (zero new RAM; WDT fed
+  through the formatter's Print callbacks; 8 MHz clock only when the
+  engine isn't turning — EMI corrupts writes silently — else 2 MHz),
+  then `/TRACKS` is provisioned (`sdEnsureTracksFolder()`) and the
+  device reboots clean. The confirm can never fire from the wake press
+  (Select must be seen released once) nor beat the Select+side reboot
+  combo (a held side button disarms it). Format failure → FAULT page;
+  a dead/absent card never offers the format. 5 min idle → shutdown
+  (deferred while the engine runs), and a charging-loop resume with the
+  card still unformatted returns to the format page, not the menu.
 - **Dual JSON format**: `parseTrackFile()` auto-detects root type:
   - **Object** (HackTheTrack format): `longName`, `shortName`,
     `defaultCourse`, `courses[]` with `lengthFt`.
@@ -506,7 +512,9 @@ loop()  ~250 Hz
 hardware needs no power switch. Wake = chip reset = fresh `setup()`.
 
 - **Entry** (`enterShutdown()`): long-press left+right (5 s) on main menu,
-  5-min menu idle, the GPS status page's idle timeout, or USB present on
+  5-min menu idle, the GPS status page's idle timeout, the SD format
+  page's idle timeout (deferred while the engine runs, so a tach-wake
+  with a bad card doesn't power-cycle all session), or USB present on
   the main menu after 60 s of button inactivity (`USB_MENU_CHARGE_IDLE_MS`
   — not immediate, so a charging-loop button wake doesn't bounce and the
   device stays usable for replay/transfer while plugged in).

@@ -20,6 +20,8 @@ void displayPage_camera_serial_entry();
 void displayPage_internal_fault();
 void displayPage_internal_warning();
 void displayPage_sd_format();
+void displayPage_sd_format_progress(const __FlashStringHelper* line1,
+                                    const __FlashStringHelper* line2);
 void displayPage_sleep_charging();
 
 // Replay flow (DOVEX instant replay).
