@@ -953,6 +953,11 @@ void processTrackUpload() {
   char filepath[FILEPATH_MAX];
   snprintf(filepath, sizeof(filepath), "/TRACKS/%s", trackUploadFilename);
 
+  // Belt-and-suspenders: buildTrackList() provisions the folder at boot,
+  // but re-ensure it before every upload so a missing folder can never
+  // fail a TPUT with WRITE_FAIL. Return deliberately ignored.
+  sdEnsureTracksFolder();
+
   // Delete existing file if present
   if (SD.exists(filepath)) {
     SD.remove(filepath);

@@ -19,6 +19,7 @@
 #define SD_ACCESS_BLE_TRANSFER sd_access_policy::kBleTransfer
 #define SD_ACCESS_TRACK_PARSE  sd_access_policy::kTrackParse
 #define SD_ACCESS_USB_MSC      sd_access_policy::kUsbMsc
+#define SD_ACCESS_FORMAT       sd_access_policy::kFormat
 
 // JSON parser status codes returned by parseTrackFile(). Defined in
 // BirdsEye.ino; redeclared here so callers in other .ino files can
@@ -30,6 +31,11 @@ extern const int PARSE_STATUS_PARSE_FAILED;
 // Current SD owner. volatile because BLE callback task and main loop
 // both read it. Writes are gated by the acquire/release helpers.
 extern volatile int currentSDAccess;
+
+// Set by SD_SETUP() when the card answers at the SPI level but its FAT
+// volume will not mount (factory-blank or corrupted soldered-in module).
+// Routes boot to the format-confirm page instead of the FAULT dead-end.
+extern bool sdCardUnformatted;
 
 // Attempt to acquire SD for a given mode. Idempotent for the same
 // mode. Returns false if SD is busy with a different mode.
@@ -48,8 +54,16 @@ void forceReleaseSDAccess();
 void makeFullTrackPath(const char* trackName, char* filepath);
 
 // Initialize the SD card (with EMI-tolerant retries). Returns true
-// on success. Populates the global SD object.
+// on success. Populates the global SD object. On failure, probes the
+// raw card and sets sdCardUnformatted when it responds without a
+// mountable FAT volume.
 bool SD_SETUP();
+
+// Format the card FAT16/32 (blocking; pets the WDT via the formatter's
+// progress callbacks). Reboots the device on success; on failure returns
+// to the confirm page with sdFormatLastFailed set (a fresh full hold is
+// required to retry). Only call from the PAGE_SD_FORMAT confirm flow.
+void sdPerformFormat();
 
 // (Re)initialize the SD card at a specific SPI clock (EMI-tolerant retries).
 bool sdSetSpiClock(uint32_t maxSck);
@@ -59,8 +73,14 @@ bool sdSetSpiClock(uint32_t maxSck);
 // to the normal clock if the fast re-init fails.
 void sdSetTransferSpeed(bool fast);
 
+// Make sure /TRACKS exists, creating it when missing (blank soldered-in
+// card). Caller must already hold the SD mutex. Returns true when the
+// folder exists or was created.
+bool sdEnsureTracksFolder();
+
 // Scan /TRACKS/ and populate locations[] + trackManifest[] (one entry
-// per .json file). Returns true if the folder existed.
+// per .json file). Creates the folder when missing (blank soldered-in
+// card). Returns true if the folder existed or was created.
 bool buildTrackList();
 
 // Parse one track JSON file from disk into activeTrackMetadata and

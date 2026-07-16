@@ -117,6 +117,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `insta360_protocol.{h,cpp}` | Insta360 X4 BLE frame builders/parsers (wake advert, remote scan response, ce82 buttons, ce82 GPS/RMC frame, ce81 serial parsing, ce81 `0x10` record-timer state parse) with golden-byte tests |
 | `wake_cause.{h,cpp}` | Boot wake-cause decode: RESETREAS + GPIO LATCH register snapshots → tach / button / USB / watchdog / soft-reset / cold boot (System OFF shutdown, subsystem 10) |
 | `gps_status_page.{h,cpp}` | GPS status boot page state machine: hold, 3 s auto-close after fix+timeValid, button skip, exit destination (menu vs race), idle → shutdown |
+| `sd_format_page.{h,cpp}` | SD format-confirm boot page state machine: Select held 3 s continuously → format (release restarts the full window; other buttons never confirm), 5 min idle → shutdown |
 | `sat_bars.{h,cpp}` | Status-page satellite signal bars: NAV-SAT CNO selection (used-in-nav first, strongest first) + bar x/w/h layout math for the 128×~30 px bottom half |
 
 ### Non-Source
@@ -174,6 +175,7 @@ loop()  ~250 Hz
  ├─ calculateGPSFrameRate() 1-second PVT counter
  ├─ readButtons()           multi-sample debounce + edge detection
  ├─ gpsStatusPageLoop()     boot GPS status page: GPS re-detect + hold/auto-close/exit
+ ├─ sdFormatPageLoop()      boot SD format page: hold-Select confirm → format + reboot
  ├─ displayLoop()           pages read from active timer helpers
  ├─ autoRaceModeCheck()     RPM>500 or speed>=10 → enter race from menu
  └─ resetButtons()          clear pressed flags
@@ -280,6 +282,30 @@ loop()  ~250 Hz
   happen parked (motor off), so the EMI rationale doesn't apply. Re-`SD.begin()`
   is the runtime clock switch; it falls back to 2 MHz if the fast re-init fails.
 - Track files live under `/TRACKS/*.json` (ArduinoJson 6 parsing).
+- **Blank-card self-provision**: `buildTrackList()` creates `/TRACKS`
+  when missing (SdFat's `open()` never creates parent dirs), and
+  `processTrackUpload()` mkdirs it again before every upload — so a
+  factory-blank soldered-in module can sync tracks over BLE on first boot.
+- **On-device format** (`sdPerformFormat()` + the host-tested
+  `sd_format_page` unit): when `SD_SETUP()` finds the card answers at the
+  SPI level (`SD.cardBegin` + `sectorCount()`) but `volumeBegin()` fails
+  — the volume re-check matters: a transient card-level failure with a
+  healthy FAT must remount, not be offered an erase — boot lands on
+  `PAGE_SD_FORMAT` (buttons live, unlike FAULT). Hold Select ALONE 3 s
+  to format FAT16/32 via SdFat's `SD.format()` (zero new RAM; WDT fed
+  through the formatter's Print callbacks; 8 MHz clock only when the
+  engine isn't turning — EMI corrupts writes silently — else 2 MHz),
+  then `/TRACKS` is provisioned (`sdEnsureTracksFolder()`) and the
+  device reboots clean. The confirm can never fire from the wake press
+  (Select must be seen released once) nor beat the Select+side reboot
+  combo (a held side button disarms it). A paired camera is stopped and
+  powered off (`CAMERA_SLEEP()`) before the format blocks the loop, since
+  the ending hard reset runs no shutdown teardown. Format failure returns
+  to the confirm page (marked `FAILED - retry`; fresh full hold to retry —
+  keeps the idle-timeout battery protection the FAULT dead-end lacks);
+  a dead/absent card never offers the format. 5 min idle → shutdown
+  (deferred while the engine runs), and a charging-loop resume with the
+  card still unformatted returns to the format page, not the menu.
 - **Dual JSON format**: `parseTrackFile()` auto-detects root type:
   - **Object** (HackTheTrack format): `longName`, `shortName`,
     `defaultCourse`, `courses[]` with `lengthFt`.
@@ -293,8 +319,9 @@ loop()  ~250 Hz
 - **SD access arbitration** prevents concurrent access:
   - `acquireSDAccess(mode)` / `releaseSDAccess(mode)`
   - Modes: `SD_ACCESS_NONE` (0), `LOGGING` (1), `REPLAY` (2),
-    `BLE_TRANSFER` (3), `TRACK_PARSE` (4), `USB_MSC` (5) — values and
-    grant/deny rules live in the host-tested `sd_access_policy` pure unit.
+    `BLE_TRANSFER` (3), `TRACK_PARSE` (4), `USB_MSC` (5), `FORMAT` (6) —
+    values and grant/deny rules live in the host-tested `sd_access_policy`
+    pure unit.
     `USB_MSC` is a normal exclusive holder (held for the whole USB
     mass-storage session; see subsystem 12).
   - Transitions are **atomic**: the check-then-set runs inside a FreeRTOS
@@ -326,7 +353,9 @@ loop()  ~250 Hz
   - Camera: `PAGE_PAIR_CAMERA` (-6) pairing / paired-status management,
     `PAGE_CAMERA_SERIAL_ENTRY` (-7) manual 6-char serial entry fallback,
     `PAGE_CAMERA_TEST` (-10) bench test menu (paired-only manual controls).
-  - Errors: `PAGE_INTERNAL_WARNING` (100), `PAGE_INTERNAL_FAULT` (105).
+  - Errors: `PAGE_INTERNAL_WARNING` (100), `PAGE_INTERNAL_FAULT` (105),
+    `PAGE_SD_FORMAT` (106, card responds but FAT won't mount — driven by
+    `sdFormatPageLoop()`, buttons live unlike FAULT).
 
 ### 6. Bluetooth (`bluetooth.ino`)
 
@@ -487,7 +516,9 @@ loop()  ~250 Hz
 hardware needs no power switch. Wake = chip reset = fresh `setup()`.
 
 - **Entry** (`enterShutdown()`): long-press left+right (5 s) on main menu,
-  5-min menu idle, the GPS status page's idle timeout, or USB present on
+  5-min menu idle, the GPS status page's idle timeout, the SD format
+  page's idle timeout (deferred while the engine runs, so a tach-wake
+  with a bad card doesn't power-cycle all session), or USB present on
   the main menu after 60 s of button inactivity (`USB_MENU_CHARGE_IDLE_MS`
   — not immediate, so a charging-loop button wake doesn't bounce and the
   device stays usable for replay/transfer while plugged in).
@@ -883,6 +914,8 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | GPS nav rate (boot/status page) | 5 Hz + NAV-SAT ~1 Hz | `gps_config.h` |
 | Status page auto-close | 3 s after fix+timeValid | `gps_status_page.h` |
 | Status page idle shutdown | 5 min (no lock, no engine) | `gps_status_page.h` |
+| SD format confirm hold | 3 s continuous Select | `sd_format_page.h` |
+| SD format page idle shutdown | 5 min | `sd_format_page.h` |
 | GPS boot re-detect | 3 tries, 10 s apart | `gps_functions.ino` |
 | Menu idle shutdown | 5 min (`SLEEP_IDLE_TIMEOUT_MS`) | `project.h` |
 | USB-on-menu charge idle | 60 s (`USB_MENU_CHARGE_IDLE_MS`) | `project.h` |

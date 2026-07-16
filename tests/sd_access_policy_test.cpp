@@ -3,8 +3,8 @@
 
 using namespace sd_access_policy;
 
-static const int kAllModes[] = {kNone, kLogging, kReplay, kBleTransfer, kTrackParse, kUsbMsc};
-static const int kHolderModes[] = {kLogging, kReplay, kBleTransfer, kTrackParse, kUsbMsc};
+static const int kAllModes[] = {kNone, kLogging, kReplay, kBleTransfer, kTrackParse, kUsbMsc, kFormat};
+static const int kHolderModes[] = {kLogging, kReplay, kBleTransfer, kTrackParse, kUsbMsc, kFormat};
 
 // ---------------------------------------------------------------------------
 // canAcquire — the arbitration decision table
@@ -23,7 +23,7 @@ TEST_CASE("canAcquire - re-acquiring the held mode is idempotent") {
 }
 
 TEST_CASE("canAcquire - a non-preemptible holder denies every other mode") {
-    const int exclusive[] = {kLogging, kReplay, kBleTransfer, kUsbMsc};
+    const int exclusive[] = {kLogging, kReplay, kBleTransfer, kUsbMsc, kFormat};
     for (int current : exclusive) {
         for (int requested : kHolderModes) {
             if (requested == current) continue;
@@ -57,6 +57,10 @@ TEST_CASE("canAcquire - concrete cross-subsystem cases") {
     CHECK_FALSE(canAcquire(kUsbMsc, kLogging));
     // USB mass-storage can still preempt a leaked track-parse lock.
     CHECK(canAcquire(kTrackParse, kUsbMsc));
+    // On-device format is exclusive (full matrix covered by the parametric
+    // cases above) but still preempts a leaked track-parse lock.
+    CHECK_FALSE(canAcquire(kFormat, kLogging));
+    CHECK(canAcquire(kTrackParse, kFormat));
 }
 
 // ---------------------------------------------------------------------------
