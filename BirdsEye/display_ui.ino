@@ -627,6 +627,8 @@ void displayLoop() {
       displayPage_internal_fault();
     } else if (currentPage == PAGE_INTERNAL_WARNING) {
       displayPage_internal_warning();
+    } else if (currentPage == PAGE_SD_FORMAT) {
+      displayPage_sd_format();
     }
   }
 
@@ -744,6 +746,10 @@ void displayLoop() {
     // (BirdsEye.ino) BEFORE displayLoop() runs — nothing to do here. This
     // branch exists so the generic running-page navigation below can't
     // grab the page.
+  } else if (currentPage == PAGE_SD_FORMAT) {
+    // Boot format-confirm page: buttons are consumed by sdFormatPageLoop()
+    // (BirdsEye.ino) BEFORE displayLoop() runs — nothing to do here. Unlike
+    // PAGE_INTERNAL_FAULT, buttons stay live (the confirm hold needs them).
   } else if (currentPage == PAGE_INTERNAL_WARNING) {
     // Warning page: any button returns to main menu
     if (btn1->pressed || btn2->pressed || btn3->pressed) {

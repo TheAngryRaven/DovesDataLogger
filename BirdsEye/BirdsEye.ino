@@ -89,6 +89,7 @@
 #include "haversine.h"
 #include "replay.h"
 #include "sat_bars.h"
+#include "sd_format_page.h"
 #include "sd_functions.h"
 #include "settings.h"
 #include "tachometer.h"
@@ -440,9 +441,19 @@ bool parseDovexHeader(const char* filename);
 
 // SD state flags
 bool sdSetupSuccess = false;
+bool sdCardUnformatted = false;  // card answers but FAT won't mount (see SD_SETUP)
 bool sdTrackSuccess = false;
 bool sdDataLogInitComplete = false;
 bool enableLogging = false;
+
+// Boot format-confirm page (PAGE_SD_FORMAT) state: the hold-to-confirm
+// state machine lives in the host-tested sd_format_page unit; the render
+// phase drives displayPage_sd_format() (confirm -> running -> done).
+sd_format_page::State sdFormatState;
+const uint8_t SD_FORMAT_CONFIRM = 0;
+const uint8_t SD_FORMAT_RUNNING = 1;
+const uint8_t SD_FORMAT_DONE = 2;
+uint8_t sdFormatPhase = SD_FORMAT_CONFIRM;
 
 unsigned long lastCardFlush = 0;
 unsigned long lastLogCreateAttempt = 0;  // Throttles log-file open retries (ms)
@@ -570,6 +581,10 @@ const int GPS_STATS = 4;
 const int LOGGING_STOP_CONFIRM = 90;
 const int PAGE_INTERNAL_WARNING = 100;
 const int PAGE_INTERNAL_FAULT = 105;
+// Boot page when the SD card responds but has no mountable FAT volume
+// (soldered-in module: factory-blank or corrupted). Unlike FAULT, its
+// buttons stay live — driven by sdFormatPageLoop().
+const int PAGE_SD_FORMAT = 106;
 
 bool displayInverted = false;
 int currentPage = PAGE_BOOT;
@@ -756,7 +771,16 @@ void setup() {
   // Camera auto-record: load the persisted Insta360 serial + init the FSM
   CAMERA_SETUP();
 
-  if (!sdSetupSuccess) {
+  if (!sdSetupSuccess && sdCardUnformatted) {
+    // Card answers but no FAT volume mounts: soldered-in module out of the
+    // factory, or a corrupted filesystem. The card can't be pulled to fix
+    // it on a PC, so offer the on-device format (hold Select to confirm).
+    // Deliberately outranks the USB-wake charging branch — a device with an
+    // unusable card should say so; the page's idle timeout still lands in
+    // enterShutdown(), whose VBUS handling enters the charging loop anyway.
+    sd_format_page::begin(sdFormatState, millis());
+    switchToDisplayPage(PAGE_SD_FORMAT);
+  } else if (!sdSetupSuccess) {
     strncpy(internalNotification, "SD Init failed!\n\nlogging not possible!", sizeof(internalNotification) - 1);
     internalNotification[sizeof(internalNotification) - 1] = '\0';
     switchToDisplayPage(PAGE_INTERNAL_FAULT);
@@ -1189,6 +1213,40 @@ void gpsStatusPageLoop() {
 }
 
 /**
+ * @brief Drive the SD format-confirm boot page: step the hold-to-confirm
+ *        state machine (host-tested sd_format_page unit) and act on its
+ *        exit verdict. Runs between readButtons() and displayLoop(), like
+ *        gpsStatusPageLoop() — the page has an explicit no-op branch in
+ *        displayLoop()'s button handling.
+ */
+void sdFormatPageLoop() {
+  if (currentPage != PAGE_SD_FORMAT) return;
+
+  sd_format_page::Inputs in;
+  in.selectHeld = isButtonHeld(2, 0);  // live level, updated by updateButtonHoldState()
+  in.otherButtonPressed = btn1->pressed || btn3->pressed;
+  in.nowMs = millis();
+
+  const sd_format_page::Exit verdict = sd_format_page::step(sdFormatState, in);
+  if (verdict != sd_format_page::Exit::kStay) {
+    resetButtons();
+  }
+
+  switch (verdict) {
+    case sd_format_page::Exit::kFormat:
+      // Blocking. Reboots the device on success; drops to FAULT on failure.
+      sdPerformFormat();
+      break;
+    case sd_format_page::Exit::kToShutdown:
+      // Unformatted card and nobody home — don't drain the pack.
+      enterShutdown();
+      break;
+    case sd_format_page::Exit::kStay:
+      break;
+  }
+}
+
+/**
  * @brief Maintain the GPS-lock hold state (see gpsLockHoldActive).
  *
  * While a race session wants to log but has no valid GPS time lock yet — so
@@ -1601,6 +1659,7 @@ void loop() {
 
   readButtons();
   gpsStatusPageLoop();  // boot status page: consume presses, hold/auto-close
+  sdFormatPageLoop();   // boot format-confirm page: hold Select 3s to format
   displayLoop();
   resetButtons();
 

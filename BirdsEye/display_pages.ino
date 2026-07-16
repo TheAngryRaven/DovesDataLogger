@@ -7,6 +7,7 @@
 #include "gps_status_page.h"
 #include "lap_format.h"
 #include "sat_bars.h"
+#include "sd_format_page.h"
 
 void displayPage_boot() {
   resetDisplay();
@@ -955,6 +956,64 @@ void displayPage_internal_fault() {
   display.println(F(" Please Reboot Device"));
   display.println(F(""));
   display.println(internalNotification);
+  safeDisplayUpdate();
+}
+
+// Boot format-confirm page (PAGE_SD_FORMAT): the SD card answers but has
+// no mountable FAT volume. Confirm phase renders the hold-Select
+// instructions + live countdown from the sd_format_page unit; the
+// running/done phases are repainted by sdPerformFormat() itself (the
+// format blocks the main loop, so displayLoop() never runs during it).
+void displayPage_sd_format() {
+  resetDisplay();
+  display.setCursor(0, 0);
+
+  if (sdFormatPhase == SD_FORMAT_RUNNING) {
+    display.setTextSize(2);
+    display.println(F("SD FORMAT"));
+    display.setTextSize(1);
+    display.println(F(""));
+    display.println(F(" Formatting card..."));
+    display.println(F(" DO NOT POWER OFF"));
+    safeDisplayUpdate();
+    return;
+  }
+
+  if (sdFormatPhase == SD_FORMAT_DONE) {
+    display.setTextSize(2);
+    display.println(F("SD FORMAT"));
+    display.setTextSize(1);
+    display.println(F(""));
+    display.println(F(" Format OK"));
+    display.println(F(" Rebooting..."));
+    safeDisplayUpdate();
+    return;
+  }
+
+  // Confirm phase — flashing header, same idiom as the fault/warning pages.
+  notificationFlash = notificationFlash == true ? false : true;
+  display.setTextSize(2);
+  if (notificationFlash) {
+    display.setTextColor(DISPLAY_TEXT_BLACK, DISPLAY_TEXT_WHITE);
+  }
+  display.println(F("SD FORMAT"));
+  display.setTextWrap(true);
+  display.setTextColor(DISPLAY_TEXT_WHITE);
+  display.setTextSize(1);
+  display.println(F("Card is not formatted"));
+
+  uint32_t secondsLeft = sd_format_page::holdSecondsLeft(sdFormatState, millis());
+  if (secondsLeft > 0) {
+    display.println(F(""));
+    display.print(F("Formatting in "));
+    display.print(secondsLeft);
+    display.println(F("s..."));
+    display.println(F("Keep holding SELECT"));
+  } else {
+    display.println(F("Hold SELECT 3s to"));
+    display.println(F("format the card"));
+    display.println(F("(ERASES EVERYTHING)"));
+  }
   safeDisplayUpdate();
 }
 

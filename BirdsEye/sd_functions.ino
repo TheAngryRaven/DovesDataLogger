@@ -93,13 +93,111 @@ void sdSetTransferSpeed(bool fast) {
 }
 
 bool SD_SETUP() {
-  // TODO: FAT32 CHECK
+  sdCardUnformatted = false;
   if (sdSetSpiClock(SPI_SPEED)) {
     debugln(F("SD Card initialized successfully"));
     return true;
   }
   debugln(F("Card initialization failed after 3 attempts."));
+  // SD.begin() = cardBegin() && volumeBegin(). Distinguish "card answers
+  // but no FAT volume mounts" (factory-blank or corrupted soldered-in
+  // module — recoverable via the on-device format page) from a dead or
+  // absent card (keeps the existing FAULT dead-end).
+  if (SD.cardBegin(SdSpiConfig(PIN_SPI_CS, SHARED_SPI, SPI_SPEED)) &&
+      SD.card() && SD.card()->sectorCount() > 0) {
+    sdCardUnformatted = true;
+    debugln(F("SD card responds but has no FAT volume — format candidate"));
+  }
   return false;
+}
+
+///////////////////////////////////////////
+// ON-DEVICE FORMAT (blank/corrupt soldered-in module)
+///////////////////////////////////////////
+
+// FatFormatter reports progress through a Print*: a few text messages plus
+// one '.' per fatSize/32 FAT sectors written. Each write pets the ~4 s WDT
+// (armed since the end of setup(); the format blocks the main loop) and
+// repaints a throttled progress screen. 4-64 GB cards emit a dot every
+// ~240 sectors — comfortably inside the WDT budget even at 2 MHz SPI.
+class SdFormatProgress : public Print {
+ public:
+  size_t write(uint8_t) override {
+    tick();
+    return 1;
+  }
+  size_t write(const uint8_t*, size_t n) override {
+    tick();
+    return n;
+  }
+
+ private:
+  void tick() {
+    wdtPet();
+    if (millis() - lastPaintMs >= 250) {
+      lastPaintMs = millis();
+      displayPage_sd_format();
+    }
+  }
+  unsigned long lastPaintMs = 0;
+};
+
+void sdPerformFormat() {
+  // Nothing else can hold the card here (no FAT ever mounted this boot),
+  // but hold the mutex anyway so no other subsystem can sneak in mid-erase.
+  if (!acquireSDAccess(SD_ACCESS_FORMAT)) {
+    return;  // impossible in practice; stay on the confirm page
+  }
+
+  sdFormatPhase = SD_FORMAT_RUNNING;
+  displayPage_sd_format();
+  wdtPet();
+
+  SdFormatProgress progress;
+  bool formatted = false;
+  // The device is parked at boot (no session, motor normally off), so use
+  // the fast transfer clock first; retry the whole format once at the
+  // EMI-safe clock — a tach-wake boot means the engine may be running.
+  if (SD.cardBegin(SdSpiConfig(PIN_SPI_CS, SHARED_SPI, SD_SPI_SPEED_FAST))) {
+    formatted = SD.format(&progress);
+  }
+  if (!formatted) {
+    wdtPet();
+    debugln(F("SD format at fast clock failed, retrying at normal speed"));
+    if (SD.cardBegin(SdSpiConfig(PIN_SPI_CS, SHARED_SPI, SPI_SPEED))) {
+      formatted = SD.format(&progress);
+    }
+  }
+
+  if (!formatted) {
+    releaseSDAccess(SD_ACCESS_FORMAT);
+    sdFormatPhase = SD_FORMAT_CONFIRM;
+    debugln(F("SD format failed"));
+    strncpy(internalNotification, "SD format failed!\n\ncard may be dead", sizeof(internalNotification) - 1);
+    internalNotification[sizeof(internalNotification) - 1] = '\0';
+    switchToDisplayPage(PAGE_INTERNAL_FAULT);
+    return;
+  }
+
+  // Mount the fresh volume and provision /TRACKS now — even though the
+  // fresh boot's buildTrackList() would also create it — so an interrupted
+  // reboot still leaves a usable card.
+  wdtPet();
+  if (SD.begin(PIN_SPI_CS, SPI_SPEED)) {
+    SD.mkdir(trackFolder);
+  }
+
+  debugln(F("SD format complete, rebooting"));
+  sdFormatPhase = SD_FORMAT_DONE;
+  displayPage_sd_format();
+  // Let the "FORMAT OK" frame be seen; WDT stays fed. The reboot re-runs
+  // SD_SETUP() (mounts clean) and SETTINGS_SETUP() (creates defaults) —
+  // mirrors the BLE-disconnect / USB-MSC-exit reset precedent.
+  for (int i = 0; i < 3; i++) {
+    delay(500);
+    wdtPet();
+  }
+  NVIC_SystemReset();
 }
 
 // Static buffers for JSON parsing — saves ~4KB of stack per call.

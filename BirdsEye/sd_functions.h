@@ -32,6 +32,11 @@ extern const int PARSE_STATUS_PARSE_FAILED;
 // both read it. Writes are gated by the acquire/release helpers.
 extern volatile int currentSDAccess;
 
+// Set by SD_SETUP() when the card answers at the SPI level but its FAT
+// volume will not mount (factory-blank or corrupted soldered-in module).
+// Routes boot to the format-confirm page instead of the FAULT dead-end.
+extern bool sdCardUnformatted;
+
 // Attempt to acquire SD for a given mode. Idempotent for the same
 // mode. Returns false if SD is busy with a different mode.
 bool acquireSDAccess(int mode);
@@ -49,8 +54,15 @@ void forceReleaseSDAccess();
 void makeFullTrackPath(const char* trackName, char* filepath);
 
 // Initialize the SD card (with EMI-tolerant retries). Returns true
-// on success. Populates the global SD object.
+// on success. Populates the global SD object. On failure, probes the
+// raw card and sets sdCardUnformatted when it responds without a
+// mountable FAT volume.
 bool SD_SETUP();
+
+// Format the card FAT16/32 (blocking; pets the WDT via the formatter's
+// progress callbacks). Reboots the device on success; drops to the
+// FAULT page on failure. Only call from the PAGE_SD_FORMAT confirm flow.
+void sdPerformFormat();
 
 // (Re)initialize the SD card at a specific SPI clock (EMI-tolerant retries).
 bool sdSetSpiClock(uint32_t maxSck);
