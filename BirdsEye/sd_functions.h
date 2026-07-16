@@ -19,6 +19,7 @@
 #define SD_ACCESS_BLE_TRANSFER sd_access_policy::kBleTransfer
 #define SD_ACCESS_TRACK_PARSE  sd_access_policy::kTrackParse
 #define SD_ACCESS_USB_MSC      sd_access_policy::kUsbMsc
+#define SD_ACCESS_FORMAT       sd_access_policy::kFormat
 
 // JSON parser status codes returned by parseTrackFile(). Defined in
 // BirdsEye.ino; redeclared here so callers in other .ino files can
