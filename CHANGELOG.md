@@ -13,6 +13,19 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **Blank-module first-boot safety.** Aimed at soldered-in SD modules that
+  can never be pre-loaded or reformatted on a PC. The `/TRACKS` folder is
+  now created automatically when missing (at boot and before a BLE track
+  upload) — previously every `TPUT` to a blank card failed with
+  `TERR:WRITE_FAIL` until the card was hand-populated. And when the card
+  responds but has no mountable FAT volume (factory-blank or corrupted
+  filesystem), boot now lands on an **SD format page** instead of the
+  dead-end FAULT screen: hold Select for 3 s (live countdown, release
+  restarts the window) to format the card FAT16/32 on-device, after which
+  the device reboots, mounts the fresh volume, and creates default
+  settings — first boot then proceeds normally and tracks can be synced
+  over Bluetooth. Five minutes idle on the page powers the device down;
+  a dead/absent card still shows the FAULT page.
 - **GPS status boot page (MyChron-style).** Every boot now lands on a
   satellite status page after the splash instead of the main menu: the
   top half shows used/seen satellite count, HDOP, lock state,

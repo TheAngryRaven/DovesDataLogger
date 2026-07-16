@@ -78,7 +78,10 @@ to the matching `*_LOOP()`.
   g-force. Degrades gracefully if absent (non-Sense board).
 - **SD + tracks** (`sd_functions`) — SdFat (FAT16/32), track JSON parsing
   (two formats, auto-detected), and an in-RAM track manifest for proximity
-  detection.
+  detection. Built for a soldered-in module: a missing `/TRACKS` folder is
+  created automatically, and a card that responds without a mountable FAT
+  volume boots into a hold-to-confirm on-device format page
+  (`sd_format_page` pure unit) rather than a dead-end fault screen.
 - **Display/UI** (`display_ui`, `display_pages`) — OLED driver abstraction,
   multi-sample debounced buttons, page routing.
 - **Bluetooth** (`bluetooth`) — BLE service for file transfer, settings,
