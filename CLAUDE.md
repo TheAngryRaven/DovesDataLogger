@@ -118,11 +118,30 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `sd_format_page.{h,cpp}` | SD format-confirm boot page state machine: Select held 3 s continuously → format (release restarts the full window; other buttons never confirm), 5 min idle → shutdown |
 | `sat_bars.{h,cpp}` | Status-page satellite signal bars: NAV-SAT CNO selection (used-in-nav first, strongest first) + bar x/w/h layout math for the 128×~30 px bottom half |
 
+### Simulator (`BirdsEye/sim/`)
+
+Host build of the REAL firmware TU under the `SIM` flag (browser/WASM
+target in a later phase; native + CI today). The `.ino` sources compile
+unmodified — all sim behavior lives in `BirdsEye/sim/` or behind `SIM`.
+See `ARCHITECTURE.md` → *Simulator* and the phased plan in the simulator
+handoff spec.
+
+| Path | Purpose |
+|---|---|
+| `sim_main.cpp` | Single TU replicating Arduino's .ino concatenation (bluetooth/camera_ble/usb_msc/firmware_ota deliberately absent) + host glue (`sim_init`/`sim_step_millis`/buttons/state peeks) |
+| `sim_prototypes.h` | Hand-written stand-in for Arduino's auto-generated prototypes |
+| `virtual_clock.{h,cpp}` | Host-advanced virtual time; `delay()` consumes it; no wall clock (determinism) |
+| `arduino_shim/` | Arduino core + nRF52 registers/SoftDevice/FreeRTOS surface, Wire/SPI, LSM6DS3 (settable), Bluefruit types, placeholder Adafruit_GFX/SH110X (real libs land in sim Phase 2) |
+| `sdfat_shim/` | In-memory VFS implementing the exact SdFat subset the firmware calls; preloads `assets/` (fixed SETTINGS.json + OKC track) via cmake-embedded byte arrays |
+| `stubs/` | No-op surfaces of the excluded modules + SparkFun GNSS driver (real header, stubbed methods — PVT is injected directly into `onPVTReceived()`) |
+| `native_main.cpp` | Phase-1 driver: boot → skip GPS status page → 60 s soak, state prints |
+| `CMakeLists.txt` | Native build; FetchContent pins: DovesLapTimer `BETA` (matches CI channel), SparkFun GNSS v3.1.9 (header-only use), ArduinoJson v6.21.5, ArxTypeTraits v0.3.2 |
+
 ### Non-Source
 
 | Path | Contents |
 |---|---|
-| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). DovesLapTimer ref per channel: `BETA` builds track the library's `BETA` branch, master/release pin `v4.1.0` |
+| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, sim-build (native sim TU + 60 s boot soak + determinism check), release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). DovesLapTimer ref per channel: `BETA` builds track the library's `BETA` branch, master/release pin `v4.1.0` |
 | `tests/` | Host doctest harness (CMake) for the pure-logic units |
 | `CHANGELOG.md` | Keep-a-Changelog history; release workflow ties to version tags |
 | `ARCHITECTURE.md` | Human-facing architecture narrative (subsystems, design decisions) |

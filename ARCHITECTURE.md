@@ -24,6 +24,7 @@ BirdsEye/
   BirdsEye.ino          entry point: globals, setup(), loop(), state machine
   <subsystem>.ino + .h  one module per subsystem (see below)
   <unit>.cpp + .h       pure, Arduino-free logic (host-testable)
+  sim/                  browser/WASM simulator host build (SIM flag; see below)
 tests/                  doctest + CMake harness for the pure units
 .github/workflows/      CI: compile, lint, unit tests, clang-tidy, release
 ```
@@ -282,12 +283,42 @@ was even replayed to wake a sleeping X4).
 
 See [`CLAUDE.md`](CLAUDE.md) and the README for field-level detail.
 
+## Simulator (`BirdsEye/sim/`)
+
+A demo tool, not an emulator: the REAL firmware sources — the same
+unmodified `.ino` files that ship — compiled for a desktop (and, later,
+WASM/browser) target under the `SIM` flag. `sim_main.cpp` replicates
+Arduino's concatenation into one translation unit (`sim_prototypes.h`
+stands in for the IDE's auto-generated prototypes), against:
+
+- `arduino_shim/` — Arduino core + nRF52 register surface. Time is a
+  **virtual clock** the host advances (`delay()` consumes virtual time;
+  no wall clock anywhere, which is what makes runs deterministic).
+- `sdfat_shim/` — an in-memory VFS preloaded with fixed
+  `assets/SETTINGS.json` (deterministic boot) and an example track.
+  Logs written during a run evaporate with it; persistence is out of
+  scope.
+- `stubs/` — no-op implementations of the deliberately-excluded modules
+  (`bluetooth`, `camera_ble`, `usb_msc`, `firmware_ota`) and of the
+  SparkFun GNSS driver (real header for the UBX types; PVT is injected
+  by the host straight into `onPVTReceived()`, never parsed from bytes).
+- Real **DovesLapTimer/CourseManager** sources — lap timing fidelity is
+  the point; the display stack becomes the real Adafruit libraries in a
+  later phase (currently a placeholder).
+
+The `sim-build` workflow builds it and runs a 60 s boot soak plus a
+two-runs-byte-identical determinism check on every PR — the sim
+compiling is itself a CI gate, which is what keeps `SIM` from rotting
+the way the old `WOKWI` flag did.
+
 ## Testing & CI
 
 The pure units are unit-tested with doctest on a host toolchain; the
 firmware itself is compile-checked for the XIAO in CI, linted with
 arduino-lint, statically analyzed with clang-tidy, and gated on flash
-size. Releases are built and published (`.hex` + `.uf2`) by the `release`
-workflow on a version tag. Hardware behavior still needs manual
-verification on a real device — CI proves it builds and that the logic
-units are correct, not that a lap was timed right on track.
+size. The `sim-build` workflow additionally compiles the whole firmware
+TU natively under `SIM` and boots it (see *Simulator* above). Releases
+are built and published (`.hex` + `.uf2`) by the `release` workflow on a
+version tag. Hardware behavior still needs manual verification on a real
+device — CI proves it builds and that the logic units are correct, not
+that a lap was timed right on track.

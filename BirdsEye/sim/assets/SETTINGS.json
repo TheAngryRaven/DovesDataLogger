@@ -1,0 +1,10 @@
+{
+  "bluetooth_name": "BirdsEyeSim",
+  "bluetooth_pin": "0000",
+  "camera_serial": "",
+  "device_name": "SimulatedDove",
+  "driver_name": "Driver",
+  "lap_detection_distance": "7",
+  "waypoint_detection_distance": "30",
+  "waypoint_speed": "30"
+}
