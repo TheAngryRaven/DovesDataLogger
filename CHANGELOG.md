@@ -12,74 +12,61 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
-### Fixed
-- **Simulator: center button in race mode now switches pages** (pace
-  while moving, best lap when stopped) exactly like the hardware. The
-  old Wokwi-era `#ifdef SIM` carve-out toggled panel inversion instead —
-  invisible in the simulator (inversion happens in the panel, not the
-  framebuffer), so the button read as dead. Hardware behavior unchanged;
-  the now-unused `displayInverted` global is removed.
+## [3.0.0] - 2026-07-17
+
+This release rolls up the entire BETA cycle since `2.2.3`: hands-free
+Insta360 X4 camera auto-record, USB mass-storage transfer, a full nRF52
+System OFF shutdown/wake redesign, a MyChron-style GPS status boot page,
+on-device SD formatting for blank/soldered-in modules, per-device log
+labeling, and a complete browser/WASM simulator built from the real
+firmware — on top of the code-review hardening and CI supply-chain
+pinning that were originally scoped for `2.3.0`. The version is bumped to
+**3.0.0** because the sleep model changes to a full power-down, two
+user-visible modes are removed (the Wokwi target; the sleep-time periodic
+GPS fix), and the BLE file-command protocol adds `BUSY` back-pressure —
+all breaking under this project's semver policy.
 
 ### Added
-- **Simulator boot-sequence capture (internal, sim).** `sim_init()` now
-  records deduplicated framebuffer keyframes (with virtual timestamps)
-  at every in-`setup()` `delay()` boundary — the splash and boot pages
-  that were previously invisible to the host because `setup()` runs as
-  one call. Exposed as `getBootFrames()` in the wasm API (contract v1
-  addition) so the viewer can play the real power-on sequence.
-- **Simulator WASM build (internal, sim Phase 4).** The sim now compiles
-  to a browser module (`emcmake`; Emscripten 3.1.61 pinned in CI):
-  `birdseye-sim.mjs` (stable public wrapper) + `birdseye-sim-core.{mjs,
-  wasm}` + `version.json` (firmware sha, DovesLapTimer sha, display-lib
-  versions). Full API contract v1 in `BirdsEye/sim/API.md` — framebuffer
-  view + FNV-1a hash, JSON PVT injection, RPM synthesis, state/version
-  JSON, VFS readFile/listFiles, and a true-fresh-boot async `reset()`
-  (module re-instantiation). A standalone `test.html` harness boots the
-  firmware in a browser and replays real `.dovex` files; a node smoke
-  test gates CI (`sim wasm build` job) and the dist folder is uploaded
-  as the `birdseye-sim-wasm` artifact. The wasm module renders
-  byte-identically to the native golden fixtures (same frame hashes).
-  Artifacts are vendored into DovesDataViewer (`public/sim/`).
-- **Simulator hardware-session oracle (internal, sim Phase 3b).** A real
-  device-recorded OKC session (`sim/fixtures/okc_tillotson_1.dovex`,
-  13 laps) is now replayed through the sim in CI and the sim's
-  DovesLapTimer must reproduce the lap list from the file's own header —
-  it currently matches all 13 hardware lap times to the exact
-  millisecond. This is the definitive same-code-same-answer check for
-  the simulator's fidelity.
-- **Simulator inputs + lap-timing oracle (internal, sim Phase 3).** The
-  sim now drives the firmware at the same boundaries the hardware uses:
-  GPS frames are injected as real `UBX_NAV_PVT_data_t` structs straight
-  into `onPVTReceived()` (struct and JSON spellings), the tachometer is
-  synthesized pulses through the real falling-edge ISR at exact virtual
-  microseconds, and accelerometer traces ride the IMU shim. A CI oracle
-  test streams a synthetic constant-speed OKC lap trace — lap period
-  exact by construction — through the whole real pipeline (boot GPS
-  page → auto race entry → track proximity detection → CourseDetector
-  picking "Normal" → DovesLapTimer) and requires every lap within one
-  GPS frame (40 ms; observed within 1 ms). The same driver's `--dovex`
-  mode replays a hardware-recorded log against its own header lap list.
-  The sim's bundled OKC track fixture is now the HackTheTrack object
-  format (`courses[]`), so proximity detection and course ranking work.
-- **Simulator pixel-perfect display (internal, sim Phase 2).** The sim
-  now renders through the REAL Adafruit display stack (GFX 1.12.6 →
-  GrayOLED → SH110X 2.1.14, pinned) with the hardware boundary shimmed at
-  the two BusIO device pointers — every framebuffer pixel comes from the
-  real `drawPixel()`. Adds a zero-copy framebuffer getter + FNV-1a frame
-  hash, a dependency-free PNG frame dumper, and 8 committed golden page
-  fixtures (hash + expected page id, captured by walking the real menus)
-  that CI verifies on every PR; rendered frames are uploaded as a CI
-  artifact. No firmware behavior changes.
-- **Simulator host build (`BirdsEye/sim/`, internal).** The real firmware
-  sources now also compile and run on a desktop toolchain under the `SIM`
-  flag — one concatenated translation unit against an Arduino/nRF52 shim,
-  an in-memory SD card (fixed settings + example track baked in), a
-  host-driven virtual clock, and the real DovesLapTimer/CourseManager
-  library, with BLE/camera/USB/OTA stubbed out. A new `sim-build` CI
-  workflow boots the firmware for 60 virtual seconds and verifies two
-  runs are byte-identical, so the `SIM` flag can't silently rot. This is
-  the foundation for the browser (WASM) simulator; no firmware behavior
-  changes.
+- **Insta360 X4 camera auto-record (remote emulation).** The device
+  emulates the physical Insta360 GPS Remote as a pure BLE **peripheral**
+  to drive an X4 hands-free. Engine start (RPM > 500 held 2 s) wakes a
+  paired, powered-off camera with the remote's manufacturer-data
+  advertisement carrying the camera's serial — byte-for-byte the genuine
+  remote's payload, **X4-confirmed** (captured with nRF Connect and
+  replayed to wake a sleeping X4; flags `0x05`, serial at mfg[14..19]).
+  The camera connects back to *us* and subscribes to our `ce82` button
+  characteristic, and **all** control rides `ce82` notifications exactly
+  like the real remote: recording toggles via the shutter button (the FSM
+  tracks record state so a mid-session reconnect never blind-toggles), and
+  power-off streams the remote's 3-second power hold. Pairing captures the
+  camera's 6-character serial (new `camera_serial` setting; manual-entry
+  fallback) from the new main-menu **Camera** page, which also has a bench
+  **Test** menu (*Wake / Record / Power Off*) with live `R:UP+` / `Adv`
+  status. The single BLE peripheral slot is shared with the file-transfer
+  service via an explicit `bleOwner`, so a camera link can never trigger
+  the transfer auto-reboot; the link is Just-Works bonded; the FSM is a
+  telemetry consumer (logs are byte-identical with the feature on or off,
+  save the one deliberate 30 s-engine-off log-session end) and BLE comes
+  up lazily, so unpaired users pay nothing. The in-camera GPS overlay
+  rides the remote channel: a Wireshark capture of the genuine
+  remote↔camera link revealed the remote streams GPS on `ce82` at **10 Hz**
+  as a (non-standard, signed-longitude) NMEA-RMC frame — so the firmware
+  now streams that continuously while the camera is connected (it doubles
+  as the remote's liveness heartbeat; status `V` with no fix, never
+  silent), golden-tested byte-for-byte against the capture. **GPS still
+  logs to SD** exactly as before, independently. All lifecycle timing
+  lives in a host-tested pure FSM; the frame bytes in a host-tested
+  protocol unit with golden tests.
+- **USB mass-storage file transfer.** The Transfer screen now opens a
+  submenu offering **Bluetooth** (the existing BLE file-transfer flow,
+  unchanged) or **USB**. Choosing USB presents the SD card to a connected
+  computer as a standard drive (TinyUSB MSC) for drag-and-drop of track
+  files and logs — no companion app required. The drive is opt-in: it only
+  enumerates while on the USB page, so normal plug-in/charging is unchanged.
+  Exiting USB mode reboots the device so the firmware remounts a clean
+  filesystem after host edits. USB transfer holds the SD card exclusively
+  via the access mutex (new `SD_ACCESS_USB_MSC` mode), so it cannot collide
+  with logging, replay, or BLE.
 - **Blank-module first-boot safety.** Aimed at soldered-in SD modules that
   can never be pre-loaded or reformatted on a PC. The `/TRACKS` folder is
   now created automatically when missing (at boot and before a BLE track
@@ -109,12 +96,77 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   that fails to initialize is re-probed up to 3 times in the background
   and surfaced as `NOT DETECTED` / `CHECK WIRING` instead of failing
   silently.
+- **`device_name` setting to label logs per device.** A new persistent
+  setting identifies which unit produced a log — handy when dumping logs
+  from a fleet. On first boot (or upgrade) a friendly default is generated
+  by picking two of twelve racing-adjacent words at random (e.g.
+  `ApexTurbo`); editable on a computer or over BLE like any other setting.
+- **`device_name` recorded in the DOVEX header.** The session metadata line
+  now carries the logging device's name as a new trailing column. The column
+  is appended after `optimal_ms`, so older readers ignore it and the firmware
+  reads pre-existing logs (no column) as an empty device name — fully
+  backwards compatible with the reserved 1 KB header.
+- **Simulator host build (`BirdsEye/sim/`, internal).** The real firmware
+  sources now also compile and run on a desktop toolchain under the `SIM`
+  flag — one concatenated translation unit against an Arduino/nRF52 shim,
+  an in-memory SD card (fixed settings + example track baked in), a
+  host-driven virtual clock, and the real DovesLapTimer/CourseManager
+  library, with BLE/camera/USB/OTA stubbed out. A new `sim-build` CI
+  workflow boots the firmware for 60 virtual seconds and verifies two
+  runs are byte-identical, so the `SIM` flag can't silently rot. This is
+  the foundation for the browser (WASM) simulator; no firmware behavior
+  changes.
+- **Simulator pixel-perfect display (internal, sim Phase 2).** The sim
+  now renders through the REAL Adafruit display stack (GFX 1.12.6 →
+  GrayOLED → SH110X 2.1.14, pinned) with the hardware boundary shimmed at
+  the two BusIO device pointers — every framebuffer pixel comes from the
+  real `drawPixel()`. Adds a zero-copy framebuffer getter + FNV-1a frame
+  hash, a dependency-free PNG frame dumper, and 8 committed golden page
+  fixtures (hash + expected page id, captured by walking the real menus)
+  that CI verifies on every PR; rendered frames are uploaded as a CI
+  artifact. No firmware behavior changes.
+- **Simulator inputs + lap-timing oracle (internal, sim Phase 3).** The
+  sim now drives the firmware at the same boundaries the hardware uses:
+  GPS frames are injected as real `UBX_NAV_PVT_data_t` structs straight
+  into `onPVTReceived()` (struct and JSON spellings), the tachometer is
+  synthesized pulses through the real falling-edge ISR at exact virtual
+  microseconds, and accelerometer traces ride the IMU shim. A CI oracle
+  test streams a synthetic constant-speed OKC lap trace — lap period
+  exact by construction — through the whole real pipeline (boot GPS
+  page → auto race entry → track proximity detection → CourseDetector
+  picking "Normal" → DovesLapTimer) and requires every lap within one
+  GPS frame (40 ms; observed within 1 ms). The same driver's `--dovex`
+  mode replays a hardware-recorded log against its own header lap list.
+  The sim's bundled OKC track fixture is now the HackTheTrack object
+  format (`courses[]`), so proximity detection and course ranking work.
+- **Simulator hardware-session oracle (internal, sim Phase 3b).** A real
+  device-recorded OKC session (`sim/fixtures/okc_tillotson_1.dovex`,
+  13 laps) is now replayed through the sim in CI and the sim's
+  DovesLapTimer must reproduce the lap list from the file's own header —
+  it currently matches all 13 hardware lap times to the exact
+  millisecond. This is the definitive same-code-same-answer check for
+  the simulator's fidelity.
+- **Simulator WASM build (internal, sim Phase 4).** The sim now compiles
+  to a browser module (`emcmake`; Emscripten 3.1.61 pinned in CI):
+  `birdseye-sim.mjs` (stable public wrapper) + `birdseye-sim-core.{mjs,
+  wasm}` + `version.json` (firmware sha, DovesLapTimer sha, display-lib
+  versions). Full API contract v1 in `BirdsEye/sim/API.md` — framebuffer
+  view + FNV-1a hash, JSON PVT injection, RPM synthesis, state/version
+  JSON, VFS readFile/listFiles, and a true-fresh-boot async `reset()`
+  (module re-instantiation). A standalone `test.html` harness boots the
+  firmware in a browser and replays real `.dovex` files; a node smoke
+  test gates CI (`sim wasm build` job) and the dist folder is uploaded
+  as the `birdseye-sim-wasm` artifact. The wasm module renders
+  byte-identically to the native golden fixtures (same frame hashes).
+  Artifacts are vendored into DovesDataViewer (`public/sim/`).
+- **Simulator boot-sequence capture (internal, sim).** `sim_init()` now
+  records deduplicated framebuffer keyframes (with virtual timestamps)
+  at every in-`setup()` `delay()` boundary — the splash and boot pages
+  that were previously invisible to the host because `setup()` runs as
+  one call. Exposed as `getBootFrames()` in the wasm API (contract v1
+  addition) so the viewer can play the real power-on sequence.
 
 ### Changed
-- **SIM builds now use the hardware's 4 KB track JSON buffer** (was a
-  1 KB Wokwi-era carve-out inside `#ifdef SIM`). The smaller buffer
-  silently truncated real track files, breaking track parsing in the
-  simulator; hardware builds are byte-for-byte unaffected (always 4 KB).
 - **Sleep is now a full shutdown (nRF52 System OFF).** Replacing the
   software sleep loop, the device tears everything down and powers off
   to µA-level System OFF; a tachometer pulse (engine start), any button,
@@ -128,6 +180,24 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   on the main menu now enters the charging loop after 60 s of button
   inactivity (previously immediate sleep), so the device remains usable
   for replay/transfer while plugged in.
+- **Camera auto-record is a simple, RPM-driven lifecycle.** Recording is
+  not gated on a GPS lock and does not stop on a speed+engine combo
+  with a cooldown/power-off tail. Instead: the engine starting wakes+connects
+  the camera; ~5 s of sustained RPM starts recording (one shutter); 30 s of
+  engine-off (RPM only — a stationary but running grid idle keeps rolling)
+  stops recording (one shutter) **and** ends+saves the race log session,
+  returning to the menu. The camera then enters a **watching** state — it
+  stays on and connected, so a brief on-track stall recovers straight back
+  into recording when RPM returns — and powers off only when the device
+  sleeps. GPS still streams to the camera the whole time (voided RMC until a
+  lock, real data after). While the camera is recording, the speed-based log
+  auto-idle yields to it; with no camera paired, logging is unchanged.
+- **SD SPI clock raised during file transfers.** While a BLE or USB
+  mass-storage transfer is active the SD card is clocked at 8 MHz (4x the
+  normal 2 MHz), reverting to 2 MHz afterward. Transfers only happen parked
+  with the motor off, so the ignition-EMI rationale for the slow clock doesn't
+  apply — this lifts the USB drag-and-drop ceiling from ~250 KB/s. Falls back
+  to 2 MHz automatically if the fast re-init fails.
 - **GPS boot connection hardening.** Boot now sends the u-blox
   backup-mode wake byte before probing (a module left in backup mode by
   the shutdown wakes correctly), probes the configured 57600 baud first
@@ -135,6 +205,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   only paid when nothing answers), and validates that PVT data actually
   flows within 5 s of boot — recovering via the existing baud-recovery
   ladder if the module answered the probe but was silently misconfigured.
+- **CI now controls which DovesLapTimer the firmware is built against.**
+  Builds targeting (or running on) the `BETA` branch track the library's own
+  `BETA` branch, so the two beta channels move together; `master` CI and the
+  release/tag builds pin the known-good `v4.1.0` tag instead of floating on
+  the library's default-branch tip. Bump the pin deliberately when a new
+  library release is validated.
 - **Simulator flag renamed: the old Wokwi define is now `SIM`** at every
   site, ahead of the browser/WASM simulator work. All conditional behavior
   carries over unchanged (bare-SdFat type, smaller JSON buffer, WDT skip, fixed battery
@@ -143,15 +219,19 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   that just sets `gpsInitialized = true` — the simulator will inject PVT
   data via the real `onPVTReceived()` callback instead. `SIM` is never
   defined in normal firmware builds; no hardware behavior changes.
+- **SIM builds now use the hardware's 4 KB track JSON buffer** (was a
+  1 KB Wokwi-era carve-out inside `#ifdef SIM`). The smaller buffer
+  silently truncated real track files, breaking track parsing in the
+  simulator; hardware builds are byte-for-byte unaffected (always 4 KB).
 
 ### Removed
-- **Wokwi simulator files** (`BirdsEye/diagram.json`,
+- **(Breaking) Wokwi simulator files** (`BirdsEye/diagram.json`,
   `BirdsEye/libraries.txt`) — they described a dead Wokwi/Arduino-Mega
   target with the wrong display (SSD1306 vs the shipped SH1106G) and the
   wrong GPS library (Adafruit NMEA vs SparkFun UBX). A WASM simulator
   built from the real firmware replaces them.
-- **24-hour periodic GPS fix during sleep** — nothing runs during System
-  OFF to schedule it; the GPS warm-starts on wake instead.
+- **(Breaking) 24-hour periodic GPS fix during sleep** — nothing runs
+  during System OFF to schedule it; the GPS warm-starts on wake instead.
 - **RPM sleep-wake latch (`tachHavePeriod` / `TACH_SLEEP()`)** —
   superseded by the tach pin's GPIO SENSE wake from System OFF.
 
@@ -173,94 +253,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   paths is bracketed by watchdog pets. The status page also shows an
   uptime readout so any remaining reboot can be timed against the GPS
   watchdog (5 s) and re-detect retry (10 s) schedules.
-- **Insta360 X4 camera auto-record (remote emulation).** The device
-  emulates the physical Insta360 GPS Remote as a pure BLE **peripheral**
-  to drive an X4 hands-free. Engine start (RPM > 500 held 2 s) wakes a
-  paired, powered-off camera with the remote's manufacturer-data
-  advertisement carrying the camera's serial — byte-for-byte the genuine
-  remote's payload, **X4-confirmed** (captured with nRF Connect and
-  replayed to wake a sleeping X4; flags `0x05`, serial at mfg[14..19]).
-  The camera connects back to *us* and subscribes to our `ce82` button
-  characteristic, and **all** control rides `ce82` notifications exactly
-  like the real remote: recording toggles via the shutter button (the FSM
-  tracks record state so a mid-session reconnect never blind-toggles), and
-  power-off streams the remote's 3-second power hold. Recording starts once
-  the camera is connected + subscribed and GPS locks (or after 30 s),
-  stops after 60 s of *stationary AND engine-off* (grid idling and coasting
-  stalls keep recording; a manual session end stops it immediately), and
-  the camera powers off after a 3-minute cooldown. Pairing captures the
-  camera's 6-character serial (new `camera_serial` setting; manual-entry
-  fallback) from the new main-menu **Camera** page, which also has a bench
-  **Test** menu (*Wake / Record / Power Off*) with live `R:UP+` / `Adv`
-  status. The single BLE peripheral slot is shared with the file-transfer
-  service via an explicit `bleOwner`, so a camera link can never trigger
-  the transfer auto-reboot; the link is Just-Works bonded; the FSM is a
-  read-only telemetry consumer (logs are byte-identical with the feature
-  on or off) and BLE comes up lazily, so unpaired users pay nothing. All
-  lifecycle timing lives in a host-tested pure FSM; the frame bytes in a
-  host-tested protocol unit with golden tests. *Note:* an earlier design
-  ran the BLE **central** role too (writing the camera's `be80`
-  start/stop-video plus a 1 Hz GPS-overlay frame) — but one BLE link holds
-  one role, and power-off exists only as a remote `ce82` hold, so central
-  and remote could never coexist and power-off was impossible. Committing
-  to the remote role fixes that. The in-camera GPS overlay rides the same
-  remote channel after all: a Wireshark capture of the genuine
-  remote↔camera link revealed the remote streams GPS on `ce82` at **10 Hz**
-  as a (non-standard, signed-longitude) NMEA-RMC frame — so the firmware
-  now streams that continuously while the camera is connected (it doubles
-  as the remote's liveness heartbeat; status `V` with no fix, never
-  silent), golden-tested byte-for-byte against the capture. **GPS still
-  logs to SD** exactly as before, independently.
-- **USB mass-storage file transfer.** The Transfer screen now opens a
-  submenu offering **Bluetooth** (the existing BLE file-transfer flow,
-  unchanged) or **USB**. Choosing USB presents the SD card to a connected
-  computer as a standard drive (TinyUSB MSC) for drag-and-drop of track
-  files and logs — no companion app required. The drive is opt-in: it only
-  enumerates while on the USB page, so normal plug-in/charging is unchanged.
-  Exiting USB mode reboots the device so the firmware remounts a clean
-  filesystem after host edits. USB transfer holds the SD card exclusively
-  via the access mutex (new `SD_ACCESS_USB_MSC` mode), so it cannot collide
-  with logging, replay, or BLE.
-- **`device_name` setting to label logs per device.** A new persistent
-  setting identifies which unit produced a log — handy when dumping logs
-  from a fleet. On first boot (or upgrade) a friendly default is generated
-  by picking two of twelve racing-adjacent words at random (e.g.
-  `ApexTurbo`); editable on a computer or over BLE like any other setting.
-- **`device_name` recorded in the DOVEX header.** The session metadata line
-  now carries the logging device's name as a new trailing column. The column
-  is appended after `optimal_ms`, so older readers ignore it and the firmware
-  reads pre-existing logs (no column) as an empty device name — fully
-  backwards compatible with the reserved 1 KB header.
-
-### Changed
-- **Camera auto-record is now a simple, RPM-driven lifecycle.** Recording is
-  no longer gated on a GPS lock and no longer stops on a speed+engine combo
-  with a cooldown/power-off tail. Instead: the engine starting wakes+connects
-  the camera; ~5 s of sustained RPM starts recording (one shutter); 30 s of
-  engine-off (RPM only — a stationary but running grid idle keeps rolling)
-  stops recording (one shutter) **and** ends+saves the race log session,
-  returning to the menu. The camera then enters a **watching** state — it
-  stays on and connected, so a brief on-track stall recovers straight back
-  into recording when RPM returns — and powers off only when the device
-  sleeps. GPS still streams to the camera the whole time (voided RMC until a
-  lock, real data after). While the camera is recording, the speed-based log
-  auto-idle yields to it; with no camera paired, logging is unchanged.
-- **CI now controls which DovesLapTimer the firmware is built against.**
-  Builds targeting (or running on) the `BETA` branch track the library's own
-  `BETA` branch, so the two beta channels move together; `master` CI and the
-  release/tag builds pin the known-good `v4.1.0` tag instead of floating on
-  the library's default-branch tip. Bump the pin deliberately when a new
-  library release is validated.
-
-- **SD SPI clock raised during file transfers.** While a BLE or USB
-  mass-storage transfer is active the SD card is clocked at 8 MHz (4x the
-  normal 2 MHz), reverting to 2 MHz afterward. Transfers only happen parked
-  with the motor off, so the ignition-EMI rationale for the slow clock doesn't
-  apply — this lifts the USB drag-and-drop ceiling from ~250 KB/s. Falls back
-  to 2 MHz automatically if the fast re-init fails.
-
-### Fixed
-- **Camera record state is now confirmed from the camera, not just believed.**
+- **Camera record state is confirmed from the camera, not just believed.**
   The shutter is a stateful toggle, so a lost or mistimed frame used to
   *invert* our belief and stop a live recording (or start one in the paddock).
   A Wireshark capture of the genuine remote link showed the camera reports its
@@ -277,7 +270,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   GPS indicator so the link can be verified end-to-end. (Parser is golden-
   tested in the `insta360_protocol` unit; the reconcile in the `camera_fsm`
   unit.)
-- **Camera now powers off on sleep instead of running all night.** Entering
+- **Camera powers off on sleep instead of running all night.** Entering
   sleep armed the streamed power-off hold and then immediately disconnected —
   but the loop parks on sleep, so the hold was never serviced and *zero*
   power-off frames were sent. Sleep entry now streams the hold synchronously
@@ -305,21 +298,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   a SoftDevice round-trip called ~500×/s (per loop + per GPS tick); it is now
   latched from the CCCD callback (with a low-rate re-read to catch a bonded
   peer's silent sys-attr restore), keeping the 25 Hz logging loop clear.
-- **USB mass-storage exit no longer risks truncating a host write.** Exiting
-  USB mode syncs the card and reboots, but `setUnitReady(false)` only stops
-  *new* SCSI commands — a `WRITE10` already in flight keeps calling the write
-  block callback on the USB task. The exit now waits (bounded to 1 s) for the
-  write callback to go quiet before syncing and resetting, so a reset can't
-  cut an in-progress `writeSectors()` and leave a truncated file or an
-  inconsistent FAT.
-- **Selecting USB storage with no cable plugged in no longer reboots the
-  device.** `USB_MSC_ENABLE()` had no VBUS precondition and the parked USB
-  loop reads "VBUS absent" as "cable pulled" on its first iteration, so
-  choosing USB before plugging in instantly reset the unit. USB mode now
-  requires VBUS: the menu shows "Plug in USB cable first!" instead of
-  entering (and the enable path bails defensively too, taking no SD lock and
-  not enumerating).
-- **Camera Power Off now streams the held-button frame — decoded from a
+- **Camera Power Off streams the held-button frame — decoded from a
   live remote capture.** A genuine remote's ce82 traffic (nRF Connect,
   2026-07-10) showed two things we had wrong: the button frame's byte[4]
   is a running sequence counter the remote steps by 2 with every frame
@@ -331,6 +310,19 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   also now NOTIFY-only, matching the captured remote's GATT. (The
   captured shutter/mode/power-tap frames confirm our other button byte
   patterns exactly.)
+- **Camera Power Off no longer fails silently — ce82 sends honor the
+  camera's subscription and report failures.** The power-off button frame
+  was a fire-and-forget notify behind two invisible gates: it returned
+  silently with no remote link, and a notification to a camera that never
+  wrote the ce82 CCCD (or subscribed for *indications* rather than
+  notifications) was discarded by the stack while the UI showed nothing.
+  ce82 sends now pick notify vs indicate from the actual subscription,
+  return a real result, and the bench-test menu shows *why* a Power Off
+  failed ("run Connect first" / "camera not subscribed" / "rejected by
+  stack"). The test page's R status gains a `+` when the camera has
+  subscribed to buttons (`R:UP+` = deliverable; `R:UP` = connected but
+  ignoring us), and ce82 CCCD writes are traced to serial for bench
+  diagnosis.
 - **Wake advert matched byte-for-byte to the genuine GPS Remote —
   X4-confirmed ground truth.** A real remote was captured with nRF
   Connect against the camera, and replaying its advertisement from a
@@ -345,27 +337,6 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   transmits, and what the camera's reconnect scan expects) — the
   invented name+service advert is now used only for the unpaired pairing
   flow, where no serial exists yet for the manufacturer block.
-- **Camera R-link diagnosis + bench advert re-arm.** The camera has been
-  observed connecting to the remote service intermittently — sometimes
-  dropping faster than the display refresh, invisibly. R-link connects
-  and disconnects (with the HCI reason code, which says who ended the
-  link and why) are now traced to serial, and in the bench-test menu the
-  connectable remote advert automatically re-arms whenever the R-link is
-  down — the camera retries on its own schedule and could previously
-  only reconnect if the tester pressed Connect at the right moment.
-- **Camera Power Off no longer fails silently — ce82 sends honor the
-  camera's subscription and report failures.** The power-off button frame
-  was a fire-and-forget notify behind two invisible gates: it returned
-  silently with no remote link, and a notification to a camera that never
-  wrote the ce82 CCCD (or subscribed for *indications* rather than
-  notifications) was discarded by the stack while the UI showed nothing.
-  ce82 sends now pick notify vs indicate from the actual subscription,
-  return a real result, and the bench-test menu shows *why* a Power Off
-  failed ("run Connect first" / "camera not subscribed" / "rejected by
-  stack"). The test page's R status gains a `+` when the camera has
-  subscribed to buttons (`R:UP+` = deliverable; `R:UP` = connected but
-  ignoring us), and ce82 CCCD writes are traced to serial for bench
-  diagnosis.
 - **Camera wake advert was garbled on air by a BLE core bug — all adverts
   now transmit as fixed 31-byte packets.** Bluefruit 0.21.0 (the version
   in the Seeed board package; fixed upstream in Adafruit 1.7.0) freezes
@@ -384,12 +355,54 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   from research:* on the X4, Bluetooth Wakeup is armed only when
   **QuickCapture is OFF** — with QuickCapture on, the powered-down
   camera's radio never scans and no beacon can wake it.
+- **Camera R-link diagnosis + bench advert re-arm.** The camera has been
+  observed connecting to the remote service intermittently — sometimes
+  dropping faster than the display refresh, invisibly. R-link connects
+  and disconnects (with the HCI reason code, which says who ended the
+  link and why) are now traced to serial, and in the bench-test menu the
+  connectable remote advert automatically re-arms whenever the R-link is
+  down — the camera retries on its own schedule and could previously
+  only reconnect if the tester pressed Connect at the right moment.
 - **Main menu scrolls — the Camera entry is reachable again.** The 4-item
   main menu was drawn as four full-height rows filling the panel's nominal
   64 px exactly, and the last row (Camera) was cut off on real hardware.
   The menu now shows a 3-row window that follows the selection (same
   pattern as the replay file list) with a `v more` scroll hint on the
   spare bottom line.
+- **USB mass-storage exit no longer risks truncating a host write.** Exiting
+  USB mode syncs the card and reboots, but `setUnitReady(false)` only stops
+  *new* SCSI commands — a `WRITE10` already in flight keeps calling the write
+  block callback on the USB task. The exit now waits (bounded to 1 s) for the
+  write callback to go quiet before syncing and resetting, so a reset can't
+  cut an in-progress `writeSectors()` and leave a truncated file or an
+  inconsistent FAT.
+- **Selecting USB storage with no cable plugged in no longer reboots the
+  device.** `USB_MSC_ENABLE()` had no VBUS precondition and the parked USB
+  loop reads "VBUS absent" as "cable pulled" on its first iteration, so
+  choosing USB before plugging in instantly reset the unit. USB mode now
+  requires VBUS: the menu shows "Plug in USB cable first!" instead of
+  entering (and the enable path bails defensively too, taking no SD lock and
+  not enumerating).
+- **USB mass-storage no longer races the host for the SD card.** While the
+  drive was mounted the main loop kept running `GPS_LOOP()`,
+  `trackDetectionLoop()`, auto-idle, etc., so the firmware and the host PC
+  could both drive the FAT — corruption was prevented only as a side effect
+  of the access mutex denying those acquires, not by design. The loop now
+  parks while `usbMscActive` (mirroring the BLE branch): GPS/tach/lap/SD
+  processing is skipped entirely, only the Exit button and the status page
+  are serviced, so the host owns the card uncontested.
+- **Unplugging the USB cable now exits mass-storage mode.** Previously the
+  only way out was the on-device Exit button; pulling the cable (the natural
+  way to "finish") left the device stuck `usbMscActive` — holding the
+  `SD_ACCESS_USB_MSC` lock and the EMI-unsafe 8 MHz SD clock indefinitely,
+  so a subsequent drive would silently fail to log. The parked loop now
+  watches VBUS and reboots out of USB mode when the cable is removed.
+- **Simulator: center button in race mode now switches pages** (pace
+  while moving, best lap when stopped) exactly like the hardware. The
+  old Wokwi-era `#ifdef SIM` carve-out toggled panel inversion instead —
+  invisible in the simulator (inversion happens in the panel, not the
+  framebuffer), so the button read as dead. Hardware behavior unchanged;
+  the now-unused `displayInverted` global is removed.
 - **I2C bus recovery no longer risks a reboot loop.** `i2cBusRecover()`
   re-inits Wire and the OLED over I2C, which can block if ignition EMI is
   still glitching the bus — and it never fed the watchdog, so the recovery
@@ -415,20 +428,6 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   track upload/delete completing during a logging teardown could touch SdFat
   from two tasks. It now holds `SD_ACCESS_TRACK_PARSE` for the walk and
   checks the directory open.
-- **USB mass-storage no longer races the host for the SD card.** While the
-  drive was mounted the main loop kept running `GPS_LOOP()`,
-  `trackDetectionLoop()`, auto-idle, etc., so the firmware and the host PC
-  could both drive the FAT — corruption was prevented only as a side effect
-  of the access mutex denying those acquires, not by design. The loop now
-  parks while `usbMscActive` (mirroring the BLE branch): GPS/tach/lap/SD
-  processing is skipped entirely, only the Exit button and the status page
-  are serviced, so the host owns the card uncontested.
-- **Unplugging the USB cable now exits mass-storage mode.** Previously the
-  only way out was the on-device Exit button; pulling the cable (the natural
-  way to "finish") left the device stuck `usbMscActive` — holding the
-  `SD_ACCESS_USB_MSC` lock and the EMI-unsafe 8 MHz SD clock indefinitely,
-  so a subsequent drive would silently fail to log. The parked loop now
-  watches VBUS and reboots out of USB mode when the cable is removed.
 - **Track detection no longer throttles the whole main loop.** The manifest
   scan (O(N) software-double haversine, several ms at the 200-entry ceiling)
   was gated only on `gpsData.fix`, which stays true between PVT updates — so
@@ -457,7 +456,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   device would silently start a new session and drain the pack overnight.
   `enterSleepMode()` now calls the new `TACH_SLEEP()`, which re-arms the
   wake trigger and drops stale ring-buffer/Kalman state; the next *real*
-  pulse still RPM-wakes straight into race mode as designed.
+  pulse still RPM-wakes straight into race mode as designed. (Superseded
+  within this release by the full System OFF shutdown, above.)
 - **Lap times under 100 ms-fraction rendered wrong on the live pages.** The
   current-lap, best-lap, and optimal-lap pages appended the millisecond
   zero-padding *after* the value, so `1:23.007` displayed as `1:23.700` (a
@@ -721,6 +721,10 @@ Initial tagged release. Core capabilities:
 - 8+ OLED display pages, Bluetooth LE file download / settings / track
   sync, and a low-power sleep mode.
 
-[Unreleased]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v3.0.0...HEAD
+[3.0.0]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v2.2.3...v3.0.0
+[2.2.3]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v2.2.2...v2.2.3
+[2.2.2]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v2.2.1...v2.2.2
+[2.2.1]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v1.0.0...v2.2.0
 [1.0.0]: https://github.com/TheAngryRaven/DovesDataLogger/releases/tag/v1.0.0
