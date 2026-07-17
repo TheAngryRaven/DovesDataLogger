@@ -193,6 +193,86 @@ target_compile_options(birdseye_sim_core PUBLIC
   -include ${SIM_DIR}/arduino_shim/Arduino.h
 )
 
+# Provenance for getVersion()/version.json: the firmware repo sha and the
+# resolved DovesLapTimer sha (its pin is the moving BETA branch).
+execute_process(COMMAND git rev-parse --short HEAD
+                WORKING_DIRECTORY ${BIRDSEYE_DIR}
+                OUTPUT_VARIABLE FIRMWARE_SHA OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET)
+execute_process(COMMAND git rev-parse --short HEAD
+                WORKING_DIRECTORY ${doveslaptimer_SOURCE_DIR}
+                OUTPUT_VARIABLE SIM_LAPTIMER_SHA OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET)
+if(NOT FIRMWARE_SHA)
+  set(FIRMWARE_SHA "unknown")
+endif()
+if(NOT SIM_LAPTIMER_SHA)
+  set(SIM_LAPTIMER_SHA "unknown")
+endif()
+
+if(EMSCRIPTEN)
+  # ---- Phase 4: the browser artifact -------------------------------------
+  # Emits dist/birdseye-sim-core.mjs + .wasm; the hand-written public
+  # wrapper (wasm/birdseye-sim.mjs) and a generated version.json are
+  # copied/written next to them. Those four files are what gets vendored
+  # into DovesDataViewer/public/sim/.
+
+  # The firmware TU signals NVIC_SystemReset with a C++ throw that
+  # sim_step_millis catches — Emscripten disables exception CATCHING by
+  # default, so force it on for every TU in the core too.
+  target_compile_options(birdseye_sim_core PUBLIC -fexceptions)
+
+  add_executable(birdseye-sim-core
+    ${SIM_DIR}/wasm/bindings.cpp
+  )
+  target_link_libraries(birdseye-sim-core PRIVATE birdseye_sim_core)
+  target_compile_definitions(birdseye-sim-core PRIVATE
+    FIRMWARE_SHA="${FIRMWARE_SHA}"
+    SIM_LAPTIMER_SHA="${SIM_LAPTIMER_SHA}"
+  )
+  # The firmware TU signals NVIC_SystemReset with a C++ throw — the wasm
+  # build must keep exceptions on (core lib compiles with the same flag
+  # via the PUBLIC options below).
+  target_compile_options(birdseye-sim-core PRIVATE -fexceptions)
+  set_target_properties(birdseye-sim-core PROPERTIES
+    OUTPUT_NAME "birdseye-sim-core"
+    SUFFIX ".mjs"
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/dist
+  )
+  target_link_options(birdseye-sim-core PRIVATE
+    -fexceptions
+    -sMODULARIZE=1
+    -sEXPORT_ES6=1
+    -sEXPORT_NAME=createBirdsEyeSim
+    -sALLOW_MEMORY_GROWTH=1
+    -sENVIRONMENT=web,worker,node
+    -sEXPORTED_RUNTIME_METHODS=cwrap,getValue,HEAPU8
+    -sEXPORTED_FUNCTIONS=_malloc,_free
+  )
+
+  # version.json — session-capture provenance (see the handoff spec).
+  string(TIMESTAMP SIM_BUILD_DATE "%Y-%m-%d" UTC)
+  file(WRITE ${CMAKE_BINARY_DIR}/dist/version.json
+"{
+  \"firmwareSha\": \"${FIRMWARE_SHA}\",
+  \"buildDate\": \"${SIM_BUILD_DATE}\",
+  \"simApiVersion\": 1,
+  \"dovesLapTimerSha\": \"${SIM_LAPTIMER_SHA}\",
+  \"adafruitGfx\": \"${SIM_GFX_VERSION}\",
+  \"adafruitSh110x\": \"${SIM_SH110X_VERSION}\"
+}
+")
+  add_custom_command(TARGET birdseye-sim-core POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${SIM_DIR}/wasm/birdseye-sim.mjs
+            ${SIM_DIR}/wasm/test.html
+            ${SIM_DIR}/wasm/smoke.mjs
+            ${CMAKE_BINARY_DIR}/dist/
+    COMMENT "Staging wrapper + harness into dist/"
+  )
+  return()  # native executables/tests below are host-only
+endif()
+
 add_executable(birdseye_sim_native ${SIM_DIR}/native_main.cpp)
 target_link_libraries(birdseye_sim_native PRIVATE birdseye_sim_core)
 

@@ -247,6 +247,16 @@ int sim_logging_active(void) { return sdDataLogInitComplete ? 1 : 0; }
 
 int sim_track_detected(void) { return trackDetected ? 1 : 0; }
 
+int sim_sats(void) { return gpsData.satellites; }
+
+uint32_t sim_best_lap_ms(void) { return (uint32_t)activeTimerBestLapTime(); }
+
+uint32_t sim_last_lap_ms(void) { return (uint32_t)activeTimerLastLapTime(); }
+
+uint32_t sim_current_lap_ms(void) {
+  return (uint32_t)activeTimerCurrentLapTime();
+}
+
 int sim_lap_anything_active(void) {
   return (courseManager != nullptr && courseManager->isLapAnythingActive())
              ? 1

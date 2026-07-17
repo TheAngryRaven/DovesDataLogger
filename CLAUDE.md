@@ -141,13 +141,18 @@ handoff spec.
 | `golden_main.cpp` | Phase-2 driver: scripted real-menu walk capturing 8 golden page hashes (`golden/golden_hashes.txt`; regenerate with `--print`, eyeball with `--dump`) |
 | `oracle_main.cpp` | Phase-3 driver: lap-timing oracle. Default = synthetic constant-speed OKC circle (period exact by construction) through the whole real pipeline (boot page → race entry → proximity detect → CourseDetector "Normal" → laps ±40 ms); `--dovex <file>` replays a hardware log against its own header laps |
 | `fixtures/okc_tillotson_1.dovex` | Hardware-recorded OKC session (13 laps) — the `--dovex` oracle's CI fixture; the sim reproduces its header lap list to the exact millisecond |
+| `API.md` | Canonical WASM API contract (v1): artifact set, method surface, injectPvt schema, deltas from the handoff-spec draft (async `reset()` via module re-instantiation) |
+| `wasm/bindings.cpp` | EMSCRIPTEN_KEEPALIVE exports over sim_host.h + getStateJson/getVersion/readFile/listFiles |
+| `wasm/birdseye-sim.mjs` | Hand-written public ESM wrapper (stable import; async `reset()` re-instantiates the core module) |
+| `wasm/test.html` | Standalone browser harness: canvas blit (hash dirty-check), buttons, dovex file playback |
+| `wasm/smoke.mjs` | Node smoke test the wasm CI job runs (boot→menu, state/version/VFS, determinism across instances, reset) |
 | `CMakeLists.txt` | Native build; FetchContent pins: DovesLapTimer `BETA` (matches CI channel), SparkFun GNSS v3.1.9 (header-only use), ArduinoJson v6.21.5, ArxTypeTraits v0.3.2, Adafruit GFX 1.12.6 + SH110X 2.1.14 (real display stack) |
 
 ### Non-Source
 
 | Path | Contents |
 |---|---|
-| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, sim-build (native sim TU + 60 s boot soak + determinism check), release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). DovesLapTimer ref per channel: `BETA` builds track the library's `BETA` branch, master/release pin `v4.1.0` |
+| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, sim-build (native sim TU + 60 s boot soak + determinism + goldens + lap oracles, plus a wasm job: emsdk 3.1.61 build + node smoke + `birdseye-sim-wasm` artifact), release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). DovesLapTimer ref per channel: `BETA` builds track the library's `BETA` branch, master/release pin `v4.1.0` |
 | `tests/` | Host doctest harness (CMake) for the pure-logic units |
 | `CHANGELOG.md` | Keep-a-Changelog history; release workflow ties to version tags |
 | `ARCHITECTURE.md` | Human-facing architecture narrative (subsystems, design decisions) |
