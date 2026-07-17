@@ -139,6 +139,7 @@ handoff spec.
 | `png_dump.{h,cpp}` | Dependency-free PNG writer (stored-deflate + repo crc32) for eyeballing frames |
 | `native_main.cpp` | Phase-1 driver: boot → skip GPS status page → 60 s soak, state prints |
 | `golden_main.cpp` | Phase-2 driver: scripted real-menu walk capturing 8 golden page hashes (`golden/golden_hashes.txt`; regenerate with `--print`, eyeball with `--dump`) |
+| `oracle_main.cpp` | Phase-3 driver: lap-timing oracle. Default = synthetic constant-speed OKC circle (period exact by construction) through the whole real pipeline (boot page → race entry → proximity detect → CourseDetector "Normal" → laps ±40 ms); `--dovex <file>` replays a hardware log against its own header laps |
 | `CMakeLists.txt` | Native build; FetchContent pins: DovesLapTimer `BETA` (matches CI channel), SparkFun GNSS v3.1.9 (header-only use), ArduinoJson v6.21.5, ArxTypeTraits v0.3.2, Adafruit GFX 1.12.6 + SH110X 2.1.14 (real display stack) |
 
 ### Non-Source
@@ -962,7 +963,7 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | SD SPI clock (transfer) | 8 MHz (`SD_SPI_SPEED_FAST`) | `BirdsEye.ino` |
 | Battery check interval | 5 s | `BirdsEye.ino` |
 | BLE default MTU | 23 | `bluetooth.ino` |
-| JSON buffer | 4096 (1024 in SIM builds) | `sd_functions.ino` |
+| JSON buffer | 4096 (SIM builds too) | `sd_functions.ino` |
 | Settings JSON buffer | 512 | `settings.ino` |
 | Settings file path | `/SETTINGS.json` | `settings.ino` |
 | Track upload buffer | 4096 | `bluetooth.ino` |
@@ -1048,10 +1049,10 @@ This device operates in ignition-noise environments. Three layers of defense:
 - PROGMEM is used for bitmap images to save RAM.
 - Avoid Arduino `String` in hot paths (heap fragmentation risk on 256 KB).
 - SD chip-select is hardwired to GND; pass `-1` to SdFat.
-- `#define SIM` enables simulator-specific tweaks (smaller JSON buffer, no WDT,
-  fixed battery voltage, placeholder GPS setup). Never defined in CI firmware
-  builds — it's the compile flag for the browser/WASM simulator build
-  (sources land under `BirdsEye/sim/`; replaces the old Wokwi target).
+- `#define SIM` enables simulator-specific tweaks (no WDT, fixed battery
+  voltage, placeholder GPS setup, sim button pins). Never defined in CI
+  firmware builds — it's the compile flag for the browser/WASM simulator
+  build (sources under `BirdsEye/sim/`; replaces the old Wokwi target).
 - `#define ENDURANCE_MODE` hides the tachometer page and reshuffles
   page numbers — for endurance racing where RPM isn't relevant.
 - **TIMER3 is reserved** for the GPS serial buffer ISR. Use TIMER4 if another

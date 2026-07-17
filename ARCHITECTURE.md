@@ -310,13 +310,27 @@ stands in for the IDE's auto-generated prototypes), against:
   comes from the real `drawPixel()` — pixel-perfect by construction. The
   1024-byte buffer is exposed zero-copy plus an FNV-1a frame hash.
 
+Inputs are injected at the same boundaries the hardware uses: GPS as a
+real `UBX_NAV_PVT_data_t` handed straight to `onPVTReceived()` (the
+SparkFun parser is never involved), the tach as synthesized pulses
+through the real falling-edge ISR at exact virtual microseconds (the
+debounce/ring-buffer/Kalman path is all real firmware), buttons as pin
+levels through the real multi-sample debounce, and accel via the IMU
+shim. A **lap-timing oracle** test drives a synthetic constant-speed
+lap trace around the OKC start line — whose lap period is exact by
+construction — through the whole pipeline (boot page → auto race entry
+→ haversine track detection → CourseDetector → DovesLapTimer) and
+requires every recorded lap to match within one GPS frame (40 ms); the
+same driver's `--dovex` mode replays a hardware-recorded log against
+the lap list in its own header.
+
 The `sim-build` workflow builds it and runs a 60 s boot soak, a
-two-runs-byte-identical determinism check, and **golden display
+two-runs-byte-identical determinism check, **golden display
 fixtures** — a scripted walk of the real menus capturing the frame hash
 (and expected page id) at fixed virtual times for 8 pages, committed in
-`sim/golden/` — on every PR. The sim compiling is itself a CI gate,
-which is what keeps `SIM` from rotting the way the old `WOKWI` flag
-did.
+`sim/golden/` — and the lap oracle, on every PR. The sim compiling is
+itself a CI gate, which is what keeps `SIM` from rotting the way the
+old `WOKWI` flag did.
 
 ## Testing & CI
 

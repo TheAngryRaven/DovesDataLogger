@@ -199,6 +199,9 @@ target_link_libraries(birdseye_sim_native PRIVATE birdseye_sim_core)
 add_executable(birdseye_sim_golden ${SIM_DIR}/golden_main.cpp)
 target_link_libraries(birdseye_sim_golden PRIVATE birdseye_sim_core)
 
+add_executable(birdseye_sim_oracle ${SIM_DIR}/oracle_main.cpp)
+target_link_libraries(birdseye_sim_oracle PRIVATE birdseye_sim_core)
+
 enable_testing()
 
 # Phase-1 done-criteria: boots to menu + survives 60 s of virtual time,
@@ -215,3 +218,10 @@ add_test(NAME sim_determinism
 add_test(NAME sim_golden_fixtures
   COMMAND birdseye_sim_golden --golden ${SIM_DIR}/golden/golden_hashes.txt
 )
+
+# Phase-3 done-criteria: injected GPS/tach drive the REAL pipeline end to
+# end — boot page exit, OKC proximity detection, CourseDetector picking
+# "Normal", and lap times matching the constructed ground truth within
+# one GPS frame (40 ms). (--dovex mode replays a hardware log against its
+# own header once a fixture is committed under sim/fixtures/.)
+add_test(NAME sim_lap_oracle COMMAND birdseye_sim_oracle)

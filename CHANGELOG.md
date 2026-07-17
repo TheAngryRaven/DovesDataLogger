@@ -13,6 +13,20 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **Simulator inputs + lap-timing oracle (internal, sim Phase 3).** The
+  sim now drives the firmware at the same boundaries the hardware uses:
+  GPS frames are injected as real `UBX_NAV_PVT_data_t` structs straight
+  into `onPVTReceived()` (struct and JSON spellings), the tachometer is
+  synthesized pulses through the real falling-edge ISR at exact virtual
+  microseconds, and accelerometer traces ride the IMU shim. A CI oracle
+  test streams a synthetic constant-speed OKC lap trace — lap period
+  exact by construction — through the whole real pipeline (boot GPS
+  page → auto race entry → track proximity detection → CourseDetector
+  picking "Normal" → DovesLapTimer) and requires every lap within one
+  GPS frame (40 ms; observed within 1 ms). The same driver's `--dovex`
+  mode replays a hardware-recorded log against its own header lap list.
+  The sim's bundled OKC track fixture is now the HackTheTrack object
+  format (`courses[]`), so proximity detection and course ranking work.
 - **Simulator pixel-perfect display (internal, sim Phase 2).** The sim
   now renders through the REAL Adafruit display stack (GFX 1.12.6 →
   GrayOLED → SH110X 2.1.14, pinned) with the hardware boundary shimmed at
@@ -63,6 +77,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   silently.
 
 ### Changed
+- **SIM builds now use the hardware's 4 KB track JSON buffer** (was a
+  1 KB Wokwi-era carve-out inside `#ifdef SIM`). The smaller buffer
+  silently truncated real track files, breaking track parsing in the
+  simulator; hardware builds are byte-for-byte unaffected (always 4 KB).
 - **Sleep is now a full shutdown (nRF52 System OFF).** Replacing the
   software sleep loop, the device tears everything down and powers off
   to µA-level System OFF; a tachometer pulse (engine start), any button,

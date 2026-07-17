@@ -470,12 +470,10 @@ int numOfLocations = 0;
 // JSON PARSING GLOBALS
 ///////////////////////////////////////////
 #include <ArduinoJson.h>
-#ifdef SIM
-#define JSON_BUFFER_SIZE 1024
-#else
-// 4 KB handles tracks with up to 10 courses with full sector data
+// 4 KB handles tracks with up to 10 courses with full sector data.
+// The sim uses the same size: a smaller buffer silently truncated real
+// track files (the old Wokwi target's RAM constraint doesn't apply).
 #define JSON_BUFFER_SIZE 4096
-#endif
 
 // extern matches the forward declaration in sd_functions.h so the
 // constants have external linkage; otherwise their default internal
