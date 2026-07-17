@@ -33,6 +33,7 @@
 // Host glue — lives in this TU so it can touch the sketch's globals.
 ///////////////////////////////////////////
 
+#include "frame_hash.h"
 #include "sim_host.h"
 
 namespace {
@@ -91,6 +92,16 @@ void sim_button_up(int idx) {
 }
 
 int sim_reset_requested(void) { return g_resetRequested ? 1 : 0; }
+
+const uint8_t* sim_framebuffer(void) {
+  // The real Adafruit_GrayOLED buffer — every pixel in it came from the
+  // real drawPixel(). 128x64 mono = 1024 bytes, page layout.
+  return display.getBuffer();
+}
+
+uint32_t sim_frame_hash(void) {
+  return frame_hash::fnv1a(display.getBuffer(), 1024);
+}
 
 uint32_t sim_millis(void) { return (uint32_t)millis(); }
 

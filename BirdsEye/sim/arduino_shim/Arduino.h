@@ -90,6 +90,8 @@ static inline long map(long x, long inMin, long inMax, long outMin, long outMax)
   return (x - inMin) * (outMax - outMin) / (inMax - inMin) + outMin;
 }
 #define sq(x) ((x) * (x))
+#define radians(deg) ((deg)*DEG_TO_RAD)
+#define degrees(rad) ((rad)*RAD_TO_DEG)
 #define lowByte(w) ((uint8_t)((w) & 0xff))
 #define highByte(w) ((uint8_t)((w) >> 8))
 

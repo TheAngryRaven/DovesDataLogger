@@ -58,7 +58,28 @@ FetchContent_Declare(arxtypetraits
   GIT_SHALLOW TRUE
 )
 
-FetchContent_MakeAvailable(doveslaptimer sparkfun_gnss arduinojson arxtypetraits)
+# REAL display stack (pixel-perfect is fidelity priority #1). The class
+# chain Adafruit_SH1106G : Adafruit_SH110X : Adafruit_GrayOLED :
+# Adafruit_GFX is portable C++; the hardware boundary is the two BusIO
+# device pointers, shimmed in busio_shim/. Versions are recorded below
+# for the sim's getVersion() surface.
+set(SIM_GFX_VERSION "1.12.6")
+set(SIM_SH110X_VERSION "2.1.14")
+FetchContent_Declare(adafruit_gfx
+  GIT_REPOSITORY https://github.com/adafruit/Adafruit-GFX-Library.git
+  GIT_TAG ${SIM_GFX_VERSION}
+  GIT_SHALLOW TRUE
+  SOURCE_SUBDIR cmake-subdir-does-not-exist  # repo root CMakeLists is ESP-IDF-only
+)
+FetchContent_Declare(adafruit_sh110x
+  GIT_REPOSITORY https://github.com/adafruit/Adafruit_SH110x.git
+  GIT_TAG ${SIM_SH110X_VERSION}
+  GIT_SHALLOW TRUE
+  SOURCE_SUBDIR cmake-subdir-does-not-exist  # repo root CMakeLists is ESP-IDF-only
+)
+
+FetchContent_MakeAvailable(doveslaptimer sparkfun_gnss arduinojson
+                           arxtypetraits adafruit_gfx adafruit_sh110x)
 
 # ------------------------------------------------------------ embed assets
 set(SIM_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
@@ -116,17 +137,26 @@ set(SIM_CORE_SOURCES
   ${doveslaptimer_SOURCE_DIR}/src/WaypointLapTimer.cpp
   ${doveslaptimer_SOURCE_DIR}/src/CourseDetector.cpp
   ${doveslaptimer_SOURCE_DIR}/src/CourseManager.cpp
+  # Real display stack — every pixel comes from the real drawPixel().
+  ${adafruit_gfx_SOURCE_DIR}/Adafruit_GFX.cpp
+  ${adafruit_gfx_SOURCE_DIR}/Adafruit_GrayOLED.cpp
+  ${adafruit_sh110x_SOURCE_DIR}/Adafruit_SH110X.cpp
+  ${adafruit_sh110x_SOURCE_DIR}/Adafruit_SH1106G.cpp
+  # Display output plumbing (frame hash + PNG dumps).
+  ${SIM_DIR}/frame_hash.cpp
+  ${SIM_DIR}/png_dump.cpp
+  ${BIRDSEYE_DIR}/crc32.cpp
 )
 
-add_executable(birdseye_sim_native
-  ${SIM_CORE_SOURCES}
-  ${SIM_DIR}/native_main.cpp
-)
-add_dependencies(birdseye_sim_native sim_assets)
+# Everything except the driver main()s — shared by the soak binary and
+# the golden-fixture binary.
+add_library(birdseye_sim_core STATIC ${SIM_CORE_SOURCES})
+add_dependencies(birdseye_sim_core sim_assets)
 
-target_include_directories(birdseye_sim_native PRIVATE
+target_include_directories(birdseye_sim_core PUBLIC
   ${SIM_DIR}
   ${SIM_DIR}/arduino_shim
+  ${SIM_DIR}/busio_shim
   ${SIM_DIR}/sdfat_shim
   ${SIM_GEN_DIR}
   ${BIRDSEYE_DIR}
@@ -134,29 +164,54 @@ target_include_directories(birdseye_sim_native PRIVATE
   ${sparkfun_gnss_SOURCE_DIR}/src
   ${arduinojson_SOURCE_DIR}/src
   ${arxtypetraits_SOURCE_DIR}
+  ${adafruit_gfx_SOURCE_DIR}
+  ${adafruit_sh110x_SOURCE_DIR}
 )
 
-target_compile_definitions(birdseye_sim_native PRIVATE
+target_compile_definitions(birdseye_sim_core PUBLIC
   $<$<BOOL:${SIM_DEBUG_OUTPUT}>:HAS_DEBUG>
+  SIM_GFX_VERSION="${SIM_GFX_VERSION}"
+  SIM_SH110X_VERSION="${SIM_SH110X_VERSION}"
+  # Adafruit_GFX keys its Print-override signature (size_t write(uint8_t))
+  # off the Arduino version macro; pretend to be a modern core.
+  ARDUINO=10819
+  # ...but keep ArduinoJson exactly as it behaved before ARDUINO was
+  # defined (std mode): the firmware only ever hands it char buffers.
+  ARDUINOJSON_ENABLE_ARDUINO_STRING=0
+  ARDUINOJSON_ENABLE_ARDUINO_STREAM=0
+  ARDUINOJSON_ENABLE_ARDUINO_PRINT=0
+  ARDUINOJSON_ENABLE_PROGMEM=0
 )
 
 # The firmware TU is Arduino-style code compiled far from its home
 # toolchain — keep warnings on but non-fatal for it; the sim's own shims
 # should stay clean.
-target_compile_options(birdseye_sim_native PRIVATE
+target_compile_options(birdseye_sim_core PUBLIC
   -Wall -Wextra -Wno-unused-parameter
   # The Arduino build force-includes Arduino.h into every source; the
-  # DovesLapTimer sources rely on that (no explicit include). Replicate.
+  # DovesLapTimer and Adafruit sources rely on that. Replicate.
   -include ${SIM_DIR}/arduino_shim/Arduino.h
 )
 
+add_executable(birdseye_sim_native ${SIM_DIR}/native_main.cpp)
+target_link_libraries(birdseye_sim_native PRIVATE birdseye_sim_core)
+
+add_executable(birdseye_sim_golden ${SIM_DIR}/golden_main.cpp)
+target_link_libraries(birdseye_sim_golden PRIVATE birdseye_sim_core)
+
 enable_testing()
 
-# Done-criteria checks: boots to menu + survives 60 s of virtual time,
+# Phase-1 done-criteria: boots to menu + survives 60 s of virtual time,
 # and two runs produce byte-identical output (determinism).
 add_test(NAME sim_boot_soak COMMAND birdseye_sim_native)
 add_test(NAME sim_determinism
   COMMAND ${CMAKE_COMMAND}
           -DSIM_BIN=$<TARGET_FILE:birdseye_sim_native>
           -P ${SIM_DIR}/cmake/determinism_test.cmake
+)
+
+# Phase-2 done-criteria: the real display stack renders the committed
+# golden page hashes (pixels AND the navigation that produced them).
+add_test(NAME sim_golden_fixtures
+  COMMAND birdseye_sim_golden --golden ${SIM_DIR}/golden/golden_hashes.txt
 )

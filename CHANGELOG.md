@@ -13,6 +13,15 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **Simulator pixel-perfect display (internal, sim Phase 2).** The sim
+  now renders through the REAL Adafruit display stack (GFX 1.12.6 →
+  GrayOLED → SH110X 2.1.14, pinned) with the hardware boundary shimmed at
+  the two BusIO device pointers — every framebuffer pixel comes from the
+  real `drawPixel()`. Adds a zero-copy framebuffer getter + FNV-1a frame
+  hash, a dependency-free PNG frame dumper, and 8 committed golden page
+  fixtures (hash + expected page id, captured by walking the real menus)
+  that CI verifies on every PR; rendered frames are uploaded as a CI
+  artifact. No firmware behavior changes.
 - **Simulator host build (`BirdsEye/sim/`, internal).** The real firmware
   sources now also compile and run on a desktop toolchain under the `SIM`
   flag — one concatenated translation unit against an Arduino/nRF52 shim,
