@@ -58,6 +58,18 @@ EMSCRIPTEN_KEEPALIVE const uint8_t* simw_framebuffer(void) {
   return sim_framebuffer();
 }
 
+EMSCRIPTEN_KEEPALIVE int simw_boot_frame_count(void) {
+  return sim_boot_frame_count();
+}
+
+EMSCRIPTEN_KEEPALIVE uint32_t simw_boot_frame_time_ms(int i) {
+  return sim_boot_frame_time_ms(i);
+}
+
+EMSCRIPTEN_KEEPALIVE const uint8_t* simw_boot_frame_pixels(int i) {
+  return sim_boot_frame_pixels(i);
+}
+
 EMSCRIPTEN_KEEPALIVE uint32_t simw_frame_hash(void) {
   return sim_frame_hash();
 }

@@ -13,7 +13,16 @@ unsigned long micros(void) {
   return (unsigned long)sim_clock::nowUs();
 }
 
-void delay(unsigned long ms) { sim_clock::advanceUs((uint64_t)ms * 1000ULL); }
+namespace {
+SimDelayObserver g_delayObserver = nullptr;
+}
+
+void simSetDelayObserver(SimDelayObserver cb) { g_delayObserver = cb; }
+
+void delay(unsigned long ms) {
+  if (g_delayObserver) g_delayObserver();
+  sim_clock::advanceUs((uint64_t)ms * 1000ULL);
+}
 
 void delayMicroseconds(unsigned int us) { sim_clock::advanceUs(us); }
 

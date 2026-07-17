@@ -33,6 +33,8 @@
 // Host glue — lives in this TU so it can touch the sketch's globals.
 ///////////////////////////////////////////
 
+#include <vector>
+
 #include "frame_hash.h"
 #include "sim_host.h"
 
@@ -54,6 +56,30 @@ constexpr uint32_t kButtonPins[3] = {4, 5, 6};
 int g_simRpm = 0;
 uint64_t g_pulsePeriodUs = 0;
 uint64_t g_nextPulseUs = 0;
+
+// Boot-sequence capture (see sim_host.h). Bounded; frames dedupe by
+// content so back-to-back delays with no repaint cost one slot.
+struct BootFrame {
+  uint32_t tMs;
+  uint8_t fb[1024];
+};
+constexpr size_t kMaxBootFrames = 32;
+std::vector<BootFrame> g_bootFrames;
+bool g_bootCapture = false;
+
+void bootDelayObserver() {
+  if (!g_bootCapture || g_bootFrames.size() >= kMaxBootFrames) return;
+  const uint8_t* fb = display.getBuffer();
+  if (!fb) return;  // before display.begin() allocates the buffer
+  if (!g_bootFrames.empty() &&
+      memcmp(g_bootFrames.back().fb, fb, sizeof(BootFrame::fb)) == 0) {
+    return;
+  }
+  BootFrame f;
+  f.tMs = (uint32_t)millis();
+  memcpy(f.fb, fb, sizeof(f.fb));
+  g_bootFrames.push_back(f);
+}
 
 // Unix days -> civil date (Howard Hinnant's civil_from_days; public
 // domain algorithm). Valid far beyond any GPS date the sim will see.
@@ -78,11 +104,29 @@ void sim_init(void) {
   sim_clock::reset();
   sim_vfs::reset();
   g_resetRequested = false;
+  g_bootFrames.clear();
+  g_bootCapture = true;
+  simSetDelayObserver(&bootDelayObserver);
   try {
     setup();
   } catch (const SimResetRequest&) {
     g_resetRequested = true;
   }
+  bootDelayObserver();  // final post-setup frame
+  g_bootCapture = false;
+  simSetDelayObserver(nullptr);
+}
+
+int sim_boot_frame_count(void) { return (int)g_bootFrames.size(); }
+
+uint32_t sim_boot_frame_time_ms(int i) {
+  if (i < 0 || i >= (int)g_bootFrames.size()) return 0;
+  return g_bootFrames[(size_t)i].tMs;
+}
+
+const uint8_t* sim_boot_frame_pixels(int i) {
+  if (i < 0 || i >= (int)g_bootFrames.size()) return nullptr;
+  return g_bootFrames[(size_t)i].fb;
 }
 
 int sim_step_millis(uint32_t deltaMs) {

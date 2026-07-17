@@ -41,6 +41,11 @@ sim.stepMillis(500);
 st = sim.getStateJson();
 check(st.page === -1, `Select skips to main menu (page=${st.page})`);
 
+const boot = sim.getBootFrames();
+check(boot.length >= 2, `boot sequence captured (${boot.length} keyframes)`);
+check(boot.every((f) => f.pixels.length === 1024), 'boot frames are 1024 bytes');
+check(boot.some((f) => f.pixels.some((b) => b !== 0)), 'boot splash has lit pixels');
+
 const fb = sim.getFramebuffer();
 check(fb.length === 1024, 'framebuffer is 1024 bytes');
 check(fb.some((b) => b !== 0), 'framebuffer has lit pixels');

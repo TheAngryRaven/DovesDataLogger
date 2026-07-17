@@ -34,6 +34,9 @@ export default async function createBirdsEyeSim(coreOptions = {}) {
       injectPvt: core.cwrap('simw_inject_pvt', 'number', ['string']),
       setRpm: core.cwrap('simw_set_rpm', null, ['number']),
       framebuffer: core.cwrap('simw_framebuffer', 'number', []),
+      bootFrameCount: core.cwrap('simw_boot_frame_count', 'number', []),
+      bootFrameTime: core.cwrap('simw_boot_frame_time_ms', 'number', ['number']),
+      bootFramePixels: core.cwrap('simw_boot_frame_pixels', 'number', ['number']),
       frameHash: core.cwrap('simw_frame_hash', 'number', []),
       resetRequested: core.cwrap('simw_reset_requested', 'number', []),
       stateJson: core.cwrap('simw_state_json', 'string', []),
@@ -68,6 +71,20 @@ export default async function createBirdsEyeSim(coreOptions = {}) {
       return new Uint8Array(core.HEAPU8.buffer, ptr, 1024);
     },
     getFrameHash() { return c.frameHash() >>> 0; },
+    // Boot-sequence keyframes captured during init() (splash, boot page)
+    // with virtual timestamps — replay them for the real power-on feel.
+    getBootFrames() {
+      const n = c.bootFrameCount();
+      const frames = [];
+      for (let i = 0; i < n; i++) {
+        const ptr = c.bootFramePixels(i);
+        if (!ptr) continue;
+        const pixels = new Uint8Array(1024);
+        pixels.set(core.HEAPU8.subarray(ptr, ptr + 1024));
+        frames.push({ tMs: c.bootFrameTime(i), pixels });
+      }
+      return frames;
+    },
     getStateJson() { return JSON.parse(c.stateJson()); },
     getVersion() { return JSON.parse(c.versionJson()); },
     resetRequested() { return c.resetRequested() === 1; },

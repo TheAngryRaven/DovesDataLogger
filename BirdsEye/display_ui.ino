@@ -473,24 +473,17 @@ void handleRunningPageSelection() {
   } else if (currentPage == PAGE_REPLAY_RESULTS) {
     // Middle button on results does nothing (use left/right for navigation)
   } else {
-    // sim doesnt like fancy page switcher
-    // inverted eats too much power
-    #ifdef SIM
-      if(displayInverted == true) {
-        displayInverted = false;
-        display.invertDisplay(false);
-      } else {
-        displayInverted = true;
-        display.invertDisplay(true);
-      }
-    #else
-      if (gps_speed_mph <= 5.0) {
-        currentPage = GPS_LAP_BEST;
-      } else {
-        currentPage = GPS_LAP_PACE;
-      }
-      switchToDisplayPage(currentPage);
-    #endif
+    // Speed-aware center-button jump: pace page while moving, best-lap
+    // page when (nearly) stopped. SIM uses the same behavior — the old
+    // Wokwi carve-out here toggled panel inversion instead, which is
+    // invisible in the simulator (inversion happens in the panel, not
+    // the framebuffer) and read as a dead button.
+    if (gps_speed_mph <= 5.0) {
+      currentPage = GPS_LAP_BEST;
+    } else {
+      currentPage = GPS_LAP_PACE;
+    }
+    switchToDisplayPage(currentPage);
   }
 }
 

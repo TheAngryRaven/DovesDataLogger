@@ -71,6 +71,17 @@ void sim_set_accel(float x, float y, float z);
 // True once the firmware has requested a reset (sticky until sim_init).
 int sim_reset_requested(void);
 
+// ---- boot-sequence frames ----
+// setup() runs as a single call, so its display states (splash, boot
+// page) would otherwise be invisible to the host. sim_init() captures a
+// deduplicated framebuffer snapshot at each in-setup delay() boundary
+// (plus the final post-setup frame) with its virtual timestamp, so a
+// host can replay the boot sequence at real-time pace.
+int sim_boot_frame_count(void);
+uint32_t sim_boot_frame_time_ms(int i);
+// 1024-byte framebuffer of frame i (same layout as sim_framebuffer).
+const uint8_t* sim_boot_frame_pixels(int i);
+
 // ---- display output (Phase 2) ----
 // Zero-copy view of the REAL Adafruit_GrayOLED framebuffer: 1024 bytes,
 // page layout — bit = buf[x + (y>>3)*128] >> (y&7) & 1.

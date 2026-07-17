@@ -49,6 +49,11 @@ sim.getFramebuffer();       // Uint8Array VIEW, 1024 bytes; layout:
                             // Re-take after memory growth (each call returns a
                             // fresh view; don't cache long-term).
 sim.getFrameHash();         // FNV-1a 32 of those 1024 bytes (redraw dirty-check)
+sim.getBootFrames();        // [{tMs, pixels: Uint8Array(1024)}] — boot-sequence
+                            // keyframes (splash, boot page) captured during
+                            // init() with virtual timestamps; replay them for
+                            // the power-on feel (hold each frame until the
+                            // next one's tMs; the last is the live state)
 sim.getStateJson();         // object: { page, raceActive, lapCount, bestLapMs,
                             //   lastLapMs, currentLapMs, gpsFix, sats, rpm,
                             //   loggingActive, trackDetected, courseName, millis }

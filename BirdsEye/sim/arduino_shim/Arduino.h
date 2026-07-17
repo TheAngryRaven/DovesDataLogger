@@ -109,6 +109,13 @@ void delay(unsigned long ms);
 void delayMicroseconds(unsigned int us);
 static inline void yield(void) {}
 
+// Host hook fired at the START of every delay() (before virtual time
+// advances). The sim glue uses it to capture boot-sequence framebuffers:
+// setup() runs as one call, so its delays are the only observation
+// points a host has for the splash/boot pages. Null = no observer.
+typedef void (*SimDelayObserver)(void);
+void simSetDelayObserver(SimDelayObserver cb);
+
 // ------------------------------------------------------------------ pins
 // XIAO nRF52840 pin names the sketch uses. Values are arbitrary but
 // stable indices into the sim pin-state map (matching the variant's

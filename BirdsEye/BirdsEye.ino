@@ -588,7 +588,6 @@ const int PAGE_INTERNAL_FAULT = 105;
 // buttons stay live — driven by sdFormatPageLoop().
 const int PAGE_SD_FORMAT = 106;
 
-bool displayInverted = false;
 int currentPage = PAGE_BOOT;
 int lastPage = 0;
 
