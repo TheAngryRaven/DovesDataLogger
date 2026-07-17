@@ -12,7 +12,21 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Fixed
+- **Simulator: center button in race mode now switches pages** (pace
+  while moving, best lap when stopped) exactly like the hardware. The
+  old Wokwi-era `#ifdef SIM` carve-out toggled panel inversion instead —
+  invisible in the simulator (inversion happens in the panel, not the
+  framebuffer), so the button read as dead. Hardware behavior unchanged;
+  the now-unused `displayInverted` global is removed.
+
 ### Added
+- **Simulator boot-sequence capture (internal, sim).** `sim_init()` now
+  records deduplicated framebuffer keyframes (with virtual timestamps)
+  at every in-`setup()` `delay()` boundary — the splash and boot pages
+  that were previously invisible to the host because `setup()` runs as
+  one call. Exposed as `getBootFrames()` in the wasm API (contract v1
+  addition) so the viewer can play the real power-on sequence.
 - **Simulator WASM build (internal, sim Phase 4).** The sim now compiles
   to a browser module (`emcmake`; Emscripten 3.1.61 pinned in CI):
   `birdseye-sim.mjs` (stable public wrapper) + `birdseye-sim-core.{mjs,
