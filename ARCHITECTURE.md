@@ -303,13 +303,20 @@ stands in for the IDE's auto-generated prototypes), against:
   SparkFun GNSS driver (real header for the UBX types; PVT is injected
   by the host straight into `onPVTReceived()`, never parsed from bytes).
 - Real **DovesLapTimer/CourseManager** sources — lap timing fidelity is
-  the point; the display stack becomes the real Adafruit libraries in a
-  later phase (currently a placeholder).
+  the point.
+- The REAL **Adafruit display stack** (GFX → GrayOLED → SH1106G, pinned
+  versions): the hardware boundary is two BusIO device pointers, shimmed
+  in `busio_shim/` to succeed-and-discard, so every framebuffer pixel
+  comes from the real `drawPixel()` — pixel-perfect by construction. The
+  1024-byte buffer is exposed zero-copy plus an FNV-1a frame hash.
 
-The `sim-build` workflow builds it and runs a 60 s boot soak plus a
-two-runs-byte-identical determinism check on every PR — the sim
-compiling is itself a CI gate, which is what keeps `SIM` from rotting
-the way the old `WOKWI` flag did.
+The `sim-build` workflow builds it and runs a 60 s boot soak, a
+two-runs-byte-identical determinism check, and **golden display
+fixtures** — a scripted walk of the real menus capturing the frame hash
+(and expected page id) at fixed virtual times for 8 pages, committed in
+`sim/golden/` — on every PR. The sim compiling is itself a CI gate,
+which is what keeps `SIM` from rotting the way the old `WOKWI` flag
+did.
 
 ## Testing & CI
 

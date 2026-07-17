@@ -27,6 +27,13 @@ void sim_button_up(int idx);
 // True once the firmware has requested a reset (sticky until sim_init).
 int sim_reset_requested(void);
 
+// ---- display output (Phase 2) ----
+// Zero-copy view of the REAL Adafruit_GrayOLED framebuffer: 1024 bytes,
+// page layout — bit = buf[x + (y>>3)*128] >> (y&7) & 1.
+const uint8_t* sim_framebuffer(void);
+// FNV-1a 32-bit hash of those 1024 bytes (golden fixtures + dirty-check).
+uint32_t sim_frame_hash(void);
+
 // ---- state peeks (Phase 4 wraps these into getStateJson) ----
 uint32_t sim_millis(void);
 int sim_current_page(void);

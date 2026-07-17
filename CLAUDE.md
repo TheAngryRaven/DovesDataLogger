@@ -131,11 +131,15 @@ handoff spec.
 | `sim_main.cpp` | Single TU replicating Arduino's .ino concatenation (bluetooth/camera_ble/usb_msc/firmware_ota deliberately absent) + host glue (`sim_init`/`sim_step_millis`/buttons/state peeks) |
 | `sim_prototypes.h` | Hand-written stand-in for Arduino's auto-generated prototypes |
 | `virtual_clock.{h,cpp}` | Host-advanced virtual time; `delay()` consumes it; no wall clock (determinism) |
-| `arduino_shim/` | Arduino core + nRF52 registers/SoftDevice/FreeRTOS surface, Wire/SPI, LSM6DS3 (settable), Bluefruit types, placeholder Adafruit_GFX/SH110X (real libs land in sim Phase 2) |
+| `arduino_shim/` | Arduino core + nRF52 registers/SoftDevice/FreeRTOS surface, Wire/SPI, LSM6DS3 (settable), Bluefruit types |
+| `busio_shim/` | The display stack's entire hardware boundary: `Adafruit_I2CDevice` whose `begin()` is true and whose writes discard — everything above it (GFX/GrayOLED/SH110X) is the REAL pinned library, so the framebuffer is pixel-perfect |
 | `sdfat_shim/` | In-memory VFS implementing the exact SdFat subset the firmware calls; preloads `assets/` (fixed SETTINGS.json + OKC track) via cmake-embedded byte arrays |
 | `stubs/` | No-op surfaces of the excluded modules + SparkFun GNSS driver (real header, stubbed methods — PVT is injected directly into `onPVTReceived()`) |
+| `frame_hash.{h,cpp}` | FNV-1a 32 over the 1024-byte framebuffer (golden fixtures, viewer dirty-check, future HIL tap) |
+| `png_dump.{h,cpp}` | Dependency-free PNG writer (stored-deflate + repo crc32) for eyeballing frames |
 | `native_main.cpp` | Phase-1 driver: boot → skip GPS status page → 60 s soak, state prints |
-| `CMakeLists.txt` | Native build; FetchContent pins: DovesLapTimer `BETA` (matches CI channel), SparkFun GNSS v3.1.9 (header-only use), ArduinoJson v6.21.5, ArxTypeTraits v0.3.2 |
+| `golden_main.cpp` | Phase-2 driver: scripted real-menu walk capturing 8 golden page hashes (`golden/golden_hashes.txt`; regenerate with `--print`, eyeball with `--dump`) |
+| `CMakeLists.txt` | Native build; FetchContent pins: DovesLapTimer `BETA` (matches CI channel), SparkFun GNSS v3.1.9 (header-only use), ArduinoJson v6.21.5, ArxTypeTraits v0.3.2, Adafruit GFX 1.12.6 + SH110X 2.1.14 (real display stack) |
 
 ### Non-Source
 
