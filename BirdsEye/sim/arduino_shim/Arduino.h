@@ -74,13 +74,20 @@ class __FlashStringHelper;
 // ------------------------------------------------------------ min / max
 // The Arduino core defines these as macros; templates avoid the classic
 // macro/std collisions while behaving the same for firmware code.
+// MUST return by value (common_type): a decltype of the ternary on two
+// same-type parameters is an lvalue REFERENCE — returning it dangles to
+// a dead stack slot, which cost a day of heisenbugs once.
+#include <type_traits>
+
 template <typename A, typename B>
-static inline auto min(A a, B b) -> decltype(a < b ? a : b) {
-  return a < b ? a : b;
+static inline typename std::common_type<A, B>::type min(A a, B b) {
+  using T = typename std::common_type<A, B>::type;
+  return (T)a < (T)b ? (T)a : (T)b;
 }
 template <typename A, typename B>
-static inline auto max(A a, B b) -> decltype(a > b ? a : b) {
-  return a > b ? a : b;
+static inline typename std::common_type<A, B>::type max(A a, B b) {
+  using T = typename std::common_type<A, B>::type;
+  return (T)a > (T)b ? (T)a : (T)b;
 }
 template <typename T, typename L, typename H>
 static inline T constrain(T v, L lo, H hi) {
