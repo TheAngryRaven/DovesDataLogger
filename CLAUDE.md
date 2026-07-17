@@ -140,6 +140,7 @@ handoff spec.
 | `native_main.cpp` | Phase-1 driver: boot → skip GPS status page → 60 s soak, state prints |
 | `golden_main.cpp` | Phase-2 driver: scripted real-menu walk capturing 8 golden page hashes (`golden/golden_hashes.txt`; regenerate with `--print`, eyeball with `--dump`) |
 | `oracle_main.cpp` | Phase-3 driver: lap-timing oracle. Default = synthetic constant-speed OKC circle (period exact by construction) through the whole real pipeline (boot page → race entry → proximity detect → CourseDetector "Normal" → laps ±40 ms); `--dovex <file>` replays a hardware log against its own header laps |
+| `fixtures/okc_tillotson_1.dovex` | Hardware-recorded OKC session (13 laps) — the `--dovex` oracle's CI fixture; the sim reproduces its header lap list to the exact millisecond |
 | `CMakeLists.txt` | Native build; FetchContent pins: DovesLapTimer `BETA` (matches CI channel), SparkFun GNSS v3.1.9 (header-only use), ArduinoJson v6.21.5, ArxTypeTraits v0.3.2, Adafruit GFX 1.12.6 + SH110X 2.1.14 (real display stack) |
 
 ### Non-Source

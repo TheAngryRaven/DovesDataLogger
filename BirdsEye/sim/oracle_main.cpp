@@ -29,6 +29,7 @@
 #include <string>
 #include <vector>
 
+#include "dovex_header.h"
 #include "sim_host.h"
 
 namespace {
@@ -179,32 +180,27 @@ int runDovex(const char* path) {
     std::printf("cannot open %s\n", path);
     return 2;
   }
-  std::vector<char> header(1024);
-  if (std::fread(header.data(), 1, 1024, f) != 1024) {
+  std::vector<char> header(dovex_header::kHeaderSize);
+  if (std::fread(header.data(), 1, header.size(), f) != header.size()) {
     std::printf("short dovex header\n");
     std::fclose(f);
     return 2;
   }
-  // Header line 2 = comma-separated hardware lap times (ms).
-  std::vector<uint32_t> hwLaps;
-  {
-    std::string h(header.begin(), header.end());
-    size_t l1 = h.find('\n');
-    size_t l2 = (l1 == std::string::npos) ? std::string::npos
-                                          : h.find('\n', l1 + 1);
-    if (l1 != std::string::npos && l2 != std::string::npos) {
-      std::string laps = h.substr(l1 + 1, l2 - l1 - 1);
-      const char* s = laps.c_str();
-      while (*s) {
-        char* end = nullptr;
-        unsigned long v = std::strtoul(s, &end, 10);
-        if (end == s) break;
-        if (v > 0) hwLaps.push_back((uint32_t)v);
-        s = (*end == ',') ? end + 1 : end;
-      }
-    }
+  // Parse the reserved header with the firmware's OWN parser — the lap
+  // list in it is the hardware-computed ground truth.
+  dovex_header::ParsedHeader meta;
+  unsigned long hwLapBuf[1000];
+  size_t hwLapCount = 0;
+  if (!dovex_header::parse(header.data(), header.size(), meta, hwLapBuf,
+                           1000, hwLapCount)) {
+    std::printf("dovex header did not parse (crashed session?)\n");
+    std::fclose(f);
+    return 2;
   }
-  std::printf("hardware header laps: %zu\n", hwLaps.size());
+  std::vector<uint32_t> hwLaps(hwLapBuf, hwLapBuf + hwLapCount);
+  std::printf("hardware session: %s / %s / course '%s' best %s — %zu laps\n",
+              meta.datetime, meta.driver, meta.course, meta.bestLap,
+              hwLaps.size());
 
   std::vector<DovexRow> rows;
   char line[512];
@@ -240,6 +236,14 @@ int runDovex(const char* path) {
     sim_step_millis(200);
   }
 
+  // Accumulate laps as they appear. lapHistory is cleared if the sim's
+  // own auto-idle/session-end logic fires during the replay (exactly as
+  // the hardware's did at the end of the recorded session), so the
+  // comparison list is collected live rather than read at the end.
+  std::vector<uint32_t> simLaps;
+  int prevCount = 0;
+  std::string courseSeen;
+
   unsigned long long prevTs = rows[0].ts;
   for (const DovexRow& r : rows) {
     SimPvt p = {};
@@ -263,17 +267,34 @@ int runDovex(const char* path) {
     if (dt > 1000) dt = 1000;  // bridge gaps without stalling
     sim_step_millis((uint32_t)dt);
     prevTs = r.ts;
+
+    const int count = sim_lap_count();
+    if (count > prevCount) {
+      for (int i = prevCount; i < count; i++) {
+        simLaps.push_back(sim_lap_time_ms(i));
+      }
+    }
+    prevCount = count;
+    if (courseSeen.empty() && sim_course_name()[0]) {
+      courseSeen = sim_course_name();
+    }
   }
 
-  const int laps = sim_lap_count();
-  std::printf("sim laps: %d, course '%s'\n", laps, sim_course_name());
-  check((size_t)laps == hwLaps.size(), "lap count matches hardware header");
-  for (size_t i = 0; i < hwLaps.size() && (int)i < laps; i++) {
+  std::printf("sim laps: %zu, course '%s'\n", simLaps.size(),
+              courseSeen.c_str());
+  {
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "course matches header ('%s')",
+                  meta.course);
+    check(courseSeen == meta.course, buf);
+  }
+  check(simLaps.size() == hwLaps.size(), "lap count matches hardware header");
+  for (size_t i = 0; i < hwLaps.size() && i < simLaps.size(); i++) {
     char buf[96];
     std::snprintf(buf, sizeof(buf),
                   "lap %zu: sim %u ms vs hardware %u ms (±%u)", i + 1,
-                  sim_lap_time_ms((int)i), hwLaps[i], kToleranceMs);
-    check(nearlyEqualMs(sim_lap_time_ms((int)i), (double)hwLaps[i]), buf);
+                  simLaps[i], hwLaps[i], kToleranceMs);
+    check(nearlyEqualMs(simLaps[i], (double)hwLaps[i]), buf);
   }
   return failures ? 1 : 0;
 }

@@ -225,3 +225,11 @@ add_test(NAME sim_golden_fixtures
 # one GPS frame (40 ms). (--dovex mode replays a hardware log against its
 # own header once a fixture is committed under sim/fixtures/.)
 add_test(NAME sim_lap_oracle COMMAND birdseye_sim_oracle)
+
+# The definitive same-code-same-answer check: replay a hardware-recorded
+# OKC session (13 laps, real ignition/GPS noise and all) and require the
+# sim's DovesLapTimer to reproduce the lap list from the file's own
+# header. Currently reproduces it to the exact millisecond.
+add_test(NAME sim_lap_oracle_hardware
+  COMMAND birdseye_sim_oracle --dovex ${SIM_DIR}/fixtures/okc_tillotson_1.dovex
+)

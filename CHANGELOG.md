@@ -13,6 +13,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **Simulator hardware-session oracle (internal, sim Phase 3b).** A real
+  device-recorded OKC session (`sim/fixtures/okc_tillotson_1.dovex`,
+  13 laps) is now replayed through the sim in CI and the sim's
+  DovesLapTimer must reproduce the lap list from the file's own header —
+  it currently matches all 13 hardware lap times to the exact
+  millisecond. This is the definitive same-code-same-answer check for
+  the simulator's fidelity.
 - **Simulator inputs + lap-timing oracle (internal, sim Phase 3).** The
   sim now drives the firmware at the same boundaries the hardware uses:
   GPS frames are injected as real `UBX_NAV_PVT_data_t` structs straight
