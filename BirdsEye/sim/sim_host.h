@@ -88,6 +88,10 @@ int sim_gps_fix(void);
 int sim_logging_active(void);
 int sim_track_detected(void);
 int sim_lap_anything_active(void);
+int sim_sats(void);
+uint32_t sim_best_lap_ms(void);
+uint32_t sim_last_lap_ms(void);
+uint32_t sim_current_lap_ms(void);
 // Active course name ("" when no CourseManager / no course yet).
 const char* sim_course_name(void);
 // lapHistory[idx] in ms (0 when out of range).

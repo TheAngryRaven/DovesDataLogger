@@ -328,9 +328,19 @@ The `sim-build` workflow builds it and runs a 60 s boot soak, a
 two-runs-byte-identical determinism check, **golden display
 fixtures** — a scripted walk of the real menus capturing the frame hash
 (and expected page id) at fixed virtual times for 8 pages, committed in
-`sim/golden/` — and the lap oracle, on every PR. The sim compiling is
+`sim/golden/` — and the lap oracles, on every PR. The sim compiling is
 itself a CI gate, which is what keeps `SIM` from rotting the way the
 old `WOKWI` flag did.
+
+The same sources also build to a **browser module** (Emscripten;
+`sim/wasm/`): `birdseye-sim.mjs` wraps the emitted core and exposes the
+contract in `sim/API.md` (framebuffer + frame hash, JSON PVT injection,
+RPM, state/version JSON, VFS reads; `reset()` re-instantiates the
+module for a true fresh boot). CI builds it, smoke-tests it under node
+(including cross-instance determinism), and uploads the dist folder;
+the artifacts are vendored into `DovesDataViewer/public/sim/` so the
+viewer only ever runs a deliberately-committed build. The wasm module
+renders byte-identically to the native golden fixtures.
 
 ## Testing & CI
 

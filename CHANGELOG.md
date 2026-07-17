@@ -13,6 +13,19 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **Simulator WASM build (internal, sim Phase 4).** The sim now compiles
+  to a browser module (`emcmake`; Emscripten 3.1.61 pinned in CI):
+  `birdseye-sim.mjs` (stable public wrapper) + `birdseye-sim-core.{mjs,
+  wasm}` + `version.json` (firmware sha, DovesLapTimer sha, display-lib
+  versions). Full API contract v1 in `BirdsEye/sim/API.md` — framebuffer
+  view + FNV-1a hash, JSON PVT injection, RPM synthesis, state/version
+  JSON, VFS readFile/listFiles, and a true-fresh-boot async `reset()`
+  (module re-instantiation). A standalone `test.html` harness boots the
+  firmware in a browser and replays real `.dovex` files; a node smoke
+  test gates CI (`sim wasm build` job) and the dist folder is uploaded
+  as the `birdseye-sim-wasm` artifact. The wasm module renders
+  byte-identically to the native golden fixtures (same frame hashes).
+  Artifacts are vendored into DovesDataViewer (`public/sim/`).
 - **Simulator hardware-session oracle (internal, sim Phase 3b).** A real
   device-recorded OKC session (`sim/fixtures/okc_tillotson_1.dovex`,
   13 laps) is now replayed through the sim in CI and the sim's
