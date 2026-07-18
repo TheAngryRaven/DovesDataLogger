@@ -208,9 +208,10 @@ all breaking under this project's semver policy.
 - **CI now controls which DovesLapTimer the firmware is built against.**
   Builds targeting (or running on) the `BETA` branch track the library's own
   `BETA` branch, so the two beta channels move together; `master` CI and the
-  release/tag builds pin the known-good `v4.1.0` tag instead of floating on
+  release/tag builds pin a known-good tag instead of floating on
   the library's default-branch tip. Bump the pin deliberately when a new
-  library release is validated.
+  library release is validated — this release moves that pin from `v4.1.0`
+  to **`v4.2.0`**.
 - **Simulator flag renamed: the old Wokwi define is now `SIM`** at every
   site, ahead of the browser/WASM simulator work. All conditional behavior
   carries over unchanged (bare-SdFat type, smaller JSON buffer, WDT skip, fixed battery
