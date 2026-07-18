@@ -776,6 +776,45 @@ void displayPage_tachometer() {
   safeDisplayUpdate();
 }
 
+// SensorEgg wireless EGT page — mirrors the tachometer layout: big value,
+// small status subtext. NaN (stale link OR egg-reported invalid probe)
+// renders '---'; the reading is NEVER held across a dropout.
+void displayPage_sensorTemp() {
+  resetDisplay();
+
+  if (sensoreggTcFault()) {
+    display.println(F("Temp1 C   *TC FAULT*"));
+  } else {
+    display.println(F("      Temp1 C"));
+  }
+
+  const float egt = sensoreggEgtC();
+
+  display.setCursor(5, 20);
+  display.setTextSize(4);
+  if (isnan(egt)) {
+    display.println(F("  ---"));
+  } else {
+    char egtStr[8];
+    snprintf(egtStr, sizeof(egtStr), "%5d", (int)lroundf(egt));
+    display.println(egtStr);
+  }
+
+  display.setTextSize(1);
+  display.setCursor(0, 55);
+  display.print(F(" junc: "));
+  const float junc = sensoreggJunctionC();
+  if (isnan(junc)) {
+    display.print(F("---"));
+  } else {
+    display.print(junc, 1);
+  }
+  display.print(F("   rf: "));
+  display.print(sensoreggLinkUp() ? F("OK") : F("--"));
+
+  safeDisplayUpdate();
+}
+
 void displayPage_optimal_lap() {
   resetDisplay();
 

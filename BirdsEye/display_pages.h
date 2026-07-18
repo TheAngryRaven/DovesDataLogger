@@ -33,6 +33,7 @@ void displayPage_replay_exit();
 void displayPage_gps_stats();
 void displayPage_gps_speed();
 void displayPage_tachometer();
+void displayPage_sensorTemp();
 void displayPage_gps_lap_time();
 void displayPage_gps_pace();
 void displayPage_gps_best_lap();
