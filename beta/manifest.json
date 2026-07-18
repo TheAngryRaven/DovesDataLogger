@@ -3,7 +3,7 @@
   "channel": "beta",
   "commit": "ba320c5",
   "branch": "BETA",
-  "publishedAt": "2026-07-18T19:53:25Z",
+  "publishedAt": "2026-07-18T20:12:03Z",
   "builds": {
     "BirdsEye-sense": {
       "variant": "sense",
