@@ -576,6 +576,10 @@ void displayLoop() {
       displayPage_gps_speed();
     } else if (currentPage == TACHOMETER) {
       displayPage_tachometer();
+#ifndef ENDURANCE_MODE
+    } else if (currentPage == SENSOR_TEMP) {
+      displayPage_sensorTemp();
+#endif
     } else if (currentPage == GPS_LAP_TIME) {
       displayPage_gps_lap_time();
     } else if (currentPage == GPS_LAP_PACE) {

@@ -1,6 +1,7 @@
 ///////////////////////////////////////////
 // Stubs for the firmware modules deliberately excluded from the sim TU:
-// bluetooth.ino, camera_ble.ino, usb_msc.ino, firmware_ota.ino.
+// bluetooth.ino, camera_ble.ino, usb_msc.ino, firmware_ota.ino,
+// sensoregg.ino.
 //
 // The sim has no BLE, no camera, no USB host (demo scope — see the
 // handoff spec). These implement the excluded modules' public headers
@@ -13,6 +14,7 @@
 
 #include "bluetooth.h"
 #include "camera_ble.h"
+#include "sensoregg.h"
 #include "usb_msc.h"
 
 // ---- bluetooth.ino surface ----
@@ -78,6 +80,20 @@ void cameraTestExitMode() {}
 bool cameraTestWake() { return false; }
 bool cameraTestRecord() { return false; }
 bool cameraTestPowerOff() { return false; }
+
+// ---- sensoregg.ino surface ----
+
+// No egg ever appears in the sim: the Temp1 page renders its '---'
+// stale state and DOVEX rows log "nan" for both egg columns.
+
+void SENSOREGG_SETUP() {}
+void SENSOREGG_LOOP() {}
+
+bool sensoreggLinkUp() { return false; }
+float sensoreggEgtC() { return NAN; }
+float sensoreggJunctionC() { return NAN; }
+bool sensoreggTcFault() { return false; }
+uint16_t sensoreggSequence() { return 0; }
 
 // ---- usb_msc.ino surface ----
 

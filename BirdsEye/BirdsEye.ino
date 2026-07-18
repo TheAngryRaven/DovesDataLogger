@@ -91,6 +91,7 @@
 #include "sat_bars.h"
 #include "sd_format_page.h"
 #include "sd_functions.h"
+#include "sensoregg.h"
 #include "settings.h"
 #include "tachometer.h"
 #include "usb_msc.h"
@@ -571,12 +572,13 @@ const int GPS_STATS = 4;
 #else
   const int GPS_SPEED = 5;
   const int TACHOMETER = 6;
-  const int GPS_LAP_TIME = 7;
-  const int GPS_LAP_PACE = 8;
-  const int GPS_LAP_BEST = 9;
-  const int OPTIMAL_LAP = 10;
-  const int GPS_LAP_LIST = 11;
-  const int LOGGING_STOP = 12;
+  const int SENSOR_TEMP = 7;  // SensorEgg wireless EGT (Temp1)
+  const int GPS_LAP_TIME = 8;
+  const int GPS_LAP_PACE = 9;
+  const int GPS_LAP_BEST = 10;
+  const int OPTIMAL_LAP = 11;
+  const int GPS_LAP_LIST = 12;
+  const int LOGGING_STOP = 13;
 #endif
 
 // end menu
@@ -771,6 +773,11 @@ void setup() {
 
   // Camera auto-record: load the persisted Insta360 serial + init the FSM
   CAMERA_SETUP();
+
+  // SensorEgg wireless EGT: bring the BLE core up and start the passive
+  // scanner (after CAMERA_SETUP so every GATT service is registered by
+  // bleCoreEnsureInit before anything advertises).
+  SENSOREGG_SETUP();
 
   if (!sdSetupSuccess && sdCardUnformatted) {
     // Card answers but no FAT volume mounts: soldered-in module out of the
@@ -1610,6 +1617,7 @@ void loop() {
   TACH_LOOP();
   ACCEL_LOOP();
   BLUETOOTH_LOOP();
+  SENSOREGG_LOOP();  // drain SensorEgg scan buffer (Temp1 fresh for logging)
 
   trackDetectionLoop();
   checkForNewLapData();
