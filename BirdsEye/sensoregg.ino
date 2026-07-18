@@ -51,6 +51,7 @@ static uint32_t eggRxMs = 0;
 static bool     eggHaveReading = false;
 
 static bool eggScannerRunning = false;
+static uint32_t eggLastKickMs = 0;  // last scanner self-heal kick (main loop)
 
 ///////////////////////////////////////////
 // SCAN CALLBACK (Bluefruit task context — copy bytes, resume, return)
@@ -107,15 +108,22 @@ void SENSOREGG_SETUP() {
   // are unaffected by the early init).
   bleCoreEnsureInit();
 
-  // Passive observer per PW-ADV-1: 100 ms interval / 40 ms window
-  // (~40% duty ≈ 4 Hz effective catch rate — deliberately NOT higher;
-  // the probe's thermal time constant is orders of magnitude slower,
-  // and a higher duty only contends with the camera link).
+  // Passive observer: 100 ms interval / 60 ms window (see the constants'
+  // comments for why the window is wider than the spec's 40 ms). Passive
+  // listening costs the camera link nothing — S140 yields scan windows to
+  // connection events automatically.
   Bluefruit.Scanner.setRxCallback(sensoreggScanCallback);
   Bluefruit.Scanner.useActiveScan(false);
   Bluefruit.Scanner.setInterval(sensoregg_protocol::kScanIntervalUnits,
                                 sensoregg_protocol::kScanWindowUnits);
   Bluefruit.Scanner.filterRssi(sensoregg_protocol::kRssiFloorDbm);
+  // INLINE manufacturer-ID filter — load-bearing, not an optimization.
+  // Bluefruit rejects+resumes filtered packets inside its event handler;
+  // an ACCEPTED packet pauses scanning until our deferred rx callback
+  // runs and resumes. Without this filter every ambient packet above the
+  // RSSI floor (phones, PCs, the X4) took that slow accepted path just to
+  // be magic-rejected in our callback, collapsing scan duty in bursts.
+  Bluefruit.Scanner.filterMSD(sensoregg_protocol::kCompanyId);
   eggScannerRunning = Bluefruit.Scanner.start(0);  // 0 = forever
 
   if (eggScannerRunning) {
@@ -143,6 +151,23 @@ void SENSOREGG_LOOP() {
       eggReading = r;
       eggRxMs = atMs;
       eggHaveReading = true;
+    }
+  }
+
+  // Scanner self-heal. The rx path only resumes scanning when our
+  // deferred callback actually runs; a dropped callback would halt the
+  // scanner silently and forever. If nothing has been accepted for
+  // kScannerSelfHealMs, kick stop+start — harmless when the egg is just
+  // off, curative when the scanner wedged. Throttled by its own stamp so
+  // an absent egg costs one kick per interval, not one per loop.
+  if (eggScannerRunning) {
+    const uint32_t now = millis();
+    const uint32_t lastAlive = eggHaveReading ? eggRxMs : 0;
+    if ((uint32_t)(now - lastAlive) >= sensoregg_protocol::kScannerSelfHealMs &&
+        (uint32_t)(now - eggLastKickMs) >= sensoregg_protocol::kScannerSelfHealMs) {
+      eggLastKickMs = now;
+      Bluefruit.Scanner.stop();
+      Bluefruit.Scanner.start(0);
     }
   }
 }

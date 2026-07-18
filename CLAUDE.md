@@ -853,10 +853,20 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   raw MCP9600 STATUS, battery stub, uint16 sequence), ~10 Hz.
 - **Radio role — do not "improve" this**: the logger is a pure passive
   OBSERVER (`Bluefruit.Scanner`, `useActiveScan(false)`, 100 ms interval /
-  40 ms window, RSSI ≥ −90). No SCAN_REQ, no connection, no GATT — so it
+  60 ms window, RSSI ≥ −90). No SCAN_REQ, no connection, no GATT — so it
   cannot contend with the camera peripheral link for TX airtime; S140
   time-slices scan windows around connection events. The egg accepts no
   connections. **The camera link wins every tradeoff.**
+- **Scanner robustness (bench-proven, do not remove)**: (1)
+  `Scanner.filterMSD(0xFFFF)` rejects ambient packets INLINE — Bluefruit
+  self-resumes filtered reports, while an accepted report pauses scanning
+  until the deferred rx callback runs, so without this filter desk BLE
+  traffic collapses the scan duty in bursts. (2) The scan window is 60 ms
+  (not the spec's 40) and the egg advertises off-100 ms, because equal
+  100 ms adv/scan periods phase-lock and parked the egg in the deaf zone
+  for seconds. (3) `SENSOREGG_LOOP()` kicks stop+start after 30 s with no
+  accepted packet — a lost deferred callback otherwise halts the scanner
+  silently forever.
 - **Pairing (POC)**: `SENSOREGG_MAC` #define in `sensoregg.h`, human byte
   order; all-zeros (default) = accept any advertiser matching the payload
   magic. The scan callback filters length + magic + MAC, copies the raw 14
@@ -1038,7 +1048,8 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | Camera record-obs freshness | 3 s (stale 0x10 → kUnknown) | `camera_ble.ino` |
 | Camera pairing timeout | 120 s | `camera_fsm.h` |
 | SensorEgg staleness | 1000 ms (older → NaN/`---`) | `sensoregg_protocol.h` |
-| SensorEgg scan interval / window | 100 ms / 40 ms, passive | `sensoregg_protocol.h` |
+| SensorEgg scan interval / window | 100 ms / 60 ms, passive | `sensoregg_protocol.h` |
+| SensorEgg scanner self-heal | 30 s no packet → stop+start kick | `sensoregg_protocol.h` |
 | SensorEgg RSSI floor | −90 dBm | `sensoregg_protocol.h` |
 | SensorEgg pairing MAC | `SENSOREGG_MAC` (all-zeros = any egg) | `sensoregg.h` |
 
