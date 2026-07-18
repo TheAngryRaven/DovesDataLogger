@@ -37,6 +37,18 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   so the SensorEgg scanner is always listening. Idle power draw increases
   accordingly; GATT service registration order is unchanged.
 
+### Fixed
+- **SensorEgg reception flapping** (1 s of readings, then 1–30 s of
+  `NA`/`nan`, seen on the first bench soak). Three scanner fixes: an
+  inline manufacturer-ID filter (`filterMSD(0xFFFF)`) so ambient BLE
+  packets are rejected inside Bluefruit instead of pausing the scanner
+  for a deferred-callback round trip each; a 60 ms scan window (was
+  40 ms) plus an off-100 ms egg advertising interval so the equal
+  100 ms adv/scan periods can no longer phase-lock the egg into the
+  scanner's deaf zone for seconds at a time; and a 30 s self-heal that
+  restarts a silently-halted scanner (a lost deferred rx callback
+  otherwise kills scanning forever with no error).
+
 ## [3.0.0] - 2026-07-17
 
 This release rolls up the entire BETA cycle since `2.2.3`: hands-free
