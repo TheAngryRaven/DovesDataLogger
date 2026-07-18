@@ -1,0 +1,153 @@
+#include "doctest.h"
+
+#include <cmath>
+#include <cstdint>
+
+#include "sensoregg_protocol.h"
+
+using namespace sensoregg_protocol;
+
+// Golden PW-ADV-1 frame: the byte layout is the wire contract with the
+// DovesSensorEgg firmware. If the layout changes, these vectors must
+// change with it — deliberately.
+//
+//   FF FF        company ID (SIG test/internal, inside the array)
+//   50 57        magic 'P' 'W'
+//   01           protocol version
+//   00           flags
+//   64 19        EGT 0x1964 = 6500 deci-degC = 650.0 C
+//   4D 01        cold junction 0x014D = 333 deci-degC = 33.3 C
+//   00           MCP9600 STATUS
+//   FF           battery stub
+//   2A 01        sequence 0x012A = 298
+static const uint8_t kGoldenFrame[kPayloadLen] = {
+    0xFF, 0xFF, 0x50, 0x57, 0x01, 0x00, 0x64, 0x19,
+    0x4D, 0x01, 0x00, 0xFF, 0x2A, 0x01};
+
+// ---------------------------------------------------------------------------
+// Magic filter
+// ---------------------------------------------------------------------------
+
+TEST_CASE("sensoregg_protocol - magic matches golden frame") {
+    CHECK(matchesMagic(kGoldenFrame, sizeof(kGoldenFrame)));
+    // The cheap callback filter only needs the 4-byte prefix.
+    CHECK(matchesMagic(kGoldenFrame, 4));
+}
+
+TEST_CASE("sensoregg_protocol - magic rejects wrong prefix") {
+    uint8_t frame[kPayloadLen];
+    for (size_t i = 0; i < kPayloadLen; i++) frame[i] = kGoldenFrame[i];
+
+    frame[0] = 0x4C;  // some other company ID
+    CHECK_FALSE(matchesMagic(frame, sizeof(frame)));
+
+    frame[0] = 0xFF;
+    frame[2] = 'X';  // 0xFFFF squatter without our magic
+    CHECK_FALSE(matchesMagic(frame, sizeof(frame)));
+}
+
+TEST_CASE("sensoregg_protocol - magic rejects null and short input") {
+    CHECK_FALSE(matchesMagic(nullptr, kPayloadLen));
+    CHECK_FALSE(matchesMagic(kGoldenFrame, 3));
+    CHECK_FALSE(matchesMagic(kGoldenFrame, 0));
+}
+
+// ---------------------------------------------------------------------------
+// Payload parse
+// ---------------------------------------------------------------------------
+
+TEST_CASE("sensoregg_protocol - golden frame parses") {
+    Reading r;
+    REQUIRE(parsePayload(kGoldenFrame, sizeof(kGoldenFrame), r));
+
+    CHECK(r.egtC == doctest::Approx(650.0f));
+    CHECK(r.junctionC == doctest::Approx(33.3f));
+    CHECK(r.flags == 0);
+    CHECK_FALSE(r.pairingActive);
+    CHECK_FALSE(r.tcFault);
+    CHECK(r.status == 0);
+    CHECK(r.battery == 0xFF);
+    CHECK(r.sequence == 298);
+}
+
+TEST_CASE("sensoregg_protocol - negative temperatures decode") {
+    uint8_t frame[kPayloadLen];
+    for (size_t i = 0; i < kPayloadLen; i++) frame[i] = kGoldenFrame[i];
+    // EGT -12.5 C = -125 deci-degC = 0xFF83 LE
+    frame[6] = 0x83;
+    frame[7] = 0xFF;
+    // Junction -0.1 C = -1 deci-degC = 0xFFFF LE
+    frame[8] = 0xFF;
+    frame[9] = 0xFF;
+
+    Reading r;
+    REQUIRE(parsePayload(frame, sizeof(frame), r));
+    CHECK(r.egtC == doctest::Approx(-12.5f));
+    CHECK(r.junctionC == doctest::Approx(-0.1f));
+}
+
+TEST_CASE("sensoregg_protocol - invalid sentinel becomes NaN") {
+    uint8_t frame[kPayloadLen];
+    for (size_t i = 0; i < kPayloadLen; i++) frame[i] = kGoldenFrame[i];
+    // 0x8000 LE in both temperature fields.
+    frame[6] = 0x00;
+    frame[7] = 0x80;
+    frame[8] = 0x00;
+    frame[9] = 0x80;
+
+    Reading r;
+    REQUIRE(parsePayload(frame, sizeof(frame), r));
+    CHECK(std::isnan(r.egtC));
+    CHECK(std::isnan(r.junctionC));
+}
+
+TEST_CASE("sensoregg_protocol - flag bits decode") {
+    uint8_t frame[kPayloadLen];
+    for (size_t i = 0; i < kPayloadLen; i++) frame[i] = kGoldenFrame[i];
+    frame[5] = 0x03;  // pairing + TC fault
+    frame[10] = 0x10; // STATUS input-range bit (open probe)
+
+    Reading r;
+    REQUIRE(parsePayload(frame, sizeof(frame), r));
+    CHECK(r.pairingActive);
+    CHECK(r.tcFault);
+    CHECK(r.status == 0x10);
+}
+
+TEST_CASE("sensoregg_protocol - parse rejects short / null / bad version") {
+    Reading r;
+    CHECK_FALSE(parsePayload(nullptr, kPayloadLen, r));
+    CHECK_FALSE(parsePayload(kGoldenFrame, kPayloadLen - 1, r));
+
+    uint8_t frame[kPayloadLen];
+    for (size_t i = 0; i < kPayloadLen; i++) frame[i] = kGoldenFrame[i];
+    frame[4] = 0x02;  // future protocol version — layout unknown, reject
+    CHECK_FALSE(parsePayload(frame, sizeof(frame), r));
+}
+
+TEST_CASE("sensoregg_protocol - parse accepts longer-than-14 payloads") {
+    // Forward compatibility: a future egg may append fields.
+    uint8_t frame[kPayloadLen + 4] = {0};
+    for (size_t i = 0; i < kPayloadLen; i++) frame[i] = kGoldenFrame[i];
+
+    Reading r;
+    REQUIRE(parsePayload(frame, sizeof(frame), r));
+    CHECK(r.egtC == doctest::Approx(650.0f));
+}
+
+// ---------------------------------------------------------------------------
+// Staleness
+// ---------------------------------------------------------------------------
+
+TEST_CASE("sensoregg_protocol - staleness threshold") {
+    CHECK(isFresh(1000, 1000));
+    CHECK(isFresh(1000, 1000 + kStalenessMs - 1));
+    CHECK_FALSE(isFresh(1000, 1000 + kStalenessMs));
+    CHECK_FALSE(isFresh(1000, 1000 + kStalenessMs + 5000));
+}
+
+TEST_CASE("sensoregg_protocol - staleness is wrap-safe across millis rollover") {
+    const uint32_t nearWrap = 0xFFFFFF38u;  // 200 ms before rollover
+    CHECK(isFresh(nearWrap, nearWrap + 999));  // wraps past 0, still fresh
+    CHECK_FALSE(isFresh(nearWrap, nearWrap + kStalenessMs));
+}
