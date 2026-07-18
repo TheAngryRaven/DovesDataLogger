@@ -319,6 +319,20 @@ void displayPage_camera_test() {
     display.println(kTestItems[i]);
   }
 
+  // SensorEgg readout (bottom line): live Temp1 or NA when the egg is
+  // silent (>1 s) / faulted. Makes this page the coexistence soak-test
+  // harness: camera linked above + egg streaming here, and the page never
+  // idle-sleeps (the idle-shutdown and USB-charging entries are
+  // main-menu-only), so it can sit on a desk indefinitely.
+  display.print(F("egg: "));
+  const float soakEgtC = sensoreggEgtC();
+  if (isnan(soakEgtC)) {
+    display.println(F("NA"));
+  } else {
+    display.print(soakEgtC, 1);
+    display.println(F("C"));
+  }
+
   safeDisplayUpdate();
 }
 
