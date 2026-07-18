@@ -12,6 +12,31 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+- **SensorEgg wireless EGT (proof of concept).** The logger passively
+  scans for the DovesSensorEgg — a wireless thermocouple pod that
+  broadcasts EGT + cold-junction temperature in BLE advertising packets
+  (protocol `PW-ADV-1`, 14-byte manufacturer data, ~10 Hz). Passive
+  observer only: no SCAN_REQ, no connection, no GATT link to the egg, so
+  the scanner cannot contend with the Insta360 X4 camera link for TX
+  airtime. Pairing is a hardcoded MAC (`SENSOREGG_MAC` in `sensoregg.h`);
+  the all-zeros default accepts any egg matching the payload magic (POC:
+  exactly one egg exists). Payload parsing + staleness rules live in the
+  host-tested `sensoregg_protocol` pure unit.
+- **DOVEX columns `Temp1` / `Junction1`** (degC, appended after
+  `accel_z`). A stale link (>1 s) or an egg-reported invalid probe logs
+  the literal `nan` — a dropout is a visible gap, never a held flat line
+  (which would be indistinguishable from real data). Old logs and readers
+  are unaffected; the egg fields can never cause a GPS row to be skipped.
+- **Temp1 race page** after the tachometer page: big EGT (degC), small
+  cold-junction + `rf:` link-status subtext, `---` when the egg is
+  silent, `*TC FAULT*` header when the egg reports an open/faulted probe.
+
+### Changed
+- **BLE core now starts at boot** (was lazy — first camera/transfer use)
+  so the SensorEgg scanner is always listening. Idle power draw increases
+  accordingly; GATT service registration order is unchanged.
+
 ## [3.0.0] - 2026-07-17
 
 This release rolls up the entire BETA cycle since `2.2.3`: hands-free

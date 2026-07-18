@@ -54,6 +54,7 @@ loop()
  ├─ TACH_LOOP()                  drain pulse ring buffer, Kalman-filter RPM
  ├─ ACCEL_LOOP()                 read g-force (rate-limited to 50 Hz)
  ├─ BLUETOOTH_LOOP()             service deferred BLE work
+ ├─ SENSOREGG_LOOP()             drain SensorEgg scan buffer, parse payload
  ├─ trackDetectionLoop()         haversine match -> create CourseManager
  ├─ checkForNewLapData()         append completed laps to history
  ├─ checkAutoIdle()              60 s < 2 mph -> end session
@@ -94,6 +95,14 @@ to the matching `*_LOOP()`.
   Insta360 GPS Remote as a pure BLE peripheral, wakes the paired camera on
   engine start, and starts/stops/powers it off automatically via ce82
   remote-button notifications.
+- **SensorEgg** (`sensoregg` + the `sensoregg_protocol` pure unit) —
+  wireless EGT proof of concept: a passive BLE observer receives the
+  DovesSensorEgg pod's `PW-ADV-1` advertising broadcasts (14-byte
+  manufacturer data: EGT + cold junction as int16 deci-degC, fault flags,
+  sequence counter) and feeds the `Temp1`/`Junction1` DOVEX columns and
+  the Temp1 race page. Observer + peripheral coexist natively on S140;
+  passive scanning never transmits, so the camera link is untouched.
+  Readings older than 1 s go NaN — never held across a dropout.
 - **Replay** (`replay`) — instant DOVEX header replay.
 - **Settings** (`settings`) — JSON key/value store on the SD card.
 - **CourseManager** (external library) — owns course detection, sector

@@ -31,7 +31,14 @@
       "WebFetch(domain:www.cnx-software.com)",
       "WebFetch(domain:docs.cirkitdesigner.com)",
       "mcp__Claude_Code_Remote__add_repo",
-      "mcp__Claude_Code_Remote__register_repo_root"
+      "mcp__Claude_Code_Remote__register_repo_root",
+      "Bash(git clone *)",
+      "Bash(git ls-remote *)",
+      "Bash(grep -E \"refs/heads/\\(master|main\\)$\")",
+      "Bash(grep -E \"^\\(master|main\\)$\")",
+      "Bash(git symbolic-ref *)",
+      "Bash(git -C /home/user/DovesDataLogger status --porcelain)",
+      "Bash(git -C /workspace/dovessensoregg status --porcelain)"
     ]
   }
 }

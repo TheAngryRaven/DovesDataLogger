@@ -319,6 +319,20 @@ void displayPage_camera_test() {
     display.println(kTestItems[i]);
   }
 
+  // SensorEgg readout (bottom line): live Temp1 or NA when the egg is
+  // silent (>1 s) / faulted. Makes this page the coexistence soak-test
+  // harness: camera linked above + egg streaming here, and the page never
+  // idle-sleeps (the idle-shutdown and USB-charging entries are
+  // main-menu-only), so it can sit on a desk indefinitely.
+  display.print(F("egg: "));
+  const float soakEgtC = sensoreggEgtC();
+  if (isnan(soakEgtC)) {
+    display.println(F("NA"));
+  } else {
+    display.print(soakEgtC, 1);
+    display.println(F("C"));
+  }
+
   safeDisplayUpdate();
 }
 
@@ -772,6 +786,45 @@ void displayPage_tachometer() {
   display.setCursor(0, 55);
   display.print(F("     max: "));
   display.print(topTachReported);
+
+  safeDisplayUpdate();
+}
+
+// SensorEgg wireless EGT page — mirrors the tachometer layout: big value,
+// small status subtext. NaN (stale link OR egg-reported invalid probe)
+// renders '---'; the reading is NEVER held across a dropout.
+void displayPage_sensorTemp() {
+  resetDisplay();
+
+  if (sensoreggTcFault()) {
+    display.println(F("Temp1 C   *TC FAULT*"));
+  } else {
+    display.println(F("      Temp1 C"));
+  }
+
+  const float egt = sensoreggEgtC();
+
+  display.setCursor(5, 20);
+  display.setTextSize(4);
+  if (isnan(egt)) {
+    display.println(F("  ---"));
+  } else {
+    char egtStr[8];
+    snprintf(egtStr, sizeof(egtStr), "%5d", (int)lroundf(egt));
+    display.println(egtStr);
+  }
+
+  display.setTextSize(1);
+  display.setCursor(0, 55);
+  display.print(F(" junc: "));
+  const float junc = sensoreggJunctionC();
+  if (isnan(junc)) {
+    display.print(F("---"));
+  } else {
+    display.print(junc, 1);
+  }
+  display.print(F("   rf: "));
+  display.print(sensoreggLinkUp() ? F("OK") : F("--"));
 
   safeDisplayUpdate();
 }

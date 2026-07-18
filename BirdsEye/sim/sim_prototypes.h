@@ -88,6 +88,7 @@ void displayPage_gps_lap_time();
 void displayPage_gps_pace();
 void displayPage_gps_best_lap();
 void displayPage_tachometer();
+void displayPage_sensorTemp();
 void displayPage_optimal_lap();
 void displayPage_gps_lap_list();
 void displayPage_stop_logging();
