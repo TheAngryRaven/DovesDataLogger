@@ -1,0 +1,8 @@
+gps_status_no_fix 900 fb82cebc
+main_menu_race -1 34b50cd7
+main_menu_transfer -1 c79664ba
+transfer_menu -4 3013bbe2
+bluetooth_waiting -2 c0f9211b
+warning_no_dovex 100 f800764b
+pair_camera_unpaired -6 5d1129cc
+camera_serial_entry -7 56588408

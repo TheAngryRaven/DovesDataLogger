@@ -19,9 +19,10 @@
 
 #include <avr/dtostrf.h>
 #include <SPI.h>
+#include <nrf_gpio.h>  // SENSE-wake pin config for System OFF shutdown
 #include <nrf_wdt.h>
 
-// #define WOKWI
+// #define SIM
 // #define HAS_DEBUG
 
 // Hides a couple pages and changes some behavior
@@ -45,11 +46,11 @@
 // SdFat configuration. SD_FAT_TYPE must be defined BEFORE SdFat.h is
 // processed for the first time, which means before any module header
 // that pulls it in (e.g. replay.h).
-//   0 = bare SdFat/File   (Wokwi only)
+//   0 = bare SdFat/File   (SIM only)
 //   1 = SdFat32/File32    (real hardware — FAT16/FAT32)
 //   2 = SdExFat/ExFile
 //   3 = SdFs/FsFile
-#ifdef WOKWI
+#ifdef SIM
 #define SD_FAT_TYPE 0
 #define PIN_SPI_CS -1
 #else
@@ -61,22 +62,39 @@
 // and the BLE-2M file transfer ceiling.
 #define SPI_SPEED SD_SCK_MHZ(2)
 
+// Parked-transfer SPI clock. File transfers (BLE / USB mass storage) only
+// happen with the motor off, so the ignition-EMI rationale for the slow 2 MHz
+// clock doesn't apply — sdSetTransferSpeed(true) bumps to this for the session
+// and reverts to SPI_SPEED afterward. Bump to SD_SCK_MHZ(16) if the board
+// proves it can sustain it (the nRF52840 standard SPIM may clamp 16 to 8 MHz).
+#define SD_SPI_SPEED_FAST SD_SCK_MHZ(8)
+
 #include "SdFat.h"
 #include "sdios.h"
+
+// TinyUSB — provides Adafruit_USBD_MSC / TinyUSBDevice for the USB
+// mass-storage transfer mode (usb_msc module). Must precede usb_msc.h.
+#include <Adafruit_TinyUSB.h>
 
 // Module interfaces. Each header documents its module's public
 // surface and pulls in any library types those signatures need.
 #include "accelerometer.h"
 #include "bluetooth.h"
+#include "camera_ble.h"
 #include "display_pages.h"
 #include "display_ui.h"
 #include "dovex_header.h"
 #include "gps_functions.h"
+#include "gps_status_page.h"
 #include "haversine.h"
 #include "replay.h"
+#include "sat_bars.h"
+#include "sd_format_page.h"
 #include "sd_functions.h"
 #include "settings.h"
 #include "tachometer.h"
+#include "usb_msc.h"
+#include "wake_cause.h"
 
 ///////////////////////////////////////////
 // BATTERY CONFIGURATION
@@ -91,7 +109,7 @@ int batteryUpdateInterval = 5000;
 float lastBatteryVoltage;
 
 float getBatteryVoltage() {
-  #ifdef WOKWI
+  #ifdef SIM
   return 3.75;
   #else
   unsigned int adcCount = analogRead(PIN_VBAT);
@@ -132,6 +150,7 @@ float settingLapDetectionDistance = 7.0;
 float settingWaypointDetectionDistance = 30.0;
 float settingWaypointSpeed = 30.0;
 char settingDriverName[32] = "Driver";
+char settingDeviceName[32] = "BirdsEye";
 
 // Track manifest for proximity detection
 TrackManifestEntry trackManifest[MAX_LOCATIONS];
@@ -145,16 +164,10 @@ char dovexReplayShortName[16];
 char dovexReplayBestLap[16];
 char dovexReplayOptimal[16];
 
-// Sleep mode state
-bool sleepModeActive = false;
-bool sleepGpsWakeActive = false;         // GPS periodic fix in progress
-unsigned long sleepEnteredAt = 0;
-unsigned long sleepLastGpsWake = 0;
-unsigned long sleepGpsWakeStartedAt = 0;
-unsigned long menuIdleStartTime = 0;     // For 5-min auto-sleep
+// Main-menu idle tracking (drives auto-shutdown and the USB charge-mode
+// entry — see the trigger block at the end of loop()).
+unsigned long menuIdleStartTime = 0;
 bool menuIdleTimerRunning = false;
-bool chargingModeActive = false;           // USB connected during sleep
-unsigned long chargeDisplayOnAt = 0;       // 0 = display off, >0 = millis() when turned on
 
 // Button hold tracking (for long-press combos)
 unsigned long btn1HoldStart = 0;
@@ -218,6 +231,11 @@ BLEDis bledis;
 bool bleInitialized = false;
 bool bleActive = false;
 bool bleConnected = false;
+// Which subsystem owns the BLE radio (advert set + peripheral slot):
+// transfer service vs camera remote. Transitions only on the main loop —
+// see the ownership model in bluetooth.h. volatile: read from Bluefruit
+// task callbacks for routing decisions.
+volatile BleOwner bleOwner = BLE_OWNER_NONE;
 bool bleTransferInProgress = false;
 uint32_t bleFileSize = 0;
 uint32_t bleBytesTransferred = 0;
@@ -254,16 +272,18 @@ int topTachReported = 0;
 static const uint32_t tachMinPulseGapUs = 3000;
 volatile uint32_t tachLastPulseUs = 0;
 
-// Sleep wake detection: set true by ISR on any valid pulse
-volatile bool tachHavePeriod = false;
-
 // Ring buffer: ISR writes pulse timestamps, TACH_LOOP reads and computes periods.
-// Single-producer (ISR writes head), single-consumer (TACH_LOOP reads tail).
-// 16 entries handles up to 20k RPM with 48ms of main-loop stall margin.
+// Single-producer (ISR writes head), single-consumer (TACH_LOOP writes tail).
+// The ISR checks full before publishing (one slot sacrificed so head==tail
+// means empty) and drops + flags instead of lapping the consumer: SD GC
+// stalls can block the main loop for 100 ms–2 s, far past what any sane
+// ring size covers at racing RPM. tachRingTail is volatile because the ISR
+// reads it for the full check.
 static const uint8_t TACH_RING_SIZE = 16;
 volatile uint32_t tachRingBuf[TACH_RING_SIZE];
 volatile uint8_t  tachRingHead = 0;  // ISR write index (only ISR writes)
-static uint8_t    tachRingTail = 0;  // Main-loop read index (only TACH_LOOP writes)
+volatile uint8_t  tachRingTail = 0;  // Main-loop read index (only TACH_LOOP writes)
+volatile bool     tachRingOverflow = false;  // ISR sets on drop; TACH_LOOP clears
 
 // Tunable constants
 static const float tachRevsPerPulse = 1.0f;          // Wasted spark = 1 pulse/rev
@@ -308,12 +328,41 @@ struct GpsData {
 
 volatile bool gpsDataFresh = false;  // Set by PVT callback, cleared by GPS_LOOP()
 
-// GPS wake validation: tracks whether GPS is producing data after wake from sleep.
-// GPS_WAKE() sets gpsWakeTime and clears gpsWakeValidated. GPS_LOOP() sets
-// gpsWakeValidated=true on first PVT arrival. If 5 seconds pass without PVT,
-// GPS_LOOP() triggers baud recovery and reconfiguration.
+// GPS nav-rate target: the rate GPS_RECONFIGURE() (and every wake/recovery
+// path that calls it) re-asserts. Boot starts in status mode (5 Hz +
+// NAV-SAT for the GPS status page); gpsEnterRaceMode() moves it to 25 Hz
+// PVT-only when the page exits. Owned by gps_functions.ino.
+uint8_t gpsNavRateTarget = GPS_NAV_RATE_STATUS_HZ;
+bool gpsNavSatWanted = true;
+
+// Why this boot happened — decoded from RESETREAS + GPIO LATCH first thing
+// in setup(). Routes the GPS status page's exit (tach wake -> race mode)
+// and the USB-wake charging shortcut once sleep is a full System OFF.
+wake_cause::Cause bootWakeCause = wake_cause::Cause::kColdBoot;
+
+// GPS status boot page hold/auto-close state (host-tested pure unit).
+gps_status_page::State gpsStatusState;
+
+// Per-satellite CNO snapshot for the GPS status page's signal bars.
+// Written by onNAVSATReceived() (main-loop context via checkCallbacks()),
+// read by displayPage_gps_status(). Selection/ordering rules live in the
+// host-tested sat_bars unit.
+uint8_t gpsSatCnos[sat_bars::kMaxSats];
+uint8_t gpsSatCnoCount = 0;     // entries in gpsSatCnos (display-capped)
+uint8_t gpsSatUsedCount = 0;    // satellites participating in the nav solution
+uint8_t gpsSatTrackedCount = 0; // satellites tracked with a measurable signal
+                                // (CNO > 0) — the bars' population, NOT capped.
+                                // Note NAV-PVT's numSV is used-in-solution too,
+                                // so it can't serve as the "in view" figure.
+
+// GPS PVT-arrival validation: tracks whether GPS is producing data after
+// GPS_SETUP() / GPS_WAKE(). Both set gpsWakeTime and clear gpsWakeValidated;
+// GPS_LOOP() sets gpsWakeValidated=true on first PVT arrival. If 5 seconds
+// pass without PVT, GPS_LOOP() triggers baud recovery and reconfiguration —
+// this is how a module that silently lost its config (V_BCKP drop, full
+// power cycle) gets caught even when the begin() probe succeeded.
 unsigned long gpsWakeTime = 0;
-bool gpsWakeValidated = true;  // Start true (validated at boot by GPS_SETUP)
+bool gpsWakeValidated = true;  // Armed (set false) by GPS_SETUP at boot
 
 float gps_speed_mph = 0.0;
 
@@ -380,16 +429,11 @@ File replayFile;
 
 ///////////////////////////////////////////
 // SD CARD ACCESS STATE MANAGEMENT
-// Prevents race conditions between logging, replay, and BLE file transfers
+// Prevents race conditions between logging, replay, and BLE file transfers.
+// The SD_ACCESS_* modes come from sd_functions.h (aliases of the host-tested
+// sd_access_policy constants); transitions are made atomically by
+// acquireSDAccess() / releaseSDAccess() in sd_functions.ino.
 ///////////////////////////////////////////
-// Note: Using #define instead of enum to avoid Arduino preprocessor issues
-// (Arduino generates function prototypes before seeing enum definitions)
-#define SD_ACCESS_NONE         0   // SD card not in use by any subsystem
-#define SD_ACCESS_LOGGING      1   // Data logging active (dataFile in use)
-#define SD_ACCESS_REPLAY       2   // Replay mode active (replayFile in use)
-#define SD_ACCESS_BLE_TRANSFER 3   // BLE file transfer active (bleCurrentFile in use)
-#define SD_ACCESS_TRACK_PARSE  4   // Track file parsing (temporary, should release quickly)
-
 volatile int currentSDAccess = SD_ACCESS_NONE;
 
 // Replay function prototypes (must be after SdFat include for File type)
@@ -401,9 +445,19 @@ bool parseDovexHeader(const char* filename);
 
 // SD state flags
 bool sdSetupSuccess = false;
+bool sdCardUnformatted = false;  // card answers but FAT won't mount (see SD_SETUP)
 bool sdTrackSuccess = false;
 bool sdDataLogInitComplete = false;
 bool enableLogging = false;
+
+// Boot format-confirm page (PAGE_SD_FORMAT): the hold-to-confirm state
+// machine lives in the host-tested sd_format_page unit. displayLoop()
+// only ever renders the confirm screen; the running/done screens are
+// painted directly by sdPerformFormat() (which blocks the main loop).
+// A failed attempt returns to the confirm page with sdFormatLastFailed
+// set so the renderer can say so.
+sd_format_page::State sdFormatState;
+bool sdFormatLastFailed = false;
 
 unsigned long lastCardFlush = 0;
 unsigned long lastLogCreateAttempt = 0;  // Throttles log-file open retries (ms)
@@ -416,12 +470,10 @@ int numOfLocations = 0;
 // JSON PARSING GLOBALS
 ///////////////////////////////////////////
 #include <ArduinoJson.h>
-#ifdef WOKWI
-#define JSON_BUFFER_SIZE 1024
-#else
-// 4 KB handles tracks with up to 10 courses with full sector data
+// 4 KB handles tracks with up to 10 courses with full sector data.
+// The sim uses the same size: a smaller buffer silently truncated real
+// track files (the old Wokwi target's RAM constraint doesn't apply).
 #define JSON_BUFFER_SIZE 4096
-#endif
 
 // extern matches the forward declaration in sd_functions.h so the
 // constants have external linkage; otherwise their default internal
@@ -474,7 +526,7 @@ bool recentlyChanged = false;
 // uses adafruit display libraries
 #include <Wire.h>
 
-#ifdef WOKWI
+#ifdef SIM
 // #define USE_1306_DISPLAY // remove to use SH110X oled
 #endif
 // #define USE_1306_DISPLAY // remove to use SH110X oled
@@ -488,13 +540,21 @@ unsigned long displayLastUpdate;
 const int PAGE_BOOT = 999;
 const int PAGE_TEST = 995;
 const int PAGE_RC_ERROR = 990;
+// GPS status boot page — every boot lands here after the splash. Outside
+// the ENDURANCE_MODE-reshuffled 3-12 running block and not arrow-navigable.
+const int PAGE_GPS_STATUS = 900;
 
 // main menu (shown after boot)
 const int PAGE_MAIN_MENU = -1;
 const int PAGE_BLUETOOTH = -2;
 const int PAGE_REPLAY_FILE_SELECT = -3;
+const int PAGE_TRANSFER_MENU = -4;   // Bluetooth-vs-USB submenu
+const int PAGE_USB_STORAGE = -5;     // USB mass-storage active screen
+const int PAGE_PAIR_CAMERA = -6;     // Insta360 pairing / paired-status screen
+const int PAGE_CAMERA_SERIAL_ENTRY = -7; // manual 6-char camera serial entry
 const int PAGE_REPLAY_RESULTS = -8;
 const int PAGE_REPLAY_EXIT = -9;
+const int PAGE_CAMERA_TEST = -10;    // bench test menu (paired camera controls)
 
 // running menu (these must be in order)
 const int GPS_DEBUG = 3;
@@ -523,8 +583,11 @@ const int GPS_STATS = 4;
 const int LOGGING_STOP_CONFIRM = 90;
 const int PAGE_INTERNAL_WARNING = 100;
 const int PAGE_INTERNAL_FAULT = 105;
+// Boot page when the SD card responds but has no mountable FAT volume
+// (soldered-in module: factory-blank or corrupted). Unlike FAULT, its
+// buttons stay live — driven by sdFormatPageLoop().
+const int PAGE_SD_FORMAT = 106;
 
-bool displayInverted = false;
 int currentPage = PAGE_BOOT;
 int lastPage = 0;
 
@@ -539,6 +602,11 @@ int runningPageEnd = LOGGING_STOP; // only changes if sd:/tracks not found
 
 // Display state
 int menuSelectionIndex = 0;
+// Manual camera-serial entry state (PAGE_CAMERA_SERIAL_ENTRY): edited by the
+// button handler in display_ui.ino, rendered by display_pages.ino. Cursor
+// 0-5 = characters, 6 = OK, 7 = CANCEL. Reset when the page is entered.
+char cameraSerialEntryBuf[7] = "AAAAAA";
+int cameraSerialEntryCursor = 0;
 bool paceFlashStatus = false;
 bool notificationFlash = false;
 char internalNotification[64] = "N/A";
@@ -565,16 +633,67 @@ void wdtPet() {
 }
 
 ///////////////////////////////////////////
+// BOOT WAKE CAUSE
+///////////////////////////////////////////
+
+// Bit mask for an Arduino pin on the given GPIO port (0/1), or 0 if the
+// pin lives on the other port. Uses the board variant's pin map so raw
+// P-numbers never get hardcoded.
+static uint32_t pinPortMask(uint32_t arduinoPin, int port) {
+  const uint32_t p = g_ADigitalPinMap[arduinoPin];
+  if ((int)(p >> 5) != port) return 0;
+  return 1u << (p & 31);
+}
+
+// Per-port masks of the System OFF wake pins for the wake_cause decoder.
+// The button pin literals mirror setupButtons() in display_ui.ino (kept in
+// sync by hand) — buttons aren't assigned to the ButtonState structs until
+// displaySetup(), which runs after the boot decode needs these.
+static wake_cause::PinMasks shutdownWakePinMasks() {
+  #ifndef SIM
+  const uint32_t buttonPins[3] = {1, 2, 3};
+  #else
+  const uint32_t buttonPins[3] = {4, 5, 6};
+  #endif
+  wake_cause::PinMasks m = {};
+  m.tach0 = pinPortMask(tachInputPin, 0);
+  m.tach1 = pinPortMask(tachInputPin, 1);
+  for (int i = 0; i < 3; i++) {
+    m.buttons0 |= pinPortMask(buttonPins[i], 0);
+    m.buttons1 |= pinPortMask(buttonPins[i], 1);
+  }
+  return m;
+}
+
+// Read (then clear) the sticky boot registers and decode why we booted.
+// Must run before anything else touches them; RESETREAS is cumulative and
+// LATCH survives System OFF, so stale bits would corrupt the next decode.
+// The SoftDevice is never enabled this early (BLE init is lazy), so raw
+// register access is safe.
+static void captureBootWakeCause() {
+  wake_cause::Regs regs;
+  regs.resetreas = NRF_POWER->RESETREAS;
+  regs.latch0 = NRF_P0->LATCH;
+  regs.latch1 = NRF_P1->LATCH;
+  NRF_POWER->RESETREAS = 0xFFFFFFFF;  // write-1-to-clear
+  NRF_P0->LATCH = 0xFFFFFFFF;
+  NRF_P1->LATCH = 0xFFFFFFFF;
+  bootWakeCause = wake_cause::decode(regs, shutdownWakePinMasks());
+}
+
+///////////////////////////////////////////
 // SETUP
 ///////////////////////////////////////////
 
 void setup() {
+  captureBootWakeCause();
+
 #ifdef HAS_DEBUG
   Serial.begin(9600);
   while (!Serial);
 #endif
 
-  #ifndef WOKWI
+  #ifndef SIM
     analogReadResolution(ADC_RESOLUTION);
     pinMode(PIN_VBAT, INPUT);
     pinMode(VBAT_ENABLE, OUTPUT);
@@ -604,6 +723,12 @@ void setup() {
   // Load settings from SD (creates defaults on first boot)
   SETTINGS_SETUP();
 
+  // Register the USB mass-storage callbacks (no drive presented until the
+  // user enters USB transfer mode). Needs a working SD card for block I/O.
+  if (sdSetupSuccess) {
+    USB_MSC_SETUP();
+  }
+
   ACCEL_SETUP();
 
   GPS_SETUP();
@@ -627,6 +752,10 @@ void setup() {
       strncpy(settingDriverName, buf, sizeof(settingDriverName) - 1);
       settingDriverName[sizeof(settingDriverName) - 1] = '\0';
     }
+    if (getSetting("device_name", buf, sizeof(buf))) {
+      strncpy(settingDeviceName, buf, sizeof(settingDeviceName) - 1);
+      settingDeviceName[sizeof(settingDeviceName) - 1] = '\0';
+    }
     crossingThresholdMeters = settingLapDetectionDistance;
     debug(F("Settings loaded: lap_dist="));
     debug(settingLapDetectionDistance);
@@ -635,19 +764,44 @@ void setup() {
     debug(F(" wp_speed="));
     debug(settingWaypointSpeed);
     debug(F(" driver="));
-    debugln(settingDriverName);
+    debug(settingDriverName);
+    debug(F(" device="));
+    debugln(settingDeviceName);
   }
 
-  if (!sdSetupSuccess) {
+  // Camera auto-record: load the persisted Insta360 serial + init the FSM
+  CAMERA_SETUP();
+
+  if (!sdSetupSuccess && sdCardUnformatted) {
+    // Card answers but no FAT volume mounts: soldered-in module out of the
+    // factory, or a corrupted filesystem. The card can't be pulled to fix
+    // it on a PC, so offer the on-device format (hold Select to confirm).
+    // Deliberately outranks the USB-wake charging branch — a device with an
+    // unusable card should say so; the page's idle timeout still lands in
+    // enterShutdown(), whose VBUS handling enters the charging loop anyway.
+    sd_format_page::begin(sdFormatState, millis());
+    switchToDisplayPage(PAGE_SD_FORMAT);
+  } else if (!sdSetupSuccess) {
     strncpy(internalNotification, "SD Init failed!\n\nlogging not possible!", sizeof(internalNotification) - 1);
     internalNotification[sizeof(internalNotification) - 1] = '\0';
     switchToDisplayPage(PAGE_INTERNAL_FAULT);
-  } else if (sdSetupSuccess && !sdTrackSuccess) {
-    // No TRACKS folder is fine — Lap Anything will handle it
-    debugln(F("No TRACKS folder — Lap Anything will activate"));
-    switchToDisplayPage(PAGE_MAIN_MENU);
+  } else if (bootWakeCause == wake_cause::Cause::kUsbWake) {
+    // Plugged in while off: VBUS woke the chip so software can hold the
+    // fast-charge pin. Skip the GPS status page and drop straight into
+    // the charging loop; a button press there resumes to the main menu
+    // (in which case setup() continues below), unplugging powers back off.
+    enterShutdown();
   } else {
-    switchToDisplayPage(PAGE_MAIN_MENU);
+    // A missing TRACKS folder is auto-created by buildTrackList(); a
+    // false here means even that failed — Lap Anything will handle it.
+    if (!sdTrackSuccess) {
+      debugln(F("No usable TRACKS folder — Lap Anything will activate"));
+    }
+    // Every boot lands on the GPS status page (MyChron-style): hold until
+    // a stable lock (or a button press), then continue to the menu — or
+    // straight into race mode when the tach woke us / the engine runs.
+    gps_status_page::begin(gpsStatusState, millis());
+    switchToDisplayPage(PAGE_GPS_STATUS);
   }
 
   // tachometer
@@ -657,7 +811,7 @@ void setup() {
   // Start hardware watchdog LAST - everything above must complete before
   // the 4-second timeout starts counting. If setup itself hangs, the
   // device won't boot-loop because WDT hasn't started yet.
-  #ifndef WOKWI
+  #ifndef SIM
   wdtSetup();
   debugln(F("Watchdog timer started (~4s timeout)"));
   #endif
@@ -775,6 +929,16 @@ bool activeTimerSectorsConfigured() {
 void trackDetectionLoop() {
   if (trackDetected || !gpsData.fix || trackManifestCount == 0) return;
 
+  // Throttle the scan to 1 Hz. Each haversineDistanceMiles() is several
+  // software-emulated double libm calls (the M4F FPU is single-precision
+  // only); at the 200-entry manifest ceiling a full scan costs multiple
+  // milliseconds. gpsData.fix stays true BETWEEN PVT updates, so without
+  // this gate the scan ran every ~250 Hz loop iteration — collapsing the
+  // loop rate — for an answer that changes at driving pace.
+  static unsigned long lastManifestScan = 0;
+  if (millis() - lastManifestScan < 1000) return;
+  lastManifestScan = millis();
+
   double bestDist = 999999.0;
   int bestIndex = -1;
 
@@ -876,6 +1040,14 @@ void trackDetectionLoop() {
  * and LOGGING_STOP_CONFIRM in display_ui.ino.
  */
 void endRaceSession() {
+  // Deliberately NO camera notification here: checkAutoIdle() ends the
+  // log session on speed alone (engine ignored), but the camera must
+  // keep recording through a stationary grid idle — its own
+  // stationary-AND-engine-off rule decides the recording stop. The
+  // camera is stopped explicitly where the user means "I'm done":
+  // the manual stop confirm (display_ui.ino) and shutdown entry
+  // (CAMERA_SLEEP() in enterShutdown()).
+
   // Write DOVEX metadata header into the reserved region
   if (sdDataLogInitComplete && dataFile.isOpen()) {
     writeDovexHeader();
@@ -931,6 +1103,13 @@ void createLapAnythingCourseManager() {
 void checkAutoIdle() {
   if (!raceActive) return;
 
+  // Yield to an active camera recording: while the camera is recording, IT owns
+  // the end (30 s engine-off -> cameraConsumeAutoStop() above), so the
+  // speed-based idle must not cut the log out from under it during a stationary
+  // but engine-running stint (grid/paddock). No camera, or not recording, keeps
+  // the original speed-only behavior below.
+  if (cameraActivelyRecording()) return;
+
   // Grace period: don't auto-idle within first 3 minutes of a session.
   // After RPM wake the car is often stationary (warming up, waiting for
   // track session) and GPS needs time to reacquire. Without this, the
@@ -981,6 +1160,99 @@ void autoRaceModeCheck() {
 }
 
 /**
+ * @brief Drive the GPS status boot page: bounded GPS re-detect, then step
+ *        the hold/auto-close state machine (host-tested gps_status_page
+ *        unit) and act on its exit verdict. Runs between readButtons()
+ *        and displayLoop() so it consumes this frame's presses — the page
+ *        has an explicit no-op branch in displayLoop()'s button handling.
+ */
+void gpsStatusPageLoop() {
+  if (currentPage != PAGE_GPS_STATUS) return;
+
+  // GPS missing at boot? Re-probe a few times while the page is up.
+  GPS_STATUS_RETRY_LOOP();
+
+  gps_status_page::Inputs in;
+  in.fix = gpsData.fix;
+  in.timeValid = gpsData.timeValid;
+  in.buttonPressed = btn1->pressed || btn2->pressed || btn3->pressed;
+  in.tachWakeBoot = (bootWakeCause == wake_cause::Cause::kTachWake);
+  in.engineRunning = tachLastReported > 500;  // autoRaceModeCheck threshold
+  in.nowMs = millis();
+
+  const gps_status_page::Exit verdict = gps_status_page::step(gpsStatusState, in);
+  if (verdict != gps_status_page::Exit::kStay) {
+    // The press that skipped this page must not also drive the
+    // destination page's button handling in displayLoop() this frame.
+    resetButtons();
+  }
+
+  switch (verdict) {
+    case gps_status_page::Exit::kToMenu:
+      gpsEnterRaceMode();  // 25 Hz PVT-only is the steady state off this page
+      switchToDisplayPage(PAGE_MAIN_MENU);
+      break;
+    case gps_status_page::Exit::kToRace:
+      // Engine is (or was, at wake) running — straight into race mode with
+      // logging, mirroring the old RPM-wake path.
+      gpsEnterRaceMode();
+      debugln(F("GPS status page -> race mode"));
+      raceActive = true;
+      enableLogging = true;
+      raceSessionStartedAt = millis();
+      createLapAnythingCourseManager();
+      switchToDisplayPage(TACHOMETER);
+      break;
+    case gps_status_page::Exit::kToShutdown:
+      // Nothing locked, engine silent for the idle timeout — a spurious
+      // wake or a shelf queen. Power back down.
+      enterShutdown();
+      break;
+    case gps_status_page::Exit::kStay:
+      break;
+  }
+}
+
+/**
+ * @brief Drive the SD format-confirm boot page: step the hold-to-confirm
+ *        state machine (host-tested sd_format_page unit) and act on its
+ *        exit verdict. Runs between readButtons() and displayLoop(), like
+ *        gpsStatusPageLoop() — the page has an explicit no-op branch in
+ *        displayLoop()'s button handling.
+ */
+void sdFormatPageLoop() {
+  if (currentPage != PAGE_SD_FORMAT) return;
+
+  sd_format_page::Inputs in;
+  in.selectHeld = isButtonHeld(2, 0);  // live level, updated by updateButtonHoldState()
+  // A held side button disarms the confirm — the user is going for the
+  // global Select+side reboot combo (5 s), which must outrank a 3 s erase.
+  in.otherButtonHeld = isButtonHeld(1, 0) || isButtonHeld(3, 0);
+  in.otherButtonPressed = btn1->pressed || btn3->pressed;
+  in.engineRunning = tachLastReported > 500;  // autoRaceModeCheck threshold
+  in.nowMs = millis();
+
+  const sd_format_page::Exit verdict = sd_format_page::step(sdFormatState, in);
+  if (verdict != sd_format_page::Exit::kStay) {
+    resetButtons();
+  }
+
+  switch (verdict) {
+    case sd_format_page::Exit::kFormat:
+      // Blocking. Reboots the device on success; returns to this page's
+      // confirm screen on failure (fresh full hold required to retry).
+      sdPerformFormat();
+      break;
+    case sd_format_page::Exit::kToShutdown:
+      // Unformatted card and nobody home — don't drain the pack.
+      enterShutdown();
+      break;
+    case sd_format_page::Exit::kStay:
+      break;
+  }
+}
+
+/**
  * @brief Maintain the GPS-lock hold state (see gpsLockHoldActive).
  *
  * While a race session wants to log but has no valid GPS time lock yet — so
@@ -1027,6 +1299,7 @@ void writeDovexHeader() {
       shortName,
       activeTimerBestLapTime(),
       activeTimerOptimalLapTime(),
+      settingDeviceName,
   };
 
   static char headerBuf[dovex_header::kHeaderSize];
@@ -1040,74 +1313,222 @@ void writeDovexHeader() {
 }
 
 ///////////////////////////////////////////
-// SLEEP MODE
+// SHUTDOWN (System OFF)
+//
+// "Sleep" is a full power-down: tear everything down, arm GPIO SENSE on
+// the tach + buttons as wake sources, and enter nRF52 System OFF (~µA).
+// Wake is a chip reset — setup() runs fresh and captureBootWakeCause()
+// reads why (tach pulse -> the GPS status page exits into race mode).
+//
+// The ONE soft exception is charging: while VBUS is present the device
+// must stay alive because the HICHG fast-charge pin is software-held, so
+// enterShutdown() parks in a live charging loop instead and only drops
+// to System OFF when the cable is pulled. VBUS itself is a System OFF
+// wake source (always armed on nRF52840), so plugging in a dark device
+// boots it straight back into that loop.
 ///////////////////////////////////////////
 
 bool isUsbConnected() {
   return (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
 }
 
-void enterSleepMode() {
-  // 1. End race session if active (safety net)
-  if (raceActive) endRaceSession();
-
-  // 2. Stop BLE if active (prevents SoftDevice power waste during sleep)
-  if (bleActive) BLE_STOP();
-
-  // 3. Turn off display (I2C command, ~10uA sleep current)
-  DISPLAY_SLEEP();
-
-  // 3. Put GPS to backup mode
-  GPS_SLEEP();
-
-  // 4. Power down IMU (~1mA savings)
-  if (accelAvailable) {
-    pinMode(PIN_LSM6DS3TR_C_POWER, OUTPUT);
-    digitalWrite(PIN_LSM6DS3TR_C_POWER, HIGH);  // HIGH = disable power
+// Raw multi-sampled poll until every button is released (or timeout).
+// A held button at System OFF entry = SENSE already satisfied = instant
+// wake-reset, so the entry combo must be released before we commit.
+static void waitAllButtonsReleased(unsigned long timeoutMs) {
+  unsigned long start = millis();
+  while (anyButtonPressed() && millis() - start < timeoutMs) {
+    wdtPet();
+    delay(10);
   }
-
-  // 5. Set state
-  sleepModeActive = true;
-  sleepEnteredAt = millis();
-  sleepLastGpsWake = millis();
-  // Tach ISR stays attached -- RPM pulses will wake via tachHavePeriod
 }
 
-void exitSleepMode(bool rpmWake = false) {
-  // 1. Re-enable IMU
+// CPU idle for the charging loop. sd_app_evt_wait() is an SVC into the
+// SoftDevice and hard-faults when it isn't enabled — BLE is lazily
+// initialized, so ask the SoftDevice itself (the old sleep loop called
+// it unconditionally, a latent fault).
+static void shutdownIdleWait() {
+  uint8_t sdEnabled = 0;
+  (void)sd_softdevice_is_enabled(&sdEnabled);
+  if (sdEnabled) {
+    sd_app_evt_wait();
+  } else {
+    __WFE();
+  }
+}
+
+// Configure wake sources and enter System OFF. Does not return: wake is
+// a full reset (RESETREAS.OFF + the pin's LATCH bit record the cause),
+// and the WDT stops with every other clock — wdtSetup() re-arms on the
+// fresh boot (nRF52840 PS: System OFF halts all clocks/peripherals).
+static void shutdownSystemOff() {
+  #ifdef SIM
+  // Simulator has no System OFF emulation worth trusting — plain reset.
+  NVIC_SystemReset();
+  #else
+  waitAllButtonsReleased(3000);
+  delay(50);  // contact settle
+  wdtPet();
+
+  // Wake sources: SENSE-LOW with pull-up on the tach (idle-high, pulse =
+  // falling) and all three buttons (active-low). Pull + SENSE config is
+  // retained in System OFF. P-numbers via the board variant's pin map.
+  nrf_gpio_cfg_sense_input(g_ADigitalPinMap[tachInputPin],
+                           NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
+  nrf_gpio_cfg_sense_input(g_ADigitalPinMap[btn1->pin],
+                           NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
+  nrf_gpio_cfg_sense_input(g_ADigitalPinMap[btn2->pin],
+                           NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
+  nrf_gpio_cfg_sense_input(g_ADigitalPinMap[btn3->pin],
+                           NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
+  // VBUS wake needs no configuration on the nRF52840 — always armed.
+
+  // A set LATCH bit is a pending DETECT = instant re-wake; clear last,
+  // right before entering OFF. (Boot already cleared RESETREAS, but the
+  // SoftDevice path below clears again to be unambiguous.)
+  NRF_P0->LATCH = 0xFFFFFFFF;
+  NRF_P1->LATCH = 0xFFFFFFFF;
+
+  // Cortex-M4F: a pending FPU exception can inhibit low-power entry —
+  // clear lazily-stacked FP state before OFF (standard Nordic guidance).
+  __set_FPSCR(__get_FPSCR() & ~0x9F);
+  NVIC_ClearPendingIRQ(FPU_IRQn);
+
+  // NRF_POWER is a restricted peripheral while the SoftDevice is enabled
+  // (BLE is lazy — it may or may not be up). GPREGRET is deliberately
+  // untouched: register 0 belongs to the OTA/bootloader handoff.
+  uint8_t sdEnabled = 0;
+  (void)sd_softdevice_is_enabled(&sdEnabled);
+  if (sdEnabled) {
+    sd_power_reset_reason_clr(0xFFFFFFFF);
+    (void)sd_power_system_off();
+  } else {
+    NRF_POWER->RESETREAS = 0xFFFFFFFF;
+    NRF_POWER->SYSTEMOFF = 1;
+  }
+  // Only reachable in emulated System OFF (debugger attached).
+  while (true) { __WFE(); }
+  #endif
+}
+
+// The charging loop — runs after full teardown whenever VBUS is present
+// at shutdown (or woke us). Shows the charging screen for 10 s, then
+// display off; ANY button press is a full wake back to the main menu
+// (the USB-on-menu trigger waits USB_MENU_CHARGE_IDLE_MS before pulling
+// the device back here, so wake doesn't bounce). Returns true to resume
+// to the menu, false when the cable was pulled (caller enters System OFF).
+static bool runChargingShutdownLoop() {
+  debugln(F("Charging loop (VBUS present)"));
+  DISPLAY_WAKE();
+  waitAllButtonsReleased(2000);  // shutdown entry combo may still be held
+  unsigned long shownAt = millis();
+  if (shownAt == 0) shownAt = 1;  // 0 is the display-off sentinel
+
+  while (true) {
+    wdtPet();
+
+    if (!isUsbConnected()) {
+      if (shownAt != 0) DISPLAY_SLEEP();
+      return false;  // unplugged — fall through to System OFF
+    }
+
+    if (anyButtonPressed()) {
+      waitAllButtonsReleased(2000);
+      return true;  // full wake to the main menu
+    }
+
+    if (shownAt != 0 && millis() - shownAt >= CHARGE_DISPLAY_TIMEOUT_MS) {
+      DISPLAY_SLEEP();
+      shownAt = 0;
+    }
+    if (shownAt != 0 &&
+        millis() - displayLastUpdate > (1000 / displayUpdateRateHz)) {
+      displayLastUpdate = millis();
+      displayPage_sleep_charging();
+    }
+
+    shutdownIdleWait();
+  }
+}
+
+// Bring the subsystems back after the charging loop — the chip never
+// powered down, so this is the minimal mirror of the cold-boot bring-up.
+// BLE and the camera stay down (both come up lazily on demand).
+static void softResumeFromCharging() {
   if (accelAvailable) {
     digitalWrite(PIN_LSM6DS3TR_C_POWER, LOW);
     delay(50);
     if (accelIMU.begin() != 0) {
-      debugln(F("IMU failed to reinitialize after sleep"));
+      debugln(F("IMU failed to reinitialize after charging"));
       accelAvailable = false;
     }
   }
 
-  // 2. Wake GPS
+  // The menu's steady state is race config. Set the targets directly so
+  // GPS_WAKE()'s GPS_RECONFIGURE() applies them (a shutdown from the GPS
+  // status page would otherwise resume at 5 Hz with NAV-SAT on).
+  gpsNavRateTarget = GPS_NAV_RATE_HZ;
+  gpsNavSatWanted = false;
+  gpsSatCnoCount = 0;
+  gpsSatUsedCount = 0;
   GPS_WAKE();
 
-  // 3. Wake display
   DISPLAY_WAKE();
-
-  // 4. Reset state
-  sleepModeActive = false;
-  sleepGpsWakeActive = false;
   menuIdleTimerRunning = false;
-  chargingModeActive = false;
-  chargeDisplayOnAt = 0;
-
-  // 5. RPM wake → skip main menu, go straight to race mode
-  if (rpmWake) {
-    debugln(F("RPM wake — entering race mode directly"));
-    raceActive = true;
-    enableLogging = true;
-    raceSessionStartedAt = millis();
-    createLapAnythingCourseManager();
-    switchToDisplayPage(TACHOMETER);
-  } else {
-    switchToDisplayPage(PAGE_MAIN_MENU);
+  if (!sdSetupSuccess && sdCardUnformatted) {
+    // The format page's idle timeout landed us in the charging loop; the
+    // card still has no FAT, so resume back to the format offer — the main
+    // menu is useless (and misleading) when nothing can mount.
+    sd_format_page::begin(sdFormatState, millis());
+    switchToDisplayPage(PAGE_SD_FORMAT);
+    return;
   }
+  switchToDisplayPage(PAGE_MAIN_MENU);
+}
+
+// Full shutdown: tear down every subsystem, then System OFF — or the
+// charging loop when VBUS is present. May return (charging resume);
+// callers in loop() must `return` right after so the frame restarts.
+void enterShutdown() {
+  debugln(F("Shutdown"));
+
+  // End race session if active (safety net — may write the DOVEX header)
+  if (raceActive) endRaceSession();
+  wdtPet();
+
+  // Camera power-off streams a synchronous 3 s ce82 hold — the longest
+  // single teardown step, bracketed by pets against the ~4 s WDT.
+  CAMERA_SLEEP();
+  wdtPet();
+
+  // Stop BLE if active (advertising/connection teardown)
+  if (bleActive) BLE_STOP();
+
+  // Display off (I2C command, ~10 µA panel sleep)
+  DISPLAY_SLEEP();
+
+  // GPS to software backup mode (µA; config retained while powered) and
+  // TIMER3 serial-drain stopped
+  GPS_SLEEP();
+
+  // IMU rail off (HIGH = power disabled)
+  if (accelAvailable) {
+    pinMode(PIN_LSM6DS3TR_C_POWER, OUTPUT);
+    digitalWrite(PIN_LSM6DS3TR_C_POWER, HIGH);
+  }
+  wdtPet();
+
+  // Charging exception: never System OFF while VBUS is present — the
+  // HICHG charge-rate pin needs software alive.
+  if (isUsbConnected()) {
+    if (runChargingShutdownLoop()) {
+      softResumeFromCharging();
+      return;
+    }
+    // Cable pulled during the charging loop — power down for real.
+  }
+
+  shutdownSystemOff();  // does not return
 }
 
 ///////////////////////////////////////////
@@ -1119,86 +1540,9 @@ unsigned long loopMaxTime = 0;
 #endif
 
 void loop() {
-  #ifndef WOKWI
+  #ifndef SIM
   wdtPet();
   #endif
-
-  if (sleepModeActive) {
-    // Check wake triggers
-    bool wakeButton = anyButtonPressed();
-    bool wakeRpm = tachHavePeriod;  // ISR sets this directly on any valid pulse
-
-    if (wakeRpm) {
-      exitSleepMode(true);
-      return;
-    }
-    if (wakeButton && !chargingModeActive) {
-      exitSleepMode(false);
-      return;
-    }
-
-    // ---- CHARGE MODE (USB connected during sleep) ----
-    if (isUsbConnected()) {
-      if (!chargingModeActive) {
-        // First detection of USB: show charging screen for 10s
-        chargingModeActive = true;
-        DISPLAY_WAKE();
-        chargeDisplayOnAt = millis();
-        if (chargeDisplayOnAt == 0) chargeDisplayOnAt = 1; // avoid 0 sentinel
-      }
-
-      // Button press: re-show display for another 10s
-      if (wakeButton && chargeDisplayOnAt == 0) {
-        DISPLAY_WAKE();
-        chargeDisplayOnAt = millis();
-        if (chargeDisplayOnAt == 0) chargeDisplayOnAt = 1;
-      }
-
-      // Display management
-      if (chargeDisplayOnAt != 0) {
-        if (millis() - chargeDisplayOnAt >= CHARGE_DISPLAY_TIMEOUT_MS) {
-          DISPLAY_SLEEP();
-          chargeDisplayOnAt = 0;
-        } else if (millis() - displayLastUpdate > (1000 / displayUpdateRateHz)) {
-          displayLastUpdate = millis();
-          displayPage_sleep_charging();
-        }
-      }
-
-      // Skip GPS periodic checks and WFE while charging — just loop
-      return;
-    }
-
-    // USB disconnected: clean up charge mode
-    if (chargingModeActive) {
-      chargingModeActive = false;
-      if (chargeDisplayOnAt != 0) {
-        DISPLAY_SLEEP();
-      }
-      chargeDisplayOnAt = 0;
-    }
-
-    // Periodic GPS fix (every SLEEP_GPS_WAKE_INTERVAL)
-    if (!sleepGpsWakeActive &&
-        (millis() - sleepLastGpsWake >= SLEEP_GPS_WAKE_INTERVAL)) {
-      GPS_SLEEP_PERIODIC_CHECK();
-    }
-
-    // GPS periodic wake: check for fix or timeout
-    if (sleepGpsWakeActive) {
-      myGNSS.checkUblox();
-      myGNSS.checkCallbacks();
-      if (gpsData.fix || (millis() - sleepGpsWakeStartedAt >= SLEEP_GPS_FIX_TIMEOUT)) {
-        GPS_SLEEP();
-        sleepGpsWakeActive = false;
-        sleepLastGpsWake = millis();
-      }
-    }
-
-    // CPU idle (SoftDevice-safe WFE — any interrupt wakes CPU)
-    sd_app_evt_wait();
-    return;  // Skip entire normal loop
-  }
 
   #ifdef HAS_DEBUG
   unsigned long loopStart = millis();
@@ -1232,6 +1576,36 @@ void loop() {
     return; // Skip GPS, tach, lap checks while BLE is active
   }
 
+  // When USB mass-storage is active the host PC owns the SD card over MSC.
+  // Park the loop exactly like the BLE branch so the firmware never drives
+  // the FAT concurrently with the host — GPS/tach/lap/SD processing is all
+  // skipped. (The SD-access policy would deny those acquires anyway, but
+  // parking here is the real guarantee rather than a side effect.)
+  if (usbMscActive) {
+    // Cable pulled without using the on-device Exit (the natural way to
+    // "finish") — tear down so the SD lock, the fast SPI clock, and the
+    // media-ready state don't leak into a later driving session and
+    // silently refuse to log. USB_MSC_DISABLE() reboots and does not return.
+    if (!isUsbConnected()) {
+      USB_MSC_DISABLE();
+    }
+
+    // Minimal button check for the on-device Exit (Select).
+    readButtons();
+    if (btn2->pressed) {
+      USB_MSC_DISABLE();  // does not return (NVIC_SystemReset)
+    }
+    resetButtons();
+
+    // Refresh the status page at the normal rate.
+    if (millis() - displayLastUpdate > (1000 / displayUpdateRateHz)) {
+      displayLastUpdate = millis();
+      displayPage_usb_storage();
+    }
+
+    return;  // host owns the card — skip GPS/tach/lap/SD entirely
+  }
+
   GPS_LOOP();
   TACH_LOOP();
   ACCEL_LOOP();
@@ -1242,15 +1616,26 @@ void loop() {
   checkAutoIdle();
   autoRaceModeCheck();
   updateGpsLockHold();
+  CAMERA_LOOP();  // step the Insta360 auto-record FSM (GPS/tach fresh above)
 
-  // Button hold detection for sleep/reboot combos
+  // Camera auto-stopped recording (30 s engine-off): end + save the race
+  // session and return to the menu — the camera stays connected in WATCHING,
+  // ready to re-record if the engine restarts. endRaceSession() is idempotent
+  // and does not switch pages itself, so we do (mirrors checkAutoIdle). A
+  // manual logging-stop does not set this — that path already ended the log.
+  if (raceActive && cameraConsumeAutoStop()) {
+    endRaceSession();
+    switchToDisplayPage(PAGE_MAIN_MENU);
+  }
+
+  // Button hold detection for shutdown/reboot combos
   updateButtonHoldState();
 
-  // Long-press left+right (5s) on main menu -> sleep
+  // Long-press left+right (5s) on main menu -> shutdown
   if (currentPage == PAGE_MAIN_MENU &&
       isButtonHeld(1, SLEEP_LONG_PRESS_MS) &&
       isButtonHeld(3, SLEEP_LONG_PRESS_MS)) {
-    enterSleepMode();
+    enterShutdown();
     return;
   }
 
@@ -1260,23 +1645,25 @@ void loop() {
     NVIC_SystemReset();
   }
 
-  // USB connected on main menu -> auto-sleep for efficient charging
-  if (currentPage == PAGE_MAIN_MENU && isUsbConnected()) {
-    enterSleepMode();
-    return;
-  }
-
-  // 5-minute menu idle -> auto-sleep
+  // Main-menu idle tracking. Two consumers:
+  //  - USB present: enter the charging loop after USB_MENU_CHARGE_IDLE_MS
+  //    of no button activity. Not immediate — a charging-loop button wake
+  //    lands here, and an instant re-entry would bounce it right back.
+  //    The window is what lets replay/transfer be used while plugged in.
+  //  - No USB: full shutdown after SLEEP_IDLE_TIMEOUT_MS.
   if (currentPage == PAGE_MAIN_MENU) {
     if (!menuIdleTimerRunning) {
       menuIdleTimerRunning = true;
       menuIdleStartTime = millis();
-    } else if (millis() - menuIdleStartTime >= SLEEP_IDLE_TIMEOUT_MS) {
-      enterSleepMode();
-      return;
     }
     if (btn1->pressed || btn2->pressed || btn3->pressed) {
       menuIdleStartTime = millis();  // Reset on any button
+    }
+    unsigned long idleFor = millis() - menuIdleStartTime;
+    if ((isUsbConnected() && idleFor >= USB_MENU_CHARGE_IDLE_MS) ||
+        idleFor >= SLEEP_IDLE_TIMEOUT_MS) {
+      enterShutdown();
+      return;
     }
   } else {
     menuIdleTimerRunning = false;
@@ -1285,6 +1672,8 @@ void loop() {
   calculateGPSFrameRate();
 
   readButtons();
+  gpsStatusPageLoop();  // boot status page: consume presses, hold/auto-close
+  sdFormatPageLoop();   // boot format-confirm page: hold Select 3s to format
   displayLoop();
   resetButtons();
 

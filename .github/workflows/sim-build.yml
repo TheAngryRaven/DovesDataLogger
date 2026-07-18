@@ -1,0 +1,80 @@
+name: sim-build
+
+# Native host build of the firmware TU under the SIM flag (BirdsEye/sim/).
+# This is what keeps SIM from rotting the way the old WOKWI flag did: the
+# sim compiling — real .ino sources, unmodified — is itself a CI gate.
+#
+# Gates: native build, 60 s virtual-time boot soak, two-runs-byte-identical
+# determinism check, and the golden display fixtures (real Adafruit stack;
+# page hashes + the menu navigation that produced them). Rendered frames
+# are uploaded as an artifact for eyeballing. Phase 4 of the simulator
+# plan extends this workflow with the WASM (emscripten) build and the
+# lap-timing oracle test.
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - BETA
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  native:
+    name: sim native build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S BirdsEye/sim -B BirdsEye/sim/build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build BirdsEye/sim/build --parallel
+
+      - name: Boot soak + determinism + golden fixture tests
+        run: ctest --test-dir BirdsEye/sim/build --output-on-failure
+
+      - name: Show boot transcript
+        run: ./BirdsEye/sim/build/birdseye_sim_native
+
+      - name: Dump fixture frames (PNG)
+        run: |
+          mkdir -p sim-frames
+          ./BirdsEye/sim/build/birdseye_sim_golden --print --dump sim-frames
+
+      - name: Upload fixture frames
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-fixture-frames
+          path: sim-frames/
+
+  wasm:
+    name: sim wasm build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up emsdk
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 3.1.61
+          actions-cache-folder: emsdk-cache
+
+      - name: Configure (emcmake)
+        run: emcmake cmake -S BirdsEye/sim -B BirdsEye/sim/build-wasm -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build BirdsEye/sim/build-wasm --parallel
+
+      - name: Node smoke test (boot, state, determinism, reset)
+        run: node BirdsEye/sim/build-wasm/dist/smoke.mjs
+
+      - name: Upload wasm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: birdseye-sim-wasm
+          path: BirdsEye/sim/build-wasm/dist/

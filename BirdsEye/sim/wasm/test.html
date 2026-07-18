@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<!--
+  test.html — minimal harness proving the WASM artifact outside the
+  viewer (sim Phase 4). Serve the dist/ folder over HTTP (wasm needs
+  same-origin fetch), e.g.:  python3 -m http.server -d dist 8080
+  Then open http://localhost:8080/test.html
+
+  Boot the firmware, click the three buttons, and optionally feed it a
+  real .dovex file: rows are injected at 25 Hz virtual time with the RPM
+  column driving the tach, exactly like the viewer's playback engine
+  will in Phase 5.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BirdsEye sim — test harness</title>
+<style>
+  body { font-family: monospace; background: #111; color: #ddd;
+         display: flex; flex-direction: column; align-items: center;
+         gap: 12px; padding: 24px; }
+  canvas { image-rendering: pixelated; border: 12px solid #333;
+           border-radius: 8px; background: #000; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  button { font-family: monospace; padding: 8px 16px; }
+  #state { white-space: pre; font-size: 12px; color: #8c8; }
+</style>
+</head>
+<body>
+<h3>BirdsEye simulator — Phase 4 harness</h3>
+<canvas id="oled" width="128" height="64" style="width:512px;height:256px"></canvas>
+<div class="row">
+  <button id="btnL">&#9664; Left</button>
+  <button id="btnS">Select</button>
+  <button id="btnR">Right &#9654;</button>
+  <label>speed <select id="speed">
+    <option value="1">1x</option><option value="2">2x</option>
+    <option value="5">5x</option><option value="10" selected>10x</option>
+  </select></label>
+  <input type="file" id="dovex" accept=".dovex">
+</div>
+<div id="state">loading…</div>
+<script type="module">
+import createBirdsEyeSim from './birdseye-sim.mjs';
+
+const sim = await createBirdsEyeSim();
+sim.init();
+
+const ctx = document.getElementById('oled').getContext('2d');
+const img = ctx.createImageData(128, 64);
+let lastHash = -1;
+
+function blit() {
+  const hash = sim.getFrameHash();
+  if (hash === lastHash) return;   // fw refreshes at 3 Hz — don't repaint 60
+  lastHash = hash;
+  const fb = sim.getFramebuffer();
+  for (let y = 0; y < 64; y++) {
+    for (let x = 0; x < 128; x++) {
+      const bit = (fb[x + (y >> 3) * 128] >> (y & 7)) & 1;
+      const o = (y * 128 + x) * 4;
+      img.data[o] = img.data[o + 1] = img.data[o + 2] = bit ? 235 : 8;
+      img.data[o + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+// Buttons: pointer events -> real firmware debounce via the pin map.
+const wire = (el, idx) => {
+  el.addEventListener('pointerdown', () => sim.buttonDown(idx));
+  el.addEventListener('pointerup', () => sim.buttonUp(idx));
+  el.addEventListener('pointercancel', () => sim.buttonUp(idx));
+};
+wire(document.getElementById('btnL'), 0);
+wire(document.getElementById('btnS'), 1);
+wire(document.getElementById('btnR'), 2);
+addEventListener('keydown', (e) => {
+  if (e.repeat) return;
+  if (e.key === 'ArrowLeft') sim.buttonDown(0);
+  if (e.key === 'Enter') sim.buttonDown(1);
+  if (e.key === 'ArrowRight') sim.buttonDown(2);
+});
+addEventListener('keyup', (e) => {
+  if (e.key === 'ArrowLeft') sim.buttonUp(0);
+  if (e.key === 'Enter') sim.buttonUp(1);
+  if (e.key === 'ArrowRight') sim.buttonUp(2);
+});
+
+// Optional dovex playback (Phase-5 semantics, minimally).
+let rows = null, rowIdx = 0, playClockMs = 0;
+document.getElementById('dovex').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const text = new TextDecoder().decode(
+      (await file.arrayBuffer()).slice(1024));
+  rows = text.split('\n').slice(1).map((l) => l.split(',')).filter(
+      (f) => f.length === 13);
+  rowIdx = 0;
+  await sim.reset();
+  sim.init();
+  playClockMs = Number(rows[0][0]) - 3000;  // ~3 s no-fix pre-roll
+  console.log(`dovex loaded: ${rows.length} rows`);
+});
+
+let prev = performance.now();
+function frame(now) {
+  const speed = Number(document.getElementById('speed').value);
+  let delta = Math.min(now - prev, 100) * speed;
+  prev = now;
+
+  if (rows && rowIdx < rows.length) {
+    // Inject every row whose timestamp falls inside the advanced window.
+    playClockMs += delta;
+    while (rowIdx < rows.length && Number(rows[rowIdx][0]) <= playClockMs) {
+      const f = rows[rowIdx++];
+      sim.injectPvt(JSON.stringify({
+        timestamp: Number(f[0]), sats: Number(f[1]), hdop: Number(f[2]),
+        lat: Number(f[3]), lng: Number(f[4]), speed_mph: Number(f[5]),
+        altitude_m: Number(f[6]), heading_deg: Number(f[7]),
+        h_acc_m: Number(f[8]), fix: true,
+        accelX: Number(f[10]), accelY: Number(f[11]), accelZ: Number(f[12]),
+      }));
+      sim.setRpm(Number(f[9]));
+    }
+  }
+
+  sim.stepMillis(delta);
+  blit();
+
+  const st = sim.getStateJson();
+  document.getElementById('state').textContent =
+      `page ${st.page}  race ${st.raceActive}  laps ${st.lapCount}  ` +
+      `best ${st.bestLapMs}  cur ${st.currentLapMs}  rpm ${st.rpm}  ` +
+      `fix ${st.gpsFix}  sats ${st.sats}  log ${st.loggingActive}\n` +
+      `course '${st.courseName}'  t=${(st.millis / 1000).toFixed(1)}s  ` +
+      `fw ${sim.getVersion().firmwareSha}  ` +
+      (rows ? `dovex ${rowIdx}/${rows.length}` : 'no dovex loaded');
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

@@ -11,12 +11,11 @@
 #include <stdint.h>
 
 // Latest filtered RPM (rounded). Written by TACH_LOOP, read by
-// display/logging/sleep — volatile so cross-context reads are coherent.
+// display/logging — volatile so cross-context reads are coherent.
+// (The engine-start wake from shutdown is NOT this module's job anymore:
+// System OFF wakes on the tach pin's GPIO SENSE, and the boot decodes it
+// from the LATCH register — see wake_cause.)
 extern volatile int tachLastReported;
-
-// Set true by the ISR on any valid pulse — sleep mode uses this as a
-// wake trigger; main loop should NOT clear it (ISR owns it).
-extern volatile bool tachHavePeriod;
 
 // ISR — must have C-style linkage for attachInterrupt().
 void TACH_COUNT_PULSE();

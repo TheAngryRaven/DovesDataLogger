@@ -17,6 +17,13 @@ static bool i2cRecoveryNeeded = false;
 void i2cBusRecover() {
   debugln(F("I2C: Bus recovery - bit-banging 9 SCL clocks"));
 
+  // Feed the watchdog before each potentially-blocking I2C re-init step.
+  // If ignition EMI is still glitching the bus, Wire.begin() / display.begin()
+  // can stall on it — without these pets the recovery routine itself would
+  // trip the 4 s WDT and reboot, then re-trigger on the next boot (boot loop).
+  // Mirrors the GPS baud-recovery hardening in gps_functions.ino.
+  wdtPet();
+
   Wire.end();
 
   // Manually toggle SCL 9 times to free stuck slave
@@ -41,16 +48,19 @@ void i2cBusRecover() {
   delayMicroseconds(5);
 
   // Re-init Wire
+  wdtPet();
   Wire.begin();
   Wire.setClock(400000);  // Must re-set after begin() (resets to 100kHz)
 
   // Re-init display
+  wdtPet();
   #ifdef USE_1306_DISPLAY
     display.begin(SSD1306_SWITCHCAPVCC, I2C_DISPLAY_ADDRESS);
   #else
     display.begin(I2C_DISPLAY_ADDRESS, true);
   #endif
 
+  wdtPet();
   debugln(F("I2C: Bus recovery complete"));
 }
 
@@ -63,13 +73,16 @@ void safeDisplayUpdate() {
   unsigned long elapsed = millis() - start;
 
   if (elapsed > 100) {
-    debugln(F("I2C: display.display() took too long, scheduling recovery"));
-    i2cRecoveryNeeded = true;
+    // Recover immediately rather than deferring to the next frame — a stuck
+    // bus would otherwise get one more (also-slow) paint before recovery runs.
+    debugln(F("I2C: display.display() took too long, recovering now"));
+    i2cRecoveryNeeded = false;
+    i2cBusRecover();
   }
 }
 
 void setupButtons() {
-  #ifndef WOKWI
+  #ifndef SIM
   // greybox
   btn1->pin = 1;
   btn2->pin = 2;
@@ -286,12 +299,120 @@ void handleMenuPageSelection() {
         internalNotification[sizeof(internalNotification) - 1] = '\0';
         switchToDisplayPage(PAGE_INTERNAL_WARNING);
       }
+    } else if (menuSelectionIndex == 2) {
+      // Transfer selected — open the Bluetooth-vs-USB submenu
+      debugln(F("Main Menu: Transfer selected"));
+      switchToDisplayPage(PAGE_TRANSFER_MENU);
     } else {
-      // Bluetooth selected
-      debugln(F("Main Menu: Bluetooth selected"));
+      // Camera selected — paired shows status/unpair, unpaired starts pairing
+      debugln(F("Main Menu: Camera selected"));
+      if (!cameraIsPaired()) {
+        cameraRequestPair();  // pairing begins as the page comes up
+      }
+      switchToDisplayPage(PAGE_PAIR_CAMERA);
+    }
+  } else if (currentPage == PAGE_PAIR_CAMERA) {
+    // Only a menu while paired (Back / Test / Unpair) — the unpaired
+    // pairing screen handles its buttons in the custom branch in
+    // displayLoop(). Back is index 0 so a late "Cancel" press right after
+    // a serial capture can't land on Test or Unpair.
+    if (menuSelectionIndex == 0) {
+      debugln(F("Camera: Back selected"));
+      switchToDisplayPage(PAGE_MAIN_MENU);
+    } else if (menuSelectionIndex == 1) {
+      debugln(F("Camera: Test selected"));
+      cameraTestEnterMode();
+      switchToDisplayPage(PAGE_CAMERA_TEST);
+    } else {
+      debugln(F("Camera: Unpair selected"));
+      if (cameraRequestUnpair()) {
+        switchToDisplayPage(PAGE_MAIN_MENU);
+      } else {
+        // FSM is mid-session (waking/recording/cooldown) — refuse
+        strncpy(internalNotification, "Camera busy -\nend session first", sizeof(internalNotification) - 1);
+        internalNotification[sizeof(internalNotification) - 1] = '\0';
+        switchToDisplayPage(PAGE_INTERNAL_WARNING);
+      }
+    }
+  } else if (currentPage == PAGE_CAMERA_TEST) {
+    // Bench-test controls for the paired camera. Items:
+    //   0 Wake      — standby wake burst (no effect on a fully-off camera)
+    //   1 Record    — ce82 shutter toggle (needs R link + ce82 subscribed)
+    //   2 Power Off — ce82 power hold (needs R link + ce82 subscribed)
+    //   3 Back
+    // Record and Power Off both ride the ce82 button characteristic, so
+    // both need the camera connected to us (R) and subscribed. Share the
+    // failure-diagnosis path.
+    if (menuSelectionIndex == 0) {
+      debugln(F("Camera Test: Wake"));
+      cameraTestWake();
+    } else if (menuSelectionIndex == 1 || menuSelectionIndex == 2) {
+      const bool ok = (menuSelectionIndex == 1) ? cameraTestRecord()
+                                                : cameraTestPowerOff();
+      debugln(menuSelectionIndex == 1 ? F("Camera Test: Record")
+                                      : F("Camera Test: Power Off"));
+      if (!ok) {
+        // Distinguish the failure for the tester: no R-link at all vs
+        // connected-but-never-subscribed (camera ignoring our buttons).
+        if (!cameraRemoteLinkUp()) {
+          strncpy(internalNotification, "No remote link -\nrun Wake first",
+                  sizeof(internalNotification) - 1);
+        } else if (!cameraCe82Subscribed()) {
+          strncpy(internalNotification, "Camera not subbed\nto buttons (ce82)",
+                  sizeof(internalNotification) - 1);
+        } else {
+          strncpy(internalNotification, "Button send\nrejected by stack",
+                  sizeof(internalNotification) - 1);
+        }
+        internalNotification[sizeof(internalNotification) - 1] = '\0';
+        // The warning page dismisses to the MAIN MENU — leave bench-test
+        // mode first or cameraTestActive would stay latched (FSM
+        // suppressed) with no way back to this menu's Back action.
+        cameraTestExitMode();
+        switchToDisplayPage(PAGE_INTERNAL_WARNING);
+      }
+    } else {
+      debugln(F("Camera Test: Back"));
+      cameraTestExitMode();
+      switchToDisplayPage(PAGE_PAIR_CAMERA);
+    }
+    forceDisplayRefresh();
+  } else if (currentPage == PAGE_TRANSFER_MENU) {
+    if (menuSelectionIndex == 0) {
+      // Bluetooth — same flow as before
+      debugln(F("Transfer: Bluetooth selected"));
+      // Transfer takes the single radio slot — kick the camera off it first
+      CAMERA_FORCE_RELEASE();
       BLE_SETUP();
       switchToDisplayPage(PAGE_BLUETOOTH);
+    } else {
+      // USB mass storage — show the status page, then enumerate the drive.
+      // Release the camera first: the USB parking branch never runs
+      // CAMERA_LOOP(), so an in-flight camera session would otherwise be
+      // frozen (advert broadcasting unserviced / cooldown never expiring)
+      // for the whole USB session.
+      debugln(F("Transfer: USB selected"));
+      // No cable = the USB page would instantly reboot (its parked loop reads
+      // absent VBUS as "cable pulled"). Guide the user instead of bouncing.
+      if (!isUsbConnected()) {
+        strncpy(internalNotification, "Plug in USB\ncable first!", sizeof(internalNotification) - 1);
+        internalNotification[sizeof(internalNotification) - 1] = '\0';
+        switchToDisplayPage(PAGE_INTERNAL_WARNING);
+      } else {
+        CAMERA_FORCE_RELEASE();
+        switchToDisplayPage(PAGE_USB_STORAGE);
+        if (!USB_MSC_ENABLE()) {
+          // SD busy with another subsystem — bounce back to the submenu
+          strncpy(internalNotification, "SD busy, cannot\nstart USB mode!", sizeof(internalNotification) - 1);
+          internalNotification[sizeof(internalNotification) - 1] = '\0';
+          switchToDisplayPage(PAGE_INTERNAL_WARNING);
+        }
+      }
     }
+  } else if (currentPage == PAGE_USB_STORAGE) {
+    // Exit — reboot to drop the drive and remount a fresh filesystem
+    debugln(F("USB Storage: Exit selected"));
+    USB_MSC_DISABLE();  // does not return (NVIC_SystemReset)
   } else if (currentPage == PAGE_REPLAY_FILE_SELECT) {
     if (numReplayFiles == 0) {
       // No files - go back
@@ -329,7 +450,11 @@ void handleMenuPageSelection() {
     if (menuSelectionIndex == 0) {
       switchToDisplayPage(GPS_SPEED);
     } else {
-      // LOGGING STOP
+      // LOGGING STOP — the user's explicit "I'm done": stop the camera
+      // recording immediately too (bypasses its stationary+engine-off
+      // hold). Auto-idle deliberately does NOT do this — see the comment
+      // in endRaceSession().
+      CAMERA_NOTIFY_SESSION_END();
       endRaceSession();
       switchToDisplayPage(PAGE_MAIN_MENU);
     }
@@ -348,25 +473,41 @@ void handleRunningPageSelection() {
   } else if (currentPage == PAGE_REPLAY_RESULTS) {
     // Middle button on results does nothing (use left/right for navigation)
   } else {
-    // wokwi doesnt like fancy page switcher
-    // inverted eats too much power
-    #ifdef WOKWI
-      if(displayInverted == true) {
-        displayInverted = false;
-        display.invertDisplay(false);
-      } else {
-        displayInverted = true;
-        display.invertDisplay(true);
-      }
-    #else
-      if (gps_speed_mph <= 5.0) {
-        currentPage = GPS_LAP_BEST;
-      } else {
-        currentPage = GPS_LAP_PACE;
-      }
-      switchToDisplayPage(currentPage);
-    #endif
+    // Speed-aware center-button jump: pace page while moving, best-lap
+    // page when (nearly) stopped. SIM uses the same behavior — the old
+    // Wokwi carve-out here toggled panel inversion instead, which is
+    // invisible in the simulator (inversion happens in the panel, not
+    // the framebuffer) and read as a dead button.
+    if (gps_speed_mph <= 5.0) {
+      currentPage = GPS_LAP_BEST;
+    } else {
+      currentPage = GPS_LAP_PACE;
+    }
+    switchToDisplayPage(currentPage);
   }
+}
+
+///////////////////////////////////////////
+// MANUAL CAMERA-SERIAL ENTRY
+// Character wheel for PAGE_CAMERA_SERIAL_ENTRY: digits then letters,
+// wrapping in both directions. Buffer + cursor live in BirdsEye.ino
+// (cameraSerialEntryBuf / cameraSerialEntryCursor) so the renderer in
+// display_pages.ino can see them.
+///////////////////////////////////////////
+
+static const char kSerialEntryChars[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+static char serialEntryCycle(char c, int dir) {
+  const int n = (int)(sizeof(kSerialEntryChars) - 1);
+  int idx = 0;
+  for (int i = 0; i < n; i++) {
+    if (kSerialEntryChars[i] == c) {
+      idx = i;
+      break;
+    }
+  }
+  idx = (idx + dir + n) % n;
+  return kSerialEntryChars[idx];
 }
 
 void displayLoop() {
@@ -407,10 +548,22 @@ void displayLoop() {
     ) {
       displayCrossing();
       lastPage = 999;
+    } else if (currentPage == PAGE_GPS_STATUS) {
+      displayPage_gps_status();
     } else if (currentPage == PAGE_MAIN_MENU) {
       displayPage_main_menu();
     } else if (currentPage == PAGE_BLUETOOTH) {
       displayPage_bluetooth();
+    } else if (currentPage == PAGE_TRANSFER_MENU) {
+      displayPage_transfer_menu();
+    } else if (currentPage == PAGE_USB_STORAGE) {
+      displayPage_usb_storage();
+    } else if (currentPage == PAGE_PAIR_CAMERA) {
+      displayPage_pair_camera();
+    } else if (currentPage == PAGE_CAMERA_TEST) {
+      displayPage_camera_test();
+    } else if (currentPage == PAGE_CAMERA_SERIAL_ENTRY) {
+      displayPage_camera_serial_entry();
     } else if (currentPage == PAGE_REPLAY_FILE_SELECT) {
       displayPage_replay_file_select();
     } else if (currentPage == PAGE_REPLAY_RESULTS) {
@@ -467,6 +620,8 @@ void displayLoop() {
       displayPage_internal_fault();
     } else if (currentPage == PAGE_INTERNAL_WARNING) {
       displayPage_internal_warning();
+    } else if (currentPage == PAGE_SD_FORMAT) {
+      displayPage_sd_format();
     }
   }
 
@@ -478,15 +633,30 @@ void displayLoop() {
   if (
     currentPage == PAGE_MAIN_MENU ||
     currentPage == PAGE_BLUETOOTH ||
+    currentPage == PAGE_TRANSFER_MENU ||
+    currentPage == PAGE_USB_STORAGE ||
     currentPage == LOGGING_STOP_CONFIRM ||
     currentPage == PAGE_REPLAY_FILE_SELECT ||
-    currentPage == PAGE_REPLAY_EXIT
+    currentPage == PAGE_REPLAY_EXIT ||
+    // Camera page is only a menu while paired; while pairing it uses the
+    // custom (non-menu) button handling below. Deriving this per frame
+    // flips the page into menu mode the moment a serial is captured.
+    (currentPage == PAGE_PAIR_CAMERA && cameraIsPaired()) ||
+    currentPage == PAGE_CAMERA_TEST
   ) {
     insideMenu = true;
     if (currentPage == PAGE_MAIN_MENU) {
-      menuLimit = 3; // Race, Replay, Download
+      menuLimit = 4; // Race, Review, Transfer, Camera
     } else if (currentPage == PAGE_BLUETOOTH) {
       menuLimit = 1; // Only "Exit" option
+    } else if (currentPage == PAGE_TRANSFER_MENU) {
+      menuLimit = 2; // Bluetooth, USB
+    } else if (currentPage == PAGE_USB_STORAGE) {
+      menuLimit = 1; // Only "Exit" option
+    } else if (currentPage == PAGE_PAIR_CAMERA) {
+      menuLimit = 3; // Back, Test, Unpair
+    } else if (currentPage == PAGE_CAMERA_TEST) {
+      menuLimit = 4; // Wake, Record, Power Off, Back
     } else if (
       currentPage == LOGGING_STOP_CONFIRM ||
       currentPage == PAGE_REPLAY_EXIT
@@ -509,9 +679,15 @@ void displayLoop() {
   // menu operator
   if (insideMenu && !buttonsDisabled) {
     // we are in a menu do weird menu things
-    // Main menu has static display (items top-to-bottom = index 0,1,2)
-    // so button direction needs to be reversed compared to scrolling menus
-    bool reverseDirection = (currentPage == PAGE_MAIN_MENU);
+    // Statically-rendered menus list their items top-to-bottom (index
+    // 0,1,2,3 down the panel), so the physical up/down buttons must be
+    // reversed vs the scrolling menus. The main menu AND the camera pages
+    // (Pair / Test) render this way — without the camera pages here, their
+    // first "down" press wrapped straight to the last item (e.g. Unpair /
+    // Power Off) (#7).
+    bool reverseDirection = (currentPage == PAGE_MAIN_MENU ||
+                             currentPage == PAGE_PAIR_CAMERA ||
+                             currentPage == PAGE_CAMERA_TEST);
 
     // BUTTON UP (or DOWN for reversed menus)
     if (btn1->pressed) {
@@ -558,10 +734,68 @@ void displayLoop() {
       debugln(menuSelectionIndex);
       forceDisplayRefresh();
     }
+  } else if (currentPage == PAGE_GPS_STATUS) {
+    // Boot GPS status page: presses are consumed by gpsStatusPageLoop()
+    // (BirdsEye.ino) BEFORE displayLoop() runs — nothing to do here. This
+    // branch exists so the generic running-page navigation below can't
+    // grab the page.
+  } else if (currentPage == PAGE_SD_FORMAT) {
+    // Boot format-confirm page: buttons are consumed by sdFormatPageLoop()
+    // (BirdsEye.ino) BEFORE displayLoop() runs — nothing to do here. Unlike
+    // PAGE_INTERNAL_FAULT, buttons stay live (the confirm hold needs them).
   } else if (currentPage == PAGE_INTERNAL_WARNING) {
     // Warning page: any button returns to main menu
     if (btn1->pressed || btn2->pressed || btn3->pressed) {
       switchToDisplayPage(PAGE_MAIN_MENU);
+    }
+  } else if (currentPage == PAGE_PAIR_CAMERA) {
+    // Unpaired pairing screen only (the paired variant is a menu above).
+    // Button map: B1 (Left) = manual serial entry, B2 (Select) = cancel.
+    if (btn1->pressed) {
+      debugln(F("Pair Camera: manual entry"));
+      cameraCancelPair();
+      // Fresh entry state every time the page is entered
+      strcpy(cameraSerialEntryBuf, "AAAAAA");
+      cameraSerialEntryCursor = 0;
+      switchToDisplayPage(PAGE_CAMERA_SERIAL_ENTRY);
+    } else if (btn2->pressed) {
+      debugln(F("Pair Camera: cancel"));
+      cameraCancelPair();
+      switchToDisplayPage(PAGE_MAIN_MENU);
+    }
+  } else if (currentPage == PAGE_CAMERA_SERIAL_ENTRY) {
+    // Manual serial entry button map:
+    //   B1 (Left)   = cycle char backward (cursor 0-5) / toggle OK-CANCEL
+    //   B2 (Select) = advance cursor; on OK = submit, on CANCEL = main menu
+    //   B3 (Right)  = cycle char forward (cursor 0-5) / toggle OK-CANCEL
+    if (btn1->pressed || btn3->pressed) {
+      if (cameraSerialEntryCursor < 6) {
+        cameraSerialEntryBuf[cameraSerialEntryCursor] = serialEntryCycle(
+            cameraSerialEntryBuf[cameraSerialEntryCursor], btn3->pressed ? 1 : -1);
+      } else {
+        // Hop between OK (6) and CANCEL (7)
+        cameraSerialEntryCursor = cameraSerialEntryCursor == 6 ? 7 : 6;
+      }
+      forceDisplayRefresh();
+    }
+    if (btn2->pressed) {
+      if (cameraSerialEntryCursor < 6) {
+        cameraSerialEntryCursor++;  // next char, then OK, then CANCEL
+        forceDisplayRefresh();
+      } else if (cameraSerialEntryCursor == 6) {
+        // OK — validate + persist via the camera module
+        debugln(F("Serial Entry: OK"));
+        if (cameraSetManualSerial(cameraSerialEntryBuf)) {
+          switchToDisplayPage(PAGE_PAIR_CAMERA);
+        } else {
+          strncpy(internalNotification, "Invalid serial", sizeof(internalNotification) - 1);
+          internalNotification[sizeof(internalNotification) - 1] = '\0';
+          switchToDisplayPage(PAGE_INTERNAL_WARNING);
+        }
+      } else {
+        debugln(F("Serial Entry: cancel"));
+        switchToDisplayPage(PAGE_MAIN_MENU);
+      }
     }
   } else if (!buttonsDisabled){
     // page up/down/enter

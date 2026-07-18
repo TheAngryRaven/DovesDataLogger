@@ -4,6 +4,10 @@
 ///////////////////////////////////////////
 
 #include "display_pages.h"
+#include "gps_status_page.h"
+#include "lap_format.h"
+#include "sat_bars.h"
+#include "sd_format_page.h"
 
 void displayPage_boot() {
   resetDisplay();
@@ -18,21 +22,123 @@ void displayPage_boot() {
   safeDisplayUpdate();
 }
 
+// GPS status boot page (MyChron-style): top half is fix/satellite stats,
+// bottom half is one vertical signal bar per satellite (height = CNO).
+// Shown on every boot; hold/auto-close logic lives in gpsStatusPageLoop().
+void displayPage_gps_status() {
+  resetDisplay();
+
+  // GPS never came up — GPS_STATUS_RETRY_LOOP() is re-probing in the
+  // background (or has given up). Any button still exits to the menu.
+  if (!gpsInitialized) {
+    display.println(F("GPS: NOT DETECTED"));
+    if (gpsRetriesExhausted()) {
+      display.println(F("\nCHECK WIRING"));
+    } else {
+      display.println(F("\nRetrying..."));
+    }
+    display.println(F("\nAny button: menu"));
+    display.print(F("\nup:"));
+    display.print(millis() / 1000);
+    display.println(F("s"));
+    safeDisplayUpdate();
+    return;
+  }
+
+  // ---- Top half (4 size-1 lines, 32 px) ----
+  // used-in-solution / tracked-with-signal — the second number matches
+  // the bar count below (until it exceeds the 16-bar display cap).
+  display.print(F("Sats:"));
+  display.print(gpsSatUsedCount);
+  display.print(F("/"));
+  display.print(gpsSatTrackedCount);
+  display.print(F("  HDOP:"));
+  if (gpsData.fix) {
+    display.println(gpsData.HDOP, 1);
+  } else {
+    display.println(F("--"));
+  }
+
+  const uint32_t countdown =
+      gps_status_page::countdownSecondsLeft(gpsStatusState, millis());
+  if (countdown > 0) {
+    display.print(F("LOCKED - ready in "));
+    display.println(countdown);
+  } else {
+    if (gpsData.fix) {
+      display.print(F("FIX (time sync) "));
+    } else {
+      display.print(F("ACQUIRING "));
+    }
+    // Uptime breadcrumb: if the device ever reboots off this page, the
+    // last seconds value on screen identifies which timed path fired
+    // (~5 s = PVT watchdog -> baud recovery, ~10 s = GPS re-detect retry).
+    display.print(millis() / 1000);
+    display.println(F("s"));
+  }
+
+  // Constellation only — the configured/live update rates confused more
+  // than they informed on a boot screen.
+  display.println(F("Mode:GPS-only"));
+
+  if (millis() - lastBatteryCheck > batteryUpdateInterval) {
+    lastBatteryCheck = millis();
+    lastBatteryVoltage = getBatteryVoltage();
+  }
+  display.print(F("Batt:"));
+  display.print(getBatteryPercent(lastBatteryVoltage));
+  display.print(F("% "));
+  display.print(lastBatteryVoltage, 2);
+  display.println(F("V"));
+
+  // ---- Bottom half: per-satellite CNO bars rising from the baseline ----
+  const int kBarAreaH = 28;   // bars live in y [63-kBarAreaH .. 62]
+  const int kBaselineY = 63;
+  display.drawFastHLine(0, kBaselineY, 128, DISPLAY_TEXT_WHITE);
+  sat_bars::Bar bars[sat_bars::kMaxSats];
+  const int barCount = sat_bars::layout(gpsSatCnos, gpsSatCnoCount, 128,
+                                        kBarAreaH, bars, sat_bars::kMaxSats);
+  for (int i = 0; i < barCount; i++) {
+    if (bars[i].h <= 0) continue;
+    display.fillRect(bars[i].x, kBaselineY - bars[i].h, bars[i].w, bars[i].h,
+                     DISPLAY_TEXT_WHITE);
+  }
+
+  safeDisplayUpdate();
+}
+
 void displayPage_main_menu() {
   resetDisplay();
 
-  display.setTextSize(1);
-  display.println(F("   Doves MagicBox"));
-  display.setTextSize(1);
-  display.println();
-  display.setTextSize(2);
+  // Scrolling menu: 3 size-2 rows (48 px) windowed over the items, plus
+  // a size-1 scroll-hint line. Four full size-2 rows fill the panel's
+  // nominal 64 px exactly, but the last row is cut off on real hardware
+  // — so the window follows the selection instead.
+  static const char* const kMenuItems[] = {"Race", "Review", "Transfer", "Camera"};
+  const int itemCount = (int)(sizeof(kMenuItems) / sizeof(kMenuItems[0]));
+  const int visibleRows = 3;
 
-  display.print(menuSelectionIndex == 0 ? "->" : "  ");
-  display.println(F("Race"));
-  display.print(menuSelectionIndex == 1 ? "->" : "  ");
-  display.println(F("Review"));
-  display.print(menuSelectionIndex == 2 ? "->" : "  ");
-  display.println(F("Transfer"));
+  // Keep the selection inside the window (max window start = count - rows).
+  int first = menuSelectionIndex - 1;
+  if (first < 0) first = 0;
+  if (first > itemCount - visibleRows) first = itemCount - visibleRows;
+
+  display.setTextSize(2);
+  for (int i = first; i < first + visibleRows; i++) {
+    display.print(menuSelectionIndex == i ? "->" : "  ");
+    display.println(kMenuItems[i]);
+  }
+
+  // Scroll hints on the spare bottom line.
+  display.setTextSize(1);
+  if (first > 0) {
+    display.print(F("^"));
+  } else {
+    display.print(F(" "));
+  }
+  if (first + visibleRows < itemCount) {
+    display.print(F(" v more"));
+  }
 
   safeDisplayUpdate();
 }
@@ -65,6 +171,190 @@ void displayPage_bluetooth() {
   display.println();
   display.setTextSize(1);
   display.println(F("->Exit"));
+
+  safeDisplayUpdate();
+}
+
+void displayPage_transfer_menu() {
+  resetDisplay();
+
+  display.setTextSize(1);
+  display.println(F("   Transfer Mode"));
+  display.println();
+  display.setTextSize(2);
+
+  display.print(menuSelectionIndex == 0 ? "->" : "  ");
+  display.println(F("Bluetooth"));
+  display.print(menuSelectionIndex == 1 ? "->" : "  ");
+  display.println(F("USB"));
+
+  safeDisplayUpdate();
+}
+
+void displayPage_usb_storage() {
+  resetDisplay();
+
+  display.setTextSize(1);
+  display.println(F("   USB Storage"));
+  display.println();
+
+  display.setTextSize(2);
+  display.println(F(" Drive On"));
+
+  display.setTextSize(1);
+  display.println();
+  display.println(F("Connected to PC."));
+  display.println(F("Drag & drop files."));
+  display.println();
+  display.println(F("->Exit (reboots)"));
+
+  safeDisplayUpdate();
+}
+
+void displayPage_pair_camera() {
+  resetDisplay();
+
+  if (cameraIsPaired()) {
+    // Paired: show the stored serial + Back/Test/Unpair menu. This branch
+    // also takes over the frame after pairing captures a serial (FSM ->
+    // kIdle). The three size-2 rows below start at y=16 and fill to y=64,
+    // so the header stays tight (no blank lines) to keep "Unpair" on-panel.
+    display.setTextSize(1);
+    display.println(F("      CAMERA"));
+
+    char serial[7];
+    cameraPairedSerial(serial, sizeof(serial));
+    display.print(F("Paired: "));
+    display.println(serial);
+
+    // Back first (index 0): the page flips from the pairing screen to
+    // this menu the frame a serial is captured, and a "Cancel" press
+    // landing one frame late must not hit Unpair and erase the
+    // just-captured serial.
+    display.setTextSize(2);
+    display.print(menuSelectionIndex == 0 ? "->" : "  ");
+    display.println(F("Back"));
+    display.print(menuSelectionIndex == 1 ? "->" : "  ");
+    display.println(F("Test"));
+    display.print(menuSelectionIndex == 2 ? "->" : "  ");
+    display.println(F("Unpair"));
+  } else {
+    // Unpaired: live pairing status from the camera FSM.
+    display.setTextSize(1);
+    display.println(F("     PAIR CAMERA"));
+    display.println();
+
+    if (cameraFsmState() == camera_fsm::State::kPairing) {
+      if (cameraRemoteLinkUp()) {
+        display.println(F("Connected -"));
+        display.println(F("reading serial..."));
+      } else {
+        display.println(F("Power on camera"));
+        display.println(F("nearby..."));
+      }
+    } else {
+      // Pairing ended without a capture (e.g. 2-min timeout).
+      display.println(F("Pairing stopped"));
+      display.println();
+    }
+
+    display.println();
+    display.println();
+    display.println();
+    display.println(F("B1:Manual B2:Cancel"));
+  }
+
+  safeDisplayUpdate();
+}
+
+void displayPage_camera_test() {
+  resetDisplay();
+
+  display.setTextSize(1);
+  // Title, with the camera's OWN reported record state (its 0x10 timer) on
+  // the right as an explicit rec:yes/no — proves a Record press actually
+  // started the camera, not just that we sent a frame. (`rec:--` when there's
+  // no fresh observation at all: no R-link, or the camera hasn't pushed a
+  // 0x10 frame yet.)
+  display.print(F("CAMERA TEST rec:"));
+  if (!cameraRecordObservationFresh()) {
+    display.println(F("--"));   // no fresh 0x10 (no link, or camera hasn't reported yet)
+  } else {
+    display.println(cameraObservedRecording() ? F("yes") : F("no"));
+  }
+
+  // Live link status so the tester can see what's actually connected:
+  // R = remote (peripheral) link — the camera connects to us and must be
+  // paired from its own Bluetooth-remote menu for this to come up.
+  // R:UP+ = camera connected AND subscribed to ce82 (buttons deliverable);
+  // R:UP without the + = connected but our button frames go nowhere.
+  display.print(F("R:"));
+  if (cameraRemoteLinkUp()) {
+    display.print(cameraCe82Subscribed() ? F("UP+") : F("UP"));
+  } else {
+    display.print(F("--"));
+  }
+  // Adv: our advert actually on air — a silently-rejected wake/connect
+  // advert shows Adv:-- (the "no blue LED" symptom).
+  display.print(F(" Adv:"));
+  display.print(cameraAdvertisingUp() ? F("UP") : F("--"));
+  // G: the 10 Hz GPS/RMC feed to the camera. SYNC = streaming with a fix,
+  // V = streaming but no lock (voided RMC — still a valid heartbeat), -- =
+  // not streaming. Confirms the GPS link end-to-end. ("R:UP+ Adv:UP G:SYNC"
+  // is 19 chars — fits the 21-char panel width.)
+  display.print(F(" G:"));
+  if (cameraGpsStreaming()) {
+    display.println(gpsData.fix ? F("SYNC") : F("V"));
+  } else {
+    display.println(F("--"));
+  }
+
+  // Four size-1 rows follow — no blank line, so "Back" stays on-panel.
+  // Wake burst only wakes a standby camera (see camera_ble.ino).
+  static const char* const kTestItems[] = {
+    "Wake", "Record", "Power Off", "Back"};
+  const int itemCount = (int)(sizeof(kTestItems) / sizeof(kTestItems[0]));
+  for (int i = 0; i < itemCount; i++) {
+    display.print(menuSelectionIndex == i ? F("->") : F("  "));
+    display.println(kTestItems[i]);
+  }
+
+  safeDisplayUpdate();
+}
+
+void displayPage_camera_serial_entry() {
+  resetDisplay();
+
+  display.setTextSize(1);
+  display.println(F("    CAMERA SERIAL"));
+
+  // Six entry characters, size 2 (12 px per column), left margin 16 px.
+  display.setTextSize(2);
+  display.setCursor(16, 16);
+  for (int i = 0; i < 6; i++) {
+    display.print(cameraSerialEntryBuf[i]);
+  }
+
+  // Caret under the character being edited (cursor 6/7 = OK/CANCEL row).
+  if (cameraSerialEntryCursor < 6) {
+    display.setCursor(16 + cameraSerialEntryCursor * 12, 34);
+    display.print(F("^"));
+  }
+
+  // OK / CANCEL on the bottom line; the cursor target renders inverted.
+  display.setTextSize(1);
+  display.setCursor(28, 56);
+  if (cameraSerialEntryCursor == 6) {
+    display.setTextColor(DISPLAY_TEXT_BLACK, DISPLAY_TEXT_WHITE);
+  }
+  display.print(F(" OK "));
+  display.setTextColor(DISPLAY_TEXT_WHITE);
+  display.print(F("  "));
+  if (cameraSerialEntryCursor == 7) {
+    display.setTextColor(DISPLAY_TEXT_BLACK, DISPLAY_TEXT_WHITE);
+  }
+  display.print(F(" CANCEL "));
+  display.setTextColor(DISPLAY_TEXT_WHITE);
 
   safeDisplayUpdate();
 }
@@ -193,16 +483,9 @@ void displayPage_replay_results() {
     }
 
     display.print(F("Best: "));
-    unsigned long minutes = bestTime / 60000;
-    unsigned long seconds = (bestTime % 60000) / 1000;
-    unsigned long milliseconds = bestTime % 1000;
-    if (minutes > 0) { display.print(minutes); display.print(F(":")); }
-    if (seconds < 10 && minutes > 0) display.print(F("0"));
-    display.print(seconds);
-    display.print(F("."));
-    if (milliseconds < 100) display.print(F("0"));
-    if (milliseconds < 10) display.print(F("0"));
-    display.print(milliseconds);
+    char lapStr[lap_format::kLapTimeStrLen];
+    lap_format::formatLapTime(bestTime, lap_format::kOmit, lapStr, sizeof(lapStr));
+    display.print(lapStr);
     display.print(F(" (L"));
     display.print(bestNum);
     display.println(F(")"));
@@ -211,16 +494,8 @@ void displayPage_replay_results() {
     if (strcmp(dovexReplayOptimal, "N/A") != 0 && dovexReplayOptimal[0] != '\0') {
       display.print(F("Opt: "));
       unsigned long optMs = strtoul(dovexReplayOptimal, NULL, 10);
-      minutes = optMs / 60000;
-      seconds = (optMs % 60000) / 1000;
-      milliseconds = optMs % 1000;
-      if (minutes > 0) { display.print(minutes); display.print(F(":")); }
-      if (seconds < 10 && minutes > 0) display.print(F("0"));
-      display.print(seconds);
-      display.print(F("."));
-      if (milliseconds < 100) display.print(F("0"));
-      if (milliseconds < 10) display.print(F("0"));
-      display.println(milliseconds);
+      lap_format::formatLapTime(optMs, lap_format::kOmit, lapStr, sizeof(lapStr));
+      display.println(lapStr);
     }
   }
 
@@ -362,27 +637,9 @@ void displayPage_gps_lap_time() {
   unsigned long currentLapTimeMs = activeTimerCurrentLapTime();
 
   if (raceStarted) {
-    unsigned long minutes = currentLapTimeMs / 60000;
-    unsigned long seconds = (currentLapTimeMs % 60000) / 1000;
-    unsigned long milliseconds = currentLapTimeMs % 1000;
-    if (minutes > 0) {
-      display.print(minutes);
-      display.print(":");
-    } else {
-      display.print(" ");
-    }
-
-    if (seconds < 10) {
-      display.print(" ");
-    }
-    display.print(seconds);
-    display.print(".");
-    display.print(milliseconds);
-    if (milliseconds < 10) {
-      display.print("00");
-    } else if (milliseconds < 100) {
-      display.print("0");
-    }
+    char lapStr[lap_format::kLapTimeStrLen];
+    lap_format::formatLapTime(currentLapTimeMs, lap_format::kSpace, lapStr, sizeof(lapStr));
+    display.print(lapStr);
   } else {
     display.print("  N/A");
   }
@@ -467,28 +724,10 @@ void displayPage_gps_best_lap() {
   int bestLapNum = activeTimerBestLapNumber();
 
   if (bestRaceStarted && bestLaps > 0) {
-    unsigned long minutes = bestLapTimeMs / 60000;
-    unsigned long seconds = (bestLapTimeMs % 60000) / 1000;
-    unsigned long milliseconds = bestLapTimeMs % 1000;
     display.setTextSize(3);
-    if (minutes > 0) {
-      display.print(minutes);
-      display.print(":");
-    } else {
-      display.print(" ");
-    }
-
-    if (seconds < 10) {
-      display.print(" ");
-    }
-    display.print(seconds);
-    display.print(".");
-    display.print(milliseconds);
-    if (milliseconds < 10) {
-      display.print("00");
-    } else if (milliseconds < 100) {
-      display.print("0");
-    }
+    char lapStr[lap_format::kLapTimeStrLen];
+    lap_format::formatLapTime(bestLapTimeMs, lap_format::kSpace, lapStr, sizeof(lapStr));
+    display.print(lapStr);
 
     display.setTextSize(2);
     display.print(F("\n\n"));
@@ -561,28 +800,9 @@ void displayPage_optimal_lap() {
     display.setCursor(0, lineHeight);
     display.setTextSize(2);
 
-    unsigned long minutes = optLapTimeMs / 60000;
-    unsigned long seconds = (optLapTimeMs % 60000) / 1000;
-    unsigned long milliseconds = optLapTimeMs % 1000;
-
-    if (minutes > 0) {
-      display.print(minutes);
-      display.print(":");
-    } else {
-      display.print(" ");
-    }
-
-    if (seconds < 10) {
-      display.print(" ");
-    }
-    display.print(seconds);
-    display.print(".");
-    display.print(milliseconds);
-    if (milliseconds < 10) {
-      display.print("00");
-    } else if (milliseconds < 100) {
-      display.print("0");
-    }
+    char lapStr[lap_format::kLapTimeStrLen];
+    lap_format::formatLapTime(optLapTimeMs, lap_format::kSpace, lapStr, sizeof(lapStr));
+    display.print(lapStr);
 
     display.setCursor(0, lineHeight+20);
     display.setTextSize(1);
@@ -629,10 +849,6 @@ void displayPage_gps_lap_list() {
     int pageEnd = pageStart + lapsPerPage;
     for (int lap = pageStart; lap < pageEnd; ++lap) {
       if (lap < lapHistoryCount) {
-        unsigned long minutes = lapHistory[lap] / 60000;
-        unsigned long seconds = (lapHistory[lap] % 60000) / 1000;
-        unsigned long milliseconds = lapHistory[lap] % 1000;
-
         int actualLap = lap + 1;
         if (actualLap < 10) {
           display.print(F(" "));
@@ -641,12 +857,9 @@ void displayPage_gps_lap_list() {
         display.setTextSize(1);
         display.print(F(" "));
         display.setTextSize(2);
-        display.print(minutes);
-        display.print(F(":"));
-        display.print(seconds);
-        display.print(F("."));
-        display.print(milliseconds);
-        display.println();
+        char lapStr[lap_format::kLapTimeStrLen];
+        lap_format::formatLapTime(lapHistory[lap], lap_format::kShow, lapStr, sizeof(lapStr));
+        display.println(lapStr);
       }
     }
   } else {
@@ -743,6 +956,62 @@ void displayPage_internal_fault() {
   display.println(F(" Please Reboot Device"));
   display.println(F(""));
   display.println(internalNotification);
+  safeDisplayUpdate();
+}
+
+// Boot format-confirm page (PAGE_SD_FORMAT): the SD card answers but has
+// no mountable FAT volume. Renders the hold-Select instructions + live
+// countdown from the sd_format_page unit. The in-progress/done screens
+// are painted by sdPerformFormat() via displayPage_sd_format_progress()
+// (the format blocks the main loop, so displayLoop() never runs then).
+void displayPage_sd_format() {
+  resetDisplay();
+  display.setCursor(0, 0);
+
+  // Flashing header, same idiom as the fault/warning pages.
+  notificationFlash = notificationFlash == true ? false : true;
+  display.setTextSize(2);
+  if (notificationFlash) {
+    display.setTextColor(DISPLAY_TEXT_BLACK, DISPLAY_TEXT_WHITE);
+  }
+  display.println(F("SD FORMAT"));
+  display.setTextWrap(true);
+  display.setTextColor(DISPLAY_TEXT_WHITE);
+  display.setTextSize(1);
+  if (sdFormatLastFailed) {
+    display.println(F("Format FAILED - retry"));
+  } else {
+    display.println(F("Card is not formatted"));
+  }
+
+  uint32_t secondsLeft = sd_format_page::holdSecondsLeft(sdFormatState, millis());
+  if (secondsLeft > 0) {
+    display.println(F(""));
+    display.print(F("Formatting in "));
+    display.print(secondsLeft);
+    display.println(F("s..."));
+    display.println(F("Keep holding SELECT"));
+  } else {
+    display.println(F("Hold SELECT 3s to"));
+    display.println(F("format the card"));
+    display.println(F("(ERASES EVERYTHING)"));
+  }
+  safeDisplayUpdate();
+}
+
+// Static two-line status screen used by sdPerformFormat() for its
+// "formatting" and "format OK" frames — painted directly because the
+// format blocks the main loop and displayLoop() cannot run.
+void displayPage_sd_format_progress(const __FlashStringHelper* line1,
+                                    const __FlashStringHelper* line2) {
+  resetDisplay();
+  display.setCursor(0, 0);
+  display.setTextSize(2);
+  display.println(F("SD FORMAT"));
+  display.setTextSize(1);
+  display.println(F(""));
+  display.println(line1);
+  display.println(line2);
   safeDisplayUpdate();
 }
 

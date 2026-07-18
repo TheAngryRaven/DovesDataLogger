@@ -4,6 +4,7 @@
 ///////////////////////////////////////////
 
 #include "bluetooth.h"
+#include "camera_ble.h"
 #include "filename_validator.h"
 #include "firmware_ota.h"
 
@@ -24,14 +25,51 @@ static volatile uint16_t trackUploadOffset = 0;
 static volatile bool trackDeletePending = false;
 static char trackDeleteFilename[25];
 
+// Deferred file command buffer (BLE callback -> main loop). Carries the
+// SD-touching commands (LIST / GET: / DELETE: / TLIST / TGET:) so SdFat is
+// only ever driven from the main-loop task — the Bluefruit callback task
+// can preempt an in-flight SD write, and SdFat is not thread-safe.
+static volatile bool fileCmdPending = false;
+static char fileCmdBuffer[65];
+
+// Queue an SD-touching command for BLUETOOTH_LOOP(). Returns false if one
+// is already pending — the caller sends its protocol-appropriate busy reply.
+// The buffer is stable once fileCmdPending is set: the callback refuses new
+// commands until the main loop has processed it and cleared the flag.
+static bool deferFileCommand(const char* cmd) {
+  if (fileCmdPending) return false;
+  strncpy(fileCmdBuffer, cmd, sizeof(fileCmdBuffer) - 1);
+  fileCmdBuffer[sizeof(fileCmdBuffer) - 1] = '\0';
+  fileCmdPending = true;
+  return true;
+}
+
 // Set by the disconnect callback; BLUETOOTH_LOOP() performs the SD teardown
 // (close transfer/staging file, release SD, abort OTA) and the auto-reboot
 // on the main loop, so SdFat is only ever touched by one task.
 static volatile bool bleDisconnectCleanupPending = false;
 
+// True once a transfer peer actually DROVE the file/settings/OTA service
+// (any fileRequestChar write while the transfer owns the radio). Gates the
+// auto-reboot-on-disconnect: a bonded camera that connects to the transfer
+// advert (the radio has one BD_ADDR, so the X4 can chase it) and vets our
+// GATT then drops must NOT reboot the logger out of the user's transfer
+// session — repeatedly, if the camera keeps retrying (#1). A peer that never
+// touched the service also held no SD, so skipping the teardown is safe.
+static volatile bool bleTransferEngaged = false;
+
 void bleConnectCallback(uint16_t conn_handle) {
+  // Camera-owned link (the X4 connecting to our remote GATT) — route to the
+  // camera module and skip everything below: bleConnected and the MTU/PHY/
+  // DLE negotiation are transfer-only.
+  if (bleOwner == BLE_OWNER_CAMERA) {
+    cameraBleOnConnect(conn_handle);
+    return;
+  }
+
   debugln(F("BLE: Device connected!"));
   bleConnected = true;
+  bleTransferEngaged = false;  // this peer hasn't used the service yet
 
   BLEConnection* connection = Bluefruit.Connection(conn_handle);
 
@@ -62,6 +100,20 @@ void bleConnectCallback(uint16_t conn_handle) {
 }
 
 void bleDisconnectCallback(uint16_t conn_handle, uint8_t reason) {
+  // Camera link — route to the camera module and return. This makes the
+  // transfer teardown below (and with it the deferred auto-reboot in
+  // BLUETOOTH_LOOP()) structurally unreachable for camera links: a camera
+  // dropping off must never reboot the logger mid-session. Matched BY
+  // HANDLE first, not owner: a teardown-initiated camera disconnect
+  // completes asynchronously, so its event can land after ownership has
+  // already moved to NONE/TRANSFER (e.g. CAMERA_FORCE_RELEASE()
+  // immediately followed by BLE_SETUP() on the transfer page) — owner
+  // routing alone would misdeliver it here and reboot the device.
+  if (cameraBleOwnsConnHandle(conn_handle) || bleOwner == BLE_OWNER_CAMERA) {
+    cameraBleOnDisconnect(conn_handle, reason);
+    return;
+  }
+
   debugln(F("BLE: Disconnected!"));
   bleConnected = false;
   bleNegotiatedMtu = 23; // Reset to default
@@ -73,6 +125,10 @@ void bleDisconnectCallback(uint16_t conn_handle, uint8_t reason) {
   trackUploadComplete = false;
   trackUploadError = false;
   trackDeletePending = false;
+  // Drop any queued-but-unprocessed commands so they can't fire on behalf
+  // of a peer that is no longer connected (or after a reconnect).
+  fileCmdPending = false;
+  settingsCmdPending = false;
 
   // Everything that touches SdFat — closing the in-flight transfer/staging
   // file, releasing SD access, aborting the OTA — plus the auto-reboot is
@@ -81,9 +137,16 @@ void bleDisconnectCallback(uint16_t conn_handle, uint8_t reason) {
   // and SdFat is not thread-safe. If this was a local BLE_STOP() (which sets
   // bleActive=false before disconnecting), BLE_STOP() already did the
   // teardown on the main loop, so there is nothing to defer.
-  if (bleActive) {
+  //
+  // Only reboot for a peer that actually USED the transfer service. A bonded
+  // camera can land on the transfer advert (shared BD_ADDR) and be routed
+  // here as "the phone" when it drops; without this gate its disconnect would
+  // reboot the logger mid-transfer, over and over (#1). A never-engaged peer
+  // also held no SD, so there is nothing to tear down.
+  if (bleActive && bleTransferEngaged) {
     bleDisconnectCleanupPending = true;
   }
+  bleTransferEngaged = false;  // reset for the next peer
 }
 
 // Forward declaration for callback
@@ -120,7 +183,58 @@ void bleSetupFileService() {
   fileStatusChar.begin();
 }
 
-void bleStartAdvertising() {
+void bleAdvFinalizePadded() {
+  // WORKAROUND for a Bluefruit 0.21.0 core bug (fixed upstream in
+  // Adafruit 1.7.0, but the Seeed fork ships the broken version):
+  // BLEAdvertising::_start() initializes its ble_gap_adv_data_t as a
+  // function-local STATIC, so both packet .len fields freeze at whatever
+  // the FIRST advert of the boot carried. Any later advert of a
+  // different length goes on air truncated or with a stale tail — a
+  // malformed PDU every receiver silently discards, while all our API
+  // calls report success. (This is what broke the camera wake advert:
+  // a 28-byte connect advert first froze the length, then the 31-byte
+  // wake PDU lost its last 3 bytes on air.)
+  //
+  // Defeat it by construction: EVERY advert in this firmware is padded
+  // to exactly 31+31 bytes before start(), so the frozen length is
+  // always correct. Zero padding after the last AD structure is
+  // explicitly legal (BT Core Spec Vol 3 Part C §11: the non-significant
+  // part is all-zero octets). Call this after building the payload
+  // (additive or raw setData) and immediately before Advertising.start().
+  uint8_t buf[BLE_GAP_ADV_SET_DATA_SIZE_MAX] = {0};
+  uint8_t n = Bluefruit.Advertising.count();
+  memcpy(buf, Bluefruit.Advertising.getData(), n);
+  Bluefruit.Advertising.setData(buf, sizeof(buf));
+
+  memset(buf, 0, sizeof(buf));
+  n = Bluefruit.ScanResponse.count();
+  memcpy(buf, Bluefruit.ScanResponse.getData(), n);
+  Bluefruit.ScanResponse.setData(buf, sizeof(buf));
+}
+
+void bleApplyTransferAdvertising() {
+  // Full rebuild, not an incremental start: the camera module may have
+  // owned the advert set (name + payload) since the last transfer session,
+  // so drop whatever is there and reconstruct the transfer advert exactly.
+  Bluefruit.Advertising.stop();  // safe no-op if not advertising
+  Bluefruit.Advertising.clearData();
+  Bluefruit.ScanResponse.clearData();
+
+  char bleName[32];
+  if (getSetting("bluetooth_name", bleName, sizeof(bleName))) {
+    debug(F("BLE: Name from settings: "));
+    debugln(bleName);
+    Bluefruit.setName(bleName);
+  } else {
+    debugln(F("BLE: WARNING - bluetooth_name not found, using fallback"));
+    Bluefruit.setName("DovesDataLogger");
+  }
+
+  // Force connectable: the shared Advertising object may have been left
+  // non-connectable by a camera wake burst (see kStartWakeBurst in
+  // camera_ble.ino), which would otherwise make this transfer advert
+  // unconnectable.
+  Bluefruit.Advertising.setType(BLE_GAP_ADV_TYPE_CONNECTABLE_SCANNABLE_UNDIRECTED);
   Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
   Bluefruit.Advertising.addTxPower();
   Bluefruit.Advertising.addService(fileService);
@@ -129,15 +243,18 @@ void bleStartAdvertising() {
   Bluefruit.Advertising.restartOnDisconnect(true);
   Bluefruit.Advertising.setInterval(32, 244);
   Bluefruit.Advertising.setFastTimeout(30);
+  bleAdvFinalizePadded();  // every advert must be 31+31 — see the helper
   Bluefruit.Advertising.start(0);
 }
 
 void bleSendFileList() {
-  // BLE callbacks run in a separate FreeRTOS task from loop().
-  // SdFat is NOT thread-safe — concurrent access from BLE task and main
-  // loop (e.g. CSV logging) can corrupt internal state.
-  // Check if SD is in use and return BUSY if so.
-  if (currentSDAccess != SD_ACCESS_NONE) {
+  // Runs on the main loop (deferred via fileCmdBuffer). Hold the SD lock
+  // for the entire walk — the delay(10) per entry yields to other tasks,
+  // so ownership must be held, not just peeked. The explicit free-check
+  // first keeps the idempotent/preempting acquire from piggybacking on an
+  // active transfer or stealing a track parse.
+  if (currentSDAccess != SD_ACCESS_NONE ||
+      !acquireSDAccess(SD_ACCESS_BLE_TRANSFER)) {
     debugln(F("BLE: SD busy, cannot list files"));
     fileListChar.notify((uint8_t*)"BUSY", 4);
     return;
@@ -146,6 +263,7 @@ void bleSendFileList() {
   File32 root = SD.open("/");
   if (!root) {
     debugln(F("BLE: Failed to open root directory"));
+    releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
     fileListChar.notify((uint8_t*)"BUSY", 4);
     return;
   }
@@ -181,6 +299,7 @@ void bleSendFileList() {
     entry.close();
   }
   root.close();
+  releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
 
   fileListChar.notify((uint8_t*)"END", 3);
   debug(F("BLE: File list sent, "));
@@ -189,7 +308,9 @@ void bleSendFileList() {
 }
 
 void bleSendTrackList() {
-  if (currentSDAccess != SD_ACCESS_NONE) {
+  // Same locking discipline as bleSendFileList() — see the comment there.
+  if (currentSDAccess != SD_ACCESS_NONE ||
+      !acquireSDAccess(SD_ACCESS_BLE_TRANSFER)) {
     debugln(F("BLE: SD busy, cannot list tracks"));
     fileStatusChar.notify((uint8_t*)"TERR:SD_BUSY", 12);
     return;
@@ -198,6 +319,7 @@ void bleSendTrackList() {
   File32 trackDir2 = SD.open("/TRACKS/");
   if (!trackDir2) {
     debugln(F("BLE: Failed to open TRACKS directory"));
+    releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
     fileStatusChar.notify((uint8_t*)"TEND", 4);
     return;
   }
@@ -222,6 +344,7 @@ void bleSendTrackList() {
     entry.close();
   }
   trackDir2.close();
+  releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
 
   fileStatusChar.notify((uint8_t*)"TEND", 4);
   debug(F("BLE: Track list sent, "));
@@ -271,6 +394,20 @@ void bleDeleteFile(const char* filename) {
   debug(filename);
   debugln(F("]"));
 
+  // An active transfer holds SD_ACCESS_BLE_TRANSFER, and the same-mode
+  // re-acquire below would succeed — guard explicitly so a DELETE can't
+  // remove the file being streamed and then drop the transfer's lock.
+  if (bleTransferInProgress) {
+    debugln(F("BLE: transfer in progress, cannot delete"));
+    fileStatusChar.notify((uint8_t*)"BUSY", 4);
+    return;
+  }
+  if (!acquireSDAccess(SD_ACCESS_BLE_TRANSFER)) {
+    debugln(F("BLE: SD busy, cannot delete"));
+    fileStatusChar.notify((uint8_t*)"BUSY", 4);
+    return;
+  }
+
   if (SD.exists(filename)) {
     if (SD.remove(filename)) {
       debugln(F("BLE: File deleted successfully"));
@@ -283,9 +420,21 @@ void bleDeleteFile(const char* filename) {
     debugln(F("BLE: File not found"));
     fileStatusChar.notify((uint8_t*)"NOT_FOUND", 9);
   }
+
+  releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
 }
 
 void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, uint16_t len) {
+  // Only serve the file service while the transfer page owns the radio. A
+  // peer that connects during camera mode must not queue deferred SD work —
+  // BLUETOOTH_LOOP() is gated on bleActive and would never drain it.
+  if (bleOwner != BLE_OWNER_TRANSFER) return;
+
+  // A write to the request characteristic means this is a genuine transfer
+  // peer (the phone app), not a bonded camera vetting our GATT — arm the
+  // reboot-on-disconnect gate (#1).
+  bleTransferEngaged = true;
+
   char buffer[65];
   memset(buffer, 0, sizeof(buffer));
   uint16_t copyLen = len < 64 ? len : 64;
@@ -327,12 +476,29 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
     return;
   }
 
+  // A command longer than the parse buffer was truncated by the memcpy
+  // above. The raw-data paths (track upload / OTA image) returned already,
+  // so anything this long is a malformed command — never a valid filename
+  // command (those are FAT-short). Reject rather than validate and act on a
+  // silently-mangled name. (len <= 64 fits buffer[65] with NUL intact.)
+  if (len >= sizeof(buffer)) {
+    debugln(F("BLE: command too long, rejecting"));
+    fileStatusChar.notify((uint8_t*)"ERROR", 5);
+    return;
+  }
+
   debug(F("BLE: Received command: ["));
   debug(buffer);
   debugln(F("]"));
 
+  // File commands (LIST/GET/DELETE/TLIST/TGET) all touch SD, so they are
+  // DEFERRED to BLUETOOTH_LOOP() via deferFileCommand() — SdFat must never
+  // run in this Bluefruit callback task. Filename validation is RAM-only
+  // and stays here so bad names are rejected immediately.
   if (strncmp(buffer, "LIST", 4) == 0) {
-    bleSendFileList();
+    if (!deferFileCommand(buffer)) {
+      fileListChar.notify((uint8_t*)"BUSY", 4);
+    }
   } else if (strncmp(buffer, "GET:", 4) == 0) {
     // Skip "GET:" prefix and trim leading whitespace
     char* filename = buffer + 4;
@@ -343,7 +509,9 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
       fileStatusChar.notify((uint8_t*)"ERROR", 5);
       return;
     }
-    bleStartFileTransfer(filename);
+    if (!deferFileCommand(buffer)) {
+      fileStatusChar.notify((uint8_t*)"BUSY", 4);
+    }
   } else if (strncmp(buffer, "DELETE:", 7) == 0) {
     // Skip "DELETE:" prefix and trim leading whitespace
     char* filename = buffer + 7;
@@ -353,7 +521,9 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
       fileStatusChar.notify((uint8_t*)"NOT_FOUND", 9);
       return;
     }
-    bleDeleteFile(filename);
+    if (!deferFileCommand(buffer)) {
+      fileStatusChar.notify((uint8_t*)"BUSY", 4);
+    }
   } else if (strcmp(buffer, "SLIST") == 0 ||
              strncmp(buffer, "SGET:", 5) == 0 ||
              strncmp(buffer, "SSET:", 5) == 0 ||
@@ -369,7 +539,9 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
 
   // Track management commands
   } else if (strcmp(buffer, "TLIST") == 0) {
-    bleSendTrackList();
+    if (!deferFileCommand(buffer)) {
+      fileStatusChar.notify((uint8_t*)"TERR:BUSY", 9);
+    }
   } else if (strncmp(buffer, "TGET:", 5) == 0) {
     // The name is spliced into "/TRACKS/%s"; validate it so it can't
     // climb out of /TRACKS via ../ or carry FAT-unsafe characters.
@@ -378,9 +550,9 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
       fileStatusChar.notify((uint8_t*)"TERR:BAD_NAME", 13);
       return;
     }
-    char filepath[FILEPATH_MAX];
-    snprintf(filepath, sizeof(filepath), "/TRACKS/%s", buffer + 5);
-    bleStartFileTransfer(filepath);
+    if (!deferFileCommand(buffer)) {
+      fileStatusChar.notify((uint8_t*)"TERR:BUSY", 9);
+    }
   } else if (strncmp(buffer, "TPUT:", 5) == 0) {
     if (trackUploadActive || bleTransferInProgress) {
       fileStatusChar.notify((uint8_t*)"TERR:BUSY", 9);
@@ -430,42 +602,51 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
   }
 }
 
-void BLE_SETUP() {
-  if (bleInitialized) {
-    // Already initialized, just start advertising
-    debugln(F("BLE: Restarting advertising..."));
-    Bluefruit.autoConnLed(true);
-    Bluefruit.setConnLedInterval(250); // Blink every 250ms when connected
-    Bluefruit.Advertising.start(0);
-    bleActive = true;
-    return;
-  }
+// Just-Works pairing result trace (Bluefruit pair-complete callback).
+// Signature is plain integers, so no Bluefruit-type forward declaration is
+// needed. auth_status == BLE_GAP_SEC_STATUS_SUCCESS (0) means bonded.
+void blePairCompleteCallback(uint16_t conn_hdl, uint8_t auth_status) {
+  (void)conn_hdl;
+  debug(F("BLE: pairing complete, auth_status=0x"));
+  debugln(auth_status, HEX);
+}
 
-  debugln(F("BLE: Initializing Bluetooth..."));
+void bleCoreEnsureInit() {
+  if (bleInitialized) return;
+
+  debugln(F("BLE: Initializing Bluetooth core..."));
 
   // Custom BLE config for max file transfer throughput:
   // MTU 247, event_len 100 (125ms max radio time per event),
   // HVN TX queue 10 (up from BANDWIDTH_MAX's 3 — deeper notification pipeline),
   // WrCmd queue 1 (default, we don't use write commands).
   Bluefruit.configPrphConn(247, 100, 10, 1);
-  Bluefruit.begin();
+  // 1 peripheral + 0 central: the camera feature is now a pure PERIPHERAL
+  // remote emulation (the camera connects to US and we notify our ce82
+  // buttons), so the old central slot for the X4's be80 control link is
+  // gone. Both the transfer service and the camera remote are peripherals
+  // sharing the single peripheral slot via bleOwner.
+  Bluefruit.begin(1, 0);
   Bluefruit.setTxPower(4);
-  char bleName[32];
-  if (getSetting("bluetooth_name", bleName, sizeof(bleName))) {
-    debug(F("BLE: Name from settings: "));
-    debugln(bleName);
-    Bluefruit.setName(bleName);
-  } else {
-    debugln(F("BLE: WARNING - bluetooth_name not found, using fallback"));
-    Bluefruit.setName("DovesDataLogger");
-  }
-
-  // Enable connection LED
-  Bluefruit.autoConnLed(true);
-  Bluefruit.setConnLedInterval(250);
 
   Bluefruit.Periph.setConnectCallback(bleConnectCallback);
   Bluefruit.Periph.setDisconnectCallback(bleDisconnectCallback);
+
+  // Just-Works pairing acceptance (peripheral). The genuine Insta360 GPS
+  // Remote link is encrypted + bonded, and a captured X4 brings up
+  // encryption immediately on connect, so the camera (as central) may
+  // withhold its ce82 CCCD subscription until the link is secured. Advertise
+  // NoInputNoOutput I/O capabilities and no MITM requirement so the
+  // SoftDevice completes Just-Works pairing without any on-device prompt.
+  // This is link-level only — NO characteristic is marked encrypted
+  // (SECMODE_OPEN everywhere), so the file-transfer service keeps working
+  // fully open/unbonded. NOTE (Bluefruit 0.21.0 assumption): NoInputNoOutput
+  // + MITM-off is already Bluefruit's default and yields Just-Works; setting
+  // it explicitly documents intent and guards against a future default
+  // change. The pair-complete callback is trace-only.
+  Bluefruit.Security.setIOCaps(false, false, false);  // display, yes/no, keyboard
+  Bluefruit.Security.setMITM(false);
+  Bluefruit.Security.setPairCompleteCallback(blePairCompleteCallback);
 
   // Set connection interval (7.5-15ms)
   Bluefruit.Periph.setConnInterval(6, 12);
@@ -490,9 +671,40 @@ void BLE_SETUP() {
   bledis.begin();
 
   bleSetupFileService();
-  bleStartAdvertising();
+
+  // Camera remote GATT (peripheral ce80 + D0FF services) plus the central
+  // client objects for the camera's be80 service. GATT services can only
+  // be added before advertising starts, so they are registered here even
+  // when the user never touches the camera feature.
+  cameraBleRegisterServices();
 
   bleInitialized = true;
+
+  // Deliberately NO advertising, NO device name, NO conn-LED here — the
+  // owner (transfer page or camera module) applies its own advert set.
+}
+
+void BLE_SETUP() {
+  // Parked transfer — bump the SD clock for faster file transfers. Reverted
+  // in BLE_STOP() (and by the auto-reboot on phone disconnect).
+  sdSetTransferSpeed(true);
+
+  debugln(F("BLE: Starting transfer mode..."));
+
+  bleCoreEnsureInit();
+
+  // Take the radio for the transfer service (main-loop context — the camera
+  // module released its links via CAMERA_FORCE_RELEASE() before this page
+  // opened). The full advert rebuild below is what makes re-entry correct
+  // even when the camera owned the advert set in between.
+  bleOwner = BLE_OWNER_TRANSFER;
+
+  // Enable connection LED
+  Bluefruit.autoConnLed(true);
+  Bluefruit.setConnLedInterval(250); // Blink every 250ms when connected
+
+  bleApplyTransferAdvertising();
+
   bleActive = true;
 
   debugln(F("BLE: Ready for connection!"));
@@ -516,7 +728,24 @@ void BLE_STOP() {
     releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
   }
   bleTransferInProgress = false;
+  bleTransferEngaged = false;  // session is over — no reboot owed
   fwReset();  // abort any in-flight OTA (closes staging file, frees SD)
+
+  // Drop queued-but-unprocessed commands so a stale one can't execute on
+  // the next BLE session (BLUETOOTH_LOOP stops running once bleActive is
+  // false, so nothing would clear them otherwise).
+  fileCmdPending = false;
+  settingsCmdPending = false;
+
+  // Disarm auto-restart BEFORE disconnecting. bleApplyTransferAdvertising()
+  // set restartOnDisconnect(true) so a mid-session phone drop re-advertises;
+  // but here we are deliberately tearing the transfer service down. The
+  // disconnect below is async, so if we left it armed Bluefruit's internal
+  // handler would restart an ownerless transfer advert AFTER we stop it —
+  // the phone would reconnect into a mute session (owner already NONE) and
+  // the occupied peripheral slot would block camera auto-record until a
+  // power cycle.
+  Bluefruit.Advertising.restartOnDisconnect(false);
 
   // Disconnect any connected device
   if (Bluefruit.connected()) {
@@ -535,7 +764,41 @@ void BLE_STOP() {
   bleConnected = false;
   // bleActive already set false at top of BLE_STOP()
 
+  // Release radio ownership. The camera module re-acquires it on its next
+  // advertising action (in CAMERA_LOOP()) — nothing to hand off here.
+  bleOwner = BLE_OWNER_NONE;
+
+  // Restore the EMI-safe SD clock now that the transfer session is over.
+  sdSetTransferSpeed(false);
+
   debugln(F("BLE: Bluetooth stopped"));
+}
+
+// Execute a deferred file command (main-loop context — the only place
+// SdFat may be touched). The filename was validated in the callback and
+// the buffer is stable while fileCmdPending is set.
+static void processFileCommand() {
+  debug(F("BLE: Processing file cmd: ["));
+  debug(fileCmdBuffer);
+  debugln(F("]"));
+
+  if (strncmp(fileCmdBuffer, "LIST", 4) == 0) {
+    bleSendFileList();
+  } else if (strncmp(fileCmdBuffer, "GET:", 4) == 0) {
+    char* filename = fileCmdBuffer + 4;
+    while (*filename == ' ') filename++;
+    bleStartFileTransfer(filename);
+  } else if (strncmp(fileCmdBuffer, "DELETE:", 7) == 0) {
+    char* filename = fileCmdBuffer + 7;
+    while (*filename == ' ') filename++;
+    bleDeleteFile(filename);
+  } else if (strcmp(fileCmdBuffer, "TLIST") == 0) {
+    bleSendTrackList();
+  } else if (strncmp(fileCmdBuffer, "TGET:", 5) == 0) {
+    char filepath[FILEPATH_MAX];
+    snprintf(filepath, sizeof(filepath), "/TRACKS/%s", fileCmdBuffer + 5);
+    bleStartFileTransfer(filepath);
+  }
 }
 
 void processSettingsCommand() {
@@ -690,6 +953,11 @@ void processTrackUpload() {
   char filepath[FILEPATH_MAX];
   snprintf(filepath, sizeof(filepath), "/TRACKS/%s", trackUploadFilename);
 
+  // Belt-and-suspenders: buildTrackList() provisions the folder at boot,
+  // but re-ensure it before every upload so a missing folder can never
+  // fail a TPUT with WRITE_FAIL. Return deliberately ignored.
+  sdEnsureTracksFolder();
+
   // Delete existing file if present
   if (SD.exists(filepath)) {
     SD.remove(filepath);
@@ -799,6 +1067,14 @@ void BLUETOOTH_LOOP() {
   if (settingsCmdPending) {
     processSettingsCommand();
     settingsCmdPending = false;
+  }
+
+  // Process deferred file commands (LIST/GET/DELETE/TLIST/TGET) — the only
+  // place these touch SdFat. A GET lands here before the burst-send block
+  // below, so a transfer still starts in the same loop iteration.
+  if (fileCmdPending) {
+    processFileCommand();
+    fileCmdPending = false;
   }
 
   // Process track upload state machine

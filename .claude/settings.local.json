@@ -29,7 +29,9 @@
       "Bash(git status:*)",
       "WebFetch(domain:www.seeedstudio.com)",
       "WebFetch(domain:www.cnx-software.com)",
-      "WebFetch(domain:docs.cirkitdesigner.com)"
+      "WebFetch(domain:docs.cirkitdesigner.com)",
+      "mcp__Claude_Code_Remote__add_repo",
+      "mcp__Claude_Code_Remote__register_repo_root"
     ]
   }
 }
