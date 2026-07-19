@@ -170,3 +170,65 @@ TEST_CASE("sensoregg_protocol - celsiusToFahrenheit propagates NaN") {
     // still render '---' after conversion, never a numeric artifact.
     CHECK(std::isnan(celsiusToFahrenheit(std::numeric_limits<float>::quiet_NaN())));
 }
+
+// ---------------------------------------------------------------------------
+// Zombie-egg detection (frozen sequence counter, 2026-07-19 field incident)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("sensoregg_protocol - seq monitor: advancing sequence stays live") {
+    SeqMonitor m;
+    CHECK_FALSE(seqMonitorLive(m, 0));  // nothing fed yet
+    uint32_t t = 1000;
+    for (uint16_t s = 100; s < 130; s++) {
+        seqMonitorFeed(m, s, t);
+        CHECK(seqMonitorLive(m, t));
+        t += 100;  // 10 Hz packets
+        CHECK(seqMonitorLive(m, t));  // still inside kStalenessMs
+    }
+}
+
+TEST_CASE("sensoregg_protocol - seq monitor: frozen sequence goes dead at 1 s") {
+    // The hung-egg case: packets keep arriving (radio alive) but the app
+    // stopped updating the payload, so every packet carries the same seq.
+    SeqMonitor m;
+    seqMonitorFeed(m, 42, 1000);
+    CHECK(seqMonitorLive(m, 1000));
+    uint32_t t = 1000;
+    for (int i = 0; i < 30; i++) {  // 3 s of identical packets at 10 Hz
+        t += 100;
+        seqMonitorFeed(m, 42, t);
+    }
+    CHECK_FALSE(seqMonitorLive(m, t));                       // dead
+    CHECK(seqMonitorLive(m, 1000 + kStalenessMs - 1));       // was live until 1 s
+    CHECK_FALSE(seqMonitorLive(m, 1000 + kStalenessMs));     // exact boundary
+}
+
+TEST_CASE("sensoregg_protocol - seq monitor: recovery after the egg reboots") {
+    SeqMonitor m;
+    seqMonitorFeed(m, 500, 1000);
+    for (uint32_t t = 1100; t <= 5000; t += 100) seqMonitorFeed(m, 500, t);
+    CHECK_FALSE(seqMonitorLive(m, 5000));   // hung
+    seqMonitorFeed(m, 0, 5100);             // egg power-cycled: seq restarts
+    CHECK(seqMonitorLive(m, 5100));
+}
+
+TEST_CASE("sensoregg_protocol - seq monitor: uint16 wrap counts as a change") {
+    // At 10 Hz the sequence wraps every ~109 min; 65535 -> 0 must read as
+    // life, not a freeze.
+    SeqMonitor m;
+    seqMonitorFeed(m, 65535, 1000);
+    seqMonitorFeed(m, 0, 1100);
+    CHECK(m.lastSeq == 0);
+    CHECK(seqMonitorLive(m, 1100));
+}
+
+TEST_CASE("sensoregg_protocol - seq monitor: duplicate reception is not a freeze") {
+    // The scanner can catch the same advertising event twice; a repeated
+    // seq within the staleness window must not kill a live egg.
+    SeqMonitor m;
+    seqMonitorFeed(m, 7, 1000);
+    seqMonitorFeed(m, 7, 1050);   // duplicate 50 ms later
+    seqMonitorFeed(m, 8, 1200);   // next real update
+    CHECK(seqMonitorLive(m, 1200));
+    CHECK(seqMonitorLive(m, 1200 + kStalenessMs - 1));
+}

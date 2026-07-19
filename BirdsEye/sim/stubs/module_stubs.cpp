@@ -90,6 +90,7 @@ void SENSOREGG_SETUP() {}
 void SENSOREGG_LOOP() {}
 
 bool sensoreggLinkUp() { return false; }
+bool sensoreggAppHung() { return false; }
 float sensoreggEgtC() { return NAN; }
 float sensoreggJunctionC() { return NAN; }
 bool sensoreggTcFault() { return false; }
