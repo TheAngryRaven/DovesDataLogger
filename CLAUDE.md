@@ -262,8 +262,14 @@ loop()  ~250 Hz
   not created from the module's placeholder date — this prevents garbage-named
   files (e.g. `20210307_0000.dovex`) that collided every boot and corrupted on
   reboot. Until the lock arrives, `updateGpsLockHold()` pins the user to the
-  tachometer page (engine running) and logging waits; a failed open is retried
+  tachometer page (engine running; the page shows `WAITING GPS LOCK..` so the
+  pin never reads as a crash) and logging waits; a failed open is retried
   at 1 Hz and a write failure stops logging — **none fault out of race mode**.
+  The pin **releases after 10 s of engine-off** (session stays active; a
+  restart re-latches), and while it is active `checkAutoIdle()` may end the
+  fileless session even if the camera is recording — the recording yield
+  otherwise left no session-ender and the device looked bricked until a
+  power cycle (2026-07-19 field incident).
 - Time helpers: `getGpsTimeInMilliseconds()`, `getGpsUnixTimestampMillis()`.
 - 64-bit timestamps are manually converted to strings (Arduino lacks `%llu`).
 - **Wake hardening**: `GPS_WAKE()` (charging-loop resume) clears stale
@@ -737,9 +743,12 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   when **QuickCapture is OFF** — an armed camera keeps its radio scanning even
   fully powered off. Every advert goes through `bleAdvFinalizePadded()` — see
   bluetooth.ino — to defeat the Bluefruit 0.21.0 frozen-packet-length core
-  bug.) **Recording starts** from WATCHING once RPM has held above ON for
-  `kRecordStartDelayMs` (5 s) — **no GPS-lock gate** (GPS still streams the
-  whole time) — by sending one shutter-toggle ce82 frame. The shutter is a
+  bug.) **Recording starts** from WATCHING once RPM has held at/above
+  `kRecordRpmThreshold` (1500 — deliberately far above the 500 wake
+  threshold: pull-start cranking blips clear 500 and once started a
+  recording during a failed first start; any dip below 1500 restarts the
+  clock) for `kRecordStartDelayMs` (5 s) — **no GPS-lock gate** (GPS still
+  streams the whole time) — by sending one shutter-toggle ce82 frame. The shutter is a
   stateful TOGGLE, so the FSM never blind-fires it: it **confirms** record
   state from the camera's own `0x10` ce81 display-string frame (a live
   `.HH:MM:SS` timer while recording — the `0x02` status word is not reliable;
@@ -878,9 +887,11 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   `sensoreggJunctionC()` (NaN when stale or egg-invalid), `sensoreggLinkUp()`,
   `sensoreggTcFault()`. **Staleness (1 s) is absolute** — a reading is never
   held across a dropout (a held value draws a flat line indistinguishable
-  from real data). Logging writes `Temp1`/`Junction1` (or `nan`); the
-  `SENSOR_TEMP` race page (after the tach page) shows big EGT + junction +
-  `rf:` link subtext.
+  from real data). Logging writes `Temp1`/`Junction1` (or `nan`) **in
+  Celsius**; the `SENSOR_TEMP` race page (after the tach page) shows big
+  EGT + junction + `rf:` link subtext **in Fahrenheit** — converted at
+  render time only via `sensoregg_protocol::celsiusToFahrenheit()` (a C/F
+  display setting comes later).
 - **BLE lifetime change**: `SENSOREGG_SETUP()` (called from `setup()` after
   `CAMERA_SETUP()`) runs `bleCoreEnsureInit()` at boot — BLE is no longer
   lazy. Scanner start failure logs the documented `Bluefruit.begin(1, 1)`
@@ -1038,7 +1049,7 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | OTA staging flash base | `0xA4000` | `firmware_ota.ino` |
 | OTA max image size | 320 KB | `firmware_ota.ino` |
 | OTA min apply voltage | 3.6 V | `firmware_ota.ino` |
-| Camera record-start delay | 5 s RPM held above ON (no GPS gate) | `camera_fsm.h` |
+| Camera record-start gate | RPM ≥ 1500 (`kRecordRpmThreshold`) held 5 s, strict — dips restart the clock (no GPS gate) | `camera_fsm.h` |
 | Camera stop-record delay | 30 s engine-off (RPM only) → also ends log session | `camera_fsm.h` |
 | Camera power-off | shutdown only (no post-record cooldown/timeout) | `camera_ble.ino` (`CAMERA_SLEEP`) |
 | Camera RPM on/off thresholds | 500 / 300 (2 s on-debounce) | `camera_fsm.h` |

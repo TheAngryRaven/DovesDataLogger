@@ -35,10 +35,18 @@ namespace camera_fsm {
 // engine has been off a while (which also ends the log session), then WATCH —
 // stay connected, ready to re-record if the engine restarts (stall recovery).
 // The camera powers off ONLY on device sleep.
-constexpr uint32_t kRecordStartDelayMs  = 5000;    // RPM held above ON this long -> start recording
+constexpr uint32_t kRecordStartDelayMs  = 5000;    // RPM held at/above the record threshold this long -> start recording
 constexpr uint32_t kStopRecordDelayMs   = 30000;   // RPM below OFF this long -> stop recording + end session
 
 // ---- Trigger thresholds (hysteresis band between OFF and ON) ----
+// Record-start gate — deliberately FAR above the wake threshold. A pull-start
+// registers real ignition pulses (magneto fires while the cord is pulled), so
+// cranking blips clear kRpmOnThreshold and can wake the camera; during a
+// failed first start of the day they also started a recording (2026-07-19
+// field incident). RPM must hold at/above this CONTINUOUSLY for
+// kRecordStartDelayMs — any dip below restarts the clock — so only a
+// genuinely running engine records. Wake/stop keep the 500/300 band.
+constexpr int32_t  kRecordRpmThreshold    = 1500;
 constexpr int32_t  kRpmOnThreshold        = 500;   // above = engine running (matches autoRaceModeCheck)
 constexpr int32_t  kRpmOffThreshold       = 300;   // below = engine off
 constexpr uint32_t kRpmOnDebounceMs       = 2000;  // RPM must hold above ON threshold this long to wake

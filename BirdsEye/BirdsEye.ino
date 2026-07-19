@@ -1115,7 +1115,15 @@ void checkAutoIdle() {
   // speed-based idle must not cut the log out from under it during a stationary
   // but engine-running stint (grid/paddock). No camera, or not recording, keeps
   // the original speed-only behavior below.
-  if (cameraActivelyRecording()) return;
+  //
+  // EXCEPTION — GPS-lock hold: while the session is still waiting for its GPS
+  // time lock, no log file exists and the hold pins the UI with navigation
+  // disabled (displayLoop). If the camera is also recording, this yield was
+  // the ONLY session-ender left, so a lock that never arrives left the device
+  // looking bricked until a power cycle (2026-07-19 pull-start incident).
+  // There is no log to protect yet — let the idle timer end the fileless
+  // session, which releases the UI and stops the camera.
+  if (cameraActivelyRecording() && !gpsLockHoldActive) return;
 
   // Grace period: don't auto-idle within first 3 minutes of a session.
   // After RPM wake the car is often stationary (warming up, waiting for
@@ -1270,9 +1278,24 @@ void sdFormatPageLoop() {
  * begins automatically and normal race-mode navigation resumes.
  */
 void updateGpsLockHold() {
+  // Engine-off release window: the pin only makes sense while the engine is
+  // (recently) turning. Killing the motor with no lock used to leave the hold
+  // latched — tach page, navigation dead — until the session ended, which the
+  // camera's recording suppressed indefinitely (2026-07-19 field incident).
+  static uint32_t lastEngineActivityMs = 0;
+  const uint32_t kEngineOffReleaseMs = 10000;
+
   if (raceActive && enableLogging && !sdDataLogInitComplete) {
-    // No lock yet (file not created). Latch the hold once the engine turns.
-    if (tachLastReported > 0) gpsLockHoldActive = true;
+    if (tachLastReported > 0) {
+      lastEngineActivityMs = millis();
+      gpsLockHoldActive = true;
+    } else if (gpsLockHoldActive &&
+               (uint32_t)(millis() - lastEngineActivityMs) >= kEngineOffReleaseMs) {
+      // Engine has been silent long enough — give the UI back. The session
+      // stays active (the user can end it from the END RACE page), and a
+      // restart re-latches the hold.
+      gpsLockHoldActive = false;
+    }
   } else {
     gpsLockHoldActive = false;  // lock acquired (file created) or race ended
   }

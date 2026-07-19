@@ -8,6 +8,7 @@
 #include "lap_format.h"
 #include "sat_bars.h"
 #include "sd_format_page.h"
+#include "sensoregg_protocol.h"
 
 void displayPage_boot() {
   resetDisplay();
@@ -325,12 +326,12 @@ void displayPage_camera_test() {
   // idle-sleeps (the idle-shutdown and USB-charging entries are
   // main-menu-only), so it can sit on a desk indefinitely.
   display.print(F("egg: "));
-  const float soakEgtC = sensoreggEgtC();
-  if (isnan(soakEgtC)) {
+  const float soakEgtF = sensoregg_protocol::celsiusToFahrenheit(sensoreggEgtC());
+  if (isnan(soakEgtF)) {
     display.println(F("NA"));
   } else {
-    display.print(soakEgtC, 1);
-    display.println(F("C"));
+    display.print(soakEgtF, 1);
+    display.println(F("F"));
   }
 
   safeDisplayUpdate();
@@ -784,8 +785,14 @@ void displayPage_tachometer() {
 
   display.setTextSize(1);
   display.setCursor(0, 55);
-  display.print(F("     max: "));
-  display.print(topTachReported);
+  if (gpsLockHoldActive) {
+    // The GPS-lock hold pins the user here with navigation disabled (see
+    // displayLoop). Say so — a silent pin reads as a crash in the field.
+    display.print(F("  WAITING GPS LOCK.."));
+  } else {
+    display.print(F("     max: "));
+    display.print(topTachReported);
+  }
 
   safeDisplayUpdate();
 }
@@ -793,16 +800,18 @@ void displayPage_tachometer() {
 // SensorEgg wireless EGT page — mirrors the tachometer layout: big value,
 // small status subtext. NaN (stale link OR egg-reported invalid probe)
 // renders '---'; the reading is NEVER held across a dropout.
+// Rendered in Fahrenheit (DOVEX logging stays Celsius); a C/F display
+// setting comes later.
 void displayPage_sensorTemp() {
   resetDisplay();
 
   if (sensoreggTcFault()) {
-    display.println(F("Temp1 C   *TC FAULT*"));
+    display.println(F("Temp1 F   *TC FAULT*"));
   } else {
-    display.println(F("      Temp1 C"));
+    display.println(F("      Temp1 F"));
   }
 
-  const float egt = sensoreggEgtC();
+  const float egt = sensoregg_protocol::celsiusToFahrenheit(sensoreggEgtC());
 
   display.setCursor(5, 20);
   display.setTextSize(4);
@@ -817,7 +826,7 @@ void displayPage_sensorTemp() {
   display.setTextSize(1);
   display.setCursor(0, 55);
   display.print(F(" junc: "));
-  const float junc = sensoreggJunctionC();
+  const float junc = sensoregg_protocol::celsiusToFahrenheit(sensoreggJunctionC());
   if (isnan(junc)) {
     display.print(F("---"));
   } else {

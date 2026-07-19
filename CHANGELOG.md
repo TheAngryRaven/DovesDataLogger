@@ -12,6 +12,35 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Fixed
+- **Pull-start / engine-kill lockup (field incident 2026-07-19).** A failed
+  first start or killing the motor before GPS acquired its time lock left
+  the device apparently frozen: pinned to the RPM page, all buttons dead,
+  no watchdog reset. Root cause: the GPS-lock hold (which pins the UI while
+  a race session waits for a lock to create its log file) latched on any
+  tach pulse — pull-cord ignition blips included — and had no engine-off
+  release, while its only automatic session-enders were blocked (3-minute
+  auto-idle grace, and full auto-idle suppression once the camera was
+  recording). Fixes: the hold now releases after 10 s of engine-off (the
+  session stays active and navigable), the pinned tach page shows
+  `WAITING GPS LOCK..` instead of pinning silently, and auto-idle may end
+  a still-fileless session even while the camera records.
+
+### Changed
+- **Camera recording requires 1500+ RPM sustained for 5 s.** The record
+  start gate moved from the 500 RPM wake threshold to a dedicated
+  `kRecordRpmThreshold` (1500), held continuously for the full 5 s delay —
+  any dip below restarts the clock. Pull-start cranking registers real
+  ignition pulses above 500 RPM, which could start a camera recording
+  during a failed start; cranking cannot sustain 1500. Camera wake and the
+  30 s engine-off stop keep the 500/300 hysteresis band.
+- **SensorEgg temperatures display in Fahrenheit.** The Temp1 race page
+  (big EGT + junction subtext) and the camera bench page's `egg:` soak
+  readout now render in °F, converted at display time via the host-tested
+  `sensoregg_protocol::celsiusToFahrenheit()`. DOVEX logging is unchanged
+  (`Temp1`/`Junction1` stay Celsius). A C/F display setting will follow
+  in a later release.
+
 ### Added
 - **SensorEgg wireless EGT (proof of concept).** The logger passively
   scans for the DovesSensorEgg — a wireless thermocouple pod that
