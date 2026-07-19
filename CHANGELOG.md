@@ -12,6 +12,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Changed
+- **SensorEgg temperatures display in Fahrenheit.** The Temp1 race page
+  (big EGT + junction subtext) and the camera bench page's `egg:` soak
+  readout now render in °F, converted at display time via the host-tested
+  `sensoregg_protocol::celsiusToFahrenheit()`. DOVEX logging is unchanged
+  (`Temp1`/`Junction1` stay Celsius). A C/F display setting will follow
+  in a later release.
+
 ### Added
 - **SensorEgg wireless EGT (proof of concept).** The logger passively
   scans for the DovesSensorEgg — a wireless thermocouple pod that

@@ -130,6 +130,7 @@ set(SIM_CORE_SOURCES
   ${BIRDSEYE_DIR}/sat_bars.cpp
   ${BIRDSEYE_DIR}/sd_access_policy.cpp
   ${BIRDSEYE_DIR}/sd_format_page.cpp
+  ${BIRDSEYE_DIR}/sensoregg_protocol.cpp
   ${BIRDSEYE_DIR}/tach_filter.cpp
   ${BIRDSEYE_DIR}/wake_cause.cpp
   # Real DovesLapTimer sources — the lap/sector timing IS the demo.

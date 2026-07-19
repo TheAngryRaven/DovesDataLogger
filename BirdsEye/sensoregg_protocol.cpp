@@ -58,4 +58,8 @@ bool isFresh(uint32_t receivedAtMs, uint32_t nowMs) {
   return (uint32_t)(nowMs - receivedAtMs) < kStalenessMs;
 }
 
+float celsiusToFahrenheit(float c) {
+  return c * 9.0f / 5.0f + 32.0f;
+}
+
 }  // namespace sensoregg_protocol

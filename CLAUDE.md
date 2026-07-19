@@ -878,9 +878,11 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   `sensoreggJunctionC()` (NaN when stale or egg-invalid), `sensoreggLinkUp()`,
   `sensoreggTcFault()`. **Staleness (1 s) is absolute** — a reading is never
   held across a dropout (a held value draws a flat line indistinguishable
-  from real data). Logging writes `Temp1`/`Junction1` (or `nan`); the
-  `SENSOR_TEMP` race page (after the tach page) shows big EGT + junction +
-  `rf:` link subtext.
+  from real data). Logging writes `Temp1`/`Junction1` (or `nan`) **in
+  Celsius**; the `SENSOR_TEMP` race page (after the tach page) shows big
+  EGT + junction + `rf:` link subtext **in Fahrenheit** — converted at
+  render time only via `sensoregg_protocol::celsiusToFahrenheit()` (a C/F
+  display setting comes later).
 - **BLE lifetime change**: `SENSOREGG_SETUP()` (called from `setup()` after
   `CAMERA_SETUP()`) runs `bleCoreEnsureInit()` at boot — BLE is no longer
   lazy. Scanner start failure logs the documented `Bluefruit.begin(1, 1)`

@@ -103,4 +103,9 @@ bool parsePayload(const uint8_t* data, size_t len, Reading& out);
 // still fresh at `nowMs` (age < kStalenessMs, wrap-safe).
 bool isFresh(uint32_t receivedAtMs, uint32_t nowMs);
 
+// Display-unit conversion. The on-device display shows Fahrenheit (a C/F
+// display setting comes later); DOVEX logging stays Celsius — convert at
+// render time only. NaN propagates.
+float celsiusToFahrenheit(float c);
+
 }  // namespace sensoregg_protocol
