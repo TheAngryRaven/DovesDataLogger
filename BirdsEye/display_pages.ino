@@ -785,8 +785,14 @@ void displayPage_tachometer() {
 
   display.setTextSize(1);
   display.setCursor(0, 55);
-  display.print(F("     max: "));
-  display.print(topTachReported);
+  if (gpsLockHoldActive) {
+    // The GPS-lock hold pins the user here with navigation disabled (see
+    // displayLoop). Say so — a silent pin reads as a crash in the field.
+    display.print(F("  WAITING GPS LOCK.."));
+  } else {
+    display.print(F("     max: "));
+    display.print(topTachReported);
+  }
 
   safeDisplayUpdate();
 }

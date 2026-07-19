@@ -47,7 +47,10 @@ struct Sim {
     // ---- Drivers to reach each state via real input sequences ----
 
     void toWaking() {
-        in.rpm = 1000;
+        // Above BOTH the wake threshold (500) and the record threshold (1500)
+        // so the shared drivers can reach RECORDING; tests that need the band
+        // between them set their own rpm.
+        in.rpm = 3000;
         REQUIRE(tick(0) == Action::kNone);  // arms the RPM debounce
         REQUIRE(tick(kRpmOnDebounceMs) == Action::kStartWakeBurst);
         REQUIRE(f.state == State::kWaking);
@@ -146,7 +149,9 @@ TEST_CASE("camera_fsm - RPM debounce: 1999 ms no action, 2000 ms fires") {
     CHECK(s.tick(1) == Action::kStartWakeBurst);  // 2000 ms held: fire
     CHECK(s.f.state == State::kWaking);
     CHECK(s.f.wakeAttemptsUsed == 1);
-    CHECK(s.f.recordArmSince != 0);  // record-start clock armed at wake
+    // Wake-band RPM (above ON, below kRecordRpmThreshold) wakes the camera
+    // but must NOT arm the record clock — pull-start cranking blips live here.
+    CHECK(s.f.recordArmSince == 0);
 }
 
 TEST_CASE("camera_fsm - RPM debounce: dip below threshold resets the hold") {
@@ -189,7 +194,7 @@ TEST_CASE("camera_fsm - hysteresis: rpm at/below 500 never arms in IDLE") {
 TEST_CASE("camera_fsm - stale remote link skips the wake to AWAIT READY then WATCHING") {
     Sim s;
     s.in.remoteConnected = true;
-    s.in.rpm = 1000;
+    s.in.rpm = 3000;  // record band, so the flow can reach RECORDING below
     CHECK(s.tick(0) == Action::kNone);
     CHECK(s.tick(kRpmOnDebounceMs) == Action::kNone);  // no wake advert
     CHECK(s.f.state == State::kAwaitReady);
@@ -301,7 +306,7 @@ TEST_CASE("camera_fsm - WATCHING records one shutter after 5 s of RPM") {
     s.in.rpm = 0;
     CHECK(s.tick(10) == Action::kNone);
     CHECK(s.f.recordArmSince == 0);
-    s.in.rpm = 1000;
+    s.in.rpm = 3000;
     CHECK(s.tick(10) == Action::kNone);
     CHECK(s.f.recordArmSince != 0);
     CHECK(s.tick(kRecordStartDelayMs - 1) == Action::kNone);   // not yet
@@ -323,11 +328,64 @@ TEST_CASE("camera_fsm - WATCHING: RPM dropping during the 5 s resets the arm") {
     CHECK(s.tick(10) == Action::kNone);
     CHECK(s.f.recordArmSince == 0);
     CHECK(s.f.state == State::kWatching);
-    s.in.rpm = 1000;                        // back on — re-arm
+    s.in.rpm = 3000;                        // back on — re-arm
     CHECK(s.tick(10) == Action::kNone);
     CHECK(s.f.recordArmSince != 0);
     CHECK(s.tick(kRecordStartDelayMs - 1) == Action::kNone);
     CHECK(s.tick(1) == Action::kSendShutter);   // 5 s from the re-arm
+    CHECK(s.f.state == State::kRecording);
+}
+
+TEST_CASE("camera_fsm - cranking-band RPM wakes but NEVER records (pull-start)") {
+    // Field incident (2026-07-19): pull-starting registers real ignition
+    // pulses well above the wake threshold, which woke the camera AND
+    // started a recording before the engine was actually running. RPM in
+    // the band (kRpmOnThreshold, kRecordRpmThreshold) may drive the whole
+    // wake flow but must never fire the shutter, no matter how long it holds.
+    Sim s;
+    s.toWatching();
+    // Force a fresh arm window, then sit in the cranking band indefinitely.
+    s.in.rpm = 0;
+    CHECK(s.tick(10) == Action::kNone);
+    s.in.rpm = 1000;  // above ON (500), below record (1500)
+    auto acts = s.run(60000, 250);  // a full minute of "cranking"
+    CHECK(countOf(acts, Action::kSendShutter) == 0);
+    CHECK(s.f.state == State::kWatching);
+    CHECK(s.f.recordArmSince == 0);
+}
+
+TEST_CASE("camera_fsm - record threshold boundary: 1499 never arms, 1500 does") {
+    Sim s;
+    s.toWatching();
+    s.in.rpm = 0;
+    CHECK(s.tick(10) == Action::kNone);
+    s.in.rpm = kRecordRpmThreshold - 1;
+    auto acts = s.run(3 * kRecordStartDelayMs, 100);
+    CHECK(countOf(acts, Action::kSendShutter) == 0);
+    CHECK(s.f.recordArmSince == 0);
+    s.in.rpm = kRecordRpmThreshold;  // at threshold — arms
+    CHECK(s.tick(10) == Action::kNone);
+    CHECK(s.f.recordArmSince != 0);
+    CHECK(s.tick(kRecordStartDelayMs) == Action::kSendShutter);
+}
+
+TEST_CASE("camera_fsm - dip below record threshold restarts the 5 s clock") {
+    // "1500+ RPM for 5 seconds" is strict: sustained means sustained. A dip
+    // to idle (above OFF, below record) must restart the record-start clock,
+    // not coast through a hysteresis band.
+    Sim s;
+    s.toWatching();
+    s.in.rpm = 0;
+    CHECK(s.tick(10) == Action::kNone);
+    s.in.rpm = 3000;
+    CHECK(s.tick(kRecordStartDelayMs - 500) == Action::kNone);  // 4.5 s up
+    s.in.rpm = 1000;  // sag below the record band (engine still "on")
+    CHECK(s.tick(10) == Action::kNone);
+    CHECK(s.f.recordArmSince == 0);
+    s.in.rpm = 3000;
+    CHECK(s.tick(10) == Action::kNone);  // re-arms — fresh clock from here
+    CHECK(s.tick(kRecordStartDelayMs - 1) == Action::kNone);
+    CHECK(s.tick(1) == Action::kSendShutter);
     CHECK(s.f.state == State::kRecording);
 }
 
@@ -419,7 +477,7 @@ TEST_CASE("camera_fsm - stall recovery re-records from WATCHING on RPM return") 
     CHECK(acts.empty());
     CHECK(s.f.state == State::kWatching);
     // Engine restarts: re-arm, and after 5 s record again (one shutter).
-    s.in.rpm = 1000;
+    s.in.rpm = 3000;
     CHECK(s.tick(10) == Action::kNone);
     CHECK(s.f.recordArmSince != 0);
     CHECK(s.tick(kRecordStartDelayMs) == Action::kSendShutter);
