@@ -12,6 +12,7 @@ set(BIRDSEYE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../BirdsEye)
 add_executable(birdseye_tests
   test_main.cpp
   haversine_test.cpp
+  gps_stats_test.cpp
   gps_time_test.cpp
   gps_validation_test.cpp
   dovex_header_test.cpp
@@ -28,6 +29,7 @@ add_executable(birdseye_tests
   sat_bars_test.cpp
   sensoregg_protocol_test.cpp
   ${BIRDSEYE_DIR}/haversine.cpp
+  ${BIRDSEYE_DIR}/gps_stats.cpp
   ${BIRDSEYE_DIR}/gps_time.cpp
   ${BIRDSEYE_DIR}/gps_validation.cpp
   ${BIRDSEYE_DIR}/dovex_header.cpp

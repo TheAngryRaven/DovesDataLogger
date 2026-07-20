@@ -122,6 +122,7 @@ set(SIM_CORE_SOURCES
   # host test harness in tests/ builds).
   ${BIRDSEYE_DIR}/camera_fsm.cpp
   ${BIRDSEYE_DIR}/dovex_header.cpp
+  ${BIRDSEYE_DIR}/gps_stats.cpp
   ${BIRDSEYE_DIR}/gps_status_page.cpp
   ${BIRDSEYE_DIR}/gps_time.cpp
   ${BIRDSEYE_DIR}/gps_validation.cpp

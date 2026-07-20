@@ -53,6 +53,17 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   in a later release.
 
 ### Added
+- **GPS pipeline drop instrumentation.** The ~0.9% dropped-PVT regression
+  was invisible on-device (the only signal was the frame-rate readout).
+  The GPS serial path now carries permanent lightweight counters: missing
+  PVT frames vs the nav-rate expectation (window math in the new
+  host-tested `gps_stats` pure unit), worst-case TIMER3 drain deferral in
+  µs (hardware timer capture — measures SoftDevice radio-ISR pressure),
+  the biggest single-fire drain burst vs the core UART ring capacity, and
+  overflow event counts for both the core ring and the 4 KB GPS ring.
+  Surfaced on the GPS debug page — now first in the race rotation — with
+  a one-line `Drops / Ovf` summary on the GPS stats page. ISR cost is a
+  few cycles per fire; ~50 B RAM.
 - **SensorEgg wireless EGT (proof of concept).** The logger passively
   scans for the DovesSensorEgg — a wireless thermocouple pod that
   broadcasts EGT + cold-junction temperature in BLE advertising packets

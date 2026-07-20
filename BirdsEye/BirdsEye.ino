@@ -597,7 +597,7 @@ int lastPage = 0;
 #ifdef ENDURANCE_MODE
   const int runningPageStart = GPS_SPEED;
 #else
-  const int runningPageStart = GPS_STATS; //GPS_DEBUG;
+  const int runningPageStart = GPS_DEBUG;  // debug page carries the GPS pipeline counters
 #endif
 
 int runningPageEnd = LOGGING_STOP; // only changes if sd:/tracks not found
