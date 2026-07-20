@@ -474,7 +474,10 @@ int numOfLocations = 0;
 // 4 KB handles tracks with up to 10 courses with full sector data.
 // The sim uses the same size: a smaller buffer silently truncated real
 // track files (the old Wokwi target's RAM constraint doesn't apply).
-#define JSON_BUFFER_SIZE 4096
+// 8 KB: multi-track HackTheTrack exports (root keyed by track name) run
+// ~2 KB per track — the old 4096 truncated a 2-track export mid-file
+// (IncompleteInput) and the file silently vanished from track detection.
+#define JSON_BUFFER_SIZE 8192
 
 // extern matches the forward declaration in sd_functions.h so the
 // constants have external linkage; otherwise their default internal
@@ -975,7 +978,8 @@ void trackDetectionLoop() {
     {
       char filepath[FILEPATH_MAX];
       makeFullTrackPath(trackManifest[bestIndex].filename, filepath);
-      int parseStatus = parseTrackFile(filepath);
+      int parseStatus =
+          parseTrackFileEntry(filepath, trackManifest[bestIndex].trackKey);
 
       if (parseStatus == PARSE_STATUS_GOOD && numOfTracks > 0) {
         // Build TrackConfig from parsed data
@@ -1687,8 +1691,18 @@ void loop() {
       menuIdleTimerRunning = true;
       menuIdleStartTime = millis();
     }
-    if (btn1->pressed || btn2->pressed || btn3->pressed) {
-      menuIdleStartTime = millis();  // Reset on any button
+    // Button activity resets the idle clock. The `pressed` flags can't be
+    // used here: readButtons() sets them AFTER this check runs and
+    // resetButtons() clears them before the next iteration, so they always
+    // read false at this point (menu navigation never reset the timer and
+    // the device slept 5 min after menu entry regardless of activity —
+    // 2026-07-19 field incident). The debouncer's lastPressed stamps
+    // persist across iterations, so anchor on the newest of those.
+    unsigned long lastBtn = btn1->lastPressed;
+    if ((long)(btn2->lastPressed - lastBtn) > 0) lastBtn = btn2->lastPressed;
+    if ((long)(btn3->lastPressed - lastBtn) > 0) lastBtn = btn3->lastPressed;
+    if ((long)(lastBtn - menuIdleStartTime) > 0) {
+      menuIdleStartTime = lastBtn;
     }
     unsigned long idleFor = millis() - menuIdleStartTime;
     if ((isUsbConnected() && idleFor >= USB_MENU_CHARGE_IDLE_MS) ||

@@ -78,12 +78,19 @@ void sdSetTransferSpeed(bool fast);
 // folder exists or was created.
 bool sdEnsureTracksFolder();
 
-// Scan /TRACKS/ and populate locations[] + trackManifest[] (one entry
-// per .json file). Creates the folder when missing (blank soldered-in
-// card). Returns true if the folder existed or was created.
+// Scan /TRACKS/ and populate locations[] + trackManifest[] (one entry per
+// detectable track — a multi-track file contributes one entry per contained
+// track, keyed by the root member name). Creates the folder when missing
+// (blank soldered-in card). Returns true if the folder existed or was
+// created.
 bool buildTrackList();
 
 // Parse one track JSON file from disk into activeTrackMetadata and
-// trackLayouts[]. Auto-detects new (object) vs legacy (bare array)
-// JSON format. Returns one of the PARSE_STATUS_* codes.
+// trackLayouts[]. Auto-detects single-track (object with root "courses")
+// vs legacy (bare array) JSON format. Returns one of the PARSE_STATUS_*
+// codes.
 int parseTrackFile(char* filepath);
+
+// Same, but for multi-track files (root keyed by track name): parse the
+// member `trackKey` names. A null/empty key behaves like parseTrackFile().
+int parseTrackFileEntry(char* filepath, const char* trackKey);

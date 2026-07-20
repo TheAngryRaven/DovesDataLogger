@@ -330,11 +330,26 @@ int runDovex(const char* path, bool noHeader) {
 // then session 2 = replay of a real .dovex. Watches whether the carried-over
 // CourseManager still detects the course / times laps.
 int runTwoSession(const char* path, uint32_t breakMinutes) {
-  // ---- load the real session-2 rows
+  // ---- load the real session-2 rows (and the header lap list when the
+  // file has one — then this mode validates like the plain dovex oracle)
   FILE* f = std::fopen(path, "rb");
   if (!f) {
     std::printf("cannot open %s\n", path);
     return 2;
+  }
+  std::vector<char> header(dovex_header::kHeaderSize);
+  bool haveHeader = false;
+  dovex_header::ParsedHeader meta = {};
+  unsigned long hwLapBuf[1000];
+  size_t hwLapCount = 0;
+  if (std::fread(header.data(), 1, header.size(), f) == header.size() &&
+      dovex_header::parse(header.data(), header.size(), meta, hwLapBuf, 1000,
+                          hwLapCount)) {
+    haveHeader = true;
+    std::printf("hardware session: course '%s' — %zu laps (validating)\n",
+                meta.course, hwLapCount);
+  } else {
+    std::printf("no parseable header — diagnostic replay only\n");
   }
   std::fseek(f, 1024, SEEK_SET);
   std::vector<DovexRow> rows;
@@ -498,8 +513,12 @@ int runTwoSession(const char* path, uint32_t breakMinutes) {
   }
   status("break over");
 
-  // ---- session 2: the real hardware log
+  // ---- session 2: the real hardware log. Laps and the course name are
+  // captured live: the replayed session may auto-idle-end at the recorded
+  // session's own end (exactly as the hardware did), which clears them.
   std::vector<uint32_t> simLaps;
+  std::string courseSeen;
+  bool sawLapAnything = false;
   int prevCount = sim_lap_count();
   unsigned long long prevTs = rows[0].ts;
   unsigned long long nextS2Status = rows[0].ts;
@@ -540,11 +559,38 @@ int runTwoSession(const char* path, uint32_t breakMinutes) {
       }
     }
     if (count != prevCount) prevCount = count;
+    if (courseSeen.empty() && sim_course_name()[0]) {
+      courseSeen = sim_course_name();
+    }
+    if (sim_lap_anything_active()) sawLapAnything = true;
   }
   status("s2 final");
   std::printf("session-2 laps recorded: %zu\n", simLaps.size());
   for (size_t i = 0; i < simLaps.size(); i++) {
     std::printf("  lap %zu = %u ms\n", i + 1, simLaps[i]);
+  }
+
+  if (haveHeader) {
+    // The carried-over CourseManager must behave exactly like a fresh one:
+    // same course, same lap list as the hardware header.
+    check(!sawLapAnything, "course timer active (not fallback)");
+    {
+      char buf[96];
+      std::snprintf(buf, sizeof(buf), "course matches header ('%s')",
+                    meta.course);
+      check(courseSeen == meta.course, buf);
+    }
+    check(simLaps.size() == hwLapCount, "lap count matches hardware header");
+    for (size_t i = 0; i < hwLapCount && i < simLaps.size(); i++) {
+      char buf[96];
+      std::snprintf(buf, sizeof(buf),
+                    "lap %zu: sim %u ms vs hardware %lu ms (±%u)", i + 1,
+                    simLaps[i], hwLapBuf[i], kToleranceMs);
+      check(nearlyEqualMs(simLaps[i], (double)hwLapBuf[i]), buf);
+    }
+    std::printf(failures ? "--- two-session FAILED ---\n"
+                         : "--- two-session ok ---\n");
+    return failures ? 1 : 0;
   }
   return 0;
 }

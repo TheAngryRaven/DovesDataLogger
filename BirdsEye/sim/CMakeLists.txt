@@ -283,6 +283,9 @@ target_link_libraries(birdseye_sim_golden PRIVATE birdseye_sim_core)
 add_executable(birdseye_sim_oracle ${SIM_DIR}/oracle_main.cpp)
 target_link_libraries(birdseye_sim_oracle PRIVATE birdseye_sim_core)
 
+add_executable(birdseye_sim_trackfile ${SIM_DIR}/trackfile_main.cpp)
+target_link_libraries(birdseye_sim_trackfile PRIVATE birdseye_sim_core)
+
 enable_testing()
 
 # Phase-1 done-criteria: boots to menu + survives 60 s of virtual time,
@@ -314,3 +317,23 @@ add_test(NAME sim_lap_oracle COMMAND birdseye_sim_oracle)
 add_test(NAME sim_lap_oracle_hardware
   COMMAND birdseye_sim_oracle --dovex ${SIM_DIR}/fixtures/okc_tillotson_1.dovex
 )
+
+# Track-day state carryover: synthetic session 1 → auto-idle session end →
+# a 6-minute parked break in the menu (GPS drift, periodic button presses)
+# → the hardware fixture replayed as session 2. The carried-over
+# CourseManager must detect the same course and reproduce the same lap
+# list as a fresh boot. Also a regression test for the menu idle timer:
+# before the lastPressed-anchored reset, the 6-minute break shut the
+# device down mid-break despite the button presses (2026-07-19 field
+# incident) and session 2 never entered race mode.
+add_test(NAME sim_two_session_carryover
+  COMMAND birdseye_sim_oracle --two-session
+          ${SIM_DIR}/fixtures/okc_tillotson_1.dovex 6
+)
+
+# Track-file parsing over the real VFS: single-track object format,
+# legacy array leniency, and the multi-track HackTheTrack export (root
+# keyed by track name — one manifest entry per contained track, member
+# selected by key at parse time). ArduinoJson-bound, so it can't live in
+# the tests/ host harness.
+add_test(NAME sim_trackfile_parsing COMMAND birdseye_sim_trackfile)
