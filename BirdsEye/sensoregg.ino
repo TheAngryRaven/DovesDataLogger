@@ -109,10 +109,10 @@ void SENSOREGG_SETUP() {
   // are unaffected by the early init).
   bleCoreEnsureInit();
 
-  // Passive observer: 100 ms interval / 60 ms window (see the constants'
-  // comments for why the window is wider than the spec's 40 ms). Passive
-  // listening costs the camera link nothing — S140 yields scan windows to
-  // connection events automatically.
+  // Passive observer: 90 ms interval / 40 ms window, ~44% duty (see the
+  // constants' comments for the anti-phase-lock and GPS-drop rationale).
+  // Passive listening costs the camera link nothing — S140 yields scan
+  // windows to connection events automatically.
   Bluefruit.Scanner.setRxCallback(sensoreggScanCallback);
   Bluefruit.Scanner.useActiveScan(false);
   Bluefruit.Scanner.setInterval(sensoregg_protocol::kScanIntervalUnits,

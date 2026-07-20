@@ -49,6 +49,16 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   +384 B RAM). `project.h` fails the compile with instructions if the
   flag is missing, so a stock IDE build can't silently reintroduce the
   bug — see CONTRIBUTING.md "Local build flags".
+- **SensorEgg scan duty reduced 60% → 44% (dropped-PVT fix, part 2).**
+  The scanner now listens 40 ms out of every 90 ms (was 60 of 100). The
+  wider-than-spec 60 ms window existed to break adv/scan phase-lock, but
+  that job moves to the off-100 ms interval: 90 ms scan vs the egg's
+  ~100 ms advertising sweeps their relative phase ~10 ms per cycle, so a
+  deaf-zone park escapes in under half a second — invisible at the 1 s
+  staleness rule. Less radio time in SoftDevice scan windows means less
+  deferral of the GPS drain ISR. Camera connection parameters are
+  deliberately untouched (we're the peripheral; the X4 dictates the real
+  interval, and the 10 Hz GPS heartbeat needs the short interval).
 - **Camera recording requires 1500+ RPM sustained for 5 s.** The record
   start gate moved from the 500 RPM wake threshold to a dedicated
   `kRecordRpmThreshold` (1500), held continuously for the full 5 s delay —

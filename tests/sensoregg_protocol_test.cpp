@@ -232,3 +232,32 @@ TEST_CASE("sensoregg_protocol - seq monitor: duplicate reception is not a freeze
     CHECK(seqMonitorLive(m, 1200));
     CHECK(seqMonitorLive(m, 1200 + kStalenessMs - 1));
 }
+
+// ---------------------------------------------------------------------------
+// Scan tuning invariants
+// ---------------------------------------------------------------------------
+
+TEST_CASE("sensoregg_protocol - scan tuning: pinned values") {
+    // 0.625 ms units: 90 ms interval / 40 ms window. Deliberate values —
+    // change them only with the anti-phase-lock + GPS-drop rationale in
+    // sensoregg_protocol.h updated to match.
+    CHECK(kScanIntervalUnits == 144);
+    CHECK(kScanWindowUnits == 64);
+}
+
+TEST_CASE("sensoregg_protocol - scan tuning: invariants") {
+    // Window must fit inside the interval (BLE spec), and radio duty must
+    // stay under 45% — the 60% duty of the original 100/60 tuning deferred
+    // the TIMER3 GPS drain enough to drop 25 Hz PVT frames.
+    CHECK(kScanWindowUnits < kScanIntervalUnits);
+    CHECK(kScanWindowUnits * 100 <= kScanIntervalUnits * 45);
+
+    // The interval must sit off the egg's ~100 ms adv interval (160 units)
+    // so the phases sweep instead of locking; at least a 5 ms offset keeps
+    // a deaf-zone park escaping within ~1 s (kStalenessMs).
+    constexpr uint16_t kEggAdvUnits = 160;
+    uint16_t diff = kScanIntervalUnits > kEggAdvUnits
+                        ? kScanIntervalUnits - kEggAdvUnits
+                        : kEggAdvUnits - kScanIntervalUnits;
+    CHECK(diff >= 8);  // >= 5 ms of per-cycle phase sweep
+}
