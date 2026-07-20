@@ -3,9 +3,10 @@
 ///////////////////////////////////////////
 // GPS MODULE
 // SparkFun u-blox GNSS v3 (UBX-PVT binary) at 25 Hz. A TIMER3 ISR
-// drains Serial1 into a 4 KB ring buffer every 10 ms to survive SD
-// write stalls. The library reads from that buffer via a Stream
-// wrapper. Handles V_BCKP loss with baud-rate recovery + reconfigure.
+// drains Serial1 into a 4 KB ring buffer every GPS_DRAIN_INTERVAL_US
+// to survive SD write stalls. The library reads from that buffer via a
+// Stream wrapper. Handles V_BCKP loss with baud-rate recovery +
+// reconfigure.
 ///////////////////////////////////////////
 
 #include <SparkFun_u-blox_GNSS_v3.h>

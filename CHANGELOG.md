@@ -38,6 +38,17 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   a still-fileless session even while the camera records.
 
 ### Changed
+- **GPS serial pipeline hardened against BLE radio load (dropped-PVT
+  fix).** SoftDevice radio interrupts (SensorEgg scan windows, camera
+  connection events) can defer the TIMER3 GPS drain; at 57600 baud the
+  core's stock 64-byte Serial1 ring gave only ~1 ms of deferral slack
+  before bytes were silently lost (~0.9% of 25 Hz PVT frames in the
+  field). Two changes: the drain now runs every 5 ms instead of 10
+  (`GPS_DRAIN_INTERVAL_US`), and the core ring is grown to 256 bytes via
+  a required `-DSERIAL_BUFFER_SIZE=256` build flag (~44 ms of slack;
+  +384 B RAM). `project.h` fails the compile with instructions if the
+  flag is missing, so a stock IDE build can't silently reintroduce the
+  bug — see CONTRIBUTING.md "Local build flags".
 - **Camera recording requires 1500+ RPM sustained for 5 s.** The record
   start gate moved from the 500 RPM wake threshold to a dedicated
   `kRecordRpmThreshold` (1500), held continuously for the full 5 s delay —

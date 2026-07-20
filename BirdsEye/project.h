@@ -71,6 +71,29 @@
 #endif
 
 ///////////////////////////////////////////
+// BUILD-FLAG CONTRACT: GPS UART BUFFER
+//
+// The core's Serial1 RX ring must be 256 B (stock is 64 B, #ifndef-
+// guarded in the BSP's RingBuffer.h). SoftDevice radio interrupts
+// (unmaskable, prio 0–2) defer the TIMER3 GPS drain ISR (prio 3); at
+// 57600 baud the stock 64 B ring gives only ~1 ms of deferral slack
+// before bytes are silently dropped and 25 Hz PVT frames are lost —
+// the exact field regression the drop counters were built to catch.
+// A silently under-buffered build would reintroduce it, so fail loud.
+//
+// CI passes -DSERIAL_BUFFER_SIZE=256 (all three workflows). For a
+// local Arduino IDE / arduino-cli build, see CONTRIBUTING.md
+// ("Local build flags") — one-time setup via platform.local.txt or
+// --build-property.
+///////////////////////////////////////////
+#ifndef SIM
+static_assert(SERIAL_BUFFER_SIZE >= 256,
+              "Build with -DSERIAL_BUFFER_SIZE=256 (see CONTRIBUTING.md, "
+              "'Local build flags') — the stock 64 B Serial1 ring drops GPS "
+              "bytes under BLE radio load.");
+#endif
+
+///////////////////////////////////////////
 // DEBUG MACROS
 ///////////////////////////////////////////
 

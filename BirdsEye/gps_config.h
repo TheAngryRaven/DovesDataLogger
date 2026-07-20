@@ -18,4 +18,13 @@
 #define GPS_PROBE_MAXWAIT_MS 550
 #define GPS_SERIAL         Serial1
 
+// TIMER3 GPS drain period (µs, 1 MHz tick). At 57600 baud ≈ 5.76
+// bytes/ms line rate, a 5 ms period accumulates ~29 bytes per fire —
+// under half the core Serial1 RX ring even at its stock 64 B — so a
+// SoftDevice radio-ISR deferral of the drain has ~6 ms of slack before
+// the core ring can overflow (~1 ms at the old 10 ms period, which is
+// exactly where the scanner/camera-era PVT drops came from). The ISR
+// body is µs-scale, so doubling its rate costs nothing measurable.
+#define GPS_DRAIN_INTERVAL_US 5000
+
 #endif

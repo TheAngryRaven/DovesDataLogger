@@ -11,15 +11,23 @@
 #include "sat_bars.h"
 
 ///////////////////////////////////////////
-// GPS SERIAL BUFFER
-// Timer ISR drains Serial1 into a 4KB RAM buffer every 10ms,
-// preventing data loss during SD card write stalls (GC pauses).
-// SparkFun library reads from this buffer via GpsBufferedStream.
+// GPS SERIAL BUFFER — two buffers, two failure modes
 //
-// At 25Hz PVT (~2500 bytes/sec), the hardware serial buffer
-// (64-256 bytes) overflows in 25-100ms of blocking. SD card
-// garbage collection can block writes for 100ms-2s.
-// This 4KB buffer survives up to 1.6 seconds of stalls.
+// UARTE0 (per-byte ISR, NVIC prio 3) → core RingBuffer (256 B via the
+// SERIAL_BUFFER_SIZE build flag; project.h asserts it) → TIMER3 ISR
+// (prio 3, every GPS_DRAIN_INTERVAL_US) → this 4 KB ring → SparkFun
+// library via GpsBufferedStream on the main loop.
+//
+// Downstream stalls (SD garbage collection blocks the main loop
+// 100 ms–2 s): the 4 KB ring buffers ~1.6 s of stream while TIMER3
+// keeps draining — the original reason this ISR exists.
+//
+// Upstream deferral (SoftDevice radio ISRs at prio 0–2 preempt both
+// prio-3 ISRs): only the CORE ring absorbs bytes until TIMER3 gets to
+// run. 256 B ≈ 44 ms of line rate at 57600 baud, so radio activity
+// (SensorEgg scan windows, camera connection events) has huge margin
+// before a byte is lost. Both overflow points are counted — see the
+// gpsStats* accessors and the GPS debug page.
 ///////////////////////////////////////////
 
 // Forward-declare ISR with C linkage BEFORE Arduino's preprocessor
@@ -125,7 +133,7 @@ void startGpsSerialTimer() {
   NRF_TIMER3->MODE = TIMER_MODE_MODE_Timer;
   NRF_TIMER3->BITMODE = TIMER_BITMODE_BITMODE_32Bit;
   NRF_TIMER3->PRESCALER = 4;              // 16MHz / 2^4 = 1MHz tick
-  NRF_TIMER3->CC[0] = 10000;              // 10ms interval
+  NRF_TIMER3->CC[0] = GPS_DRAIN_INTERVAL_US;  // drain period (see gps_config.h)
   NRF_TIMER3->SHORTS = TIMER_SHORTS_COMPARE0_CLEAR_Msk;
   NRF_TIMER3->INTENSET = TIMER_INTENSET_COMPARE0_Msk;
   NVIC_SetPriority(TIMER3_IRQn, 3);       // Below SoftDevice (0-2), above main loop
