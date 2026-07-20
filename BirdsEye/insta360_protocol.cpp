@@ -219,9 +219,8 @@ size_t buildGpsRmcFrame(uint8_t* out, size_t cap, const GpsRmc& s) {
   body[b++] = s.valid ? 'A' : 'V';
   body[b++] = ',';
   // latitude ddmm.mmmm + N/S
-  b += appendFixed(body, b, toDegMin(s.latitudeDeg) < 0 ? -toDegMin(s.latitudeDeg)
-                                                        : toDegMin(s.latitudeDeg),
-                   4);
+  const double latDm = toDegMin(s.latitudeDeg);
+  b += appendFixed(body, b, latDm < 0.0 ? -latDm : latDm, 4);
   body[b++] = ',';
   body[b++] = s.latitudeDeg < 0.0 ? 'S' : 'N';
   body[b++] = ',';

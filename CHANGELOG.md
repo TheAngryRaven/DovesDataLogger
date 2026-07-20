@@ -66,6 +66,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   ignition pulses above 500 RPM, which could start a camera recording
   during a failed start; cranking cannot sustain 1500. Camera wake and the
   30 s engine-off stop keep the 500/300 hysteresis band.
+- **PVT callback math moved off software doubles.** The nRF52840's FPU
+  is single-precision; `double` is software-emulated. The 25 Hz PVT
+  callback now computes altitude/speed/HDOP/heading/accuracy as `float`
+  reciprocal multiplies (lat/lng stay `double` — 1e-7° needs the
+  precision). No logged or displayed digit changes at the precisions
+  used; the sim lap oracles reproduce the hardware fixture to the exact
+  millisecond. Also deduplicated a triple `toDegMin()` call in the
+  camera RMC builder (byte-identical output, golden-pinned).
 - **SensorEgg temperatures display in Fahrenheit.** The Temp1 race page
   (big EGT + junction subtext) and the camera bench page's `egg:` soak
   readout now render in °F, converted at display time via the host-tested

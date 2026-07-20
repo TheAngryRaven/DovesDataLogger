@@ -189,13 +189,16 @@ unsigned long long getGpsUnixTimestampMillis() {
 // NAV-PVT message arrives.  Populates the shared gpsData struct and sets
 // the gpsDataFresh flag so GPS_LOOP() knows to run lap-timer / logging.
 void onPVTReceived(UBX_NAV_PVT_data_t *pvt) {
+  // lat/lng stay double (see GpsData); the rest is single-precision with
+  // reciprocal-constant multiplies — hardware FPU, no software-double
+  // divides in this 25 Hz callback.
   gpsData.latitudeDegrees = pvt->lat / 1e7;
   gpsData.longitudeDegrees = pvt->lon / 1e7;
-  gpsData.altitude = pvt->hMSL / 1000.0;          // mm → meters
-  gpsData.speed = pvt->gSpeed / 514.444;           // mm/s → knots
-  gpsData.HDOP = pvt->pDOP / 100.0;               // pDOP ≈ HDOP for track use
-  gpsData.heading = pvt->headMot / 1e5;            // deg * 1e-5 → degrees
-  gpsData.horizontalAccuracy = pvt->hAcc / 1000.0; // mm → meters
+  gpsData.altitude = (float)pvt->hMSL * 0.001f;            // mm → meters
+  gpsData.speed = (float)pvt->gSpeed * (1.0f / 514.444f);  // mm/s → knots
+  gpsData.HDOP = (float)pvt->pDOP * 0.01f;                 // pDOP ≈ HDOP for track use
+  gpsData.heading = (float)pvt->headMot * 1e-5f;           // deg * 1e-5 → degrees
+  gpsData.horizontalAccuracy = (float)pvt->hAcc * 0.001f;  // mm → meters
   gpsData.satellites = pvt->numSV;
   // A fix is only trustworthy when the module also asserts gnssFixOK — a bare
   // fixType >= 2 can appear during convergence with garbage coordinates.

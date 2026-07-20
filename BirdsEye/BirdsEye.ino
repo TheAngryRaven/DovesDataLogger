@@ -307,14 +307,18 @@ SFE_UBLOX_GNSS_SERIAL myGNSS;
 bool gpsInitialized = false;  // Safety flag - true only after successful GPS init
 
 // Cached PVT data — updated by onPVTReceived() callback from checkCallbacks()
+// lat/lng stay double: 1e-7 deg resolution over ±180° needs ~2^31 steps,
+// beyond float's 24-bit mantissa. Everything else is float — well within
+// 7 significant digits, and double math is SOFTWARE-emulated on the
+// M4F's single-precision FPU (consumers that take double promote fine).
 struct GpsData {
   double latitudeDegrees;
   double longitudeDegrees;
-  double altitude;       // meters
-  double speed;          // knots (for DovesLapTimer compatibility)
-  double HDOP;
-  double heading;            // degrees (0-360), heading of motion
-  double horizontalAccuracy; // meters, horizontal accuracy estimate
+  float altitude;       // meters
+  float speed;          // knots (for DovesLapTimer compatibility)
+  float HDOP;
+  float heading;            // degrees (0-360), heading of motion
+  float horizontalAccuracy; // meters, horizontal accuracy estimate
   int satellites;
   bool fix;
   bool timeValid;        // true only when the module reports validDate+validTime+fullyResolved
