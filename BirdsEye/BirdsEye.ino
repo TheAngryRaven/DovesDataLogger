@@ -474,10 +474,7 @@ int numOfLocations = 0;
 // 4 KB handles tracks with up to 10 courses with full sector data.
 // The sim uses the same size: a smaller buffer silently truncated real
 // track files (the old Wokwi target's RAM constraint doesn't apply).
-// 8 KB: multi-track HackTheTrack exports (root keyed by track name) run
-// ~2 KB per track — the old 4096 truncated a 2-track export mid-file
-// (IncompleteInput) and the file silently vanished from track detection.
-#define JSON_BUFFER_SIZE 8192
+#define JSON_BUFFER_SIZE 4096
 
 // extern matches the forward declaration in sd_functions.h so the
 // constants have external linkage; otherwise their default internal
@@ -978,8 +975,7 @@ void trackDetectionLoop() {
     {
       char filepath[FILEPATH_MAX];
       makeFullTrackPath(trackManifest[bestIndex].filename, filepath);
-      int parseStatus =
-          parseTrackFileEntry(filepath, trackManifest[bestIndex].trackKey);
+      int parseStatus = parseTrackFile(filepath);
 
       if (parseStatus == PARSE_STATUS_GOOD && numOfTracks > 0) {
         // Build TrackConfig from parsed data

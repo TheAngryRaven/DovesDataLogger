@@ -160,7 +160,6 @@ bool sdEnsureTracksFolder();
 void sdPerformFormat();
 bool buildTrackList();
 int parseTrackFile(char* filepath);
-int parseTrackFileEntry(char* filepath, const char* trackKey);
 
 // ---- settings.ino ----
 bool createDefaultSettings();

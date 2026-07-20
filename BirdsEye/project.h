@@ -159,8 +159,6 @@ struct TrackLayout {
 ///////////////////////////////////////////
 struct TrackManifestEntry {
   char filename[32];   // track filename without extension (matches locations[])
-  char trackKey[32];   // multi-track files: root member key naming this track
-                       // ("" = single-track file, parse the root itself)
   double lat;          // first course's start_a_lat
   double lon;          // first course's start_a_lng
 };

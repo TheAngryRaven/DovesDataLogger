@@ -13,19 +13,6 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
-- **Multi-track track-file support.** The HackTheTrack multi-track export
-  (root JSON object keyed by track name, each member carrying its own
-  `shortName` / `defaultCourse` / `courses[]`) is now a first-class format:
-  `buildTrackList()` emits one proximity-manifest entry per contained
-  track, and detection parses just the matched member
-  (`parseTrackFileEntry()`), so one file can hold every track you visit.
-  The track-JSON buffer doubled to 8 KB (a two-track export is ~4.2 KB and
-  silently overflowed the old 4 KB buffer), and files that still overflow
-  or fail to parse now log an explicit `WARNING` instead of vanishing from
-  detection without a trace. Root cause of the 2026-07-19 field incident:
-  a session at OKC never resolved a course because the fresh multi-track
-  export was invisible to the firmware. Covered by a new sim test driver
-  (`sim/trackfile_main.cpp`) run in CI.
 - **Simulator oracle diagnostic replay modes.** `birdseye_sim_oracle
   --dovex-noheader <file>` replays a header-less DOVEX log (crashed /
   power-cut session) through the full pipeline, printing live page / race /

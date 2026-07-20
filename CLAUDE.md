@@ -145,7 +145,6 @@ handoff spec.
 | `native_main.cpp` | Phase-1 driver: boot → skip GPS status page → 60 s soak, state prints |
 | `golden_main.cpp` | Phase-2 driver: scripted real-menu walk capturing 8 golden page hashes (`golden/golden_hashes.txt`; regenerate with `--print`, eyeball with `--dump`) |
 | `oracle_main.cpp` | Phase-3 driver: lap-timing oracle. Default = synthetic constant-speed OKC circle (period exact by construction) through the whole real pipeline (boot page → race entry → proximity detect → CourseDetector "Normal" → laps ±40 ms); `--dovex <file>` replays a hardware log against its own header laps; diagnostic modes: `--dovex-noheader <file>` replays a header-less (crashed-session) log and prints live detection/lap state instead of asserting, `--two-session <file> [break-min]` reproduces a full track day (synthetic session 1 → auto-idle end → parked break with GPS drift → real-log session 2) to test CourseManager state carryover |
-| `trackfile_main.cpp` | Track-file parsing driver over the real VFS: single-track object format, legacy-array leniency, and the multi-track HackTheTrack export (per-track manifest entries + key-selected member parse). ArduinoJson-bound logic, so this is its test coverage (can't live in `tests/`) |
 | `fixtures/okc_tillotson_1.dovex` | Hardware-recorded OKC session (13 laps) — the `--dovex` oracle's CI fixture; the sim reproduces its header lap list to the exact millisecond (also the `--two-session` carryover test's session 2) |
 | `API.md` | Canonical WASM API contract (v1): artifact set, method surface, injectPvt schema, deltas from the handoff-spec draft (async `reset()` via module re-instantiation) |
 | `wasm/bindings.cpp` | EMSCRIPTEN_KEEPALIVE exports over sim_host.h + getStateJson/getVersion/readFile/listFiles |
@@ -158,7 +157,7 @@ handoff spec.
 
 | Path | Contents |
 |---|---|
-| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, sim-build (native sim TU + 60 s boot soak + determinism + goldens + lap oracles + track-file parsing + two-session carryover, plus a wasm job: emsdk 3.1.61 build + node smoke + `birdseye-sim-wasm` artifact), release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). DovesLapTimer ref per channel: `BETA` builds track the library's `BETA` branch, master/release pin `v4.2.0` |
+| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, sim-build (native sim TU + 60 s boot soak + determinism + goldens + lap oracles + two-session carryover, plus a wasm job: emsdk 3.1.61 build + node smoke + `birdseye-sim-wasm` artifact), release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). DovesLapTimer ref per channel: `BETA` builds track the library's `BETA` branch, master/release pin `v4.2.0` |
 | `tests/` | Host doctest harness (CMake) for the pure-logic units |
 | `CHANGELOG.md` | Keep-a-Changelog history; release workflow ties to version tags |
 | `ARCHITECTURE.md` | Human-facing architecture narrative (subsystems, design decisions) |
@@ -347,27 +346,16 @@ loop()  ~250 Hz
   a dead/absent card never offers the format. 5 min idle → shutdown
   (deferred while the engine runs), and a charging-loop resume with the
   card still unformatted returns to the format page, not the menu.
-- **Three JSON formats**: `parseTrackFile()` / `parseTrackFileEntry()`
-  auto-detect root type:
-  - **Single-track object** (HackTheTrack single export): root
-    `longName`, `shortName`, `defaultCourse`, `courses[]` with `lengthFt`.
-  - **Multi-track object** (HackTheTrack multi export): root keyed by
-    track long name, each member `{ shortName, defaultCourse, courses[] }`.
-    The manifest names the member (`trackKey`) and
-    `parseTrackFileEntry(path, key)` parses just that member (the key
-    becomes `longName`). One file can carry every track the user visits.
+- **Dual JSON format**: `parseTrackFile()` auto-detects root type:
+  - **Object** (HackTheTrack format): `longName`, `shortName`,
+    `defaultCourse`, `courses[]` with `lengthFt`.
   - **Array** (older format, still accepted): bare array of course
     objects, metadata blank, `lengthFt = 0`. CourseDetector can't
     rank by distance without `lengthFt`, so these tracks fall back
     to Lap Anything mode.
-  Files that exceed the 8 KB JSON buffer or fail to parse are skipped with
-  an explicit `WARNING` debug line (they used to vanish silently — the
-  2026-07-19 field incident's multi-track export overflowed the old 4 KB
-  buffer AND had an unrecognized root, so OKC never resolved a course).
 - **Track manifest**: `buildTrackList()` also builds an in-RAM
-  `trackManifest[]` (up to 200 entries) with first lat/lon per detectable
-  track for haversine proximity matching — a multi-track file contributes
-  one entry per contained track, carrying the member key. ~16 KB RAM.
+  `trackManifest[]` (up to 200 entries) with first lat/lon per track
+  for haversine proximity matching. ~10 KB RAM.
 - **SD access arbitration** prevents concurrent access:
   - `acquireSDAccess(mode)` / `releaseSDAccess(mode)`
   - Modes: `SD_ACCESS_NONE` (0), `LOGGING` (1), `REPLAY` (2),
@@ -1055,7 +1043,7 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | SD SPI clock (transfer) | 8 MHz (`SD_SPI_SPEED_FAST`) | `BirdsEye.ino` |
 | Battery check interval | 5 s | `BirdsEye.ino` |
 | BLE default MTU | 23 | `bluetooth.ino` |
-| JSON buffer | 8192 (SIM builds too) | `BirdsEye.ino` (`JSON_BUFFER_SIZE`) |
+| JSON buffer | 4096 (SIM builds too) | `sd_functions.ino` |
 | Settings JSON buffer | 512 | `settings.ino` |
 | Settings file path | `/SETTINGS.json` | `settings.ino` |
 | Track upload buffer | 4096 | `bluetooth.ino` |

@@ -227,27 +227,11 @@ void sdPerformFormat() {
   NVIC_SystemReset();
 }
 
-// Static buffers for JSON parsing — saves ~8KB of stack per call.
+// Static buffers for JSON parsing — saves ~4KB of stack per call.
 // Only one parseTrackFile() call can be active at a time (single-threaded).
 // Also reused by buildTrackList() for manifest extraction.
 static char jsonFileBuffer[JSON_BUFFER_SIZE];
 static StaticJsonDocument<JSON_BUFFER_SIZE> trackJson;
-
-// Append a manifest entry (one detectable track: file + optional multi-track
-// member key + representative coordinates). Rejects (0,0)/missing coords.
-static void addManifestEntry(const char* filename, const char* trackKey,
-                             double lat, double lon) {
-  if (trackManifestCount >= MAX_LOCATIONS) return;
-  if (lat == 0 && lon == 0) return;
-  TrackManifestEntry& e = trackManifest[trackManifestCount];
-  strncpy(e.filename, filename, sizeof(e.filename) - 1);
-  e.filename[sizeof(e.filename) - 1] = '\0';
-  strncpy(e.trackKey, trackKey, sizeof(e.trackKey) - 1);
-  e.trackKey[sizeof(e.trackKey) - 1] = '\0';
-  e.lat = lat;
-  e.lon = lon;
-  trackManifestCount++;
-}
 
 bool buildTrackList() {
   // Take the SD mutex for the whole directory walk. Every other SD consumer
@@ -305,54 +289,38 @@ bool buildTrackList() {
     strncpy(locations[numOfLocations], filename, MAX_LOCATION_LENGTH - 1);
     locations[numOfLocations][MAX_LOCATION_LENGTH - 1] = '\0';  // Ensure null-termination
 
-    // Build track manifest entries — extract first lat/lon from JSON
+    // Build track manifest entry — extract first lat/lon from JSON
     // Reuses the static JSON buffer (safe: single-threaded, one file at a time)
     if (trackManifestCount < MAX_LOCATIONS) {
       int bytesRead = file.read(jsonFileBuffer, sizeof(jsonFileBuffer) - 1);
       if (bytesRead > 0) {
         jsonFileBuffer[bytesRead] = '\0';
-        if (bytesRead == (int)sizeof(jsonFileBuffer) - 1) {
-          // Almost certainly truncated — the parse below will fail with
-          // IncompleteInput and the file will be invisible to detection.
-          // Say so instead of failing silently (pre-fix a 4.2 KB export
-          // vanished without a trace: 2026-07-19 field incident).
-          debug(F("WARNING: track file exceeds JSON buffer, skipping: "));
-          debugln(filename);
-        }
         trackJson.clear();
         DeserializationError err = deserializeJson(trackJson, jsonFileBuffer);
         if (err == DeserializationError::Ok) {
+          double firstLat = 0, firstLon = 0;
           if (trackJson.is<JsonObject>()) {
+            // New format: object with "courses" array
             JsonArray courses = trackJson["courses"];
             if (courses.size() > 0) {
-              // Single-track object format: root has its own courses array
-              addManifestEntry(filename, "",
-                               courses[0]["start_a_lat"],
-                               courses[0]["start_a_lng"]);
-            } else {
-              // Multi-track format: root keyed by track name, each member
-              // an object with its own courses array. One manifest entry
-              // per contained track so proximity matching sees them all.
-              for (JsonPair kv : trackJson.as<JsonObject>()) {
-                JsonArray tc = kv.value()["courses"];
-                if (tc.size() == 0) continue;
-                addManifestEntry(filename, kv.key().c_str(),
-                                 tc[0]["start_a_lat"],
-                                 tc[0]["start_a_lng"]);
-              }
+              firstLat = courses[0]["start_a_lat"];
+              firstLon = courses[0]["start_a_lng"];
             }
           } else if (trackJson.is<JsonArray>()) {
             // Legacy format: bare array of courses
             JsonArray arr = trackJson.as<JsonArray>();
             if (arr.size() > 0) {
-              addManifestEntry(filename, "",
-                               arr[0]["start_a_lat"],
-                               arr[0]["start_a_lng"]);
+              firstLat = arr[0]["start_a_lat"];
+              firstLon = arr[0]["start_a_lng"];
             }
           }
-        } else {
-          debug(F("WARNING: track file did not parse, skipping: "));
-          debugln(filename);
+          if (firstLat != 0 || firstLon != 0) {
+            strncpy(trackManifest[trackManifestCount].filename, filename, sizeof(trackManifest[0].filename) - 1);
+            trackManifest[trackManifestCount].filename[sizeof(trackManifest[0].filename) - 1] = '\0';
+            trackManifest[trackManifestCount].lat = firstLat;
+            trackManifest[trackManifestCount].lon = firstLon;
+            trackManifestCount++;
+          }
         }
       }
     }
@@ -377,18 +345,8 @@ bool buildTrackList() {
 }
 
 int parseTrackFile(char* filepath) {
-  return parseTrackFileEntry(filepath, nullptr);
-}
-
-int parseTrackFileEntry(char* filepath, const char* trackKey) {
   debug(F("ParseTrackFile:"));
-  debug(filepath);
-  if (trackKey && trackKey[0]) {
-    debug(F(" ["));
-    debug(trackKey);
-    debug(F("]"));
-  }
-  debugln();
+  debugln(filepath);
 
   // Reset track count so we don't accumulate stale entries from prior calls
   numOfTracks = 0;
@@ -455,35 +413,15 @@ int parseTrackFileEntry(char* filepath, const char* trackKey) {
     return PARSE_STATUS_PARSE_FAILED;
   }
 
-  // Detect JSON root type: object (single- or multi-track) or array (legacy)
+  // Detect JSON root type: object (new format) or array (legacy format)
   JsonArray coursesArray;
   if (trackJson.is<JsonObject>()) {
-    JsonObject trackRoot = trackJson.as<JsonObject>();
-    const char* longName;
+    // New format: { "longName": "...", "shortName": "...", "courses": [...] }
+    debugln(F("ParseTrackFile: New object format detected"));
 
-    if (trackKey && trackKey[0]) {
-      // Multi-track format: { "<Track Name>": { "shortName": ..,
-      // "courses": [...] }, ... } — select the member the manifest entry
-      // named. The member key IS the track's long name.
-      JsonVariant sub = trackRoot[trackKey];
-      if (!sub.is<JsonObject>() || sub["courses"].isNull()) {
-        debugln(F("ParseTrackFile: track key not found in file"));
-        trackFile.close();
-        releaseSDAccess(SD_ACCESS_TRACK_PARSE);
-        return PARSE_STATUS_PARSE_FAILED;
-      }
-      debugln(F("ParseTrackFile: Multi-track member selected"));
-      trackRoot = sub.as<JsonObject>();
-      longName = trackKey;
-    } else {
-      // Single-track object format:
-      // { "longName": "...", "shortName": "...", "courses": [...] }
-      debugln(F("ParseTrackFile: New object format detected"));
-      longName = trackRoot["longName"] | "";
-    }
-
-    const char* shortName = trackRoot["shortName"] | "";
-    const char* defaultCourse = trackRoot["defaultCourse"] | "";
+    const char* longName = trackJson["longName"] | "";
+    const char* shortName = trackJson["shortName"] | "";
+    const char* defaultCourse = trackJson["defaultCourse"] | "";
 
     strncpy(activeTrackMetadata.longName, longName, sizeof(activeTrackMetadata.longName) - 1);
     activeTrackMetadata.longName[sizeof(activeTrackMetadata.longName) - 1] = '\0';
@@ -492,7 +430,7 @@ int parseTrackFileEntry(char* filepath, const char* trackKey) {
     strncpy(activeTrackMetadata.defaultCourse, defaultCourse, sizeof(activeTrackMetadata.defaultCourse) - 1);
     activeTrackMetadata.defaultCourse[sizeof(activeTrackMetadata.defaultCourse) - 1] = '\0';
 
-    coursesArray = trackRoot["courses"];
+    coursesArray = trackJson["courses"];
 
     debug(F("  longName: "));
     debugln(longName);

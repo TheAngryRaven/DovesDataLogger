@@ -283,9 +283,6 @@ target_link_libraries(birdseye_sim_golden PRIVATE birdseye_sim_core)
 add_executable(birdseye_sim_oracle ${SIM_DIR}/oracle_main.cpp)
 target_link_libraries(birdseye_sim_oracle PRIVATE birdseye_sim_core)
 
-add_executable(birdseye_sim_trackfile ${SIM_DIR}/trackfile_main.cpp)
-target_link_libraries(birdseye_sim_trackfile PRIVATE birdseye_sim_core)
-
 enable_testing()
 
 # Phase-1 done-criteria: boots to menu + survives 60 s of virtual time,
@@ -330,10 +327,3 @@ add_test(NAME sim_two_session_carryover
   COMMAND birdseye_sim_oracle --two-session
           ${SIM_DIR}/fixtures/okc_tillotson_1.dovex 6
 )
-
-# Track-file parsing over the real VFS: single-track object format,
-# legacy array leniency, and the multi-track HackTheTrack export (root
-# keyed by track name — one manifest entry per contained track, member
-# selected by key at parse time). ArduinoJson-bound, so it can't live in
-# the tests/ host harness.
-add_test(NAME sim_trackfile_parsing COMMAND birdseye_sim_trackfile)
