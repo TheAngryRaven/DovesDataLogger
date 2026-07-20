@@ -4,7 +4,8 @@ namespace gps_stats {
 
 uint32_t expectedFrames(DropMonitor& m, uint32_t elapsedMs, uint16_t rateHz) {
   // Work in milli-frames so the sub-frame remainder carries exactly.
-  uint32_t milliFrames = m.remainderMilliFrames + elapsedMs * (uint32_t)rateHz;
+  const uint32_t milliFrames =
+      m.remainderMilliFrames + elapsedMs * (uint32_t)rateHz;
   m.remainderMilliFrames = milliFrames % 1000U;
   return milliFrames / 1000U;
 }
@@ -31,7 +32,7 @@ void windowUpdate(DropMonitor& m, uint32_t framesReceived,
     return;
   }
 
-  uint32_t expected = expectedFrames(m, elapsedMs, rateHz);
+  const uint32_t expected = expectedFrames(m, elapsedMs, rateHz);
   m.balance += (int32_t)framesReceived - (int32_t)expected;
   if (m.balance < -kSlackFrames) {
     m.droppedTotal += (uint32_t)(-kSlackFrames - m.balance);
