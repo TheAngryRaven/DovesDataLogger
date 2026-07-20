@@ -30,13 +30,43 @@ ARCHITECTURE.md for the full map.
 1. Install the **"Seeed nRF52 Boards"** package (the non-mbed variant — the
    mbed one uses ArduinoBLE instead of Bluefruit and won't compile).
 2. Install the libraries listed in the README's *Required Libraries* table.
-3. Open `BirdsEye/BirdsEye.ino`, select **Seeed XIAO nRF52840 Sense**, and
+3. Set up the required build flag (next section) — a stock IDE build stops
+   with a `static_assert` telling you to do this.
+4. Open `BirdsEye/BirdsEye.ino`, select **Seeed XIAO nRF52840 Sense**, and
    compile.
+
+### Local build flags
+
+The firmware **requires** `-DSERIAL_BUFFER_SIZE=256`: it grows the core's
+Serial1 RX/TX rings from 64 to 256 bytes so SoftDevice radio interrupts
+(BLE scan windows, camera connection events) can't defer the TIMER3 GPS
+drain long enough to silently drop GPS bytes. `project.h` fails the
+compile if the flag is missing, because a silently under-buffered build
+reintroduces a real field bug (~0.9% dropped 25 Hz PVT frames). CI passes
+the flag automatically.
+
+- **Arduino IDE**: create `platform.local.txt` next to the board package's
+  `platform.txt` (e.g.
+  `<arduino15>/packages/Seeeduino/hardware/nrf52/<version>/platform.local.txt`)
+  containing:
+
+  ```
+  compiler.cpp.extra_flags=-DSERIAL_BUFFER_SIZE=256
+  ```
+
+  One-time setup; survives sketch changes (re-add after a board-package
+  update).
+- **arduino-cli**: add
+  `--build-property "compiler.cpp.extra_flags=-DSERIAL_BUFFER_SIZE=256"`
+  (merge it into the same property if you're already passing variant
+  defines — a second `--build-property` for the same key replaces the
+  first).
 
 ### arduino-cli
 The exact invocation CI uses is in
 [`.github/workflows/compile-sketch.yml`](.github/workflows/compile-sketch.yml)
-— copy the platform/library install steps from there.
+— copy the platform/library install steps from there (including the
+`SERIAL_BUFFER_SIZE` build property).
 
 ## Running the host tests
 
