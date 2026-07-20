@@ -27,6 +27,8 @@ TEST_CASE("canAcquire - a non-preemptible holder denies every other mode") {
     for (int current : exclusive) {
         for (int requested : kHolderModes) {
             if (requested == current) continue;
+            // The one sanctioned exception: track parse nests under logging.
+            if (current == kLogging && requested == kTrackParse) continue;
             CHECK_FALSE(canAcquire(current, requested));
         }
     }
@@ -49,8 +51,11 @@ TEST_CASE("canAcquire - concrete cross-subsystem cases") {
     // Replay and BLE transfer exclude each other.
     CHECK_FALSE(canAcquire(kReplay, kBleTransfer));
     CHECK_FALSE(canAcquire(kBleTransfer, kReplay));
-    // Settings/track reads (TRACK_PARSE) are denied while logging holds it.
-    CHECK_FALSE(canAcquire(kLogging, kTrackParse));
+    // Settings/track reads (TRACK_PARSE) nest under a logging hold: they
+    // run on the same main-loop task with their own File objects, and a
+    // denial here silently degraded track detection to Lap Anything on any
+    // boot where logging started first (2026-07-19 field incident).
+    CHECK(canAcquire(kLogging, kTrackParse));
     // USB mass-storage and the other exclusive holders lock each other out.
     CHECK_FALSE(canAcquire(kLogging, kUsbMsc));
     CHECK_FALSE(canAcquire(kUsbMsc, kBleTransfer));
@@ -61,6 +66,28 @@ TEST_CASE("canAcquire - concrete cross-subsystem cases") {
     // cases above) but still preempts a leaked track-parse lock.
     CHECK_FALSE(canAcquire(kFormat, kLogging));
     CHECK(canAcquire(kTrackParse, kFormat));
+}
+
+// ---------------------------------------------------------------------------
+// ownerAfterAcquire — who is recorded as holder after a granted acquire
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ownerAfterAcquire - the requester normally takes ownership") {
+    for (int current : kAllModes) {
+        for (int requested : kHolderModes) {
+            if (current == kLogging && requested == kTrackParse) continue;
+            CHECK(ownerAfterAcquire(current, requested) == requested);
+        }
+    }
+}
+
+TEST_CASE("ownerAfterAcquire - nested track parse leaves logging as owner") {
+    // The guest parse must not take ownership: its release is ignored by
+    // releaseClears (stale-release rule), so the logging hold survives the
+    // whole nested acquire/release cycle untouched.
+    CHECK(ownerAfterAcquire(kLogging, kTrackParse) == kLogging);
+    CHECK_FALSE(releaseClears(kLogging, kTrackParse));
+    CHECK(releaseClears(kLogging, kLogging));
 }
 
 // ---------------------------------------------------------------------------

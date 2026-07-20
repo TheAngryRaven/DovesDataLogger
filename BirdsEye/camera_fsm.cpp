@@ -30,14 +30,17 @@ void clearTimers(Fsm& f) {
   f.entryPending = false;
 }
 
-// RPM-continuously-up tracker for the record-start gate: arm on the rise
-// above ON, disarm on a fall below OFF, hold through the hysteresis band.
-// The record-start clock (kRecordStartDelayMs) runs from recordArmSince.
+// RPM-continuously-up tracker for the record-start gate: arm at/above the
+// record threshold, disarm on ANY dip below it (strict — no hysteresis band
+// here, unlike wake/stop). Cranking blips from a pull-start clear the wake
+// threshold but not a sustained kRecordRpmThreshold, so a failed first start
+// can wake the camera without also starting a recording. The record-start
+// clock (kRecordStartDelayMs) runs from recordArmSince.
 void maintainRecordArm(Fsm& f, const Inputs& in) {
-  if (in.rpm > kRpmOnThreshold) {
+  if (in.rpm >= kRecordRpmThreshold) {
     if (f.recordArmSince == 0) f.recordArmSince = seedNow(in.nowMs);
-  } else if (in.rpm < kRpmOffThreshold) {
-    f.recordArmSince = 0;  // engine off — disarm
+  } else {
+    f.recordArmSince = 0;  // below the record band — restart the clock
   }
 }
 
@@ -108,10 +111,11 @@ Action stepIdle(Fsm& f, const Inputs& in) {
   }
   if (!elapsed(in.nowMs, f.rpmOnSince, kRpmOnDebounceMs)) return Action::kNone;
   f.rpmOnSince = 0;
-  // RPM is confirmed up — start the record-arm clock now so the 5 s
-  // record-start delay is measured from the wake, not from when the camera
-  // finally connects.
-  f.recordArmSince = seedNow(in.nowMs);
+  // RPM is confirmed up — the camera wakes now, but the record-arm clock only
+  // starts once RPM reaches the (higher) record threshold, so the 5 s
+  // record-start delay measures sustained running, not cranking blips.
+  // maintainRecordArm() in the following states keeps it accurate.
+  if (in.rpm >= kRecordRpmThreshold) f.recordArmSince = seedNow(in.nowMs);
 
   if (in.remoteConnected) {
     // Stale remote link from a previous session: the camera is already on
@@ -216,8 +220,8 @@ Action stepAwaitReady(Fsm& f, const Inputs& in) {
   return Action::kNone;
 }
 
-// Shared record-start gate used by WATCHING: RPM held above ON for
-// kRecordStartDelayMs, camera subscribed. Reconciles against the camera's
+// Shared record-start gate used by WATCHING: RPM held at/above
+// kRecordRpmThreshold for kRecordStartDelayMs, camera subscribed. Reconciles against the camera's
 // OBSERVED record state so we drive the shutter toward the target instead of
 // blind-toggling on belief (adopt-if-already-rolling; #4). Returns kNone with
 // no state change when the gate isn't met.

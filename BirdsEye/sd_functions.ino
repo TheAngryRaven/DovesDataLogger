@@ -23,7 +23,9 @@ bool acquireSDAccess(int mode) {
   taskENTER_CRITICAL();
   granted = sd_access_policy::canAcquire(currentSDAccess, mode);
   if (granted) {
-    currentSDAccess = mode;
+    // Normally the requester takes ownership; a track parse nested under a
+    // logging hold leaves logging as the owner (see sd_access_policy.h).
+    currentSDAccess = sd_access_policy::ownerAfterAcquire(currentSDAccess, mode);
   }
   taskEXIT_CRITICAL();
 

@@ -29,6 +29,13 @@
 // the buffer and parses via the host-tested sensoregg_protocol unit. No
 // Serial/SD/display work ever happens in the callback.
 //
+// SCANNER ROBUSTNESS: Bluefruit pauses scanning from the moment a report
+// is ACCEPTED until our deferred rx callback resumes it, so ambient
+// packets must be rejected INLINE — Scanner.filterMSD(0xFFFF) does that
+// (Bluefruit self-resumes filtered packets). And because a lost deferred
+// callback would halt the scanner silently forever, SENSOREGG_LOOP kicks
+// stop+start after kScannerSelfHealMs with no accepted packet.
+//
 // STALENESS: a reading older than sensoregg_protocol::kStalenessMs (1 s)
 // is dead — accessors return NaN/false so the display shows '---' and the
 // log writes nan. NEVER hold the last value across a dropout: a held

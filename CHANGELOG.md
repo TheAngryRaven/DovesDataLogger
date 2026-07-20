@@ -13,6 +13,65 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **Simulator oracle diagnostic replay modes.** `birdseye_sim_oracle
+  --dovex-noheader <file>` replays a header-less DOVEX log (crashed /
+  power-cut session) through the full pipeline, printing live page / race /
+  track-detect / course / lap state instead of asserting against header
+  laps. `--two-session <file> [break-minutes]` reproduces a whole track
+  day — synthetic session 1, auto-idle session end, a parked break with
+  deterministic GPS drift, then the real log as session 2 — validating the
+  carried-over CourseManager against the log's own header laps (wired into
+  CI as `sim_two_session_carryover`).
+
+### Fixed
+- **Menu idle shutdown ignored button activity.** The 5-minute main-menu
+  idle timer read the buttons' `pressed` flags at a point in the loop where
+  they are always false (set later by `readButtons()`, cleared by
+  `resetButtons()` before the next iteration), so navigating the menu never
+  reset the clock and the device powered off 5 minutes after menu entry
+  regardless of activity. The timer now anchors on the button debouncer's
+  persistent `lastPressed` stamps. Regression-tested by the new
+  `--two-session` sim oracle mode in CI (the mid-break shutdown it used to
+  cause kept session 2 from ever entering race mode).
+- **Track detection silently degraded to Lap Anything when logging started
+  first.** `SD_ACCESS_TRACK_PARSE` was denied while `SD_ACCESS_LOGGING`
+  held the card — but logging holds it for the entire race session, so any
+  boot where the log file was created before the 1 Hz track-detect parse
+  (typical tach-wake with a warm GPS) lost course detection for the whole
+  session. Track parse / settings reads now nest under the logging hold
+  without taking ownership (`sd_access_policy::ownerAfterAcquire`) — they
+  run on the same main-loop task with their own file handles, so the
+  exclusion never protected anything. Policy change covered by host unit
+  tests.
+- **Pull-start / engine-kill lockup (field incident 2026-07-19).** A failed
+  first start or killing the motor before GPS acquired its time lock left
+  the device apparently frozen: pinned to the RPM page, all buttons dead,
+  no watchdog reset. Root cause: the GPS-lock hold (which pins the UI while
+  a race session waits for a lock to create its log file) latched on any
+  tach pulse — pull-cord ignition blips included — and had no engine-off
+  release, while its only automatic session-enders were blocked (3-minute
+  auto-idle grace, and full auto-idle suppression once the camera was
+  recording). Fixes: the hold now releases after 10 s of engine-off (the
+  session stays active and navigable), the pinned tach page shows
+  `WAITING GPS LOCK..` instead of pinning silently, and auto-idle may end
+  a still-fileless session even while the camera records.
+
+### Changed
+- **Camera recording requires 1500+ RPM sustained for 5 s.** The record
+  start gate moved from the 500 RPM wake threshold to a dedicated
+  `kRecordRpmThreshold` (1500), held continuously for the full 5 s delay —
+  any dip below restarts the clock. Pull-start cranking registers real
+  ignition pulses above 500 RPM, which could start a camera recording
+  during a failed start; cranking cannot sustain 1500. Camera wake and the
+  30 s engine-off stop keep the 500/300 hysteresis band.
+- **SensorEgg temperatures display in Fahrenheit.** The Temp1 race page
+  (big EGT + junction subtext) and the camera bench page's `egg:` soak
+  readout now render in °F, converted at display time via the host-tested
+  `sensoregg_protocol::celsiusToFahrenheit()`. DOVEX logging is unchanged
+  (`Temp1`/`Junction1` stay Celsius). A C/F display setting will follow
+  in a later release.
+
+### Added
 - **SensorEgg wireless EGT (proof of concept).** The logger passively
   scans for the DovesSensorEgg — a wireless thermocouple pod that
   broadcasts EGT + cold-junction temperature in BLE advertising packets
@@ -36,6 +95,18 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - **BLE core now starts at boot** (was lazy — first camera/transfer use)
   so the SensorEgg scanner is always listening. Idle power draw increases
   accordingly; GATT service registration order is unchanged.
+
+### Fixed
+- **SensorEgg reception flapping** (1 s of readings, then 1–30 s of
+  `NA`/`nan`, seen on the first bench soak). Three scanner fixes: an
+  inline manufacturer-ID filter (`filterMSD(0xFFFF)`) so ambient BLE
+  packets are rejected inside Bluefruit instead of pausing the scanner
+  for a deferred-callback round trip each; a 60 ms scan window (was
+  40 ms) plus an off-100 ms egg advertising interval so the equal
+  100 ms adv/scan periods can no longer phase-lock the egg into the
+  scanner's deaf zone for seconds at a time; and a 30 s self-heal that
+  restarts a silently-halted scanner (a lost deferred rx callback
+  otherwise kills scanning forever with no error).
 
 ## [3.0.0] - 2026-07-17
 

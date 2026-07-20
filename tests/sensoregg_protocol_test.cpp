@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
 
 #include "sensoregg_protocol.h"
 
@@ -150,4 +151,22 @@ TEST_CASE("sensoregg_protocol - staleness is wrap-safe across millis rollover") 
     const uint32_t nearWrap = 0xFFFFFF38u;  // 200 ms before rollover
     CHECK(isFresh(nearWrap, nearWrap + 999));  // wraps past 0, still fresh
     CHECK_FALSE(isFresh(nearWrap, nearWrap + kStalenessMs));
+}
+
+// ---------------------------------------------------------------------------
+// Display-unit conversion (Temp1 page renders Fahrenheit; logging stays C)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("sensoregg_protocol - celsiusToFahrenheit known points") {
+    CHECK(celsiusToFahrenheit(0.0f) == doctest::Approx(32.0f));
+    CHECK(celsiusToFahrenheit(100.0f) == doctest::Approx(212.0f));
+    CHECK(celsiusToFahrenheit(-40.0f) == doctest::Approx(-40.0f));
+    // Golden-frame EGT: 650.0 C — a realistic two-stroke EGT reading.
+    CHECK(celsiusToFahrenheit(650.0f) == doctest::Approx(1202.0f));
+}
+
+TEST_CASE("sensoregg_protocol - celsiusToFahrenheit propagates NaN") {
+    // NaN is the no-reading sentinel end to end: a stale/invalid probe must
+    // still render '---' after conversion, never a numeric artifact.
+    CHECK(std::isnan(celsiusToFahrenheit(std::numeric_limits<float>::quiet_NaN())));
 }

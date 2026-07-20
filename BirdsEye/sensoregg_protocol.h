@@ -38,6 +38,14 @@ constexpr size_t kPayloadLen = 14;
 // Company ID + magic, exactly as they appear at the start of the payload.
 constexpr uint8_t kMagic[4] = {0xFF, 0xFF, 0x50, 0x57};
 
+// Company ID as a value, for Bluefruit's INLINE manufacturer-data filter
+// (Scanner.filterMSD). Packets failing an inline filter are rejected and
+// resumed inside Bluefruit's event handler; without it, EVERY ambient
+// packet above the RSSI floor pauses scanning for a deferred-callback
+// round trip through our rx callback, collapsing the scan duty cycle in
+// bursts on a BLE-busy bench.
+constexpr uint16_t kCompanyId = 0xFFFF;
+
 // Byte 4 — the only protocol version this parser understands.
 constexpr uint8_t kProtocolVersion = 0x01;
 
@@ -50,12 +58,26 @@ constexpr int16_t kInvalidSentinel = INT16_MIN;
 // indistinguishable from real data).
 constexpr uint32_t kStalenessMs = 1000;
 
-// Logger scan parameters (0.625 ms units): 100 ms interval / 40 ms window
-// (~40% duty), passive-only so the observer never transmits and cannot
-// contend with the Insta360 camera link for TX airtime.
+// Logger scan parameters (0.625 ms units): 100 ms interval / 60 ms window
+// (60% duty), passive-only so the observer never transmits and cannot
+// contend with the Insta360 camera link for TX airtime (S140 yields scan
+// windows to connection events automatically). The window was widened
+// from the spec's 40 ms after bench flapping: a 100 ms adv interval
+// against a 100 ms scan interval phase-locks, and with only a 40 ms live
+// window the egg could park in the 60 ms deaf zone for seconds at a
+// time. The egg's adv interval is also moved off 100 ms (see the egg
+// firmware) so the phases sweep instead of locking.
 constexpr uint16_t kScanIntervalUnits = 160;
-constexpr uint16_t kScanWindowUnits = 64;
+constexpr uint16_t kScanWindowUnits = 96;
 constexpr int8_t kRssiFloorDbm = -90;
+
+// Scanner self-heal: if no egg packet has been accepted for this long,
+// SENSOREGG_LOOP kicks the scanner (stop + start). A lost deferred rx
+// callback would otherwise leave the scanner halted forever with no
+// error - indistinguishable from a dead egg. Kicking a healthy scanner
+// is harmless (a few ms gap), so this also self-limits false positives
+// while the egg is simply powered off.
+constexpr uint32_t kScannerSelfHealMs = 30000;
 
 struct Reading {
   float egtC = 0.0f;        // NaN when the egg sent the invalid sentinel
@@ -80,5 +102,10 @@ bool parsePayload(const uint8_t* data, size_t len, Reading& out);
 // Staleness rule: true while a reading received at `receivedAtMs` is
 // still fresh at `nowMs` (age < kStalenessMs, wrap-safe).
 bool isFresh(uint32_t receivedAtMs, uint32_t nowMs);
+
+// Display-unit conversion. The on-device display shows Fahrenheit (a C/F
+// display setting comes later); DOVEX logging stays Celsius — convert at
+// render time only. NaN propagates.
+float celsiusToFahrenheit(float c);
 
 }  // namespace sensoregg_protocol

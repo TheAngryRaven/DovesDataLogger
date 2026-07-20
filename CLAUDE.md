@@ -144,8 +144,8 @@ handoff spec.
 | `png_dump.{h,cpp}` | Dependency-free PNG writer (stored-deflate + repo crc32) for eyeballing frames |
 | `native_main.cpp` | Phase-1 driver: boot → skip GPS status page → 60 s soak, state prints |
 | `golden_main.cpp` | Phase-2 driver: scripted real-menu walk capturing 8 golden page hashes (`golden/golden_hashes.txt`; regenerate with `--print`, eyeball with `--dump`) |
-| `oracle_main.cpp` | Phase-3 driver: lap-timing oracle. Default = synthetic constant-speed OKC circle (period exact by construction) through the whole real pipeline (boot page → race entry → proximity detect → CourseDetector "Normal" → laps ±40 ms); `--dovex <file>` replays a hardware log against its own header laps |
-| `fixtures/okc_tillotson_1.dovex` | Hardware-recorded OKC session (13 laps) — the `--dovex` oracle's CI fixture; the sim reproduces its header lap list to the exact millisecond |
+| `oracle_main.cpp` | Phase-3 driver: lap-timing oracle. Default = synthetic constant-speed OKC circle (period exact by construction) through the whole real pipeline (boot page → race entry → proximity detect → CourseDetector "Normal" → laps ±40 ms); `--dovex <file>` replays a hardware log against its own header laps; diagnostic modes: `--dovex-noheader <file>` replays a header-less (crashed-session) log and prints live detection/lap state instead of asserting, `--two-session <file> [break-min]` reproduces a full track day (synthetic session 1 → auto-idle end → parked break with GPS drift → real-log session 2) to test CourseManager state carryover |
+| `fixtures/okc_tillotson_1.dovex` | Hardware-recorded OKC session (13 laps) — the `--dovex` oracle's CI fixture; the sim reproduces its header lap list to the exact millisecond (also the `--two-session` carryover test's session 2) |
 | `API.md` | Canonical WASM API contract (v1): artifact set, method surface, injectPvt schema, deltas from the handoff-spec draft (async `reset()` via module re-instantiation) |
 | `wasm/bindings.cpp` | EMSCRIPTEN_KEEPALIVE exports over sim_host.h + getStateJson/getVersion/readFile/listFiles |
 | `wasm/birdseye-sim.mjs` | Hand-written public ESM wrapper (stable import; async `reset()` re-instantiates the core module) |
@@ -157,7 +157,7 @@ handoff spec.
 
 | Path | Contents |
 |---|---|
-| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, sim-build (native sim TU + 60 s boot soak + determinism + goldens + lap oracles, plus a wasm job: emsdk 3.1.61 build + node smoke + `birdseye-sim-wasm` artifact), release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). DovesLapTimer ref per channel: `BETA` builds track the library's `BETA` branch, master/release pin `v4.2.0` |
+| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, sim-build (native sim TU + 60 s boot soak + determinism + goldens + lap oracles + two-session carryover, plus a wasm job: emsdk 3.1.61 build + node smoke + `birdseye-sim-wasm` artifact), release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). DovesLapTimer ref per channel: `BETA` builds track the library's `BETA` branch, master/release pin `v4.2.0` |
 | `tests/` | Host doctest harness (CMake) for the pure-logic units |
 | `CHANGELOG.md` | Keep-a-Changelog history; release workflow ties to version tags |
 | `ARCHITECTURE.md` | Human-facing architecture narrative (subsystems, design decisions) |
@@ -262,8 +262,14 @@ loop()  ~250 Hz
   not created from the module's placeholder date — this prevents garbage-named
   files (e.g. `20210307_0000.dovex`) that collided every boot and corrupted on
   reboot. Until the lock arrives, `updateGpsLockHold()` pins the user to the
-  tachometer page (engine running) and logging waits; a failed open is retried
+  tachometer page (engine running; the page shows `WAITING GPS LOCK..` so the
+  pin never reads as a crash) and logging waits; a failed open is retried
   at 1 Hz and a write failure stops logging — **none fault out of race mode**.
+  The pin **releases after 10 s of engine-off** (session stays active; a
+  restart re-latches), and while it is active `checkAutoIdle()` may end the
+  fileless session even if the camera is recording — the recording yield
+  otherwise left no session-ender and the device looked bricked until a
+  power cycle (2026-07-19 field incident).
 - Time helpers: `getGpsTimeInMilliseconds()`, `getGpsUnixTimestampMillis()`.
 - 64-bit timestamps are manually converted to strings (Arduino lacks `%llu`).
 - **Wake hardening**: `GPS_WAKE()` (charging-loop resume) clears stale
@@ -356,6 +362,12 @@ loop()  ~250 Hz
     `BLE_TRANSFER` (3), `TRACK_PARSE` (4), `USB_MSC` (5), `FORMAT` (6) —
     values and grant/deny rules live in the host-tested `sd_access_policy`
     pure unit.
+  - `TRACK_PARSE` **nests under `LOGGING`** without taking ownership
+    (`ownerAfterAcquire`): track detection and settings reads are brief,
+    same-task, and use their own `File` objects, so they are safe alongside
+    the session-long logging hold. Before this rule, any boot where the log
+    file was created before the 1 Hz track-detect parse had the parse
+    denied and silently fell back to Lap Anything for the whole session.
     `USB_MSC` is a normal exclusive holder (held for the whole USB
     mass-storage session; see subsystem 12).
   - Transitions are **atomic**: the check-then-set runs inside a FreeRTOS
@@ -737,9 +749,12 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   when **QuickCapture is OFF** — an armed camera keeps its radio scanning even
   fully powered off. Every advert goes through `bleAdvFinalizePadded()` — see
   bluetooth.ino — to defeat the Bluefruit 0.21.0 frozen-packet-length core
-  bug.) **Recording starts** from WATCHING once RPM has held above ON for
-  `kRecordStartDelayMs` (5 s) — **no GPS-lock gate** (GPS still streams the
-  whole time) — by sending one shutter-toggle ce82 frame. The shutter is a
+  bug.) **Recording starts** from WATCHING once RPM has held at/above
+  `kRecordRpmThreshold` (1500 — deliberately far above the 500 wake
+  threshold: pull-start cranking blips clear 500 and once started a
+  recording during a failed first start; any dip below 1500 restarts the
+  clock) for `kRecordStartDelayMs` (5 s) — **no GPS-lock gate** (GPS still
+  streams the whole time) — by sending one shutter-toggle ce82 frame. The shutter is a
   stateful TOGGLE, so the FSM never blind-fires it: it **confirms** record
   state from the camera's own `0x10` ce81 display-string frame (a live
   `.HH:MM:SS` timer while recording — the `0x02` status word is not reliable;
@@ -853,10 +868,20 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   raw MCP9600 STATUS, battery stub, uint16 sequence), ~10 Hz.
 - **Radio role — do not "improve" this**: the logger is a pure passive
   OBSERVER (`Bluefruit.Scanner`, `useActiveScan(false)`, 100 ms interval /
-  40 ms window, RSSI ≥ −90). No SCAN_REQ, no connection, no GATT — so it
+  60 ms window, RSSI ≥ −90). No SCAN_REQ, no connection, no GATT — so it
   cannot contend with the camera peripheral link for TX airtime; S140
   time-slices scan windows around connection events. The egg accepts no
   connections. **The camera link wins every tradeoff.**
+- **Scanner robustness (bench-proven, do not remove)**: (1)
+  `Scanner.filterMSD(0xFFFF)` rejects ambient packets INLINE — Bluefruit
+  self-resumes filtered reports, while an accepted report pauses scanning
+  until the deferred rx callback runs, so without this filter desk BLE
+  traffic collapses the scan duty in bursts. (2) The scan window is 60 ms
+  (not the spec's 40) and the egg advertises off-100 ms, because equal
+  100 ms adv/scan periods phase-lock and parked the egg in the deaf zone
+  for seconds. (3) `SENSOREGG_LOOP()` kicks stop+start after 30 s with no
+  accepted packet — a lost deferred callback otherwise halts the scanner
+  silently forever.
 - **Pairing (POC)**: `SENSOREGG_MAC` #define in `sensoregg.h`, human byte
   order; all-zeros (default) = accept any advertiser matching the payload
   magic. The scan callback filters length + magic + MAC, copies the raw 14
@@ -868,9 +893,11 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   `sensoreggJunctionC()` (NaN when stale or egg-invalid), `sensoreggLinkUp()`,
   `sensoreggTcFault()`. **Staleness (1 s) is absolute** — a reading is never
   held across a dropout (a held value draws a flat line indistinguishable
-  from real data). Logging writes `Temp1`/`Junction1` (or `nan`); the
-  `SENSOR_TEMP` race page (after the tach page) shows big EGT + junction +
-  `rf:` link subtext.
+  from real data). Logging writes `Temp1`/`Junction1` (or `nan`) **in
+  Celsius**; the `SENSOR_TEMP` race page (after the tach page) shows big
+  EGT + junction + `rf:` link subtext **in Fahrenheit** — converted at
+  render time only via `sensoregg_protocol::celsiusToFahrenheit()` (a C/F
+  display setting comes later).
 - **BLE lifetime change**: `SENSOREGG_SETUP()` (called from `setup()` after
   `CAMERA_SETUP()`) runs `bleCoreEnsureInit()` at boot — BLE is no longer
   lazy. Scanner start failure logs the documented `Bluefruit.begin(1, 1)`
@@ -1028,7 +1055,7 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | OTA staging flash base | `0xA4000` | `firmware_ota.ino` |
 | OTA max image size | 320 KB | `firmware_ota.ino` |
 | OTA min apply voltage | 3.6 V | `firmware_ota.ino` |
-| Camera record-start delay | 5 s RPM held above ON (no GPS gate) | `camera_fsm.h` |
+| Camera record-start gate | RPM ≥ 1500 (`kRecordRpmThreshold`) held 5 s, strict — dips restart the clock (no GPS gate) | `camera_fsm.h` |
 | Camera stop-record delay | 30 s engine-off (RPM only) → also ends log session | `camera_fsm.h` |
 | Camera power-off | shutdown only (no post-record cooldown/timeout) | `camera_ble.ino` (`CAMERA_SLEEP`) |
 | Camera RPM on/off thresholds | 500 / 300 (2 s on-debounce) | `camera_fsm.h` |
@@ -1038,7 +1065,8 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | Camera record-obs freshness | 3 s (stale 0x10 → kUnknown) | `camera_ble.ino` |
 | Camera pairing timeout | 120 s | `camera_fsm.h` |
 | SensorEgg staleness | 1000 ms (older → NaN/`---`) | `sensoregg_protocol.h` |
-| SensorEgg scan interval / window | 100 ms / 40 ms, passive | `sensoregg_protocol.h` |
+| SensorEgg scan interval / window | 100 ms / 60 ms, passive | `sensoregg_protocol.h` |
+| SensorEgg scanner self-heal | 30 s no packet → stop+start kick | `sensoregg_protocol.h` |
 | SensorEgg RSSI floor | −90 dBm | `sensoregg_protocol.h` |
 | SensorEgg pairing MAC | `SENSOREGG_MAC` (all-zeros = any egg) | `sensoregg.h` |
 
