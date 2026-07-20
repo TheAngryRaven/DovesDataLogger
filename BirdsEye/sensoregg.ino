@@ -49,6 +49,7 @@ static uint8_t           eggReadIdx = 0;   // main loop reads
 static sensoregg_protocol::Reading eggReading;
 static uint32_t eggRxMs = 0;
 static bool     eggHaveReading = false;
+static sensoregg_protocol::SeqMonitor eggSeqMon;  // zombie-egg detection
 
 static bool eggScannerRunning = false;
 static uint32_t eggLastKickMs = 0;  // last scanner self-heal kick (main loop)
@@ -151,6 +152,7 @@ void SENSOREGG_LOOP() {
       eggReading = r;
       eggRxMs = atMs;
       eggHaveReading = true;
+      sensoregg_protocol::seqMonitorFeed(eggSeqMon, r.sequence, atMs);
     }
   }
 
@@ -182,18 +184,28 @@ bool sensoreggLinkUp() {
 
 float sensoreggEgtC() {
   // Stale link -> NaN (never hold a value across a dropout); a fresh
-  // link still yields NaN when the egg itself sent the invalid sentinel.
-  if (!sensoreggLinkUp()) return NAN;
+  // link still yields NaN when the egg itself sent the invalid sentinel
+  // OR when the egg's app has hung (radio beaconing a frozen payload —
+  // a flat line must never masquerade as data).
+  if (!sensoreggLinkUp() || sensoreggAppHung()) return NAN;
   return eggReading.egtC;
 }
 
 float sensoreggJunctionC() {
-  if (!sensoreggLinkUp()) return NAN;
+  if (!sensoreggLinkUp() || sensoreggAppHung()) return NAN;
   return eggReading.junctionC;
 }
 
 bool sensoreggTcFault() {
-  return sensoreggLinkUp() && eggReading.tcFault;
+  // A frozen payload's fault flag is stale information — suppress it.
+  return sensoreggLinkUp() && !sensoreggAppHung() && eggReading.tcFault;
+}
+
+bool sensoreggAppHung() {
+  // Radio alive (fresh packets) but the application isn't producing new
+  // readings (sequence frozen). The egg needs a power cycle.
+  return sensoreggLinkUp() &&
+         !sensoregg_protocol::seqMonitorLive(eggSeqMon, millis());
 }
 
 uint16_t sensoreggSequence() {

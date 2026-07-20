@@ -884,8 +884,18 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   report. No Serial/SD/display in the callback (BLE task context).
 - **Consumption**: `SENSOREGG_LOOP()` (main loop) drains + parses via the
   host-tested `sensoregg_protocol` unit. Accessors: `sensoreggEgtC()` /
-  `sensoreggJunctionC()` (NaN when stale or egg-invalid), `sensoreggLinkUp()`,
-  `sensoreggTcFault()`. **Staleness (1 s) is absolute** — a reading is never
+  `sensoreggJunctionC()` (NaN when stale, egg-invalid, or app-hung),
+  `sensoreggLinkUp()`, `sensoreggTcFault()`, `sensoreggAppHung()`.
+- **Zombie-egg detection**: BLE radios rebroadcast the last-set advert
+  buffer autonomously, so an egg whose *application* hangs (suspected
+  blocking MCP9600 I2C read under ignition EMI; 2026-07-19 field incident,
+  ~3–4 h in) keeps beaconing a frozen payload at 10 Hz — arrival-time
+  freshness alone reports a live link with a flat-lined value. The payload's
+  uint16 sequence counter is the sign of life: `sensoregg_protocol::SeqMonitor`
+  (host-tested; wrap-safe) marks the reading dead when the sequence hasn't
+  changed within `kStalenessMs` even though packets arrive. Readings go NaN
+  (log `nan`), and the Temp1 page shows `rf:HUNG` (egg needs a power cycle)
+  instead of `rf:OK`. **Staleness (1 s) is absolute** — a reading is never
   held across a dropout (a held value draws a flat line indistinguishable
   from real data). Logging writes `Temp1`/`Junction1` (or `nan`) **in
   Celsius**; the `SENSOR_TEMP` race page (after the tach page) shows big

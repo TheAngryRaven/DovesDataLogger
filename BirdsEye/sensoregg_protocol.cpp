@@ -62,4 +62,16 @@ float celsiusToFahrenheit(float c) {
   return c * 9.0f / 5.0f + 32.0f;
 }
 
+void seqMonitorFeed(SeqMonitor& m, uint16_t seq, uint32_t nowMs) {
+  if (!m.haveSeq || seq != m.lastSeq) {
+    m.lastSeq = seq;
+    m.lastChangeMs = nowMs;
+    m.haveSeq = true;
+  }
+}
+
+bool seqMonitorLive(const SeqMonitor& m, uint32_t nowMs) {
+  return m.haveSeq && isFresh(m.lastChangeMs, nowMs);
+}
+
 }  // namespace sensoregg_protocol

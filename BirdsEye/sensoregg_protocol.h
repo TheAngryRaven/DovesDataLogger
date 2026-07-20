@@ -108,4 +108,28 @@ bool isFresh(uint32_t receivedAtMs, uint32_t nowMs);
 // render time only. NaN propagates.
 float celsiusToFahrenheit(float c);
 
+// ---- Zombie-egg detection (frozen sequence counter) ---------------------
+// BLE radios rebroadcast the last-set advertising buffer autonomously: an
+// egg whose application has hung (e.g. a blocking MCP9600 I2C read locked
+// up by ignition EMI) keeps beaconing its final payload at ~10 Hz forever.
+// Arrival-time freshness alone then reports a live link with a frozen
+// value — indistinguishable from real data (2026-07-19 field incident,
+// ~3–4 h in). The payload's free-running sequence counter is the tell: a
+// live app advances it every update, a hung one never does. Feed every
+// accepted packet; the reading is only live while the sequence has changed
+// within kStalenessMs. uint16 wrap is naturally handled (any change counts).
+struct SeqMonitor {
+  uint16_t lastSeq = 0;
+  uint32_t lastChangeMs = 0;
+  bool haveSeq = false;
+};
+
+// Record an accepted packet's sequence at nowMs (stamps a change on the
+// first packet and on every packet whose sequence differs from the last).
+void seqMonitorFeed(SeqMonitor& m, uint16_t seq, uint32_t nowMs);
+
+// True while the egg's APPLICATION is demonstrably alive: a sequence
+// change has been seen within kStalenessMs (wrap-safe timing).
+bool seqMonitorLive(const SeqMonitor& m, uint32_t nowMs);
+
 }  // namespace sensoregg_protocol

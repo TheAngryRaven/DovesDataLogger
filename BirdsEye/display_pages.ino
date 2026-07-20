@@ -833,7 +833,13 @@ void displayPage_sensorTemp() {
     display.print(junc, 1);
   }
   display.print(F("   rf: "));
-  display.print(sensoreggLinkUp() ? F("OK") : F("--"));
+  if (sensoreggAppHung()) {
+    // Packets arriving but the egg's app is frozen (sequence not moving) —
+    // its radio beacons the stale payload forever. Power-cycle the egg.
+    display.print(F("HUNG"));
+  } else {
+    display.print(sensoreggLinkUp() ? F("OK") : F("--"));
+  }
 
   safeDisplayUpdate();
 }

@@ -13,6 +13,17 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Fixed
+- **Zombie SensorEgg no longer reads as a live link (field incident
+  2026-07-19).** BLE radios rebroadcast the last advertising payload
+  autonomously, so an egg whose application hangs keeps beaconing frozen
+  data at 10 Hz — the logger showed `rf: OK` with a value that never
+  updated, and would have logged a flat line indistinguishable from real
+  data. The logger now watches the payload's sequence counter (the app's
+  only sign of life, via the host-tested wrap-safe
+  `sensoregg_protocol::SeqMonitor`): if packets arrive but the sequence
+  hasn't advanced within 1 s, readings go NaN (`nan` in the log, `---` on
+  the display) and the Temp1 page shows `rf:HUNG` — the egg needs a power
+  cycle.
 - **Pull-start / engine-kill lockup (field incident 2026-07-19).** A failed
   first start or killing the motor before GPS acquired its time lock left
   the device apparently frozen: pinned to the RPM page, all buttons dead,

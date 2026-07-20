@@ -65,6 +65,12 @@ void SENSOREGG_LOOP();
 // True while a reading is fresh (received < 1 s ago).
 bool sensoreggLinkUp();
 
+// True when packets are arriving but the egg's application has hung: the
+// radio beacons the last payload autonomously, so the sequence counter is
+// the only sign of life. Readings are NaN while hung; the display shows
+// rf:HUNG (the egg needs a power cycle).
+bool sensoreggAppHung();
+
 // Latest EGT / cold junction in degC. NaN when the link is stale OR the
 // egg reported the invalid sentinel (open probe, sensor fault).
 float sensoreggEgtC();
