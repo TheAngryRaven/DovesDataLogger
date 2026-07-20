@@ -12,6 +12,17 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+- **Simulator oracle diagnostic replay modes.** `birdseye_sim_oracle
+  --dovex-noheader <file>` replays a header-less DOVEX log (crashed /
+  power-cut session) through the full pipeline, printing live page / race /
+  track-detect / course / lap state instead of asserting against header
+  laps. `--two-session <file> [break-minutes]` reproduces a whole track
+  day — synthetic session 1, auto-idle session end, a parked break with
+  deterministic GPS drift, then the real log as session 2 — to diagnose
+  CourseManager state-carryover issues between sessions. Dev-tooling only;
+  firmware behavior unchanged.
+
 ### Fixed
 - **Pull-start / engine-kill lockup (field incident 2026-07-19).** A failed
   first start or killing the motor before GPS acquired its time lock left
