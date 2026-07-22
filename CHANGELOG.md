@@ -12,6 +12,17 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+- **Simulator oracle diagnostic replay modes.** `birdseye_sim_oracle
+  --dovex-noheader <file>` replays a header-less DOVEX log (crashed /
+  power-cut session) through the full pipeline, printing live page / race /
+  track-detect / course / lap state instead of asserting against header
+  laps. `--two-session <file> [break-minutes]` reproduces a whole track
+  day — synthetic session 1, auto-idle session end, a parked break with
+  deterministic GPS drift, then the real log as session 2 — validating the
+  carried-over CourseManager against the log's own header laps (wired into
+  CI as `sim_two_session_carryover`).
+
 ### Fixed
 - **Zombie SensorEgg no longer reads as a live link (field incident
   2026-07-19).** BLE radios rebroadcast the last advertising payload
@@ -24,6 +35,25 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   hasn't advanced within 1 s, readings go NaN (`nan` in the log, `---` on
   the display) and the Temp1 page shows `rf:HUNG` — the egg needs a power
   cycle.
+- **Menu idle shutdown ignored button activity.** The 5-minute main-menu
+  idle timer read the buttons' `pressed` flags at a point in the loop where
+  they are always false (set later by `readButtons()`, cleared by
+  `resetButtons()` before the next iteration), so navigating the menu never
+  reset the clock and the device powered off 5 minutes after menu entry
+  regardless of activity. The timer now anchors on the button debouncer's
+  persistent `lastPressed` stamps. Regression-tested by the new
+  `--two-session` sim oracle mode in CI (the mid-break shutdown it used to
+  cause kept session 2 from ever entering race mode).
+- **Track detection silently degraded to Lap Anything when logging started
+  first.** `SD_ACCESS_TRACK_PARSE` was denied while `SD_ACCESS_LOGGING`
+  held the card — but logging holds it for the entire race session, so any
+  boot where the log file was created before the 1 Hz track-detect parse
+  (typical tach-wake with a warm GPS) lost course detection for the whole
+  session. Track parse / settings reads now nest under the logging hold
+  without taking ownership (`sd_access_policy::ownerAfterAcquire`) — they
+  run on the same main-loop task with their own file handles, so the
+  exclusion never protected anything. Policy change covered by host unit
+  tests.
 - **Pull-start / engine-kill lockup (field incident 2026-07-19).** A failed
   first start or killing the motor before GPS acquired its time lock left
   the device apparently frozen: pinned to the RPM page, all buttons dead,

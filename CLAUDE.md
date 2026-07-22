@@ -145,8 +145,8 @@ handoff spec.
 | `png_dump.{h,cpp}` | Dependency-free PNG writer (stored-deflate + repo crc32) for eyeballing frames |
 | `native_main.cpp` | Phase-1 driver: boot → skip GPS status page → 60 s soak, state prints |
 | `golden_main.cpp` | Phase-2 driver: scripted real-menu walk capturing 8 golden page hashes (`golden/golden_hashes.txt`; regenerate with `--print`, eyeball with `--dump`) |
-| `oracle_main.cpp` | Phase-3 driver: lap-timing oracle. Default = synthetic constant-speed OKC circle (period exact by construction) through the whole real pipeline (boot page → race entry → proximity detect → CourseDetector "Normal" → laps ±40 ms); `--dovex <file>` replays a hardware log against its own header laps |
-| `fixtures/okc_tillotson_1.dovex` | Hardware-recorded OKC session (13 laps) — the `--dovex` oracle's CI fixture; the sim reproduces its header lap list to the exact millisecond |
+| `oracle_main.cpp` | Phase-3 driver: lap-timing oracle. Default = synthetic constant-speed OKC circle (period exact by construction) through the whole real pipeline (boot page → race entry → proximity detect → CourseDetector "Normal" → laps ±40 ms); `--dovex <file>` replays a hardware log against its own header laps; diagnostic modes: `--dovex-noheader <file>` replays a header-less (crashed-session) log and prints live detection/lap state instead of asserting, `--two-session <file> [break-min]` reproduces a full track day (synthetic session 1 → auto-idle end → parked break with GPS drift → real-log session 2) to test CourseManager state carryover |
+| `fixtures/okc_tillotson_1.dovex` | Hardware-recorded OKC session (13 laps) — the `--dovex` oracle's CI fixture; the sim reproduces its header lap list to the exact millisecond (also the `--two-session` carryover test's session 2) |
 | `API.md` | Canonical WASM API contract (v1): artifact set, method surface, injectPvt schema, deltas from the handoff-spec draft (async `reset()` via module re-instantiation) |
 | `wasm/bindings.cpp` | EMSCRIPTEN_KEEPALIVE exports over sim_host.h + getStateJson/getVersion/readFile/listFiles |
 | `wasm/birdseye-sim.mjs` | Hand-written public ESM wrapper (stable import; async `reset()` re-instantiates the core module) |
@@ -158,7 +158,7 @@ handoff spec.
 
 | Path | Contents |
 |---|---|
-| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, sim-build (native sim TU + 60 s boot soak + determinism + goldens + lap oracles, plus a wasm job: emsdk 3.1.61 build + node smoke + `birdseye-sim-wasm` artifact), release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). DovesLapTimer ref per channel: `BETA` builds track the library's `BETA` branch, master/release pin `v4.2.0` |
+| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, sim-build (native sim TU + 60 s boot soak + determinism + goldens + lap oracles + two-session carryover, plus a wasm job: emsdk 3.1.61 build + node smoke + `birdseye-sim-wasm` artifact), release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). DovesLapTimer ref per channel: `BETA` builds track the library's `BETA` branch, master/release pin `v4.2.0` |
 | `tests/` | Host doctest harness (CMake) for the pure-logic units |
 | `CHANGELOG.md` | Keep-a-Changelog history; release workflow ties to version tags |
 | `ARCHITECTURE.md` | Human-facing architecture narrative (subsystems, design decisions) |
@@ -373,6 +373,12 @@ loop()  ~250 Hz
     `BLE_TRANSFER` (3), `TRACK_PARSE` (4), `USB_MSC` (5), `FORMAT` (6) —
     values and grant/deny rules live in the host-tested `sd_access_policy`
     pure unit.
+  - `TRACK_PARSE` **nests under `LOGGING`** without taking ownership
+    (`ownerAfterAcquire`): track detection and settings reads are brief,
+    same-task, and use their own `File` objects, so they are safe alongside
+    the session-long logging hold. Before this rule, any boot where the log
+    file was created before the 1 Hz track-detect parse had the parse
+    denied and silently fell back to Lap Anything for the whole session.
     `USB_MSC` is a normal exclusive holder (held for the whole USB
     mass-storage session; see subsystem 12).
   - Transitions are **atomic**: the check-then-set runs inside a FreeRTOS

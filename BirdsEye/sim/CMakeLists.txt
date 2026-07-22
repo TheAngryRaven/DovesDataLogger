@@ -315,3 +315,16 @@ add_test(NAME sim_lap_oracle COMMAND birdseye_sim_oracle)
 add_test(NAME sim_lap_oracle_hardware
   COMMAND birdseye_sim_oracle --dovex ${SIM_DIR}/fixtures/okc_tillotson_1.dovex
 )
+
+# Track-day state carryover: synthetic session 1 → auto-idle session end →
+# a 6-minute parked break in the menu (GPS drift, periodic button presses)
+# → the hardware fixture replayed as session 2. The carried-over
+# CourseManager must detect the same course and reproduce the same lap
+# list as a fresh boot. Also a regression test for the menu idle timer:
+# before the lastPressed-anchored reset, the 6-minute break shut the
+# device down mid-break despite the button presses (2026-07-19 field
+# incident) and session 2 never entered race mode.
+add_test(NAME sim_two_session_carryover
+  COMMAND birdseye_sim_oracle --two-session
+          ${SIM_DIR}/fixtures/okc_tillotson_1.dovex 6
+)

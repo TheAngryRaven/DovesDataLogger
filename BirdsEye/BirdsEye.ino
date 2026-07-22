@@ -1691,8 +1691,18 @@ void loop() {
       menuIdleTimerRunning = true;
       menuIdleStartTime = millis();
     }
-    if (btn1->pressed || btn2->pressed || btn3->pressed) {
-      menuIdleStartTime = millis();  // Reset on any button
+    // Button activity resets the idle clock. The `pressed` flags can't be
+    // used here: readButtons() sets them AFTER this check runs and
+    // resetButtons() clears them before the next iteration, so they always
+    // read false at this point (menu navigation never reset the timer and
+    // the device slept 5 min after menu entry regardless of activity —
+    // 2026-07-19 field incident). The debouncer's lastPressed stamps
+    // persist across iterations, so anchor on the newest of those.
+    unsigned long lastBtn = btn1->lastPressed;
+    if ((long)(btn2->lastPressed - lastBtn) > 0) lastBtn = btn2->lastPressed;
+    if ((long)(btn3->lastPressed - lastBtn) > 0) lastBtn = btn3->lastPressed;
+    if ((long)(lastBtn - menuIdleStartTime) > 0) {
+      menuIdleStartTime = lastBtn;
     }
     unsigned long idleFor = millis() - menuIdleStartTime;
     if ((isUsbConnected() && idleFor >= USB_MENU_CHARGE_IDLE_MS) ||
