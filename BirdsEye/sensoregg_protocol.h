@@ -58,17 +58,27 @@ constexpr int16_t kInvalidSentinel = INT16_MIN;
 // indistinguishable from real data).
 constexpr uint32_t kStalenessMs = 1000;
 
-// Logger scan parameters (0.625 ms units): 100 ms interval / 60 ms window
-// (60% duty), passive-only so the observer never transmits and cannot
+// Logger scan parameters (0.625 ms units): 90 ms interval / 40 ms window
+// (~44% duty), passive-only so the observer never transmits and cannot
 // contend with the Insta360 camera link for TX airtime (S140 yields scan
-// windows to connection events automatically). The window was widened
-// from the spec's 40 ms after bench flapping: a 100 ms adv interval
-// against a 100 ms scan interval phase-locks, and with only a 40 ms live
-// window the egg could park in the 60 ms deaf zone for seconds at a
-// time. The egg's adv interval is also moved off 100 ms (see the egg
-// firmware) so the phases sweep instead of locking.
-constexpr uint16_t kScanIntervalUnits = 160;
-constexpr uint16_t kScanWindowUnits = 96;
+// windows to connection events automatically).
+//
+// Anti-phase-lock: a scan interval equal to the egg's ~100 ms adv
+// interval phase-locks, and with a 40 ms live window the egg could park
+// in the deaf zone for seconds (bench-observed flapping). The original
+// fix widened the window to 60 ms (60% duty); that radio duty turned
+// out to defer the TIMER3 GPS drain enough to drop 25 Hz PVT frames
+// (SoftDevice scan-window ISRs outrank every app interrupt). The
+// off-100 ms *interval* now carries the anti-lock property instead:
+// 90 ms scan vs ~100 ms adv sweeps their relative phase ~10 ms per
+// cycle, so a deaf-zone park escapes within ≤5 cycles (~450 ms) —
+// comfortably inside kStalenessMs at the egg's ~10 Hz broadcast — and
+// the window returns to the spec's 40 ms. (The egg firmware also moves
+// its adv interval off 100 ms, sweeping the phases from both ends.)
+// Fallback lever if the bench ever shows flapping again: interval 176
+// (110 ms) with window 64 still gives ≤36% duty.
+constexpr uint16_t kScanIntervalUnits = 144;
+constexpr uint16_t kScanWindowUnits = 64;
 constexpr int8_t kRssiFloorDbm = -90;
 
 // Scanner self-heal: if no egg packet has been accepted for this long,
@@ -107,5 +117,29 @@ bool isFresh(uint32_t receivedAtMs, uint32_t nowMs);
 // display setting comes later); DOVEX logging stays Celsius — convert at
 // render time only. NaN propagates.
 float celsiusToFahrenheit(float c);
+
+// ---- Zombie-egg detection (frozen sequence counter) ---------------------
+// BLE radios rebroadcast the last-set advertising buffer autonomously: an
+// egg whose application has hung (e.g. a blocking MCP9600 I2C read locked
+// up by ignition EMI) keeps beaconing its final payload at ~10 Hz forever.
+// Arrival-time freshness alone then reports a live link with a frozen
+// value — indistinguishable from real data (2026-07-19 field incident,
+// ~3–4 h in). The payload's free-running sequence counter is the tell: a
+// live app advances it every update, a hung one never does. Feed every
+// accepted packet; the reading is only live while the sequence has changed
+// within kStalenessMs. uint16 wrap is naturally handled (any change counts).
+struct SeqMonitor {
+  uint16_t lastSeq = 0;
+  uint32_t lastChangeMs = 0;
+  bool haveSeq = false;
+};
+
+// Record an accepted packet's sequence at nowMs (stamps a change on the
+// first packet and on every packet whose sequence differs from the last).
+void seqMonitorFeed(SeqMonitor& m, uint16_t seq, uint32_t nowMs);
+
+// True while the egg's APPLICATION is demonstrably alive: a sequence
+// change has been seen within kStalenessMs (wrap-safe timing).
+bool seqMonitorLive(const SeqMonitor& m, uint32_t nowMs);
 
 }  // namespace sensoregg_protocol

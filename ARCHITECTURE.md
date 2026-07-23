@@ -113,13 +113,28 @@ to the matching `*_LOOP()`.
 These are the parts that look over-engineered until you've watched them
 fail the simple way.
 
-### GPS serial ring buffer (TIMER3 ISR)
-At 25 Hz PVT the GPS emits ~2.5 KB/s. The hardware UART FIFO is tiny, and
-an SD-card garbage-collection pause can block the main loop for
-100 ms – 2 s — long enough to overflow the FIFO and lose fixes. A TIMER3
-ISR drains Serial1 into a 4 KB RAM ring buffer every 10 ms, independent of
-the main loop, and the GPS library reads from that buffer. This is why
-**TIMER3 is reserved** project-wide.
+### GPS serial ring buffer (TIMER3 ISR) — two buffers, two failure modes
+At 25 Hz PVT the GPS emits ~2.5 KB/s. An SD-card garbage-collection pause
+can block the main loop for 100 ms – 2 s — long enough to overflow the
+UART buffering and lose fixes. A TIMER3 ISR drains Serial1 into a 4 KB
+RAM ring buffer every 5 ms, independent of the main loop, and the GPS
+library reads from that buffer. This is why **TIMER3 is reserved**
+project-wide.
+
+That ring only covers *downstream* stalls. Upstream of it sits the
+core's Serial1 RX ring, and the TIMER3 handler runs at NVIC priority 3 —
+below the SoftDevice's radio interrupts (priority 0–2, unmaskable by the
+app). Radio airtime (the SensorEgg scan window, camera connection
+events) defers the drain, and only the core ring absorbs bytes in the
+meantime; its stock 64 bytes gave ~1 ms of slack at 57600 baud, which is
+exactly where a ~0.9% 25 Hz PVT drop rate came from once BLE was always
+on. The core ring is therefore grown to 256 bytes via a required
+`-DSERIAL_BUFFER_SIZE=256` build flag (asserted in `project.h`), and the
+pipeline carries permanent counters — dropped PVT frames, worst TIMER3
+deferral (hardware timer capture), drain-burst high-water, and overflow
+events for both rings — surfaced on the GPS debug page so radio-induced
+loss, SD-stall loss, and checksum corruption can be told apart on
+hardware. The window math lives in the host-tested `gps_stats` unit.
 
 ### SD access arbitration
 The BLE callbacks run in a **separate FreeRTOS task** from `loop()`, and

@@ -107,6 +107,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | File | Purpose |
 |---|---|
 | `haversine.{h,cpp}` | Great-circle distance in miles (track proximity) |
+| `gps_stats.{h,cpp}` | GPS pipeline drop accounting: expected-vs-received PVT window math (exact fractional carry, 1-frame jitter slack, capped credit, rate-switch suppression) feeding the debug-page `Drops` counter |
 | `gps_time.{h,cpp}` | Leap-year/Unix-epoch math, `u64ToDecimalString` |
 | `gps_validation.{h,cpp}` | PVT sample sanity gate + dtostrf-output check |
 | `dovex_header.{h,cpp}` | DOVEX 1 KB header `format()` / `parse()` |
@@ -239,14 +240,24 @@ loop()  ~250 Hz
   (25 Hz) PVT-only. `GPS_RECONFIGURE()` and every wake/recovery path
   re-assert the *current* targets (`gpsNavRateTarget` / `gpsNavSatWanted`)
   — never hardcode a rate.
-- **GPS serial buffer**: A 4 KB RAM ring buffer (`gpsRxBuf`) sits between
-  Serial1 and the SparkFun library. A TIMER3 ISR drains Serial1 into this
-  buffer every 10 ms, independent of the main loop. This prevents GPS data
-  loss during SD card write stalls (GC pauses can block 100 ms–2 s).
-  The SparkFun library reads from the buffer via `GpsBufferedStream` (a
-  `Stream` wrapper). During `GPS_SETUP()` (before timer starts), reads pass
-  through to Serial1 directly. Timer stopped on shutdown/charging entry,
-  restarted on the charging-loop resume (`GPS_WAKE()`).
+- **GPS serial buffer — two buffers, two failure modes**: A 4 KB RAM ring
+  buffer (`gpsRxBuf`) sits between Serial1 and the SparkFun library. A
+  TIMER3 ISR drains Serial1 into this buffer every 5 ms
+  (`GPS_DRAIN_INTERVAL_US`), independent of the main loop — this covers
+  *downstream* stalls (SD GC pauses can block the loop 100 ms–2 s; the
+  ring holds ~1.6 s). *Upstream*, only the core's Serial1 RX ring absorbs
+  bytes while SoftDevice radio ISRs (prio 0–2, unmaskable) defer the
+  prio-3 TIMER3 handler — that ring is grown 64→256 B via the
+  **required `-DSERIAL_BUFFER_SIZE=256` build flag** (~44 ms of slack at
+  57600 baud; `project.h` static_asserts it, CI passes it in all three
+  workflows, local setup in CONTRIBUTING.md "Local build flags"). Both
+  overflow points and the worst TIMER3 deferral are counted — see the
+  `gpsStats*()` accessors, the `gps_stats` pure unit, and the GPS debug
+  page (first page of the race rotation). The SparkFun library reads from
+  the buffer via `GpsBufferedStream` (a `Stream` wrapper). During
+  `GPS_SETUP()` (before timer starts), reads pass through to Serial1
+  directly. Timer stopped on shutdown/charging entry, restarted on the
+  charging-loop resume (`GPS_WAKE()`).
 - `GPS_LOOP()` calls `checkUblox()` + `checkCallbacks()`. The registered
   `onPVTReceived()` callback fires with the full `UBX_NAV_PVT_data_t` struct,
   populates `gpsData`, and sets `gpsDataFresh` flag for downstream processing.
@@ -390,8 +401,9 @@ loop()  ~250 Hz
   - Boot/menu: `PAGE_BOOT` (999), `PAGE_GPS_STATUS` (900, satellite status
     page every boot lands on — driven by `gpsStatusPageLoop()`, buttons
     deliberately no-op'd in `displayLoop()`), `PAGE_MAIN_MENU` (-1).
-  - Racing: `GPS_STATS` (4) through `LOGGING_STOP` (13); `SENSOR_TEMP`
-    (7, SensorEgg Temp1) sits after `TACHOMETER` (6) — non-endurance only.
+  - Racing: `GPS_DEBUG` (3, GPS pipeline counters + lap debug — first in
+    the rotation) through `LOGGING_STOP` (13); `SENSOR_TEMP` (7, SensorEgg
+    Temp1) sits after `TACHOMETER` (6) — non-endurance only.
   - Replay: `PAGE_REPLAY_FILE_SELECT` (-3), `PAGE_REPLAY_RESULTS` (-8),
     `PAGE_REPLAY_EXIT` (-9).
   - Transfer: `PAGE_TRANSFER_MENU` (-4) Bluetooth/USB submenu,
@@ -867,21 +879,27 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   version, flags, int16 LE deci-°C ×2 with `0x8000` = invalid sentinel,
   raw MCP9600 STATUS, battery stub, uint16 sequence), ~10 Hz.
 - **Radio role — do not "improve" this**: the logger is a pure passive
-  OBSERVER (`Bluefruit.Scanner`, `useActiveScan(false)`, 100 ms interval /
-  60 ms window, RSSI ≥ −90). No SCAN_REQ, no connection, no GATT — so it
-  cannot contend with the camera peripheral link for TX airtime; S140
-  time-slices scan windows around connection events. The egg accepts no
-  connections. **The camera link wins every tradeoff.**
+  OBSERVER (`Bluefruit.Scanner`, `useActiveScan(false)`, 90 ms interval /
+  40 ms window ≈ 44% duty, RSSI ≥ −90). No SCAN_REQ, no connection, no
+  GATT — so it cannot contend with the camera peripheral link for TX
+  airtime; S140 time-slices scan windows around connection events. The
+  egg accepts no connections. **The camera link wins every tradeoff** —
+  and scan duty is capped (test-enforced ≤45%) because SoftDevice
+  scan-window ISRs defer the TIMER3 GPS drain (see subsystem 1).
 - **Scanner robustness (bench-proven, do not remove)**: (1)
   `Scanner.filterMSD(0xFFFF)` rejects ambient packets INLINE — Bluefruit
   self-resumes filtered reports, while an accepted report pauses scanning
   until the deferred rx callback runs, so without this filter desk BLE
-  traffic collapses the scan duty in bursts. (2) The scan window is 60 ms
-  (not the spec's 40) and the egg advertises off-100 ms, because equal
-  100 ms adv/scan periods phase-lock and parked the egg in the deaf zone
-  for seconds. (3) `SENSOREGG_LOOP()` kicks stop+start after 30 s with no
-  accepted packet — a lost deferred callback otherwise halts the scanner
-  silently forever.
+  traffic collapses the scan duty in bursts. (2) Anti-phase-lock lives in
+  the **interval**: equal 100 ms adv/scan periods phase-lock and parked
+  the egg in the deaf zone for seconds; the 90 ms scan interval (plus the
+  egg advertising off-100 ms) sweeps relative phase ~10 ms/cycle so a
+  deaf-zone park escapes in ≤~450 ms. (The original fix was a 60 ms
+  window — 60% radio duty, which deferred the GPS drain enough to drop
+  PVT frames; the interval retune replaced it and returned the window to
+  the spec's 40 ms.) (3) `SENSOREGG_LOOP()` kicks stop+start after 30 s
+  with no accepted packet — a lost deferred callback otherwise halts the
+  scanner silently forever.
 - **Pairing (POC)**: `SENSOREGG_MAC` #define in `sensoregg.h`, human byte
   order; all-zeros (default) = accept any advertiser matching the payload
   magic. The scan callback filters length + magic + MAC, copies the raw 14
@@ -890,8 +908,18 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   report. No Serial/SD/display in the callback (BLE task context).
 - **Consumption**: `SENSOREGG_LOOP()` (main loop) drains + parses via the
   host-tested `sensoregg_protocol` unit. Accessors: `sensoreggEgtC()` /
-  `sensoreggJunctionC()` (NaN when stale or egg-invalid), `sensoreggLinkUp()`,
-  `sensoreggTcFault()`. **Staleness (1 s) is absolute** — a reading is never
+  `sensoreggJunctionC()` (NaN when stale, egg-invalid, or app-hung),
+  `sensoreggLinkUp()`, `sensoreggTcFault()`, `sensoreggAppHung()`.
+- **Zombie-egg detection**: BLE radios rebroadcast the last-set advert
+  buffer autonomously, so an egg whose *application* hangs (suspected
+  blocking MCP9600 I2C read under ignition EMI; 2026-07-19 field incident,
+  ~3–4 h in) keeps beaconing a frozen payload at 10 Hz — arrival-time
+  freshness alone reports a live link with a flat-lined value. The payload's
+  uint16 sequence counter is the sign of life: `sensoregg_protocol::SeqMonitor`
+  (host-tested; wrap-safe) marks the reading dead when the sequence hasn't
+  changed within `kStalenessMs` even though packets arrive. Readings go NaN
+  (log `nan`), and the Temp1 page shows `rf:HUNG` (egg needs a power cycle)
+  instead of `rf:OK`. **Staleness (1 s) is absolute** — a reading is never
   held across a dropout (a held value draws a flat line indistinguishable
   from real data). Logging writes `Temp1`/`Junction1` (or `nan`) **in
   Celsius**; the `SENSOR_TEMP` race page (after the tach page) shows big
@@ -1048,7 +1076,9 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | Settings file path | `/SETTINGS.json` | `settings.ino` |
 | Track upload buffer | 4096 | `bluetooth.ino` |
 | GPS serial buffer | 4096 | `gps_functions.ino` |
-| GPS serial timer | TIMER3, 10 ms | `gps_functions.ino` |
+| GPS serial timer | TIMER3, 5 ms (`GPS_DRAIN_INTERVAL_US`) | `gps_config.h` |
+| Core Serial1 RX/TX rings | 256 B via required `-DSERIAL_BUFFER_SIZE=256` (asserted) | `project.h` + workflows |
+| GPS drop-count slack / credit cap | 1 frame / 2 frames | `gps_stats.h` |
 | OTA staging path | `/fw/pending.bin` | `firmware_ota.ino` |
 | OTA receive buffer | 2 × 4096 (double-buffer) | `firmware_ota.ino` |
 | OTA app base | `0x27000` | `firmware_ota.ino` |
@@ -1065,7 +1095,7 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | Camera record-obs freshness | 3 s (stale 0x10 → kUnknown) | `camera_ble.ino` |
 | Camera pairing timeout | 120 s | `camera_fsm.h` |
 | SensorEgg staleness | 1000 ms (older → NaN/`---`) | `sensoregg_protocol.h` |
-| SensorEgg scan interval / window | 100 ms / 60 ms, passive | `sensoregg_protocol.h` |
+| SensorEgg scan interval / window | 90 ms / 40 ms (≈44% duty, test-capped ≤45%), passive | `sensoregg_protocol.h` |
 | SensorEgg scanner self-heal | 30 s no packet → stop+start kick | `sensoregg_protocol.h` |
 | SensorEgg RSSI floor | −90 dBm | `sensoregg_protocol.h` |
 | SensorEgg pairing MAC | `SENSOREGG_MAC` (all-zeros = any egg) | `sensoregg.h` |
@@ -1102,8 +1132,10 @@ This device operates in ignition-noise environments. Three layers of defense:
    SD stability (raised to 8 MHz only during parked BLE/USB transfers, where
    the motor is off and ignition EMI is absent — see subsystem 4).
 4. **GPS serial buffer**: TIMER3 ISR drains Serial1 into a 4 KB RAM ring
-   buffer every 10 ms, preventing GPS data loss during SD card GC pauses
-   that can block writes for 100 ms–2 s.
+   buffer every 5 ms, preventing GPS data loss during SD card GC pauses
+   that can block writes for 100 ms–2 s; the core Serial1 ring (256 B via
+   the required `-DSERIAL_BUFFER_SIZE=256` flag) covers SoftDevice
+   radio-ISR deferral of the drain itself.
 
 ---
 
@@ -1127,6 +1159,13 @@ This device operates in ignition-noise environments. Three layers of defense:
   overridden at build time with `-DFIRMWARE_VERSION_OVERRIDE=<token>` (a bare
   token; `project.h` stringizes it) — the `beta` workflow uses this to stamp
   nightly builds as `<base>-beta.<gitsha>`. Normal builds leave it undefined.
+- **Required build flag `-DSERIAL_BUFFER_SIZE=256`** — grows the core's
+  Serial1 rings so radio-ISR deferral of the GPS drain can't drop bytes
+  (see subsystem 1). `project.h` static_asserts it on non-SIM builds; CI
+  passes it in all three workflows (merged into the SAME
+  `compiler.cpp.extra_flags` property — a second `--build-property` for
+  one key replaces the first). Local setup: CONTRIBUTING.md "Local build
+  flags".
 - The sketch lives in `BirdsEye/` so the folder name matches the
   `.ino` file — required by Arduino IDE / arduino-cli.
 - `project.h` is included before other `.ino` modules so Arduino's

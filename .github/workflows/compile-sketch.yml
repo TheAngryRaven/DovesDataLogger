@@ -62,9 +62,13 @@ jobs:
               version: ${{ env.LAPTIMER_REF }}
           sketch-paths: |
             - BirdsEye
+          # SERIAL_BUFFER_SIZE grows the core's Serial1 RX/TX rings 64->256 B
+          # (guarded #ifndef in the BSP's RingBuffer.h) so SoftDevice radio-ISR
+          # deferral of the TIMER3 GPS drain can't overflow the core ring.
+          # project.h static_asserts on it — keep all three workflows in sync.
           cli-compile-flags: |
             - --build-property
-            - compiler.cpp.extra_flags=-D${{ matrix.board.define }}
+            - compiler.cpp.extra_flags=-D${{ matrix.board.define }} -DSERIAL_BUFFER_SIZE=256
           enable-deltas-report: true
 
       # Hard flash-size gate. The XIAO nRF52840's app flash is shared

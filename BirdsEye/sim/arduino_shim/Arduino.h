@@ -397,6 +397,7 @@ typedef struct {
   volatile uint32_t TASKS_START;
   volatile uint32_t TASKS_STOP;
   volatile uint32_t TASKS_CLEAR;
+  volatile uint32_t TASKS_CAPTURE[6];
   volatile uint32_t MODE;
   volatile uint32_t BITMODE;
   volatile uint32_t PRESCALER;
@@ -406,6 +407,13 @@ typedef struct {
   volatile uint32_t INTENCLR;
   volatile uint32_t EVENTS_COMPARE[6];
 } SIM_NRF_TIMER_Type;
+
+// The core's Uart RX/TX ring capacity (RingBuffer.h). The firmware's
+// GPS drain instrumentation references it; the sim never runs the
+// TIMER3 ISR, so the value only feeds display text.
+#ifndef SERIAL_BUFFER_SIZE
+#define SERIAL_BUFFER_SIZE 64
+#endif
 
 extern SIM_NRF_POWER_Type* NRF_POWER;
 extern SIM_NRF_GPIO_Type* NRF_P0;

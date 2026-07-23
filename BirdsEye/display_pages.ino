@@ -595,7 +595,14 @@ void displayPage_gps_stats() {
     display.println(F("Ready"));
   }
 
-  display.println();
+  // Pipeline-health summary: missing PVT frames and overflow events
+  // (core RX ring / 4 KB ring). Full attribution on the debug page.
+  display.print(F("Drops    : "));
+  display.print(gpsStatsDroppedPvt());
+  display.print(F(" Ovf:"));
+  display.print(gpsStatsCoreSatEvents());
+  display.print(F("/"));
+  display.println(gpsStatsRingFullEvents());
 
   if (courseManager != nullptr) {
     display.print(F("Track: "));
@@ -833,7 +840,13 @@ void displayPage_sensorTemp() {
     display.print(junc, 1);
   }
   display.print(F("   rf: "));
-  display.print(sensoreggLinkUp() ? F("OK") : F("--"));
+  if (sensoreggAppHung()) {
+    // Packets arriving but the egg's app is frozen (sequence not moving) —
+    // its radio beacons the stale payload forever. Power-cycle the egg.
+    display.print(F("HUNG"));
+  } else {
+    display.print(sensoreggLinkUp() ? F("OK") : F("--"));
+  }
 
   safeDisplayUpdate();
 }
@@ -966,7 +979,7 @@ void displayPage_stop_logging_confirm() {
 
 void displayPage_gps_debug() {
   resetDisplay();
-  display.println(F("GPS LapTimer Debug"));
+  display.println(F("GPS/RF DEBUG"));
 
   // Safety check for GPS access
   if (!gpsInitialized) {
@@ -975,29 +988,42 @@ void displayPage_gps_debug() {
     return;
   }
 
-  display.print(F("Laps: "));
+  // Serial-pipeline health (gps_stats + ISR counters): missing PVT
+  // frames + live rate, worst TIMER3 deferral by radio ISRs, drain
+  // burst high-water vs the core RX capacity, and overflow events
+  // (core-ring saturations / 4 KB-ring fulls).
+  display.print(F("Drops:"));
+  display.print(gpsStatsDroppedPvt());
+  display.print(F(" R:"));
+  display.print(gpsFrameRate, 1);
+  display.println(F("Hz"));
+  display.print(F("ISRmax:"));
+  display.print(gpsStatsIsrLatencyMaxUs());
+  display.println(F("us"));
+  display.print(F("Drain:"));
+  display.print(gpsStatsDrainMaxBytes());
+  display.print(F("/"));
+  display.print(SERIAL_BUFFER_SIZE);
+  display.print(F(" Ovf:"));
+  display.print(gpsStatsCoreSatEvents());
+  display.print(F("/"));
+  display.println(gpsStatsRingFullEvents());
+
+  // Lap-timer debug (trimmed to fit the 8-row page with the stats).
+  display.print(F("Laps:"));
   display.print(activeTimerLaps());
-  display.print(F(" | od:"));
-  display.println(activeTimerTotalDistance());
-  display.print(F("Strt: "));
+  display.print(F(" Strt:"));
   display.print(activeTimerRaceStarted() ? F("T") : F("F"));
-  display.print(F(" | Xing: "));
+  display.print(F(" X:"));
   display.println(activeTimerCrossing() ? F("T") : F("F"));
-  display.print(F("Current: "));
+  display.print(F("Cur : "));
   display.println(activeTimerCurrentLapTime());
-  display.print(F("Last   : "));
-  display.println(activeTimerLastLapTime());
   display.print(F("Best: "));
   display.print(activeTimerBestLapNumber());
   display.print(F(": "));
   display.println(activeTimerBestLapTime());
-  display.print(F("Pace   : "));
+  display.print(F("Pace: "));
   display.println(activeTimerPaceDifference());
-  if (courseManager) {
-    display.print(F("Course: "));
-    const char* cn = courseManager->getActiveCourseName();
-    display.println(cn ? cn : "...");
-  }
 
   safeDisplayUpdate();
 }

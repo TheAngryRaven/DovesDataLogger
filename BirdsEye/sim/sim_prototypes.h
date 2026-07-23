@@ -141,6 +141,11 @@ void gpsEnterRaceMode();
 bool GPS_BAUD_RECOVERY();
 void GPS_WAKE();
 void calculateGPSFrameRate();
+uint32_t gpsStatsDroppedPvt();
+uint32_t gpsStatsRingFullEvents();
+uint32_t gpsStatsIsrLatencyMaxUs();
+uint16_t gpsStatsDrainMaxBytes();
+uint32_t gpsStatsCoreSatEvents();
 
 // ---- replay.ino ----
 void resetReplayState();

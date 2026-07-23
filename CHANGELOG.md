@@ -24,6 +24,17 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   CI as `sim_two_session_carryover`).
 
 ### Fixed
+- **Zombie SensorEgg no longer reads as a live link (field incident
+  2026-07-19).** BLE radios rebroadcast the last advertising payload
+  autonomously, so an egg whose application hangs keeps beaconing frozen
+  data at 10 Hz — the logger showed `rf: OK` with a value that never
+  updated, and would have logged a flat line indistinguishable from real
+  data. The logger now watches the payload's sequence counter (the app's
+  only sign of life, via the host-tested wrap-safe
+  `sensoregg_protocol::SeqMonitor`): if packets arrive but the sequence
+  hasn't advanced within 1 s, readings go NaN (`nan` in the log, `---` on
+  the display) and the Temp1 page shows `rf:HUNG` — the egg needs a power
+  cycle.
 - **Menu idle shutdown ignored button activity.** The 5-minute main-menu
   idle timer read the buttons' `pressed` flags at a point in the loop where
   they are always false (set later by `readButtons()`, cleared by
@@ -57,6 +68,27 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   a still-fileless session even while the camera records.
 
 ### Changed
+- **GPS serial pipeline hardened against BLE radio load (dropped-PVT
+  fix).** SoftDevice radio interrupts (SensorEgg scan windows, camera
+  connection events) can defer the TIMER3 GPS drain; at 57600 baud the
+  core's stock 64-byte Serial1 ring gave only ~1 ms of deferral slack
+  before bytes were silently lost (~0.9% of 25 Hz PVT frames in the
+  field). Two changes: the drain now runs every 5 ms instead of 10
+  (`GPS_DRAIN_INTERVAL_US`), and the core ring is grown to 256 bytes via
+  a required `-DSERIAL_BUFFER_SIZE=256` build flag (~44 ms of slack;
+  +384 B RAM). `project.h` fails the compile with instructions if the
+  flag is missing, so a stock IDE build can't silently reintroduce the
+  bug — see CONTRIBUTING.md "Local build flags".
+- **SensorEgg scan duty reduced 60% → 44% (dropped-PVT fix, part 2).**
+  The scanner now listens 40 ms out of every 90 ms (was 60 of 100). The
+  wider-than-spec 60 ms window existed to break adv/scan phase-lock, but
+  that job moves to the off-100 ms interval: 90 ms scan vs the egg's
+  ~100 ms advertising sweeps their relative phase ~10 ms per cycle, so a
+  deaf-zone park escapes in under half a second — invisible at the 1 s
+  staleness rule. Less radio time in SoftDevice scan windows means less
+  deferral of the GPS drain ISR. Camera connection parameters are
+  deliberately untouched (we're the peripheral; the X4 dictates the real
+  interval, and the 10 Hz GPS heartbeat needs the short interval).
 - **Camera recording requires 1500+ RPM sustained for 5 s.** The record
   start gate moved from the 500 RPM wake threshold to a dedicated
   `kRecordRpmThreshold` (1500), held continuously for the full 5 s delay —
@@ -64,6 +96,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   ignition pulses above 500 RPM, which could start a camera recording
   during a failed start; cranking cannot sustain 1500. Camera wake and the
   30 s engine-off stop keep the 500/300 hysteresis band.
+- **PVT callback math moved off software doubles.** The nRF52840's FPU
+  is single-precision; `double` is software-emulated. The 25 Hz PVT
+  callback now computes altitude/speed/HDOP/heading/accuracy as `float`
+  reciprocal multiplies (lat/lng stay `double` — 1e-7° needs the
+  precision). No logged or displayed digit changes at the precisions
+  used; the sim lap oracles reproduce the hardware fixture to the exact
+  millisecond. Also deduplicated a triple `toDegMin()` call in the
+  camera RMC builder (byte-identical output, golden-pinned).
 - **SensorEgg temperatures display in Fahrenheit.** The Temp1 race page
   (big EGT + junction subtext) and the camera bench page's `egg:` soak
   readout now render in °F, converted at display time via the host-tested
@@ -72,6 +112,17 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   in a later release.
 
 ### Added
+- **GPS pipeline drop instrumentation.** The ~0.9% dropped-PVT regression
+  was invisible on-device (the only signal was the frame-rate readout).
+  The GPS serial path now carries permanent lightweight counters: missing
+  PVT frames vs the nav-rate expectation (window math in the new
+  host-tested `gps_stats` pure unit), worst-case TIMER3 drain deferral in
+  µs (hardware timer capture — measures SoftDevice radio-ISR pressure),
+  the biggest single-fire drain burst vs the core UART ring capacity, and
+  overflow event counts for both the core ring and the 4 KB GPS ring.
+  Surfaced on the GPS debug page — now first in the race rotation — with
+  a one-line `Drops / Ovf` summary on the GPS stats page. ISR cost is a
+  few cycles per fire; ~50 B RAM.
 - **SensorEgg wireless EGT (proof of concept).** The logger passively
   scans for the DovesSensorEgg — a wireless thermocouple pod that
   broadcasts EGT + cold-junction temperature in BLE advertising packets
