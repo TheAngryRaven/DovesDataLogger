@@ -4,11 +4,6 @@ I built this, you can too, stay strong.
 
 The build guide is still a to-do... but with a couple of pictures and a pin guide, I think yall got it.... maybe do a dry run on a bench to make sure its wired right :^)
 
-
-## NOTE
-	- This was just finished, all the files are in the compiled 3mf, folder, in cura/bambu/etc click the object and "seperate by object" or however your slicer works.
-	- I'll update with individual files soon
-
 <p align="center">
   <img src="preview.png" />
 </p>
@@ -22,19 +17,23 @@ The build guide is still a to-do... but with a couple of pictures and a pin guid
 ## Materials List
  - bunch of wires
  - Seeed XIAO NRF52840 (sense optional but cooler if you did)
- - SPI Flash Module - https://www.adafruit.com/product/6039
- - USBC Charger Module - https://www.adafruit.com/product/4410
- - little USBC-4 pin breakout plug
- - MATEK SAM-m10Q GPS, super easy to solder
- 	- CAN SUBSTITUTE BARE GPS MODULE
+ - sd card slot
+ - MATEK SAM-m10Q GPS, super easy to solder up and has a backup battery
  - 2.45" 128x64 OLED LCD (SH110X or SSD1306 compatible)
- - 1500mAh 103050 LiPo (or smaller)
- - 3X 8mm panel mount buttons
+ - 1500mAh 103050 LiPo
+ - 3X 7mm panel mount buttons
  - 1mm Acrylic sheet
- - 4x m3 30mm + nylock nuts
- - 8x m3 washers
+ - 4x m3 40mm + nylock nuts
+ - 2mm heat inserts, 4mm long
+ - metal rod or such for pins on battery and sd card doors
 
-## Mounting Hardware
+## Mounting Options
+option one
+ - 1x 5/8ths carriage bolt
+ - bolt to kart with washers and such
+
+
+option two
  - 2x 1/4 carriage bolt
  - 1/16th thick rubber sheet 2in wide
  - 1/4in thick rubber 2in wide
@@ -48,13 +47,28 @@ The build guide is still a to-do... but with a couple of pictures and a pin guid
 ### Build guide (very much todo)
 
 - print all the parts
-- line them up with the cutout
-- the MCU tray should overhang towards the USBC charger
-- good luck until i cut and upload the build video
+- The GPS/SDCard/MCU trays should all be superglued together
+- melt heat insert for sd card tray
+- line up front/back case with the baseplate between them, mark case holes on baseplate
+- glue mcu tower to baseplate with the SD door facing outwards
+  - the panel to cover the MCU is screwed on with 4 tiny jewelers screws, don't glue it on unless you hate yourself
+- repeat process for power switch
+- SOLDER WIRES FOR SD CARD BEFORE GLUING BATTERY TRAY
+- add heat insert to battery box
+- setup and glue battery to baseplate
+  - battery tray might stick out a smidge, sorry
+- screw on/solder display
+- finish soldering everything else
+- be fuckin careful with the wiring 
+- [tachometer coming soon, need to hand solder SMD components]
+
+**Note:** Battery ground goes to battery ground on the XIAO, the battery positive goes to the switch, the switch then goes to the battery positive pad on the XIAO
 
 
 #### Tips
+ - add hot glue to GPS so it does not wiggle and ruin the sticker antenna, maybe add a piece of tissue paper to prevent this
  - DONT LET THE BATTERY WIGGLE AROUND, IT WILL CAUSE FAILURE EVENTUALLY
+ - stay calm, trust me i know its rough
 
 #### Pin guide
 
@@ -91,19 +105,3 @@ The Seeed XIAO nRF52840 (Sense) has limited pins — almost every one is used. R
 - Keep tach wire (D0) physically separated from button wires to reduce EMI coupling
 - Use shielded cable for tach if possible, ground shield at MCU end only
 - RC filters on buttons and tach are strongly recommended for track/racing environments — ignition noise will cause phantom inputs without them
-
----
-
-## Worst Case Scenario
-
-If you don't have a printer. you can get the 1.25in screen and shove it in a tiny project box with whatever battery will fit, this is how i did the originally software proof of concept, and exactly why the display has two build options.
-
-
-I placed a magnet in the back to attach to the rental kart steering wheels, and used a drone battery strap wrapped around it to make sure it stayed.
-
-
-It should be more than obvious you cant fit a tachometer in here but you will have every other feature, anything is possible.
-
-<p align="center">
-  <img src="projectbox.jpg" />
-</p>
