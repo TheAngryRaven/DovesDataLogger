@@ -3,9 +3,10 @@
 ///////////////////////////////////////////
 // GPS MODULE
 // SparkFun u-blox GNSS v3 (UBX-PVT binary) at 25 Hz. A TIMER3 ISR
-// drains Serial1 into a 4 KB ring buffer every 10 ms to survive SD
-// write stalls. The library reads from that buffer via a Stream
-// wrapper. Handles V_BCKP loss with baud-rate recovery + reconfigure.
+// drains Serial1 into a 4 KB ring buffer every GPS_DRAIN_INTERVAL_US
+// to survive SD write stalls. The library reads from that buffer via a
+// Stream wrapper. Handles V_BCKP loss with baud-rate recovery +
+// reconfigure.
 ///////////////////////////////////////////
 
 #include <SparkFun_u-blox_GNSS_v3.h>
@@ -68,5 +69,21 @@ unsigned long      getGpsTimeInMilliseconds();
 unsigned long      getGpsUnixTimestamp();
 unsigned long long getGpsUnixTimestampMillis();
 
-// 1 Hz frame-rate window — populates gpsFrameRate.
+// 1 Hz frame-rate window — populates gpsFrameRate and feeds the
+// gps_stats drop accounting.
 void calculateGPSFrameRate();
+
+// Serial-pipeline health counters (monotonic since boot; see the
+// instrumentation block in gps_functions.ino). Shown on the GPS debug
+// page so drop causes can be attributed on hardware:
+//   DroppedPvt      — PVT frames missing vs the nav-rate expectation
+//   RingFullEvents  — 4 KB ring was full at drain time (SD stall > ~1.6 s)
+//   IsrLatencyMaxUs — worst TIMER3 fire→entry deferral (radio ISR pressure)
+//   DrainMaxBytes   — biggest single-fire drain burst (core-ring pressure)
+//   CoreSatEvents   — a drain burst filled the core RX ring (bytes likely
+//                     already lost upstream in the core's silent drop)
+uint32_t gpsStatsDroppedPvt();
+uint32_t gpsStatsRingFullEvents();
+uint32_t gpsStatsIsrLatencyMaxUs();
+uint16_t gpsStatsDrainMaxBytes();
+uint32_t gpsStatsCoreSatEvents();

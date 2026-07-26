@@ -32,6 +32,7 @@ jobs:
         run: |
           clang-tidy -p tests/build \
             BirdsEye/haversine.cpp \
+            BirdsEye/gps_stats.cpp \
             BirdsEye/gps_time.cpp \
             BirdsEye/gps_validation.cpp \
             BirdsEye/dovex_header.cpp \

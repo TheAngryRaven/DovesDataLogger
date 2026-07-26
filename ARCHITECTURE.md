@@ -102,7 +102,11 @@ to the matching `*_LOOP()`.
   sequence counter) and feeds the `Temp1`/`Junction1` DOVEX columns and
   the Temp1 race page. Observer + peripheral coexist natively on S140;
   passive scanning never transmits, so the camera link is untouched.
-  Readings older than 1 s go NaN — never held across a dropout.
+  Readings older than 1 s go NaN — never held across a dropout. Gated on
+  the `BIRDSEYE_ENABLE_SENSOREGG` build flag: on in the beta channel, off
+  in master/release, where the scanner and Temp1 page are compiled out,
+  BLE returns to lazy init, and the DOVEX `Temp1`/`Junction1` columns are
+  written as `nan` so the log format stays identical across channels.
 - **Replay** (`replay`) — instant DOVEX header replay.
 - **Settings** (`settings`) — JSON key/value store on the SD card.
 - **CourseManager** (external library) — owns course detection, sector
@@ -113,13 +117,28 @@ to the matching `*_LOOP()`.
 These are the parts that look over-engineered until you've watched them
 fail the simple way.
 
-### GPS serial ring buffer (TIMER3 ISR)
-At 25 Hz PVT the GPS emits ~2.5 KB/s. The hardware UART FIFO is tiny, and
-an SD-card garbage-collection pause can block the main loop for
-100 ms – 2 s — long enough to overflow the FIFO and lose fixes. A TIMER3
-ISR drains Serial1 into a 4 KB RAM ring buffer every 10 ms, independent of
-the main loop, and the GPS library reads from that buffer. This is why
-**TIMER3 is reserved** project-wide.
+### GPS serial ring buffer (TIMER3 ISR) — two buffers, two failure modes
+At 25 Hz PVT the GPS emits ~2.5 KB/s. An SD-card garbage-collection pause
+can block the main loop for 100 ms – 2 s — long enough to overflow the
+UART buffering and lose fixes. A TIMER3 ISR drains Serial1 into a 4 KB
+RAM ring buffer every 5 ms, independent of the main loop, and the GPS
+library reads from that buffer. This is why **TIMER3 is reserved**
+project-wide.
+
+That ring only covers *downstream* stalls. Upstream of it sits the
+core's Serial1 RX ring, and the TIMER3 handler runs at NVIC priority 3 —
+below the SoftDevice's radio interrupts (priority 0–2, unmaskable by the
+app). Radio airtime (the SensorEgg scan window, camera connection
+events) defers the drain, and only the core ring absorbs bytes in the
+meantime; its stock 64 bytes gave ~1 ms of slack at 57600 baud, which is
+exactly where a ~0.9% 25 Hz PVT drop rate came from once BLE was always
+on. The core ring is therefore grown to 256 bytes via a required
+`-DSERIAL_BUFFER_SIZE=256` build flag (asserted in `project.h`), and the
+pipeline carries permanent counters — dropped PVT frames, worst TIMER3
+deferral (hardware timer capture), drain-burst high-water, and overflow
+events for both rings — surfaced on the GPS debug page so radio-induced
+loss, SD-stall loss, and checksum corruption can be told apart on
+hardware. The window math lives in the host-tested `gps_stats` unit.
 
 ### SD access arbitration
 The BLE callbacks run in a **separate FreeRTOS task** from `loop()`, and
@@ -169,9 +188,22 @@ booted (the host-tested `wake_cause` unit). An engine-start (tach) wake
 routes the GPS status page's exit straight into race mode with logging —
 the old software sleep loop's RPM wake, rebuilt on hardware. GPREGRET is
 never touched; register 0 belongs to the OTA/bootloader handoff. The one
-soft exception is charging: the fast-charge (HICHG) pin is software-held,
-so while VBUS is present the device parks in a live charging loop instead
-of System OFF, wakes fully on any button, and powers off when unplugged.
+soft exception is VBUS: while a cable is present the device parks in a
+live charging loop instead of System OFF, wakes fully on any button, and
+powers off when unplugged. Two reasons — the fast-charge (HICHG) pin is
+software-held when onboard charging is compiled in, and, regardless of
+that, VBUS is an always-armed System OFF wake source, so powering down
+with the cable in risks an immediate wake-reset loop.
+
+Onboard charging itself is a build flag,
+`BIRDSEYE_ENABLE_ONBOARD_CHARGING`, **off in every shipped build** since
+3.0.1: the hardware now carries an external charging circuit (the XIAO's
+BQ25100 tops out around 100 mA even with HICHG held). With the flag off
+the firmware never drives HICHG, and USB is treated as a host connection
+rather than a charge session — a VBUS wake boots normally instead of
+shortcutting to the charge screen, and the main menu is no longer pulled
+down after `USB_MENU_CHARGE_IDLE_MS` just because a cable is plugged in.
+Setting the flag to 1 restores the pre-3.0.1 behavior wholesale.
 
 ### GPS boot recovery
 The SAM-M10Q keeps its config in volatile RAM (backed by V_BCKP), and

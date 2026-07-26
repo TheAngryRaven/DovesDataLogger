@@ -5,20 +5,29 @@
 ///////////////////////////////////////////
 
 #include "gps_functions.h"
+#include "gps_stats.h"
 #include "gps_time.h"
 #include "gps_validation.h"
 #include "sat_bars.h"
 
 ///////////////////////////////////////////
-// GPS SERIAL BUFFER
-// Timer ISR drains Serial1 into a 4KB RAM buffer every 10ms,
-// preventing data loss during SD card write stalls (GC pauses).
-// SparkFun library reads from this buffer via GpsBufferedStream.
+// GPS SERIAL BUFFER — two buffers, two failure modes
 //
-// At 25Hz PVT (~2500 bytes/sec), the hardware serial buffer
-// (64-256 bytes) overflows in 25-100ms of blocking. SD card
-// garbage collection can block writes for 100ms-2s.
-// This 4KB buffer survives up to 1.6 seconds of stalls.
+// UARTE0 (per-byte ISR, NVIC prio 3) → core RingBuffer (256 B via the
+// SERIAL_BUFFER_SIZE build flag; project.h asserts it) → TIMER3 ISR
+// (prio 3, every GPS_DRAIN_INTERVAL_US) → this 4 KB ring → SparkFun
+// library via GpsBufferedStream on the main loop.
+//
+// Downstream stalls (SD garbage collection blocks the main loop
+// 100 ms–2 s): the 4 KB ring buffers ~1.6 s of stream while TIMER3
+// keeps draining — the original reason this ISR exists.
+//
+// Upstream deferral (SoftDevice radio ISRs at prio 0–2 preempt both
+// prio-3 ISRs): only the CORE ring absorbs bytes until TIMER3 gets to
+// run. 256 B ≈ 44 ms of line rate at 57600 baud, so radio activity
+// (SensorEgg scan windows, camera connection events) has huge margin
+// before a byte is lost. Both overflow points are counted — see the
+// gpsStats* accessors and the GPS debug page.
 ///////////////////////////////////////////
 
 // Forward-declare ISR with C linkage BEFORE Arduino's preprocessor
@@ -30,6 +39,15 @@ static uint8_t gpsRxBuf[GPS_RX_BUF_SIZE];
 static volatile uint16_t gpsRxHead = 0;  // Written by ISR only
 static volatile uint16_t gpsRxTail = 0;  // Read by main loop only (via gpsStream)
 static volatile bool gpsTimerActive = false;
+
+// Serial-pipeline health counters (monotonic since boot, read via the
+// gpsStats*() accessors, shown on the GPS debug page). ISR writes are a
+// few cycles each; no SVCs, no floats.
+static volatile uint32_t gpsRingFullEvents = 0;   // 4KB ring full at drain time
+static volatile uint32_t gpsIsrLatencyMaxUs = 0;  // worst TIMER3 fire→entry deferral
+static volatile uint16_t gpsDrainMaxBytes = 0;    // biggest single-fire drain burst
+static volatile uint32_t gpsCoreSatEvents = 0;    // drain burst filled the core RX ring
+static gps_stats::DropMonitor gpsDropMonitor;     // main-loop only (frame-rate window)
 
 // Stream wrapper: SparkFun library reads from our 4KB buffer instead of Serial1.
 // Before the timer ISR is started (during GPS_SETUP), reads pass through to
@@ -70,12 +88,22 @@ static GpsBufferedStream gpsStream;
 // reads gpsRxTail via gpsStream) — lock-free ring buffer.
 //
 // Brief __disable_irq() around each GPS_SERIAL read protects the UART
-// driver's internal FIFO from concurrent access by the UART DMA ISR
-// (which can preempt us at higher priority). Each critical section is
-// ~0.3µs — well within SoftDevice's 6µs safe window.
+// driver's internal FIFO from concurrent access by the core's UARTE
+// ISR (same NVIC priority 3 as this handler, so it can't preempt us —
+// the guard covers it firing *between* our read calls). Each critical
+// section is ~0.3µs — well within SoftDevice's 6µs safe window.
 void TIMER3_IRQHandler(void) {
   if (NRF_TIMER3->EVENTS_COMPARE[0]) {
     NRF_TIMER3->EVENTS_COMPARE[0] = 0;
+    // The COMPARE0_CLEAR short zeroed the counter at the scheduled fire
+    // time, so capturing now reads how long SoftDevice radio ISRs (the
+    // only thing above priority 3) deferred this handler, in µs. If a
+    // deferral swallows a whole period the reading wraps mod the period
+    // — the drain/saturation counters below catch that case.
+    NRF_TIMER3->TASKS_CAPTURE[1] = 1;
+    uint32_t deferralUs = NRF_TIMER3->CC[1];
+    if (deferralUs > gpsIsrLatencyMaxUs) gpsIsrLatencyMaxUs = deferralUs;
+    uint16_t drained = 0;
     while (true) {
       __disable_irq();
       int c = GPS_SERIAL.available() ? GPS_SERIAL.read() : -1;
@@ -83,10 +111,19 @@ void TIMER3_IRQHandler(void) {
       if (c < 0) break;
 
       uint16_t nextHead = (gpsRxHead + 1) % GPS_RX_BUF_SIZE;
-      if (nextHead == gpsRxTail) break;  // Buffer full, drop bytes
+      if (nextHead == gpsRxTail) {  // Buffer full, drop bytes
+        gpsRingFullEvents++;
+        break;
+      }
       gpsRxBuf[gpsRxHead] = (uint8_t)c;
       gpsRxHead = nextHead;
+      drained++;
     }
+    if (drained > gpsDrainMaxBytes) gpsDrainMaxBytes = drained;
+    // Draining a full core ring means it was saturated while we were
+    // deferred — bytes may already have been dropped upstream (the
+    // core's store_char discards silently on full).
+    if (drained >= SERIAL_BUFFER_SIZE - 1) gpsCoreSatEvents++;
   }
 }
 
@@ -96,7 +133,7 @@ void startGpsSerialTimer() {
   NRF_TIMER3->MODE = TIMER_MODE_MODE_Timer;
   NRF_TIMER3->BITMODE = TIMER_BITMODE_BITMODE_32Bit;
   NRF_TIMER3->PRESCALER = 4;              // 16MHz / 2^4 = 1MHz tick
-  NRF_TIMER3->CC[0] = 10000;              // 10ms interval
+  NRF_TIMER3->CC[0] = GPS_DRAIN_INTERVAL_US;  // drain period (see gps_config.h)
   NRF_TIMER3->SHORTS = TIMER_SHORTS_COMPARE0_CLEAR_Msk;
   NRF_TIMER3->INTENSET = TIMER_INTENSET_COMPARE0_Msk;
   NVIC_SetPriority(TIMER3_IRQn, 3);       // Below SoftDevice (0-2), above main loop
@@ -152,13 +189,16 @@ unsigned long long getGpsUnixTimestampMillis() {
 // NAV-PVT message arrives.  Populates the shared gpsData struct and sets
 // the gpsDataFresh flag so GPS_LOOP() knows to run lap-timer / logging.
 void onPVTReceived(UBX_NAV_PVT_data_t *pvt) {
+  // lat/lng stay double (see GpsData); the rest is single-precision with
+  // reciprocal-constant multiplies — hardware FPU, no software-double
+  // divides in this 25 Hz callback.
   gpsData.latitudeDegrees = pvt->lat / 1e7;
   gpsData.longitudeDegrees = pvt->lon / 1e7;
-  gpsData.altitude = pvt->hMSL / 1000.0;          // mm → meters
-  gpsData.speed = pvt->gSpeed / 514.444;           // mm/s → knots
-  gpsData.HDOP = pvt->pDOP / 100.0;               // pDOP ≈ HDOP for track use
-  gpsData.heading = pvt->headMot / 1e5;            // deg * 1e-5 → degrees
-  gpsData.horizontalAccuracy = pvt->hAcc / 1000.0; // mm → meters
+  gpsData.altitude = (float)pvt->hMSL * 0.001f;            // mm → meters
+  gpsData.speed = (float)pvt->gSpeed * (1.0f / 514.444f);  // mm/s → knots
+  gpsData.HDOP = (float)pvt->pDOP * 0.01f;                 // pDOP ≈ HDOP for track use
+  gpsData.heading = (float)pvt->headMot * 1e-5f;           // deg * 1e-5 → degrees
+  gpsData.horizontalAccuracy = (float)pvt->hAcc * 0.001f;  // mm → meters
   gpsData.satellites = pvt->numSV;
   // A fix is only trustworthy when the module also asserts gnssFixOK — a bare
   // fixType >= 2 can appear during convergence with garbage coordinates.
@@ -660,6 +700,10 @@ void GPS_SLEEP() {
  * (~50ms total) and idempotent — safe to call even if config was retained.
  */
 void GPS_RECONFIGURE() {
+  // The stream restarts around a reconfigure (wake/recovery paths) —
+  // discard the frame-rate window in progress so the gap isn't
+  // miscounted as dropped frames.
+  gps_stats::noteRateChange(gpsDropMonitor);
   // This runs under the armed ~4 s WDT when called from GPS_BAUD_RECOVERY
   // or GPS_WAKE. Each call below is a VALSET + ACK wait that can block up
   // to ~1.1 s on a module that answers the connection ping but responds
@@ -697,6 +741,7 @@ void GPS_RECONFIGURE() {
 void gpsEnterStatusMode() {
   gpsNavRateTarget = GPS_NAV_RATE_STATUS_HZ;
   gpsNavSatWanted = true;
+  gps_stats::noteRateChange(gpsDropMonitor);
   if (!gpsInitialized) return;
   myGNSS.setNavigationFrequency(gpsNavRateTarget);
   myGNSS.setAutoNAVSATcallbackPtr(&onNAVSATReceived);
@@ -712,6 +757,7 @@ void gpsEnterStatusMode() {
 void gpsEnterRaceMode() {
   gpsNavRateTarget = GPS_NAV_RATE_HZ;
   gpsNavSatWanted = false;
+  gps_stats::noteRateChange(gpsDropMonitor);
   gpsSatCnoCount = 0;  // stale bars must not outlive the mode
   gpsSatUsedCount = 0;
   gpsSatTrackedCount = 0;
@@ -843,10 +889,22 @@ void calculateGPSFrameRate() {
   gpsFrameEndTime = millis();
   // Check if the update interval has passed
   if (gpsFrameEndTime - gpsFrameStartTime >= 1000) {
+    unsigned long elapsed = gpsFrameEndTime - gpsFrameStartTime;
     // Calculate the frame rate (loops per second)
-    gpsFrameRate = (float)gpsFrameCounter / ((gpsFrameEndTime - gpsFrameStartTime) / 1000.0);
+    gpsFrameRate = (float)gpsFrameCounter / (elapsed / 1000.0);
+    // Feed the drop accounting: expected-vs-received against the
+    // current nav-rate target (window math in the gps_stats pure unit).
+    gps_stats::windowUpdate(gpsDropMonitor, gpsFrameCounter, elapsed,
+                            gpsNavRateTarget);
     // Reset the loop counter and start time for the next interval
     gpsFrameCounter = 0;
     gpsFrameStartTime = millis();
   }
 }
+
+// Serial-pipeline health accessors (GPS debug page + GPS stats page).
+uint32_t gpsStatsDroppedPvt() { return gpsDropMonitor.droppedTotal; }
+uint32_t gpsStatsRingFullEvents() { return gpsRingFullEvents; }
+uint32_t gpsStatsIsrLatencyMaxUs() { return gpsIsrLatencyMaxUs; }
+uint16_t gpsStatsDrainMaxBytes() { return gpsDrainMaxBytes; }
+uint32_t gpsStatsCoreSatEvents() { return gpsCoreSatEvents; }

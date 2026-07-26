@@ -30,13 +30,55 @@ ARCHITECTURE.md for the full map.
 1. Install the **"Seeed nRF52 Boards"** package (the non-mbed variant — the
    mbed one uses ArduinoBLE instead of Bluefruit and won't compile).
 2. Install the libraries listed in the README's *Required Libraries* table.
-3. Open `BirdsEye/BirdsEye.ino`, select **Seeed XIAO nRF52840 Sense**, and
+3. Set up the required build flag (next section) — a stock IDE build stops
+   with a `static_assert` telling you to do this.
+4. Open `BirdsEye/BirdsEye.ino`, select **Seeed XIAO nRF52840 Sense**, and
    compile.
+
+### Local build flags
+
+The firmware **requires** `-DSERIAL_BUFFER_SIZE=256`: it grows the core's
+Serial1 RX/TX rings from 64 to 256 bytes so SoftDevice radio interrupts
+(BLE scan windows, camera connection events) can't defer the TIMER3 GPS
+drain long enough to silently drop GPS bytes. `project.h` fails the
+compile if the flag is missing, because a silently under-buffered build
+reintroduces a real field bug (~0.9% dropped 25 Hz PVT frames). CI passes
+the flag automatically.
+
+- **Arduino IDE**: create `platform.local.txt` next to the board package's
+  `platform.txt` (e.g.
+  `<arduino15>/packages/Seeeduino/hardware/nrf52/<version>/platform.local.txt`)
+  containing:
+
+  ```
+  compiler.cpp.extra_flags=-DSERIAL_BUFFER_SIZE=256
+  ```
+
+  One-time setup; survives sketch changes (re-add after a board-package
+  update).
+- **arduino-cli**: add
+  `--build-property "compiler.cpp.extra_flags=-DSERIAL_BUFFER_SIZE=256"`
+  (merge it into the same property if you're already passing variant
+  defines — a second `--build-property` for the same key replaces the
+  first).
+
+### Feature flags
+
+Optional, and all default to **off** (`0`) in `project.h`. Pass them the
+same way as `SERIAL_BUFFER_SIZE` above — merged into the one
+`compiler.cpp.extra_flags` property. Test them with `#if`, never `#ifdef`,
+so an explicit `-DFLAG=0` still turns the feature off.
+
+| Flag | Default | Enabled by | Effect when `1` |
+|---|---|---|---|
+| `BIRDSEYE_ENABLE_ONBOARD_CHARGING` | `0` | nothing — off in every channel | Holds the BQ25100 HICHG pin high for ~100 mA fast charge and runs the USB charging UX (VBUS wake shortcuts to the charge screen; the main menu drops into the charging loop after `USB_MENU_CHARGE_IDLE_MS`). Off, the firmware leaves HICHG alone and an external charging circuit owns the battery. The VBUS park at shutdown happens either way — see ARCHITECTURE.md. |
+| `BIRDSEYE_ENABLE_SENSOREGG` | `0` | `beta.yml`, and `compile-sketch.yml` for PRs targeting `BETA` | Compiles in the wireless-EGT POC: passive BLE scanner, Temp1 race page, and BLE core up at boot. Off, the accessors return NaN, so `Temp1`/`Junction1` still log as `nan` and the log format is unchanged. |
 
 ### arduino-cli
 The exact invocation CI uses is in
 [`.github/workflows/compile-sketch.yml`](.github/workflows/compile-sketch.yml)
-— copy the platform/library install steps from there.
+— copy the platform/library install steps from there (including the
+`SERIAL_BUFFER_SIZE` build property).
 
 ## Running the host tests
 

@@ -10,6 +10,8 @@
 // silently, and nothing prints warnings into the UX.
 ///////////////////////////////////////////
 
+#define SIM 1  // project.h (via bluetooth.h) gates firmware-only build asserts on this
+
 #include <Arduino.h>
 
 #include "bluetooth.h"

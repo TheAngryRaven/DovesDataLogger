@@ -19,6 +19,12 @@ jobs:
       # tag (bump deliberately). base_ref is only set on pull_request events;
       # ref_name covers push / workflow_dispatch.
       LAPTIMER_REF: ${{ (github.base_ref == 'BETA' || github.ref_name == 'BETA') && 'BETA' || 'v4.2.0' }}
+      # Feature flags for this build, matched to the channel the code is
+      # headed for (see project.h). BETA enables the SensorEgg POC exactly
+      # as beta.yml does, so the flag-on build is compile-checked on the PR
+      # rather than first failing on the publish workflow. Everything else
+      # builds the master/release defaults (all flags off).
+      FEATURE_FLAGS: ${{ (github.base_ref == 'BETA' || github.ref_name == 'BETA') && '-DBIRDSEYE_ENABLE_SENSOREGG=1' || '' }}
     # Build both XIAO nRF52840 variants. The Sense board has the onboard
     # LSM6DS3 IMU; the plain board does not (accelerometer logging degrades
     # gracefully). Same MCU/BLE/bootloader otherwise.
@@ -62,9 +68,13 @@ jobs:
               version: ${{ env.LAPTIMER_REF }}
           sketch-paths: |
             - BirdsEye
+          # SERIAL_BUFFER_SIZE grows the core's Serial1 RX/TX rings 64->256 B
+          # (guarded #ifndef in the BSP's RingBuffer.h) so SoftDevice radio-ISR
+          # deferral of the TIMER3 GPS drain can't overflow the core ring.
+          # project.h static_asserts on it — keep all three workflows in sync.
           cli-compile-flags: |
             - --build-property
-            - compiler.cpp.extra_flags=-D${{ matrix.board.define }}
+            - compiler.cpp.extra_flags=-D${{ matrix.board.define }} -DSERIAL_BUFFER_SIZE=256 ${{ env.FEATURE_FLAGS }}
           enable-deltas-report: true
 
       # Hard flash-size gate. The XIAO nRF52840's app flash is shared

@@ -12,6 +12,56 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [3.0.1] - 2026-07-26
+
+### Added
+- **Build flag `BIRDSEYE_ENABLE_ONBOARD_CHARGING` (`project.h`), default
+  off in every channel.** The hardware now carries an external charging
+  circuit — the XIAO's onboard BQ25100 tops out around 100 mA even with
+  the HICHG fast-charge pin held, which is too slow to be useful. With the
+  flag off the firmware never drives HICHG (the charge IC stays at its
+  ~50 mA default and the external circuit owns the battery), and the USB
+  charging UX built around that hold is compiled out: a VBUS wake boots
+  normally instead of shortcutting to the charge screen, and the main menu
+  is no longer pulled into the charging loop after 60 s of inactivity just
+  because a cable is plugged in. Setting the flag to `1` restores the
+  pre-3.0.1 behavior exactly.
+- **Build flag `BIRDSEYE_ENABLE_SENSOREGG` (`project.h`), default off on
+  master/release and on in the beta channel.** The wireless-EGT pod is
+  still a proof of concept, so it now ships only where POCs belong. With
+  the flag off, the passive BLE scanner and the Temp1 race page are
+  compiled out and BLE returns to coming up lazily on first
+  camera/transfer use instead of at boot (recovering the idle power the
+  always-on core costs). `beta.yml` passes
+  `-DBIRDSEYE_ENABLE_SENSOREGG=1`, and `compile-sketch.yml` does the same
+  for pull requests targeting `BETA`, so the flag-on build is
+  compile-checked on the PR rather than first failing at publish time.
+
+### Changed
+- **USB behavior with onboard charging disabled (i.e. by default).** A
+  cable is now treated as a host/data connection rather than a charge
+  session: plugging into a powered-off device boots it normally instead of
+  landing straight on the charge screen, and the main menu keeps its full
+  5-minute idle window while plugged in. Shutdown still parks in the
+  charging loop while VBUS is present regardless of the flag — VBUS is an
+  always-armed System OFF wake source on the nRF52840, so powering down
+  with the cable in risks an immediate wake-reset loop. That park is a
+  hardware constraint, not a charging feature.
+- **DOVEX `Temp1` / `Junction1` are written on every build.** With the
+  SensorEgg POC compiled out they log the literal `nan`, so logs from the
+  master and beta channels have identical column layout.
+
+### Added
+- **Simulator oracle diagnostic replay modes.** `birdseye_sim_oracle
+  --dovex-noheader <file>` replays a header-less DOVEX log (crashed /
+  power-cut session) through the full pipeline, printing live page / race /
+  track-detect / course / lap state instead of asserting against header
+  laps. `--two-session <file> [break-minutes]` reproduces a whole track
+  day — synthetic session 1, auto-idle session end, a parked break with
+  deterministic GPS drift, then the real log as session 2 — validating the
+  carried-over CourseManager against the log's own header laps (wired into
+  CI as `sim_two_session_carryover`).
+
 ### Fixed
 - **Zombie SensorEgg no longer reads as a live link (field incident
   2026-07-19).** BLE radios rebroadcast the last advertising payload
@@ -24,6 +74,25 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   hasn't advanced within 1 s, readings go NaN (`nan` in the log, `---` on
   the display) and the Temp1 page shows `rf:HUNG` — the egg needs a power
   cycle.
+- **Menu idle shutdown ignored button activity.** The 5-minute main-menu
+  idle timer read the buttons' `pressed` flags at a point in the loop where
+  they are always false (set later by `readButtons()`, cleared by
+  `resetButtons()` before the next iteration), so navigating the menu never
+  reset the clock and the device powered off 5 minutes after menu entry
+  regardless of activity. The timer now anchors on the button debouncer's
+  persistent `lastPressed` stamps. Regression-tested by the new
+  `--two-session` sim oracle mode in CI (the mid-break shutdown it used to
+  cause kept session 2 from ever entering race mode).
+- **Track detection silently degraded to Lap Anything when logging started
+  first.** `SD_ACCESS_TRACK_PARSE` was denied while `SD_ACCESS_LOGGING`
+  held the card — but logging holds it for the entire race session, so any
+  boot where the log file was created before the 1 Hz track-detect parse
+  (typical tach-wake with a warm GPS) lost course detection for the whole
+  session. Track parse / settings reads now nest under the logging hold
+  without taking ownership (`sd_access_policy::ownerAfterAcquire`) — they
+  run on the same main-loop task with their own file handles, so the
+  exclusion never protected anything. Policy change covered by host unit
+  tests.
 - **Pull-start / engine-kill lockup (field incident 2026-07-19).** A failed
   first start or killing the motor before GPS acquired its time lock left
   the device apparently frozen: pinned to the RPM page, all buttons dead,
@@ -38,6 +107,27 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   a still-fileless session even while the camera records.
 
 ### Changed
+- **GPS serial pipeline hardened against BLE radio load (dropped-PVT
+  fix).** SoftDevice radio interrupts (SensorEgg scan windows, camera
+  connection events) can defer the TIMER3 GPS drain; at 57600 baud the
+  core's stock 64-byte Serial1 ring gave only ~1 ms of deferral slack
+  before bytes were silently lost (~0.9% of 25 Hz PVT frames in the
+  field). Two changes: the drain now runs every 5 ms instead of 10
+  (`GPS_DRAIN_INTERVAL_US`), and the core ring is grown to 256 bytes via
+  a required `-DSERIAL_BUFFER_SIZE=256` build flag (~44 ms of slack;
+  +384 B RAM). `project.h` fails the compile with instructions if the
+  flag is missing, so a stock IDE build can't silently reintroduce the
+  bug — see CONTRIBUTING.md "Local build flags".
+- **SensorEgg scan duty reduced 60% → 44% (dropped-PVT fix, part 2).**
+  The scanner now listens 40 ms out of every 90 ms (was 60 of 100). The
+  wider-than-spec 60 ms window existed to break adv/scan phase-lock, but
+  that job moves to the off-100 ms interval: 90 ms scan vs the egg's
+  ~100 ms advertising sweeps their relative phase ~10 ms per cycle, so a
+  deaf-zone park escapes in under half a second — invisible at the 1 s
+  staleness rule. Less radio time in SoftDevice scan windows means less
+  deferral of the GPS drain ISR. Camera connection parameters are
+  deliberately untouched (we're the peripheral; the X4 dictates the real
+  interval, and the 10 Hz GPS heartbeat needs the short interval).
 - **Camera recording requires 1500+ RPM sustained for 5 s.** The record
   start gate moved from the 500 RPM wake threshold to a dedicated
   `kRecordRpmThreshold` (1500), held continuously for the full 5 s delay —
@@ -45,6 +135,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   ignition pulses above 500 RPM, which could start a camera recording
   during a failed start; cranking cannot sustain 1500. Camera wake and the
   30 s engine-off stop keep the 500/300 hysteresis band.
+- **PVT callback math moved off software doubles.** The nRF52840's FPU
+  is single-precision; `double` is software-emulated. The 25 Hz PVT
+  callback now computes altitude/speed/HDOP/heading/accuracy as `float`
+  reciprocal multiplies (lat/lng stay `double` — 1e-7° needs the
+  precision). No logged or displayed digit changes at the precisions
+  used; the sim lap oracles reproduce the hardware fixture to the exact
+  millisecond. Also deduplicated a triple `toDegMin()` call in the
+  camera RMC builder (byte-identical output, golden-pinned).
 - **SensorEgg temperatures display in Fahrenheit.** The Temp1 race page
   (big EGT + junction subtext) and the camera bench page's `egg:` soak
   readout now render in °F, converted at display time via the host-tested
@@ -53,6 +151,17 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   in a later release.
 
 ### Added
+- **GPS pipeline drop instrumentation.** The ~0.9% dropped-PVT regression
+  was invisible on-device (the only signal was the frame-rate readout).
+  The GPS serial path now carries permanent lightweight counters: missing
+  PVT frames vs the nav-rate expectation (window math in the new
+  host-tested `gps_stats` pure unit), worst-case TIMER3 drain deferral in
+  µs (hardware timer capture — measures SoftDevice radio-ISR pressure),
+  the biggest single-fire drain burst vs the core UART ring capacity, and
+  overflow event counts for both the core ring and the 4 KB GPS ring.
+  Surfaced on the GPS debug page — now first in the race rotation — with
+  a one-line `Drops / Ovf` summary on the GPS stats page. ISR cost is a
+  few cycles per fire; ~50 B RAM.
 - **SensorEgg wireless EGT (proof of concept).** The logger passively
   scans for the DovesSensorEgg — a wireless thermocouple pod that
   broadcasts EGT + cold-junction temperature in BLE advertising packets
@@ -799,7 +908,8 @@ Initial tagged release. Core capabilities:
 - 8+ OLED display pages, Bluetooth LE file download / settings / track
   sync, and a low-power sleep mode.
 
-[Unreleased]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v3.0.0...HEAD
+[Unreleased]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v3.0.1...HEAD
+[3.0.1]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v2.2.3...v3.0.0
 [2.2.3]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v2.2.2...v2.2.3
 [2.2.2]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v2.2.1...v2.2.2

@@ -31,7 +31,52 @@
 #ifdef FIRMWARE_VERSION_OVERRIDE
   #define FIRMWARE_VERSION _BE_TOSTRING(FIRMWARE_VERSION_OVERRIDE)
 #else
-  #define FIRMWARE_VERSION "3.0.0"
+  #define FIRMWARE_VERSION "3.0.1"
+#endif
+
+///////////////////////////////////////////
+// BUILD FEATURE FLAGS
+//
+// Both are plain 0/1 macros with a #ifndef default, so a build can force
+// either state explicitly (-DFLAG=1 / -DFLAG=0). A bare -DFLAG also works
+// (the compiler defines it as 1). Test them with #if, never #ifdef — a
+// deliberate -DFLAG=0 must lose to the feature being off.
+///////////////////////////////////////////
+
+// ---- Onboard (XIAO) battery charging ----
+//
+// 0 (default — master, beta and release all ship this): the firmware keeps
+// its hands off the BQ25100. HICHG is never driven, so the onboard charger
+// stays at its ~50 mA default and an EXTERNAL charging circuit owns the
+// battery. USB is then a host/data connection rather than a charge session:
+// a VBUS wake boots normally instead of shortcutting to the charge screen,
+// and the main menu no longer pulls itself down after
+// USB_MENU_CHARGE_IDLE_MS just because a cable is plugged in.
+//
+// 1: the pre-3.0.1 behavior — hold HICHG high for ~100 mA fast charge and
+// run the charging UX built around it.
+//
+// NOTE (independent of this flag): with VBUS present, shutdown still parks
+// in a display-off loop instead of entering System OFF. VBUS is an
+// always-armed System OFF wake source on the nRF52840, so powering down
+// with the cable still in risks an immediate wake-reset loop. The park is a
+// hardware constraint, not a charging feature.
+#ifndef BIRDSEYE_ENABLE_ONBOARD_CHARGING
+  #define BIRDSEYE_ENABLE_ONBOARD_CHARGING 0
+#endif
+
+// ---- SensorEgg wireless EGT (BLE observer, proof of concept) ----
+//
+// 0 (default — master and release): the whole POC is compiled out. No
+// passive scanner, no Temp1 race page, and BLE goes back to coming up
+// lazily on first camera/transfer use instead of at boot. The DOVEX
+// Temp1/Junction1 columns are still written (as `nan`) so the log format is
+// identical across channels.
+//
+// 1 (the beta channel passes -DBIRDSEYE_ENABLE_SENSOREGG=1): scanner,
+// display page and live readings all present.
+#ifndef BIRDSEYE_ENABLE_SENSOREGG
+  #define BIRDSEYE_ENABLE_SENSOREGG 0
 #endif
 
 ///////////////////////////////////////////
@@ -68,6 +113,29 @@
   #define FIRMWARE_VARIANT "nonsense"
 #else  // unknown board / core — fall back to the primary variant
   #define FIRMWARE_VARIANT "sense"
+#endif
+
+///////////////////////////////////////////
+// BUILD-FLAG CONTRACT: GPS UART BUFFER
+//
+// The core's Serial1 RX ring must be 256 B (stock is 64 B, #ifndef-
+// guarded in the BSP's RingBuffer.h). SoftDevice radio interrupts
+// (unmaskable, prio 0–2) defer the TIMER3 GPS drain ISR (prio 3); at
+// 57600 baud the stock 64 B ring gives only ~1 ms of deferral slack
+// before bytes are silently dropped and 25 Hz PVT frames are lost —
+// the exact field regression the drop counters were built to catch.
+// A silently under-buffered build would reintroduce it, so fail loud.
+//
+// CI passes -DSERIAL_BUFFER_SIZE=256 (all three workflows). For a
+// local Arduino IDE / arduino-cli build, see CONTRIBUTING.md
+// ("Local build flags") — one-time setup via platform.local.txt or
+// --build-property.
+///////////////////////////////////////////
+#ifndef SIM
+static_assert(SERIAL_BUFFER_SIZE >= 256,
+              "Build with -DSERIAL_BUFFER_SIZE=256 (see CONTRIBUTING.md, "
+              "'Local build flags') — the stock 64 B Serial1 ring drops GPS "
+              "bytes under BLE radio load.");
 #endif
 
 ///////////////////////////////////////////
