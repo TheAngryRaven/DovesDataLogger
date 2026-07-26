@@ -9,6 +9,9 @@
 A high-precision GPS-based lap timer and data logger designed for motorsports and track day enthusiasts. Features 25Hz logging, sector timing, RPM monitoring via tachometer, and multiple customizable display pages.
 
 <p align="center">
+  <img src="preview.png" />
+</p>
+<p align="center">
   <img src="CASE/realworld_1.jpg" />
 </p>
 
