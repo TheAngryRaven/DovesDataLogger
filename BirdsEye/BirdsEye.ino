@@ -576,13 +576,26 @@ const int GPS_STATS = 4;
 #else
   const int GPS_SPEED = 5;
   const int TACHOMETER = 6;
-  const int SENSOR_TEMP = 7;  // SensorEgg wireless EGT (Temp1)
-  const int GPS_LAP_TIME = 8;
-  const int GPS_LAP_PACE = 9;
-  const int GPS_LAP_BEST = 10;
-  const int OPTIMAL_LAP = 11;
-  const int GPS_LAP_LIST = 12;
-  const int LOGGING_STOP = 13;
+  // The Temp1 page only exists when the SensorEgg POC is compiled in
+  // (BIRDSEYE_ENABLE_SENSOREGG, see project.h) — otherwise the running
+  // block closes up behind the tachometer rather than leaving a dead page
+  // in the rotation. Same reshuffle idea as ENDURANCE_MODE above.
+  #if BIRDSEYE_ENABLE_SENSOREGG
+    const int SENSOR_TEMP = 7;  // SensorEgg wireless EGT (Temp1)
+    const int GPS_LAP_TIME = 8;
+    const int GPS_LAP_PACE = 9;
+    const int GPS_LAP_BEST = 10;
+    const int OPTIMAL_LAP = 11;
+    const int GPS_LAP_LIST = 12;
+    const int LOGGING_STOP = 13;
+  #else
+    const int GPS_LAP_TIME = 7;
+    const int GPS_LAP_PACE = 8;
+    const int GPS_LAP_BEST = 9;
+    const int OPTIMAL_LAP = 10;
+    const int GPS_LAP_LIST = 11;
+    const int LOGGING_STOP = 12;
+  #endif
 #endif
 
 // end menu
@@ -704,10 +717,16 @@ void setup() {
     pinMode(PIN_VBAT, INPUT);
     pinMode(VBAT_ENABLE, OUTPUT);
     digitalWrite(VBAT_ENABLE, LOW);
-    // Enable fast charging (~100mA vs default ~50mA)
-    // PIN_CHARGING_CURRENT = P0.13 = HICHG pin on BQ25100 charge IC
-    pinMode(PIN_CHARGING_CURRENT, OUTPUT);
-    digitalWrite(PIN_CHARGING_CURRENT, HIGH);
+    #if BIRDSEYE_ENABLE_ONBOARD_CHARGING
+      // Enable fast charging (~100mA vs default ~50mA)
+      // PIN_CHARGING_CURRENT = P0.13 = HICHG pin on BQ25100 charge IC
+      pinMode(PIN_CHARGING_CURRENT, OUTPUT);
+      digitalWrite(PIN_CHARGING_CURRENT, HIGH);
+    #else
+      // Onboard charging disabled (default): leave HICHG alone entirely.
+      // The pin stays an input, the BQ25100 runs at its ~50 mA default, and
+      // an external charging circuit owns the battery. See project.h.
+    #endif
     lastBatteryCheck = millis();
     lastBatteryVoltage = getBatteryVoltage();
   #endif
@@ -780,7 +799,8 @@ void setup() {
 
   // SensorEgg wireless EGT: bring the BLE core up and start the passive
   // scanner (after CAMERA_SETUP so every GATT service is registered by
-  // bleCoreEnsureInit before anything advertises).
+  // bleCoreEnsureInit before anything advertises). A no-op — and BLE stays
+  // lazy — unless BIRDSEYE_ENABLE_SENSOREGG is set (beta channel only).
   SENSOREGG_SETUP();
 
   if (!sdSetupSuccess && sdCardUnformatted) {
@@ -796,12 +816,19 @@ void setup() {
     strncpy(internalNotification, "SD Init failed!\n\nlogging not possible!", sizeof(internalNotification) - 1);
     internalNotification[sizeof(internalNotification) - 1] = '\0';
     switchToDisplayPage(PAGE_INTERNAL_FAULT);
+#if BIRDSEYE_ENABLE_ONBOARD_CHARGING
   } else if (bootWakeCause == wake_cause::Cause::kUsbWake) {
     // Plugged in while off: VBUS woke the chip so software can hold the
     // fast-charge pin. Skip the GPS status page and drop straight into
     // the charging loop; a button press there resumes to the main menu
     // (in which case setup() continues below), unplugging powers back off.
+    //
+    // Only worth doing when we actually manage the charge current. With
+    // onboard charging disabled (default) a VBUS wake boots normally — the
+    // cable means "host connected", and the idle timeout still lands in
+    // enterShutdown(), which parks on VBUS anyway.
     enterShutdown();
+#endif
   } else {
     // A missing TRACKS folder is auto-created by buildTrackList(); a
     // false here means even that failed — Lap Anything will handle it.
@@ -1354,12 +1381,18 @@ void writeDovexHeader() {
 // Wake is a chip reset — setup() runs fresh and captureBootWakeCause()
 // reads why (tach pulse -> the GPS status page exits into race mode).
 //
-// The ONE soft exception is charging: while VBUS is present the device
-// must stay alive because the HICHG fast-charge pin is software-held, so
-// enterShutdown() parks in a live charging loop instead and only drops
-// to System OFF when the cable is pulled. VBUS itself is a System OFF
-// wake source (always armed on nRF52840), so plugging in a dark device
-// boots it straight back into that loop.
+// The ONE soft exception is VBUS: while a cable is present the device
+// stays alive and parks in the charging loop instead, only dropping to
+// System OFF once the cable is pulled. Two reasons, and only the first is
+// gated by BIRDSEYE_ENABLE_ONBOARD_CHARGING:
+//   1. With onboard charging enabled, the HICHG fast-charge pin is
+//      software-held, so powering down would drop the charge rate.
+//   2. Always: VBUS is an always-armed System OFF wake source on the
+//      nRF52840, so entering System OFF with the cable still in risks an
+//      immediate wake-reset loop. The park is a hardware constraint.
+// Plugging in a dark device therefore boots it straight back into that
+// loop (with charging disabled the boot is a normal one that idles its
+// way back here, rather than a direct shortcut).
 ///////////////////////////////////////////
 
 bool isUsbConnected() {
@@ -1448,9 +1481,11 @@ static void shutdownSystemOff() {
 // The charging loop — runs after full teardown whenever VBUS is present
 // at shutdown (or woke us). Shows the charging screen for 10 s, then
 // display off; ANY button press is a full wake back to the main menu
-// (the USB-on-menu trigger waits USB_MENU_CHARGE_IDLE_MS before pulling
-// the device back here, so wake doesn't bounce). Returns true to resume
-// to the menu, false when the cable was pulled (caller enters System OFF).
+// (with onboard charging enabled the USB-on-menu trigger waits
+// USB_MENU_CHARGE_IDLE_MS before pulling the device back here, so wake
+// doesn't bounce; with it disabled nothing pulls the menu down early at
+// all). Returns true to resume to the menu, false when the cable was
+// pulled (caller enters System OFF).
 static bool runChargingShutdownLoop() {
   debugln(F("Charging loop (VBUS present)"));
   DISPLAY_WAKE();
@@ -1552,8 +1587,11 @@ void enterShutdown() {
   }
   wdtPet();
 
-  // Charging exception: never System OFF while VBUS is present — the
-  // HICHG charge-rate pin needs software alive.
+  // VBUS exception: never System OFF while a cable is present. Powering
+  // down would drop the software-held HICHG charge rate (when onboard
+  // charging is enabled) and, either way, VBUS is an always-armed System
+  // OFF wake source — entering OFF with the cable in risks an immediate
+  // wake-reset loop.
   if (isUsbConnected()) {
     if (runChargingShutdownLoop()) {
       softResumeFromCharging();
@@ -1680,12 +1718,16 @@ void loop() {
     NVIC_SystemReset();
   }
 
-  // Main-menu idle tracking. Two consumers:
-  //  - USB present: enter the charging loop after USB_MENU_CHARGE_IDLE_MS
-  //    of no button activity. Not immediate — a charging-loop button wake
-  //    lands here, and an instant re-entry would bounce it right back.
-  //    The window is what lets replay/transfer be used while plugged in.
-  //  - No USB: full shutdown after SLEEP_IDLE_TIMEOUT_MS.
+  // Main-menu idle tracking. Consumers:
+  //  - USB present, onboard charging ENABLED: enter the charging loop after
+  //    USB_MENU_CHARGE_IDLE_MS of no button activity. Not immediate — a
+  //    charging-loop button wake lands here, and an instant re-entry would
+  //    bounce it right back. The window is what lets replay/transfer be
+  //    used while plugged in. Compiled out when charging is disabled: the
+  //    firmware isn't managing the charge current, so a plugged-in cable is
+  //    no reason to cut the menu short (the plain idle timeout still fires,
+  //    and enterShutdown() parks on VBUS as always).
+  //  - Always: full shutdown after SLEEP_IDLE_TIMEOUT_MS.
   if (currentPage == PAGE_MAIN_MENU) {
     if (!menuIdleTimerRunning) {
       menuIdleTimerRunning = true;
@@ -1705,8 +1747,12 @@ void loop() {
       menuIdleStartTime = lastBtn;
     }
     unsigned long idleFor = millis() - menuIdleStartTime;
+#if BIRDSEYE_ENABLE_ONBOARD_CHARGING
     if ((isUsbConnected() && idleFor >= USB_MENU_CHARGE_IDLE_MS) ||
         idleFor >= SLEEP_IDLE_TIMEOUT_MS) {
+#else
+    if (idleFor >= SLEEP_IDLE_TIMEOUT_MS) {
+#endif
       enterShutdown();
       return;
     }

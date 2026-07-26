@@ -9,7 +9,7 @@ name: beta
 # builds you flash from your phone via DovesDataViewer's beta channel while
 # wrenching at the track.
 #
-# Two things differ from release.yml:
+# Three things differ from release.yml:
 #   1. The image self-reports a beta version. The build injects
 #      -DFIRMWARE_VERSION_OVERRIDE=<base>-beta.<gitsha> so a flashed unit
 #      reports its exact commit over BLE (DIS) — you can read the version off
@@ -17,6 +17,12 @@ name: beta
 #   2. Retention is "latest only": the beta assets live at a single, flat
 #      `beta/` path with stable filenames, overwritten on every push. There is
 #      no per-build history (unlike prod's firmware/<version>/ folders).
+#   3. Beta is where the in-flight features live: the build injects
+#      -DBIRDSEYE_ENABLE_SENSOREGG=1 so the wireless-EGT POC (passive BLE
+#      scanner + Temp1 page + BLE core up at boot) is present here and absent
+#      from master/release, which default the flag to 0. See project.h for
+#      the full flag list — anything else defaulted off stays off here too
+#      (BIRDSEYE_ENABLE_ONBOARD_CHARGING in particular).
 #
 # NOTE: the build steps intentionally mirror release.yml's build job. If the
 # BSP version, library list, or asset layout changes there, mirror it here.
@@ -97,7 +103,7 @@ jobs:
         run: |
           arduino-cli compile \
             --fqbn "${{ matrix.board.fqbn }}" \
-            --build-property "compiler.cpp.extra_flags=-D${{ matrix.board.define }} -DFIRMWARE_VERSION_OVERRIDE=${{ steps.ver.outputs.betaver }} -DSERIAL_BUFFER_SIZE=256" \
+            --build-property "compiler.cpp.extra_flags=-D${{ matrix.board.define }} -DFIRMWARE_VERSION_OVERRIDE=${{ steps.ver.outputs.betaver }} -DSERIAL_BUFFER_SIZE=256 -DBIRDSEYE_ENABLE_SENSOREGG=1" \
             --output-dir dist \
             --warnings none \
             BirdsEye

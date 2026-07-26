@@ -5,6 +5,13 @@
 ///////////////////////////////////////////
 // SENSOREGG MODULE (wireless EGT pod — passive BLE observer)
 //
+// BUILD FLAG: the whole POC is gated on BIRDSEYE_ENABLE_SENSOREGG
+// (project.h) — 0 on master/release, 1 on the beta channel. When it is 0,
+// sensoregg.ino compiles to no-op lifecycle calls and NaN accessors (so
+// the DOVEX Temp1/Junction1 columns still log `nan`), the Temp1 race page
+// is dropped from the rotation, and BLE goes back to lazy init. This
+// header's contract below describes the enabled build.
+//
 // Receives the DovesSensorEgg's PW-ADV-1 advertising broadcasts (see
 // sensoregg_protocol.h for the byte layout) and exposes the latest EGT /
 // cold-junction reading to the logger and display. POC scope: one egg,

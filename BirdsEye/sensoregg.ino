@@ -16,9 +16,13 @@
 
 #include "sensoregg.h"
 
+#include <math.h>
 #include <string.h>
 
 #include "project.h"
+
+#if BIRDSEYE_ENABLE_SENSOREGG
+
 #include "bluetooth.h"  // bleCoreEnsureInit()
 #include "sensoregg_protocol.h"
 
@@ -211,3 +215,29 @@ bool sensoreggAppHung() {
 uint16_t sensoreggSequence() {
   return eggReading.sequence;
 }
+
+#else  // !BIRDSEYE_ENABLE_SENSOREGG
+
+///////////////////////////////////////////
+// POC COMPILED OUT (the master/release default — see project.h)
+//
+// No passive scanner, and nothing here calls bleCoreEnsureInit(), so BLE
+// returns to coming up lazily on the first camera/transfer use instead of
+// at boot. The accessors keep their contract and simply report "no egg
+// ever seen": the Temp1/Junction1 DOVEX columns still get written as
+// `nan`, so a log from a SensorEgg build and one from a stock build have
+// identical shape. The Temp1 race page is compiled out separately
+// (display_pages.ino) rather than left in the rotation showing '---'.
+///////////////////////////////////////////
+
+void SENSOREGG_SETUP() {}
+void SENSOREGG_LOOP() {}
+
+bool sensoreggLinkUp() { return false; }
+bool sensoreggAppHung() { return false; }
+float sensoreggEgtC() { return NAN; }
+float sensoreggJunctionC() { return NAN; }
+bool sensoreggTcFault() { return false; }
+uint16_t sensoreggSequence() { return 0; }
+
+#endif  // BIRDSEYE_ENABLE_SENSOREGG

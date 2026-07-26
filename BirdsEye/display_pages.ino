@@ -3,7 +3,7 @@
 // All displayPage_*() rendering functions for each UI screen
 ///////////////////////////////////////////
 
-#include "display_pages.h"
+#include "display_pages.h"  // also pulls in project.h's build feature flags
 #include "gps_status_page.h"
 #include "lap_format.h"
 #include "sat_bars.h"
@@ -320,6 +320,7 @@ void displayPage_camera_test() {
     display.println(kTestItems[i]);
   }
 
+#if BIRDSEYE_ENABLE_SENSOREGG
   // SensorEgg readout (bottom line): live Temp1 or NA when the egg is
   // silent (>1 s) / faulted. Makes this page the coexistence soak-test
   // harness: camera linked above + egg streaming here, and the page never
@@ -333,6 +334,7 @@ void displayPage_camera_test() {
     display.print(soakEgtF, 1);
     display.println(F("F"));
   }
+#endif
 
   safeDisplayUpdate();
 }
@@ -804,6 +806,7 @@ void displayPage_tachometer() {
   safeDisplayUpdate();
 }
 
+#if BIRDSEYE_ENABLE_SENSOREGG
 // SensorEgg wireless EGT page — mirrors the tachometer layout: big value,
 // small status subtext. NaN (stale link OR egg-reported invalid probe)
 // renders '---'; the reading is NEVER held across a dropout.
@@ -850,6 +853,7 @@ void displayPage_sensorTemp() {
 
   safeDisplayUpdate();
 }
+#endif  // BIRDSEYE_ENABLE_SENSOREGG
 
 void displayPage_optimal_lap() {
   resetDisplay();
