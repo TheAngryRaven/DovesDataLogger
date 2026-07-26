@@ -12,6 +12,57 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Fixed
+- **Sleep rebooted the device instead of powering it off.** Every shutdown
+  — the left+right long press, the menu idle timeout, the GPS status and
+  SD format pages' idle timeouts — tore everything down and then came
+  straight back up on the boot screen. Root cause: the System OFF wake
+  pins were armed with a hardcoded `SENSE_LOW`, but the shipped tachometer
+  board's `PULSE_RPM` output **rests low** and pulses high per spark (it
+  ends in an SN74LVC1G14 Schmitt inverter — see
+  `TACHOMETER/paid_schematic_1.PDF`; the falling-edge ISR counts the
+  trailing edge of each pulse). A pin whose sense condition is already met
+  holds the nRF52840's DETECT signal high, and entering System OFF with
+  DETECT high wakes the chip immediately — which is a reset. So the logger
+  could never sleep with a tach board plugged in, and the wake decoded as
+  a tach wake, dropping it back into race mode with logging. A bench unit
+  with an empty tach header rests high on the internal pull-up and slept
+  correctly, which is why this only showed up on a kart. Wake pins are now
+  armed from the level each pin actually rests at (tach: rests low → wake
+  on the rise; buttons: known active-low, and one stuck low is skipped
+  rather than allowed to block sleep), and every armed pin is re-read
+  after a settle delay so nothing that still asserts DETECT survives into
+  System OFF.
+- **A refused System OFF entry was a disguised watchdog reboot.** The
+  fallback after the entry call was a bare `while (true) __WFE()`, but the
+  watchdog is configured to keep running in sleep, so that path reset the
+  device ~4 s later and looked identical to the bug above. Entry is now
+  retried three times, and a device that genuinely cannot power down parks
+  in a dark, watchdog-fed loop until a button press or a cable takes it
+  back to the menu through a deliberate reboot.
+- **VBUS could be misread while BLE was up, parking a plugged-in device
+  into System OFF** — where VBUS, an always-armed wake source, resets it
+  straight back to boot. `isUsbConnected()` read the SoftDevice-restricted
+  `NRF_POWER->USBREGSTATUS` register directly; it now goes through
+  `sd_power_usbregstatus_get()` whenever the stack is enabled (which is
+  every boot on the beta channel, since the SensorEgg observer brings the
+  core up at startup). The charging-loop exit also re-checks the cable
+  instead of assuming it is still gone.
+
+### Added
+- **The GPS status boot page now shows why the device booted** (`W:COLD` /
+  `TACH` / `BTN` / `USB` / `WDT` / `SRQ` / `OFF?`, on the `Mode:` line).
+  That page is what you are looking at after an unwanted reboot, and the
+  label is the only thing that distinguishes a shutdown that woke itself
+  back out of System OFF from a watchdog reset or a deliberate reboot —
+  the three were indistinguishable while chasing the bug above.
+
+### Changed
+- **The SensorEgg scanner is stopped before System OFF** (`SENSOREGG_SLEEP()`,
+  no-op unless the POC is compiled in) so no BLE role is still running when
+  the chip powers down. It is the last teardown step, after the VBUS
+  branch, so a charging-loop resume keeps scanning.
+
 ## [3.0.1] - 2026-07-26
 
 ### Added

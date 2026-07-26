@@ -1396,7 +1396,22 @@ void writeDovexHeader() {
 ///////////////////////////////////////////
 
 bool isUsbConnected() {
-  return (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+  // USBREGSTATUS is a SoftDevice-restricted POWER register — read it through
+  // the SoC API whenever the stack is up (the S140 exposes
+  // sd_power_usbregstatus_get() precisely because direct access is not
+  // sanctioned), falling back to the register only when it isn't. BLE is no
+  // longer reliably down by shutdown time: the SensorEgg observer brings the
+  // core up at boot on beta builds and a paired camera does the same on any
+  // build. A false negative here is expensive — it parks a plugged-in device
+  // into System OFF, where VBUS (an always-armed wake source) resets it
+  // straight back to boot.
+  uint32_t status = 0;
+  uint8_t sdEnabled = 0;
+  (void)sd_softdevice_is_enabled(&sdEnabled);
+  if (!sdEnabled || sd_power_usbregstatus_get(&status) != NRF_SUCCESS) {
+    status = NRF_POWER->USBREGSTATUS;
+  }
+  return (status & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
 }
 
 // Raw multi-sampled poll until every button is released (or timeout).
@@ -1424,57 +1439,145 @@ static void shutdownIdleWait() {
   }
 }
 
-// Configure wake sources and enter System OFF. Does not return: wake is
-// a full reset (RESETREAS.OFF + the pin's LATCH bit record the cause),
-// and the WDT stops with every other clock — wdtSetup() re-arms on the
-// fresh boot (nRF52840 PS: System OFF halts all clocks/peripherals).
+#ifndef SIM
+// Multi-sampled resting level of a wake pin, by absolute P-number. Only
+// an unbroken run of HIGH samples counts as "rests high" — the same EMI
+// rejection readButtonMultiSample() uses. A line that is actually moving
+// (engine turning) therefore reads as low, and the post-arm DETECT audit
+// below is what stops it from stealing System OFF.
+static bool wakePinRestsHigh(uint32_t absPin) {
+  for (int i = 0; i < 4; i++) {
+    if (nrf_gpio_pin_read(absPin) == 0) return false;
+    delayMicroseconds(500);
+  }
+  return true;
+}
+
+static void applyWakeArm(uint32_t absPin, wake_cause::PinArm arm) {
+  switch (arm) {
+    case wake_cause::PinArm::kSenseLowPullUp:
+      nrf_gpio_cfg_sense_input(absPin, NRF_GPIO_PIN_PULLUP,
+                               NRF_GPIO_PIN_SENSE_LOW);
+      break;
+    case wake_cause::PinArm::kSenseHighPullDown:
+      nrf_gpio_cfg_sense_input(absPin, NRF_GPIO_PIN_PULLDOWN,
+                               NRF_GPIO_PIN_SENSE_HIGH);
+      break;
+    case wake_cause::PinArm::kSkip:
+      nrf_gpio_cfg_sense_set(absPin, NRF_GPIO_PIN_NOSENSE);
+      break;
+  }
+}
+
+// Arm the System OFF wake pins, and guarantee one thing about the result:
+// nothing left armed is currently asserting DETECT. Pull + SENSE config is
+// retained through System OFF; P-numbers come from the board variant's pin
+// map so nothing is hardcoded. (VBUS needs no arming on the nRF52840 — it
+// is always a wake source, which is why enterShutdown() parks on a cable
+// instead of powering down.)
+static void armSystemOffWakePins() {
+  const uint32_t pins[4] = {
+      g_ADigitalPinMap[tachInputPin], g_ADigitalPinMap[btn1->pin],
+      g_ADigitalPinMap[btn2->pin],    g_ADigitalPinMap[btn3->pin]};
+  wake_cause::PinArm arms[4];
+
+  // The tach polarity follows the board that is plugged in (see
+  // wake_cause.h); the buttons are known active-low.
+  arms[0] = wake_cause::armTach(wakePinRestsHigh(pins[0]));
+  for (int i = 1; i < 4; i++) {
+    arms[i] = wake_cause::armButton(wakePinRestsHigh(pins[i]));
+  }
+  for (int i = 0; i < 4; i++) applyWakeArm(pins[i], arms[i]);
+
+  // Let the RC filters (10K + 100nF on the buttons, 1K + 100nF on the
+  // tach) follow the pull we just applied before the audit reads them.
+  delay(10);
+
+  // DETECT audit. Anything still asserting gets disarmed: System OFF with
+  // DETECT high is an immediate wake-reset — an endless reboot loop, the
+  // exact symptom this path exists to avoid — whereas a disarmed pin only
+  // costs that one wake source for this one sleep. VBUS and the reset pin
+  // still bring the device back.
+  for (int i = 0; i < 4; i++) {
+    if (arms[i] == wake_cause::PinArm::kSkip) continue;
+    if (!wake_cause::armHoldsDetect(arms[i], nrf_gpio_pin_read(pins[i]) != 0)) {
+      continue;
+    }
+    applyWakeArm(pins[i], wake_cause::PinArm::kSkip);
+    debug(F("Shutdown: wake pin still asserting DETECT, disarmed: "));
+    debugln(pins[i]);
+  }
+}
+#endif  // !SIM
+
+// Configure wake sources and enter System OFF. Does not return in the
+// normal case: wake is a full reset (RESETREAS.OFF + the pin's LATCH bit
+// record the cause), and the WDT stops with every other clock —
+// wdtSetup() re-arms on the fresh boot (nRF52840 PS: System OFF halts all
+// clocks/peripherals).
 static void shutdownSystemOff() {
   #ifdef SIM
   // Simulator has no System OFF emulation worth trusting — plain reset.
   NVIC_SystemReset();
   #else
+  // Give a held entry combo a chance to release so those buttons survive
+  // the audit as wake sources (a still-held one is only skipped, never
+  // allowed to block the shutdown).
   waitAllButtonsReleased(3000);
   delay(50);  // contact settle
-  wdtPet();
 
-  // Wake sources: SENSE-LOW with pull-up on the tach (idle-high, pulse =
-  // falling) and all three buttons (active-low). Pull + SENSE config is
-  // retained in System OFF. P-numbers via the board variant's pin map.
-  nrf_gpio_cfg_sense_input(g_ADigitalPinMap[tachInputPin],
-                           NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
-  nrf_gpio_cfg_sense_input(g_ADigitalPinMap[btn1->pin],
-                           NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
-  nrf_gpio_cfg_sense_input(g_ADigitalPinMap[btn2->pin],
-                           NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
-  nrf_gpio_cfg_sense_input(g_ADigitalPinMap[btn3->pin],
-                           NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
-  // VBUS wake needs no configuration on the nRF52840 — always armed.
+  // Arm, clear the pending state, enter. Neither entry call returns when
+  // it takes effect, so reaching the bottom of an iteration means entry
+  // was refused — re-arm from scratch (a line may have moved) and retry.
+  for (int attempt = 0; attempt < 3; attempt++) {
+    wdtPet();
+    armSystemOffWakePins();
 
-  // A set LATCH bit is a pending DETECT = instant re-wake; clear last,
-  // right before entering OFF. (Boot already cleared RESETREAS, but the
-  // SoftDevice path below clears again to be unambiguous.)
-  NRF_P0->LATCH = 0xFFFFFFFF;
-  NRF_P1->LATCH = 0xFFFFFFFF;
+    // LATCH is sticky and survives System OFF, so clear it last: the boot
+    // decode must see only the pin that actually woke us. (DETECT itself
+    // is level-driven in the default DETECTMODE — the audit above, not
+    // this clear, is what guarantees it is low.) Boot already cleared
+    // RESETREAS; the SoftDevice path clears again to be unambiguous.
+    // GPREGRET is deliberately untouched: register 0 belongs to the
+    // OTA/bootloader handoff.
+    NRF_P0->LATCH = 0xFFFFFFFF;
+    NRF_P1->LATCH = 0xFFFFFFFF;
 
-  // Cortex-M4F: a pending FPU exception can inhibit low-power entry —
-  // clear lazily-stacked FP state before OFF (standard Nordic guidance).
-  __set_FPSCR(__get_FPSCR() & ~0x9F);
-  NVIC_ClearPendingIRQ(FPU_IRQn);
+    // Cortex-M4F: a pending FPU exception can inhibit low-power entry —
+    // clear lazily-stacked FP state before OFF (standard Nordic guidance).
+    __set_FPSCR(__get_FPSCR() & ~0x9F);
+    NVIC_ClearPendingIRQ(FPU_IRQn);
 
-  // NRF_POWER is a restricted peripheral while the SoftDevice is enabled
-  // (BLE is lazy — it may or may not be up). GPREGRET is deliberately
-  // untouched: register 0 belongs to the OTA/bootloader handoff.
-  uint8_t sdEnabled = 0;
-  (void)sd_softdevice_is_enabled(&sdEnabled);
-  if (sdEnabled) {
-    sd_power_reset_reason_clr(0xFFFFFFFF);
-    (void)sd_power_system_off();
-  } else {
-    NRF_POWER->RESETREAS = 0xFFFFFFFF;
-    NRF_POWER->SYSTEMOFF = 1;
+    // NRF_POWER is a restricted peripheral while the SoftDevice is enabled
+    // (BLE may or may not be up — lazy on master, at boot on beta).
+    uint8_t sdEnabled = 0;
+    (void)sd_softdevice_is_enabled(&sdEnabled);
+    if (sdEnabled) {
+      sd_power_reset_reason_clr(0xFFFFFFFF);
+      (void)sd_power_system_off();
+    } else {
+      NRF_POWER->RESETREAS = 0xFFFFFFFF;
+      NRF_POWER->SYSTEMOFF = 1;
+      __DSB();  // the write needs a moment to land before we call it a miss
+      delayMicroseconds(500);
+    }
+
+    wdtPet();
+    debugln(F("Shutdown: System OFF refused, retrying"));
   }
-  // Only reachable in emulated System OFF (debugger attached).
-  while (true) { __WFE(); }
+
+  // Three refusals: emulated System OFF (debugger attached) or a wake
+  // condition we could not clear. Do NOT fall into a bare __WFE() spin —
+  // the ~4 s watchdog is still running (CONFIG.SLEEP = Run) and would
+  // reset the device, which is indistinguishable from the
+  // reboots-instead-of-sleeping bug. Park dark and fed instead, and let a
+  // button (or a cable) take the device back through a deliberate reboot.
+  debugln(F("Shutdown: System OFF unavailable, parking"));
+  while (true) {
+    wdtPet();
+    if (anyButtonPressed() || isUsbConnected()) NVIC_SystemReset();
+    delay(50);
+  }
   #endif
 }
 
@@ -1592,13 +1695,22 @@ void enterShutdown() {
   // charging is enabled) and, either way, VBUS is an always-armed System
   // OFF wake source — entering OFF with the cable in risks an immediate
   // wake-reset loop.
-  if (isUsbConnected()) {
+  // Re-checked in a loop rather than once: the charging loop only returns
+  // false the instant it sees the cable gone, and a cable that comes back
+  // before we commit would otherwise put us into System OFF with VBUS
+  // present — which wakes (resets) the chip immediately.
+  while (isUsbConnected()) {
     if (runChargingShutdownLoop()) {
       softResumeFromCharging();
       return;
     }
     // Cable pulled during the charging loop — power down for real.
   }
+
+  // Last teardown step, and deliberately after the charging branch (a
+  // charging-loop resume keeps scanning): leave no BLE role running into
+  // System OFF. No-op unless the SensorEgg POC is compiled in.
+  SENSOREGG_SLEEP();
 
   shutdownSystemOff();  // does not return
 }

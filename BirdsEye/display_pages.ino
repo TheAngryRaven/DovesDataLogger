@@ -79,8 +79,13 @@ void displayPage_gps_status() {
   }
 
   // Constellation only — the configured/live update rates confused more
-  // than they informed on a boot screen.
-  display.println(F("Mode:GPS-only"));
+  // than they informed on a boot screen. The wake cause rides along: this
+  // page is what you are staring at after an unwanted reboot, and it is
+  // the only place that says whether the device woke itself out of System
+  // OFF (TACH/BTN/OFF?), was reset by the watchdog (WDT), or rebooted on
+  // purpose (SRQ). 20 chars at size 1 — one under the 21-char line.
+  display.print(F("Mode:GPS-only W:"));
+  display.println(wake_cause::shortName(bootWakeCause));
 
   if (millis() - lastBatteryCheck > batteryUpdateInterval) {
     lastBatteryCheck = millis();

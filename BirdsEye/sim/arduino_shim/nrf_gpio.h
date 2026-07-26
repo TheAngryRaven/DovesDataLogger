@@ -22,3 +22,6 @@ typedef enum {
 
 static inline void nrf_gpio_cfg_sense_input(uint32_t, nrf_gpio_pin_pull_t,
                                             nrf_gpio_pin_sense_t) {}
+static inline void nrf_gpio_cfg_sense_set(uint32_t, nrf_gpio_pin_sense_t) {}
+// Idle-high is the sim's stand-in for an unconnected wake pin.
+static inline uint32_t nrf_gpio_pin_read(uint32_t) { return 1; }

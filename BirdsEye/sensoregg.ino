@@ -142,6 +142,13 @@ void SENSOREGG_SETUP() {
   }
 }
 
+void SENSOREGG_SLEEP() {
+  if (!eggScannerRunning) return;
+  Bluefruit.Scanner.stop();
+  eggScannerRunning = false;
+  debugln(F("SensorEgg: scanner stopped for shutdown"));
+}
+
 void SENSOREGG_LOOP() {
   // Drain everything queued (usually 0 or 1 slots); the newest parse wins.
   while (eggReady[eggReadIdx]) {
@@ -232,6 +239,7 @@ uint16_t sensoreggSequence() {
 
 void SENSOREGG_SETUP() {}
 void SENSOREGG_LOOP() {}
+void SENSOREGG_SLEEP() {}
 
 bool sensoreggLinkUp() { return false; }
 bool sensoreggAppHung() { return false; }

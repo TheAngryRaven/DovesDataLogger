@@ -195,6 +195,22 @@ software-held when onboard charging is compiled in, and, regardless of
 that, VBUS is an always-armed System OFF wake source, so powering down
 with the cable in risks an immediate wake-reset loop.
 
+**Arming the wake pins is level-driven, not assumed.** DETECT is the OR of
+every SENSE-enabled pin's sense condition, and the nRF52840 turns "DETECT
+already asserted when System OFF is entered" into an immediate wake — a
+reset. So the shutdown path samples each wake pin, arms SENSE for a change
+*away* from the level it rests at, waits for the RC filters to follow the
+new pull, then re-reads and disarms anything still asserting. Losing one
+wake source for one sleep is strictly better than a reboot loop. This is
+not theoretical: the shipped tach board's `PULSE_RPM` output rests **low**
+(it ends in a Schmitt inverter — see `TACHOMETER/paid_schematic_1.PDF`) and
+pulses high per spark, so the original fixed `SENSE_LOW` arming asserted
+DETECT permanently and made every shutdown reboot the logger. A bench unit
+with an empty tach header rests high on the internal pull-up and slept
+fine, which is why it survived to the field. For the same reason, failing
+to enter System OFF must never fall through to a bare `__WFE()` spin: the
+~4 s watchdog runs in sleep, so that path is a disguised reboot too.
+
 Onboard charging itself is a build flag,
 `BIRDSEYE_ENABLE_ONBOARD_CHARGING`, **off in every shipped build** since
 3.0.1: the hardware now carries an external charging circuit (the XIAO's

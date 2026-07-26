@@ -464,6 +464,7 @@ struct SimResetRequest {};
 extern const uint32_t g_ADigitalPinMap[SIM_NUM_PINS];
 
 // -------------------------------------------------------------- SoftDevice
+#define NRF_SUCCESS 0
 static inline uint32_t sd_softdevice_is_enabled(uint8_t* enabled) {
   *enabled = 0;
   return 0;
@@ -471,6 +472,12 @@ static inline uint32_t sd_softdevice_is_enabled(uint8_t* enabled) {
 static inline uint32_t sd_app_evt_wait(void) { return 0; }
 static inline uint32_t sd_power_system_off(void) { return 0; }
 static inline uint32_t sd_power_reset_reason_clr(uint32_t) { return 0; }
+// Restricted-register accessor used by isUsbConnected(). The sim never
+// reports the SoftDevice as enabled, so this only has to compile.
+static inline uint32_t sd_power_usbregstatus_get(uint32_t* status) {
+  *status = 0;
+  return 0;
+}
 
 // ------------------------------------------------------- FreeRTOS critical
 // Single-threaded sim: the Bluefruit callback task doesn't exist, so the

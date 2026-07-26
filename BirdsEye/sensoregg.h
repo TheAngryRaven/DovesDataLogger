@@ -67,6 +67,14 @@ void SENSOREGG_SETUP();
 // parking branches — a stale reading correctly goes NaN there.
 void SENSOREGG_LOOP();
 
+// Stop the passive scanner. Called from enterShutdown() immediately before
+// System OFF — after the VBUS/charging branch, so a charging-loop resume
+// keeps scanning — so that no BLE role is still running when the chip is
+// powered down (Nordic's guidance is to quiesce radio activity first).
+// There is no resume counterpart: System OFF wake is a reset, and
+// SENSOREGG_SETUP() runs again on the fresh boot.
+void SENSOREGG_SLEEP();
+
 // ---- data surface (display_pages.ino / gps_functions.ino) ----
 
 // True while a reading is fresh (received < 1 s ago).

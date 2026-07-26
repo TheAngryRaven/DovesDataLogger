@@ -20,4 +20,34 @@ Cause decode(const Regs& regs, const PinMasks& pins) {
   return Cause::kColdBoot;  // reset pin or power-on (RESETREAS empty)
 }
 
+const char* shortName(Cause c) {
+  switch (c) {
+    case Cause::kColdBoot:       return "COLD";
+    case Cause::kTachWake:       return "TACH";
+    case Cause::kButtonWake:     return "BTN";
+    case Cause::kUsbWake:        return "USB";
+    case Cause::kWatchdog:       return "WDT";
+    case Cause::kSoftReset:      return "SRQ";
+    case Cause::kOffWakeUnknown: return "OFF?";
+  }
+  return "?";
+}
+
+PinArm armTach(bool restsHigh) {
+  return restsHigh ? PinArm::kSenseLowPullUp : PinArm::kSenseHighPullDown;
+}
+
+PinArm armButton(bool restsHigh) {
+  return restsHigh ? PinArm::kSenseLowPullUp : PinArm::kSkip;
+}
+
+bool armHoldsDetect(PinArm arm, bool pinIsHigh) {
+  switch (arm) {
+    case PinArm::kSenseLowPullUp:    return !pinIsHigh;
+    case PinArm::kSenseHighPullDown: return pinIsHigh;
+    case PinArm::kSkip:              break;
+  }
+  return false;
+}
+
 }  // namespace wake_cause

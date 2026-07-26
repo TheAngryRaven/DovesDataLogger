@@ -90,6 +90,7 @@ bool cameraTestPowerOff() { return false; }
 
 void SENSOREGG_SETUP() {}
 void SENSOREGG_LOOP() {}
+void SENSOREGG_SLEEP() {}
 
 bool sensoreggLinkUp() { return false; }
 bool sensoreggAppHung() { return false; }

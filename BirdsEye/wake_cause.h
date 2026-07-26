@@ -63,4 +63,56 @@ struct PinMasks {
 // VBUS is next, then watchdog, then soft reset, then cold boot.
 Cause decode(const Regs& regs, const PinMasks& pins);
 
+// Short (<= 4 char) label for the boot screen. "Why did I just boot?" is
+// otherwise invisible, and the answer separates the failure modes that
+// all look identical from the outside — a shutdown that woke itself back
+// up (kTachWake / kButtonWake / kOffWakeUnknown), a watchdog reset
+// (kWatchdog), and a deliberate reboot (kSoftReset).
+const char* shortName(Cause c);
+
+///////////////////////////////////////////
+// SYSTEM OFF WAKE-PIN ARMING (the mirror of decode(), above)
+//
+// DETECT is the OR of every SENSE-enabled pin's sense condition, and the
+// nRF52840 turns "DETECT already high when System OFF is entered" into an
+// immediate wake — which is a chip reset. So arming a wake pin has to
+// follow the level the pin actually rests at; it can never assume a
+// polarity from how the pin is wired.
+//
+// This is what broke sleep in the field. The shipped tachometer board
+// (TACHOMETER/paid_schematic_1.PDF) ends in an SN74LVC1G14 Schmitt
+// INVERTER whose input is held high by a 10K pull-up, so its PULSE_RPM
+// output rests LOW and pulses HIGH on each spark — the firmware's
+// falling-edge ISR counts the trailing edge. Arming that pin SENSE_LOW
+// (right for an open-collector pickup, wrong for this one) left DETECT
+// permanently asserted, so every shutdown became an instant wake-reset:
+// the logger "rebooted itself" instead of sleeping, every time, on any
+// unit with the tach board plugged in. A bench unit with nothing on the
+// tach header rests high on the internal pull-up and slept fine, which
+// is why it never showed up off-kart.
+///////////////////////////////////////////
+
+enum class PinArm : uint8_t {
+  kSkip,               // leave SENSE off — this pin is not a wake source
+  kSenseLowPullUp,     // rests high -> wake on the fall
+  kSenseHighPullDown,  // rests low  -> wake on the rise
+};
+
+// Tachometer: the polarity belongs to whichever pickup board is wired up,
+// so wake on a change AWAY from the observed resting level. Both families
+// work — open-collector/optocoupler (rests high) and the push-pull
+// Schmitt output (rests low).
+PinArm armTach(bool restsHigh);
+
+// Buttons: always active-low (INPUT_PULLUP + switch to ground), so a pin
+// resting low is a stuck or still-held button, never inverted wiring.
+// Arming it would hold DETECT high and cost us System OFF altogether;
+// skipping it costs only that one button as a wake source for this sleep.
+PinArm armButton(bool restsHigh);
+
+// Would this arm assert DETECT with the pin at the given level? Callers
+// re-read every pin after arming — RC filters need time to follow a pull
+// change, and a line can move — and disarm whatever answers true.
+bool armHoldsDetect(PinArm arm, bool pinIsHigh);
+
 }  // namespace wake_cause

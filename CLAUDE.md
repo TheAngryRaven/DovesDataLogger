@@ -119,7 +119,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `camera_fsm.{h,cpp}` | Insta360 auto-record lifecycle FSM (8 states, all debounce/retry/timeout timing + tunables); board-portable core shared with the nRF54 "Falcon" target |
 | `insta360_protocol.{h,cpp}` | Insta360 X4 BLE frame builders/parsers (wake advert, remote scan response, ce82 buttons, ce82 GPS/RMC frame, ce81 serial parsing, ce81 `0x10` record-timer state parse) with golden-byte tests |
 | `sensoregg_protocol.{h,cpp}` | SensorEgg `PW-ADV-1` advertising payload parser (magic filter, int16 deci-°C decode with `0x8000`→NaN sentinel, flags, sequence) + wrap-safe 1 s staleness rule + passive-scan tuning constants |
-| `wake_cause.{h,cpp}` | Boot wake-cause decode: RESETREAS + GPIO LATCH register snapshots → tach / button / USB / watchdog / soft-reset / cold boot (System OFF shutdown, subsystem 10) |
+| `wake_cause.{h,cpp}` | Boot wake-cause decode: RESETREAS + GPIO LATCH register snapshots → tach / button / USB / watchdog / soft-reset / cold boot; plus System OFF wake-pin **arming** (`armTach`/`armButton`/`armHoldsDetect` — sense polarity from the pin's resting level so DETECT is never pre-asserted) (subsystem 10) |
 | `gps_status_page.{h,cpp}` | GPS status boot page state machine: hold, 3 s auto-close after fix+timeValid, button skip, exit destination (menu vs race), idle → shutdown |
 | `sd_format_page.{h,cpp}` | SD format-confirm boot page state machine: Select held 3 s continuously → format (release restarts the full window; other buttons never confirm), 5 min idle → shutdown |
 | `sat_bars.{h,cpp}` | Status-page satellite signal bars: NAV-SAT CNO selection (used-in-nav first, strongest first) + bar x/w/h layout math for the 128×~30 px bottom half |
@@ -400,7 +400,10 @@ loop()  ~250 Hz
 - Pages are integer constants; key pages:
   - Boot/menu: `PAGE_BOOT` (999), `PAGE_GPS_STATUS` (900, satellite status
     page every boot lands on — driven by `gpsStatusPageLoop()`, buttons
-    deliberately no-op'd in `displayLoop()`), `PAGE_MAIN_MENU` (-1).
+    deliberately no-op'd in `displayLoop()`; the `Mode:` line carries a
+    `W:` wake-cause label via `wake_cause::shortName(bootWakeCause)`, the
+    only on-device answer to "why did it just reboot?"),
+    `PAGE_MAIN_MENU` (-1).
   - Racing: `GPS_DEBUG` (3, GPS pipeline counters + lap debug — first in
     the rotation) through `LOGGING_STOP`; `SENSOR_TEMP` (7, SensorEgg
     Temp1) sits after `TACHOMETER` (6) — non-endurance only, and only
@@ -593,18 +596,38 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   power-off hold is the longest step under the armed ~4 s WDT): end race
   session → `CAMERA_SLEEP()` → `BLE_STOP()` if active → `DISPLAY_SLEEP()`
   → `GPS_SLEEP()` (u-blox software backup, µA, config retained while
-  powered; TIMER3 stopped) → IMU power rail off.
-- **System OFF entry** (`shutdownSystemOff()`, no return): wait for the
-  entry combo's buttons to release (a held button = SENSE satisfied =
-  instant wake-reset), configure `nrf_gpio_cfg_sense_input(pull-up,
-  SENSE-LOW)` on the tach pin + all 3 buttons (P-numbers via
-  `g_ADigitalPinMap`, never hardcoded), clear the GPIO LATCH registers
-  (a set latch = pending DETECT = instant re-wake), clear pending FPU
-  exceptions, then `sd_power_system_off()` when the SoftDevice is enabled
-  (BLE is lazy — check `sd_softdevice_is_enabled()`) else raw
-  `NRF_POWER->SYSTEMOFF`. **GPREGRET is untouched** — register 0 belongs
-  to the OTA/bootloader handoff (subsystem 11). The WDT halts in System
-  OFF (all clocks stop); `wdtSetup()` re-arms on the fresh boot.
+  powered; TIMER3 stopped) → IMU power rail off → [VBUS charging branch]
+  → `SENSOREGG_SLEEP()` (scanner stopped last, *after* the charging
+  branch so a charging resume keeps scanning — no BLE role may still be
+  running into System OFF).
+- **System OFF entry** (`shutdownSystemOff()`, no return in the normal
+  case): wait for the entry combo's buttons to release, then per attempt
+  `armSystemOffWakePins()` → clear GPIO LATCH → clear pending FPU
+  exceptions → `sd_power_system_off()` when the SoftDevice is enabled
+  (check `sd_softdevice_is_enabled()` — lazy on master, up at boot on
+  beta) else raw `NRF_POWER->SYSTEMOFF`. **GPREGRET is untouched** —
+  register 0 belongs to the OTA/bootloader handoff (subsystem 11). The
+  WDT halts in System OFF (all clocks stop); `wdtSetup()` re-arms on the
+  fresh boot.
+- **Wake-pin arming is level-driven** (`armSystemOffWakePins()` + the
+  host-tested `wake_cause::armTach`/`armButton`/`armHoldsDetect`).
+  DETECT is the OR of every SENSE-enabled pin's condition, and entering
+  System OFF with DETECT already asserted is an immediate wake — i.e. a
+  **reset**. So each pin (P-numbers via `g_ADigitalPinMap`, never
+  hardcoded) is multi-sampled and armed for a change *away* from its
+  resting level: tach rests high → `PULLUP`/`SENSE_LOW`, rests low →
+  `PULLDOWN`/`SENSE_HIGH` (**the shipped tach board rests LOW** — it ends
+  in an SN74LVC1G14 Schmitt inverter, so a fixed `SENSE_LOW` made every
+  shutdown an instant wake-reset); buttons are known active-low, so one
+  reading low is stuck/held and is **skipped** rather than allowed to
+  block System OFF. After a 10 ms settle for the RC filters, every armed
+  pin is re-read and anything still asserting is disarmed. Never
+  hardcode a sense polarity here.
+- **A refused System OFF must not become a silent reboot.** Entry is
+  retried 3×; after that the device parks in a WDT-fed dark loop (button
+  or cable → deliberate `NVIC_SystemReset()`). The old bare
+  `while (true) __WFE()` was itself a reboot — the WDT is configured
+  `CONFIG.SLEEP = Run` and bites in ~4 s.
 - **Wake sources**: tach pulse (D0 falling, engine start), any button,
   or VBUS (USB plug-in, always armed on nRF52840).
 - **Wake-cause decode** (`captureBootWakeCause()`, FIRST thing in
