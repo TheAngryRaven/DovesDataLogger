@@ -5,6 +5,11 @@
 
 #include "display_ui.h"
 
+// Explicit, though Arduino's .ino concatenation already pulls it in via
+// BirdsEye.ino: the build feature flags below must never silently evaluate
+// as undefined (0) because an include order changed.
+#include "project.h"
+
 ///////////////////////////////////////////
 // I2C BUS RECOVERY
 // EMI from ignition can glitch the I2C bus, leaving a slave holding SDA low.
@@ -576,7 +581,7 @@ void displayLoop() {
       displayPage_gps_speed();
     } else if (currentPage == TACHOMETER) {
       displayPage_tachometer();
-#ifndef ENDURANCE_MODE
+#if !defined(ENDURANCE_MODE) && BIRDSEYE_ENABLE_SENSOREGG
     } else if (currentPage == SENSOR_TEMP) {
       displayPage_sensorTemp();
 #endif

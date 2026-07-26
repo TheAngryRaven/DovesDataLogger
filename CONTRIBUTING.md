@@ -62,6 +62,18 @@ the flag automatically.
   defines — a second `--build-property` for the same key replaces the
   first).
 
+### Feature flags
+
+Optional, and all default to **off** (`0`) in `project.h`. Pass them the
+same way as `SERIAL_BUFFER_SIZE` above — merged into the one
+`compiler.cpp.extra_flags` property. Test them with `#if`, never `#ifdef`,
+so an explicit `-DFLAG=0` still turns the feature off.
+
+| Flag | Default | Enabled by | Effect when `1` |
+|---|---|---|---|
+| `BIRDSEYE_ENABLE_ONBOARD_CHARGING` | `0` | nothing — off in every channel | Holds the BQ25100 HICHG pin high for ~100 mA fast charge and runs the USB charging UX (VBUS wake shortcuts to the charge screen; the main menu drops into the charging loop after `USB_MENU_CHARGE_IDLE_MS`). Off, the firmware leaves HICHG alone and an external charging circuit owns the battery. The VBUS park at shutdown happens either way — see ARCHITECTURE.md. |
+| `BIRDSEYE_ENABLE_SENSOREGG` | `0` | `beta.yml`, and `compile-sketch.yml` for PRs targeting `BETA` | Compiles in the wireless-EGT POC: passive BLE scanner, Temp1 race page, and BLE core up at boot. Off, the accessors return NaN, so `Temp1`/`Junction1` still log as `nan` and the log format is unchanged. |
+
 ### arduino-cli
 The exact invocation CI uses is in
 [`.github/workflows/compile-sketch.yml`](.github/workflows/compile-sketch.yml)

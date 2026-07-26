@@ -102,7 +102,11 @@ to the matching `*_LOOP()`.
   sequence counter) and feeds the `Temp1`/`Junction1` DOVEX columns and
   the Temp1 race page. Observer + peripheral coexist natively on S140;
   passive scanning never transmits, so the camera link is untouched.
-  Readings older than 1 s go NaN — never held across a dropout.
+  Readings older than 1 s go NaN — never held across a dropout. Gated on
+  the `BIRDSEYE_ENABLE_SENSOREGG` build flag: on in the beta channel, off
+  in master/release, where the scanner and Temp1 page are compiled out,
+  BLE returns to lazy init, and the DOVEX `Temp1`/`Junction1` columns are
+  written as `nan` so the log format stays identical across channels.
 - **Replay** (`replay`) — instant DOVEX header replay.
 - **Settings** (`settings`) — JSON key/value store on the SD card.
 - **CourseManager** (external library) — owns course detection, sector
@@ -184,9 +188,22 @@ booted (the host-tested `wake_cause` unit). An engine-start (tach) wake
 routes the GPS status page's exit straight into race mode with logging —
 the old software sleep loop's RPM wake, rebuilt on hardware. GPREGRET is
 never touched; register 0 belongs to the OTA/bootloader handoff. The one
-soft exception is charging: the fast-charge (HICHG) pin is software-held,
-so while VBUS is present the device parks in a live charging loop instead
-of System OFF, wakes fully on any button, and powers off when unplugged.
+soft exception is VBUS: while a cable is present the device parks in a
+live charging loop instead of System OFF, wakes fully on any button, and
+powers off when unplugged. Two reasons — the fast-charge (HICHG) pin is
+software-held when onboard charging is compiled in, and, regardless of
+that, VBUS is an always-armed System OFF wake source, so powering down
+with the cable in risks an immediate wake-reset loop.
+
+Onboard charging itself is a build flag,
+`BIRDSEYE_ENABLE_ONBOARD_CHARGING`, **off in every shipped build** since
+3.0.1: the hardware now carries an external charging circuit (the XIAO's
+BQ25100 tops out around 100 mA even with HICHG held). With the flag off
+the firmware never drives HICHG, and USB is treated as a host connection
+rather than a charge session — a VBUS wake boots normally instead of
+shortcutting to the charge screen, and the main menu is no longer pulled
+down after `USB_MENU_CHARGE_IDLE_MS` just because a cable is plugged in.
+Setting the flag to 1 restores the pre-3.0.1 behavior wholesale.
 
 ### GPS boot recovery
 The SAM-M10Q keeps its config in volatile RAM (backed by V_BCKP), and

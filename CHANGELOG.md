@@ -12,6 +12,45 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [3.0.1] - 2026-07-26
+
+### Added
+- **Build flag `BIRDSEYE_ENABLE_ONBOARD_CHARGING` (`project.h`), default
+  off in every channel.** The hardware now carries an external charging
+  circuit — the XIAO's onboard BQ25100 tops out around 100 mA even with
+  the HICHG fast-charge pin held, which is too slow to be useful. With the
+  flag off the firmware never drives HICHG (the charge IC stays at its
+  ~50 mA default and the external circuit owns the battery), and the USB
+  charging UX built around that hold is compiled out: a VBUS wake boots
+  normally instead of shortcutting to the charge screen, and the main menu
+  is no longer pulled into the charging loop after 60 s of inactivity just
+  because a cable is plugged in. Setting the flag to `1` restores the
+  pre-3.0.1 behavior exactly.
+- **Build flag `BIRDSEYE_ENABLE_SENSOREGG` (`project.h`), default off on
+  master/release and on in the beta channel.** The wireless-EGT pod is
+  still a proof of concept, so it now ships only where POCs belong. With
+  the flag off, the passive BLE scanner and the Temp1 race page are
+  compiled out and BLE returns to coming up lazily on first
+  camera/transfer use instead of at boot (recovering the idle power the
+  always-on core costs). `beta.yml` passes
+  `-DBIRDSEYE_ENABLE_SENSOREGG=1`, and `compile-sketch.yml` does the same
+  for pull requests targeting `BETA`, so the flag-on build is
+  compile-checked on the PR rather than first failing at publish time.
+
+### Changed
+- **USB behavior with onboard charging disabled (i.e. by default).** A
+  cable is now treated as a host/data connection rather than a charge
+  session: plugging into a powered-off device boots it normally instead of
+  landing straight on the charge screen, and the main menu keeps its full
+  5-minute idle window while plugged in. Shutdown still parks in the
+  charging loop while VBUS is present regardless of the flag — VBUS is an
+  always-armed System OFF wake source on the nRF52840, so powering down
+  with the cable in risks an immediate wake-reset loop. That park is a
+  hardware constraint, not a charging feature.
+- **DOVEX `Temp1` / `Junction1` are written on every build.** With the
+  SensorEgg POC compiled out they log the literal `nan`, so logs from the
+  master and beta channels have identical column layout.
+
 ### Added
 - **Simulator oracle diagnostic replay modes.** `birdseye_sim_oracle
   --dovex-noheader <file>` replays a header-less DOVEX log (crashed /
@@ -869,7 +908,8 @@ Initial tagged release. Core capabilities:
 - 8+ OLED display pages, Bluetooth LE file download / settings / track
   sync, and a low-power sleep mode.
 
-[Unreleased]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v3.0.0...HEAD
+[Unreleased]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v3.0.1...HEAD
+[3.0.1]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v2.2.3...v3.0.0
 [2.2.3]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v2.2.2...v2.2.3
 [2.2.2]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v2.2.1...v2.2.2

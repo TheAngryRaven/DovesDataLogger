@@ -1,5 +1,10 @@
 #pragma once
 
+// Build feature flags (BIRDSEYE_ENABLE_SENSOREGG below). Included here
+// rather than left to Arduino's .ino concatenation so the declarations and
+// their definitions can never disagree about which pages exist.
+#include "project.h"
+
 ///////////////////////////////////////////
 // DISPLAY PAGES MODULE
 // Per-page render functions. Each is called from displayLoop() in
@@ -33,7 +38,9 @@ void displayPage_replay_exit();
 void displayPage_gps_stats();
 void displayPage_gps_speed();
 void displayPage_tachometer();
-void displayPage_sensorTemp();
+#if BIRDSEYE_ENABLE_SENSOREGG
+void displayPage_sensorTemp();  // only built with the SensorEgg POC enabled
+#endif
 void displayPage_gps_lap_time();
 void displayPage_gps_pace();
 void displayPage_gps_best_lap();

@@ -158,7 +158,7 @@ handoff spec.
 
 | Path | Contents |
 |---|---|
-| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, sim-build (native sim TU + 60 s boot soak + determinism + goldens + lap oracles + two-session carryover, plus a wasm job: emsdk 3.1.61 build + node smoke + `birdseye-sim-wasm` artifact), release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). DovesLapTimer ref per channel: `BETA` builds track the library's `BETA` branch, master/release pin `v4.2.0` |
+| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, sim-build (native sim TU + 60 s boot soak + determinism + goldens + lap oracles + two-session carryover, plus a wasm job: emsdk 3.1.61 build + node smoke + `birdseye-sim-wasm` artifact), release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). Per-channel build config: `BETA` builds track DovesLapTimer's `BETA` branch and pass `-DBIRDSEYE_ENABLE_SENSOREGG=1`; master/release pin `v4.2.0` and build the all-flags-off defaults |
 | `tests/` | Host doctest harness (CMake) for the pure-logic units |
 | `CHANGELOG.md` | Keep-a-Changelog history; release workflow ties to version tags |
 | `ARCHITECTURE.md` | Human-facing architecture narrative (subsystems, design decisions) |
@@ -402,8 +402,12 @@ loop()  ~250 Hz
     page every boot lands on — driven by `gpsStatusPageLoop()`, buttons
     deliberately no-op'd in `displayLoop()`), `PAGE_MAIN_MENU` (-1).
   - Racing: `GPS_DEBUG` (3, GPS pipeline counters + lap debug — first in
-    the rotation) through `LOGGING_STOP` (13); `SENSOR_TEMP` (7, SensorEgg
-    Temp1) sits after `TACHOMETER` (6) — non-endurance only.
+    the rotation) through `LOGGING_STOP`; `SENSOR_TEMP` (7, SensorEgg
+    Temp1) sits after `TACHOMETER` (6) — non-endurance only, and only
+    when `BIRDSEYE_ENABLE_SENSOREGG` is set (beta). With the POC off (the
+    master/release default) the block closes up behind the tach page and
+    `LOGGING_STOP` is 12 instead of 13, same reshuffle idea as
+    `ENDURANCE_MODE`. Page ids are internal — nothing external sees them.
   - Replay: `PAGE_REPLAY_FILE_SELECT` (-3), `PAGE_REPLAY_RESULTS` (-8),
     `PAGE_REPLAY_EXIT` (-9).
   - Transfer: `PAGE_TRANSFER_MENU` (-4) Bluetooth/USB submenu,
@@ -577,10 +581,14 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
 - **Entry** (`enterShutdown()`): long-press left+right (5 s) on main menu,
   5-min menu idle, the GPS status page's idle timeout, the SD format
   page's idle timeout (deferred while the engine runs, so a tach-wake
-  with a bad card doesn't power-cycle all session), or USB present on
-  the main menu after 60 s of button inactivity (`USB_MENU_CHARGE_IDLE_MS`
-  — not immediate, so a charging-loop button wake doesn't bounce and the
-  device stays usable for replay/transfer while plugged in).
+  with a bad card doesn't power-cycle all session), or — only with
+  `BIRDSEYE_ENABLE_ONBOARD_CHARGING` — USB present on the main menu after
+  60 s of button inactivity (`USB_MENU_CHARGE_IDLE_MS` — not immediate, so
+  a charging-loop button wake doesn't bounce and the device stays usable
+  for replay/transfer while plugged in). With onboard charging off (the
+  default) that USB trigger is compiled out entirely: the firmware isn't
+  managing the charge current, so a cable is no reason to cut the menu
+  short — the plain 5-min idle still fires and still parks on VBUS.
 - **Teardown order** (wdtPet-bracketed — `CAMERA_SLEEP()`'s 3 s ce82
   power-off hold is the longest step under the armed ~4 s WDT): end race
   session → `CAMERA_SLEEP()` → `BLE_STOP()` if active → `DISPLAY_SLEEP()`
@@ -603,10 +611,22 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   `setup()`): reads then clears `RESETREAS` + `NRF_P0/P1->LATCH` (sticky,
   cumulative) and decodes via the host-tested `wake_cause` unit. A tach
   wake makes the GPS status page exit into race mode with logging; a USB
-  wake skips the status page straight into the charging loop.
+  wake skips the status page straight into the charging loop — that
+  shortcut too is `BIRDSEYE_ENABLE_ONBOARD_CHARGING`-only, since with
+  charging off a cable means "host connected" and the device just boots
+  normally (its idle timeout parks it on VBUS soon enough).
+- **Onboard charging is a build flag** (`BIRDSEYE_ENABLE_ONBOARD_CHARGING`
+  in `project.h`, **0 in every shipped build** since 3.0.1): the hardware
+  now carries an external charging circuit, so the firmware leaves HICHG
+  alone (BQ25100 stays at its ~50 mA default) and drops the charging UX.
+  Set it to 1 to restore the pre-3.0.1 behavior. The VBUS park below is
+  NOT gated on it.
 - **Charging loop — the one soft-sleep survivor** (`runChargingShutdownLoop()`):
-  System OFF is never entered while VBUS is present, because the HICHG
-  fast-charge pin (`PIN_CHARGING_CURRENT`) is software-held. After the
+  System OFF is never entered while VBUS is present. Two reasons: the
+  HICHG fast-charge pin (`PIN_CHARGING_CURRENT`) is software-held when
+  onboard charging is compiled in, and — regardless of the flag — VBUS is
+  an always-armed System OFF wake source, so entering OFF with the cable
+  in risks an immediate wake-reset loop. After the
   same full teardown, the loop shows the charging screen for 10 s then
   turns the display off; **any button is a full wake to the main menu**
   (`softResumeFromCharging()`: IMU re-init, race-mode GPS targets +
@@ -872,6 +892,16 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
 
 ### 14. SensorEgg Wireless EGT (`sensoregg.ino`, `sensoregg_protocol.{h,cpp}`)
 
+- **BUILD FLAG — `BIRDSEYE_ENABLE_SENSOREGG` (`project.h`)**: this whole
+  subsystem is a beta-channel feature. `0` (master/release default)
+  compiles `sensoregg.ino` down to no-op `SENSOREGG_SETUP/LOOP` and NaN
+  accessors, drops the Temp1 race page from the rotation
+  (`display_pages.ino` + the page-constant block in `BirdsEye.ino`), and
+  returns BLE to lazy init. `1` (passed by `beta.yml`, and by
+  `compile-sketch.yml` for PRs targeting `BETA`) is everything described
+  below. The DOVEX `Temp1`/`Junction1` columns are written either way —
+  `nan` when the POC is off — so the log format never forks by channel.
+  Keep any new egg code behind the flag.
 - **What (POC)**: a wireless thermocouple pod (DovesSensorEgg repo) reads a
   K-type EGT probe via MCP9600 and broadcasts EGT + cold junction in BLE
   **advertising packets** — protocol `PW-ADV-1`: 14-byte Manufacturer
@@ -1048,7 +1078,9 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | SD format page idle shutdown | 5 min | `sd_format_page.h` |
 | GPS boot re-detect | 3 tries, 10 s apart | `gps_functions.ino` |
 | Menu idle shutdown | 5 min (`SLEEP_IDLE_TIMEOUT_MS`) | `project.h` |
-| USB-on-menu charge idle | 60 s (`USB_MENU_CHARGE_IDLE_MS`) | `project.h` |
+| USB-on-menu charge idle | 60 s (`USB_MENU_CHARGE_IDLE_MS`) — compiled out unless `BIRDSEYE_ENABLE_ONBOARD_CHARGING` | `project.h` |
+| Onboard charging (HICHG hold + USB charge UX) | `BIRDSEYE_ENABLE_ONBOARD_CHARGING`, default 0 (all channels) | `project.h` |
+| SensorEgg wireless EGT POC | `BIRDSEYE_ENABLE_SENSOREGG`, default 0; 1 on the beta channel | `project.h` |
 | Charging screen timeout | 10 s (`CHARGE_DISPLAY_TIMEOUT_MS`) | `project.h` |
 | Sat bars display cap / CNO ceiling | 16 bars / 50 dB-Hz | `sat_bars.h` |
 | Crossing threshold | 7.0 m | `BirdsEye.ino` |
@@ -1166,6 +1198,18 @@ This device operates in ignition-noise environments. Three layers of defense:
   `compiler.cpp.extra_flags` property — a second `--build-property` for
   one key replaces the first). Local setup: CONTRIBUTING.md "Local build
   flags".
+- **Feature flags** (`project.h`, both default `0`, both tested with `#if`
+  so an explicit `-DFLAG=0` wins):
+  - `BIRDSEYE_ENABLE_ONBOARD_CHARGING` — off in **every** channel. See
+    subsystem 10: HICHG hold + the USB charging UX. The hardware now has
+    an external charging circuit.
+  - `BIRDSEYE_ENABLE_SENSOREGG` — off in master/release, **on in beta**
+    (`beta.yml`, plus `compile-sketch.yml` for PRs targeting `BETA` so the
+    flag-on build is compile-checked before it reaches the publish
+    workflow). See subsystem 14.
+  When adding a flag: give it a `#ifndef` default in `project.h`, decide
+  its per-channel value in the workflows, and document it here + in
+  CONTRIBUTING.md's flag table.
 - The sketch lives in `BirdsEye/` so the folder name matches the
   `.ino` file — required by Arduino IDE / arduino-cli.
 - `project.h` is included before other `.ino` modules so Arduino's
