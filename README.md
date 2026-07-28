@@ -120,7 +120,7 @@ SDCARD/
 
 Two formats are supported. The device auto-detects which format is used.
 
-**New format** (recommended, can use [HackTheTrack.net](http://HackTheTrack.net) to update tracks on the device):
+**New format** (recommended, can use [LapWingData.com](https://LapWingData.com) to update tracks on the device):
 
 ```json
 {
@@ -439,7 +439,7 @@ Look at existing pages like `displayPage_gps_speed()` or `displayPage_tachometer
 
 - **Data Viewer**: [DovesDataViewer](https://github.com/TheAngryRaven/DovesDataViewer)
   - Web-based viewer for logged data
-  - Preview at [HackTheTrack.net](http://HackTheTrack.net)
+  - Preview at [LapWingData.com](https://LapWingData.com)
 
 - **Core GPS Timing Library**: [DovesLapTimer](https://github.com/TheAngryRaven/DovesLapTimer)
   - Line-crossing detection

@@ -12,6 +12,11 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Changed
+- Companion web app references updated from HackTheTrack.net to
+  [LapWingData.com](https://LapWingData.com) in the README and project
+  docs (site rename; no firmware behavior change).
+
 ## [3.0.1] - 2026-07-26
 
 ### Added
