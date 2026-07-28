@@ -32,16 +32,16 @@ A high-precision GPS-based lap timer and data logger designed for motorsports an
 - **GPS Status Page** - Every boot shows a MyChron-style satellite view (sat count, HDOP, per-satellite signal bars) until GPS locks; any button skips it
 - **DOVEX Format** - Crash-safe logging with reserved header for instant replay
 - **Review Data** - Instant replay of DOVEX session headers on-device
+- **Insta360 cameras pairing** - Automatically turn on, start recording, and sync GPS data directly to your camera once a session starts
 
 #### WebApp Features (no login)
-- **Bluetooth Downloads** - Can now download files directly to [HackTheTrack.net](http://HackTheTrack.net)
+- **Bluetooth Downloads** - Can now download files directly to [LapWingData.com](https://LapWingData.com)
+- **Bluetooth Firmware updates** - update from the latest stable or the experimental beta branch releases
 - **Configure settings** - none of us want to fill in text with three buttons
 - **Track Sync** - Update on-device track library via the webapp
 
 #### To-Do
-- **Update GPS Tray** - Matek now wants $50 per module, when they are $15 from digikey, doesn't require any supporting circuitry
 - **External Sensors** - Add thermocouple sensor / m8 circle connector
-- **Tachometer** - **I** have a working tachometer... it's not easy to replicate, I need to fix that
 - **Pin Lock** - require pin to pull logs from device
 
 ### Display Pages
