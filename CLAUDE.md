@@ -58,7 +58,7 @@ Core capabilities:
 - Accelerometer logging (g-force X/Y/Z) via onboard LSM6DS3 IMU
 - DOVEX data logging with reserved 1 KB header (crash-safe GPS data)
 - 8+ display pages on a 128x64 OLED (3 Hz refresh)
-- Bluetooth LE file download to companion apps / HackTheTrack.net
+- Bluetooth LE file download to companion apps / LapWingData.com
 - On-device session replay: instant DOVEX header replay
 - **Insta360 X4 camera auto-record**: emulates the Insta360 GPS Remote as a
   pure BLE peripheral — wakes the camera on engine start, records via a ce82
@@ -358,7 +358,7 @@ loop()  ~250 Hz
   (deferred while the engine runs), and a charging-loop resume with the
   card still unformatted returns to the format page, not the menu.
 - **Dual JSON format**: `parseTrackFile()` auto-detects root type:
-  - **Object** (HackTheTrack format): `longName`, `shortName`,
+  - **Object** (LapWingData format): `longName`, `shortName`,
     `defaultCourse`, `courses[]` with `lengthFt`.
   - **Array** (older format, still accepted): bare array of course
     objects, metadata blank, `lengthFt = 0`. CourseDetector can't
@@ -996,7 +996,7 @@ timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x
 
 ### Track JSON (`/TRACKS/*.json`)
 
-**New format** (HackTheTrack / web simulator):
+**New format** (LapWingData / web simulator):
 ```json
 {
   "longName": "Orlando Kart Center",
