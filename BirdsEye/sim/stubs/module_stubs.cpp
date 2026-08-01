@@ -95,6 +95,8 @@ bool sensoreggLinkUp() { return false; }
 bool sensoreggAppHung() { return false; }
 float sensoreggEgtC() { return NAN; }
 float sensoreggJunctionC() { return NAN; }
+float sensoreggAuxC() { return NAN; }
+uint8_t sensoreggBatteryPct() { return 0xFF; }
 bool sensoreggTcFault() { return false; }
 uint16_t sensoreggSequence() { return 0; }
 

@@ -581,13 +581,14 @@ const int GPS_STATS = 4;
   // block closes up behind the tachometer rather than leaving a dead page
   // in the rotation. Same reshuffle idea as ENDURANCE_MODE above.
   #if BIRDSEYE_ENABLE_SENSOREGG
-    const int SENSOR_TEMP = 7;  // SensorEgg wireless EGT (Temp1)
-    const int GPS_LAP_TIME = 8;
-    const int GPS_LAP_PACE = 9;
-    const int GPS_LAP_BEST = 10;
-    const int OPTIMAL_LAP = 11;
-    const int GPS_LAP_LIST = 12;
-    const int LOGGING_STOP = 13;
+    const int SENSOR_TEMP = 7;   // SensorEgg wireless EGT (Temp1)
+    const int SENSOR_TEMP2 = 8;  // SensorEgg aux intake-air temp (Temp2, v2 eggs)
+    const int GPS_LAP_TIME = 9;
+    const int GPS_LAP_PACE = 10;
+    const int GPS_LAP_BEST = 11;
+    const int OPTIMAL_LAP = 12;
+    const int GPS_LAP_LIST = 13;
+    const int LOGGING_STOP = 14;
   #else
     const int GPS_LAP_TIME = 7;
     const int GPS_LAP_PACE = 8;

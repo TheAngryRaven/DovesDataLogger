@@ -64,8 +64,9 @@ Core capabilities:
   pure BLE peripheral — wakes the camera on engine start, records via a ce82
   shutter toggle, stops and powers off automatically (see subsystem 13)
 - **SensorEgg wireless EGT (POC)**: passive BLE observer receives the
-  DovesSensorEgg thermocouple pod's advertising broadcasts (`PW-ADV-1`),
-  logs `Temp1`/`Junction1` DOVEX columns + a Temp1 race page (subsystem 14)
+  DovesSensorEgg thermocouple pod's advertising broadcasts (`PW-ADV` v1
+  and v2), logs `Temp1`/`Junction1`/`Temp2` DOVEX columns + Temp1/Temp2
+  race pages (subsystem 14)
 
 ---
 
@@ -118,7 +119,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `tach_filter.{h,cpp}` | Tachometer 1-D Kalman filter (predict/update math + Q/R tuning constants) |
 | `camera_fsm.{h,cpp}` | Insta360 auto-record lifecycle FSM (8 states, all debounce/retry/timeout timing + tunables); board-portable core shared with the nRF54 "Falcon" target |
 | `insta360_protocol.{h,cpp}` | Insta360 X4 BLE frame builders/parsers (wake advert, remote scan response, ce82 buttons, ce82 GPS/RMC frame, ce81 serial parsing, ce81 `0x10` record-timer state parse) with golden-byte tests |
-| `sensoregg_protocol.{h,cpp}` | SensorEgg `PW-ADV-1` advertising payload parser (magic filter, int16 deci-°C decode with `0x8000`→NaN sentinel, flags, sequence) + wrap-safe 1 s staleness rule + passive-scan tuning constants |
+| `sensoregg_protocol.{h,cpp}` | SensorEgg `PW-ADV` v1+v2 advertising payload parser (magic filter, int16 deci-°C decode with `0x8000`→NaN sentinel, flags, sequence, v2 aux thermistor + battery) + wrap-safe 1 s staleness rule + passive-scan tuning constants |
 | `wake_cause.{h,cpp}` | Boot wake-cause decode: RESETREAS + GPIO LATCH register snapshots → tach / button / USB / watchdog / soft-reset / cold boot (System OFF shutdown, subsystem 10) |
 | `gps_status_page.{h,cpp}` | GPS status boot page state machine: hold, 3 s auto-close after fix+timeValid, button skip, exit destination (menu vs race), idle → shutdown |
 | `sd_format_page.{h,cpp}` | SD format-confirm boot page state machine: Select held 3 s continuously → format (release restarts the full window; other buttons never confirm), 5 min idle → shutdown |
@@ -974,7 +975,7 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
 datetime,driver_name,course_name,short_name,best_lap_ms,optimal_lap_ms,device_name
 lap1_ms,lap2_ms,lap3_ms,...
 \n padding to byte 1024
-timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z,Temp1,Junction1
+timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z,Temp1,Junction1,Temp2
 1710512400123,12,0.8,35.12345678,-97.12345678,65.32,234.56,...
 ```
 
@@ -984,9 +985,10 @@ timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x
   Appending it keeps old logs readable (parsed as empty) and lets older
   readers ignore the extra column — backwards compatible by design.
 - **GPS data** (byte 1024+): CSV column header then streaming GPS rows.
-- **`Temp1` / `Junction1`** (trailing columns): SensorEgg EGT + cold
-  junction in °C. Literal `nan` when the egg link is stale (>1 s) or the
-  egg reports an invalid probe — a dropout must be a visible gap, never a
+- **`Temp1` / `Junction1` / `Temp2`** (trailing columns): SensorEgg EGT +
+  cold junction + v2 aux intake-air temp, all °C. Literal `nan` when the
+  egg link is stale (>1 s), the egg reports an invalid probe/divider, or
+  (for `Temp2`) the egg is v1 — a dropout must be a visible gap, never a
   held value. These fields never cause a GPS row to be skipped.
 - **Crash safety**: file created with pre-filled newlines to 1024 bytes
   before any data. Header written on session end. If header is empty

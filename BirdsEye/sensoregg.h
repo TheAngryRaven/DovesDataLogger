@@ -12,10 +12,11 @@
 // is dropped from the rotation, and BLE goes back to lazy init. This
 // header's contract below describes the enabled build.
 //
-// Receives the DovesSensorEgg's PW-ADV-1 advertising broadcasts (see
-// sensoregg_protocol.h for the byte layout) and exposes the latest EGT /
-// cold-junction reading to the logger and display. POC scope: one egg,
-// one temperature channel ("Temp1") plus its cold junction ("Junction1").
+// Receives the DovesSensorEgg's PW-ADV advertising broadcasts, v1 and
+// v2 (see sensoregg_protocol.h for the byte layouts), and exposes the
+// latest readings to the logger and display. Scope: one egg, EGT
+// ("Temp1") + cold junction ("Junction1"), and on v2 eggs the aux
+// intake-air thermistor ("Temp2") + a real battery percent.
 //
 // RADIO ROLE: pure OBSERVER on the shared SoftDevice. Passive scanning
 // only — we never transmit a SCAN_REQ, never connect, and hold no GATT
@@ -82,6 +83,15 @@ bool sensoreggAppHung();
 // egg reported the invalid sentinel (open probe, sensor fault).
 float sensoreggEgtC();
 float sensoreggJunctionC();
+
+// v2 aux thermistor (intake air, "Temp2") in degC. NaN when the link is
+// stale, the egg is v1 (no aux field), or the egg reported the invalid
+// sentinel (divider open/shorted).
+float sensoreggAuxC();
+
+// Egg battery percent 0-100; 0xFF = unknown (stale link, v1 stub, or no
+// pack fitted on the egg).
+uint8_t sensoreggBatteryPct();
 
 // True while fresh AND the egg flags a thermocouple fault (open /
 // out-of-range probe, MCP9600 STATUS input-range bit).

@@ -231,8 +231,8 @@ Bytes 0-1023:    Session header (written when session ends)
   Remaining:     \n padding to byte 1024
 
 Bytes 1024+:     GPS data
-  Header row:    timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z
-  Data rows:     1741128001234,12,0.8,28.41270817,-81.37973266,87.32,125.45,182.34,1.25,8450,0.123,-0.945,0.032
+  Header row:    timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z,Temp1,Junction1,Temp2
+  Data rows:     1741128001234,12,0.8,28.41270817,-81.37973266,87.32,125.45,182.34,1.25,8450,0.123,-0.945,0.032,650.0,33.3,23.4
 ```
 
 The 1 KB header fits about 100 lap times at ~8 characters per entry. If the device loses power mid-session the header is left blank but all GPS data after byte 1024 is still valid and recoverable — the metadata write is the LAST thing a clean session does, so file integrity is independent of it.
@@ -251,6 +251,8 @@ The 1 KB header fits about 100 lap times at ~8 characters per entry. If the devi
 - **h_acc_m**: Horizontal accuracy estimate in meters (2 decimal places, from UBX hAcc)
 - **rpm**: Engine RPM from tachometer input
 - **accel_x/y/z**: Accelerometer g-force from onboard LSM6DS3 IMU (3 decimal places, logs `0.000` if IMU not available)
+- **Temp1/Junction1**: SensorEgg wireless EGT + cold junction in °C (1 decimal place; literal `nan` when the egg link is stale, invalid, or the POC is compiled out)
+- **Temp2**: SensorEgg aux intake-air thermistor in °C (v2 eggs; `nan` on v1 eggs and everything above)
 
 ## File Structure
 
