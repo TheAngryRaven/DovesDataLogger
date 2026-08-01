@@ -12,7 +12,39 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+- **SensorEgg PW-ADV v2 support** (backwards compatible — MINOR). The
+  passive observer now accepts the egg's 16-byte v2 payload alongside v1:
+  a new aux intake-air thermistor (`Temp2`) and a real battery percent.
+  v1 eggs keep working (their `Temp2` parses as `nan`); a v2 frame
+  truncated below 16 bytes is rejected as corrupt rather than mis-read
+  as v1. The RX path previously truncated captures at 14 bytes — v2
+  bytes never reached the parser — and now captures up to the largest
+  known layout with per-slot lengths.
+- **`Temp2` race page**: second temperature page after Temp1, same
+  layout and staleness rules ('---' on stale/v1/invalid), with the egg's
+  battery percent as the subtext (`--` when unknown). Beta channel only,
+  like the rest of the SensorEgg POC.
+- **DOVEX `Temp2` trailing column** (backwards compatible append, same
+  mechanism as `device_name` and `Temp1`/`Junction1`): aux intake-air
+  temp in °C, literal `nan` on stale link / v1 egg / invalid divider.
+  Never causes a GPS row to be skipped; written on every build so the
+  format does not fork by channel.
+
+### Fixed
+- **`isnan()` was compiled out of egg paths by `-Ofast`** (the platform
+  builds sketches with `-ffinite-math-only`, which constant-folds
+  `isnan()` to false). The Temp1 race page rendered `lroundf(NaN)`
+  garbage (`-214748`) instead of `---` on a stale link; the DOVEX temp
+  columns survived only because `dtostrf(NaN)` happens to emit a string
+  the numeric guard rejects into the same `nan` fallback. Egg paths now
+  use `isNanF()` (bit-pattern check, `nan_bits.h`) which the optimizer
+  cannot fold.
+
 ### Changed
+- The scan-tuning test's pinned egg advertising interval was stale at
+  160 units; the egg de-aliased to 179 units (111.875 ms) — pin updated
+  (anti-phase-lock invariants still hold).
 - Companion web app references updated from HackTheTrack.net to
   [LapWingData.com](https://LapWingData.com) in the README and project
   docs (site rename; no firmware behavior change).

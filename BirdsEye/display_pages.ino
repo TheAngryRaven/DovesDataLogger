@@ -8,6 +8,7 @@
 #include "lap_format.h"
 #include "sat_bars.h"
 #include "sd_format_page.h"
+#include "nan_bits.h"
 #include "sensoregg_protocol.h"
 
 void displayPage_boot() {
@@ -328,7 +329,7 @@ void displayPage_camera_test() {
   // main-menu-only), so it can sit on a desk indefinitely.
   display.print(F("egg: "));
   const float soakEgtF = sensoregg_protocol::celsiusToFahrenheit(sensoreggEgtC());
-  if (isnan(soakEgtF)) {
+  if (isNanF(soakEgtF)) {   // isNanF: plain isnan() folds to false under -Ofast
     display.println(F("NA"));
   } else {
     display.print(soakEgtF, 1);
@@ -825,7 +826,10 @@ void displayPage_sensorTemp() {
 
   display.setCursor(5, 20);
   display.setTextSize(4);
-  if (isnan(egt)) {
+  // isNanF, not isnan: -Ofast folds isnan() to false, and this branch
+  // then feeds lroundf(NaN) into %5d - the page showed "-214748" on a
+  // stale link instead of '---'.
+  if (isNanF(egt)) {
     display.println(F("  ---"));
   } else {
     char egtStr[8];
@@ -837,7 +841,7 @@ void displayPage_sensorTemp() {
   display.setCursor(0, 55);
   display.print(F(" junc: "));
   const float junc = sensoregg_protocol::celsiusToFahrenheit(sensoreggJunctionC());
-  if (isnan(junc)) {
+  if (isNanF(junc)) {
     display.print(F("---"));
   } else {
     display.print(junc, 1);
@@ -846,6 +850,48 @@ void displayPage_sensorTemp() {
   if (sensoreggAppHung()) {
     // Packets arriving but the egg's app is frozen (sequence not moving) —
     // its radio beacons the stale payload forever. Power-cycle the egg.
+    display.print(F("HUNG"));
+  } else {
+    display.print(sensoreggLinkUp() ? F("OK") : F("--"));
+  }
+
+  safeDisplayUpdate();
+}
+
+// SensorEgg aux intake-air temp (Temp2, v2 eggs) — same layout and
+// staleness rules as the Temp1 page. NaN ('---') also covers a v1 egg,
+// which has no aux field at all. The subtext shows the egg's battery
+// (real on v2 eggs; '--' = unknown/stale/v1) instead of a junction —
+// the thermistor has no cold junction.
+void displayPage_sensorTemp2() {
+  resetDisplay();
+
+  display.println(F("      Temp2 F"));
+
+  const float aux = sensoregg_protocol::celsiusToFahrenheit(sensoreggAuxC());
+
+  display.setCursor(5, 20);
+  display.setTextSize(4);
+  if (isNanF(aux)) {   // isNanF: isnan() folds to false under -Ofast
+    display.println(F("  ---"));
+  } else {
+    char auxStr[8];
+    snprintf(auxStr, sizeof(auxStr), "%5d", (int)lroundf(aux));
+    display.println(auxStr);
+  }
+
+  display.setTextSize(1);
+  display.setCursor(0, 55);
+  display.print(F(" batt: "));
+  const uint8_t pct = sensoreggBatteryPct();
+  if (pct > 100) {   // 0xFF = unknown (stale link, v1 egg, no pack)
+    display.print(F("--"));
+  } else {
+    display.print(pct);
+    display.print(F("%"));
+  }
+  display.print(F("   rf: "));
+  if (sensoreggAppHung()) {
     display.print(F("HUNG"));
   } else {
     display.print(sensoreggLinkUp() ? F("OK") : F("--"));

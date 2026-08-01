@@ -39,7 +39,8 @@ void displayPage_gps_stats();
 void displayPage_gps_speed();
 void displayPage_tachometer();
 #if BIRDSEYE_ENABLE_SENSOREGG
-void displayPage_sensorTemp();  // only built with the SensorEgg POC enabled
+void displayPage_sensorTemp();   // only built with the SensorEgg POC enabled
+void displayPage_sensorTemp2();  // v2 aux intake-air temp (same gating)
 #endif
 void displayPage_gps_lap_time();
 void displayPage_gps_pace();
