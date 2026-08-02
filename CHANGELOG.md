@@ -863,7 +863,7 @@ all breaking under this project's semver policy.
   before the app region is ever erased, and a GPREGRET bootloader-recovery
   flag so an interrupted swap leaves the unit re-flashable over BLE. The
   request characteristic max length was raised to 244 to carry ~240-byte
-  image chunks. See `docs/firmware-ota-phase0.md` for the apply-strategy
+  image chunks. See `docs/plans/0000-firmware-ota-phase0.md` for the apply-strategy
   decision and the hardware spikes that gate it. (The previously added
   `BLEDfu` buttonless Secure DFU service remains registered for the one-time
   fleet-migration push via the nRF Connect mobile app.)
