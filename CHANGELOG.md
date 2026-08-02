@@ -81,6 +81,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   cannot fold.
 
 ### Changed
+- **CI/production builds pass `-DDOVES_DISABLE_DEBUG`** (new DovesLapTimer
+  BETA flag): the library's debug strings + print call-sites are dead
+  weight on hardware builds (no debug Stream is ever attached) and the
+  beta image had crossed 100% of the 320 KB OTA self-flash cap — it was
+  already at 98.2% before sprint mode. Dropping the resident debug pipeline
+  brings the image back under the cap with headroom instead of moving the
+  OTA staging layout. Local IDE debug builds are unaffected (the macro is
+  opt-in per build).
 - The scan-tuning test's pinned egg advertising interval was stale at
   160 units; the egg de-aliased to 179 units (111.875 ms) — pin updated
   (anti-phase-lock invariants still hold).
