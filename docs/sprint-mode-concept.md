@@ -178,11 +178,20 @@ track the library's BETA branch in CI, so co-development is wired).
   - Run completion is an explicit edge (event/callback), not the current
     `checkForNewLapData()` value-change dedupe (`BirdsEye.ino:389-406`) —
     two identical run times in a row would be silently dropped.
-- **DOVEX**: add a trailing `race_mode` column to header line 1 (the
-  format has an explicit trailing-column back-compat story —
-  `device_name` was added the same way, `dovex_header.h:21-23`); the lap
-  times line doubles as the run times line. Old readers ignore the extra
-  column; old files parse as circuit. Extend `tests/dovex_header_test.cpp`.
+- **DOVEX** (decided): add a trailing `race_mode` column to header
+  lines 1/2 — the format's established extension mechanism
+  (`device_name` was added the same way, `dovex_header.h:21-23`).
+  Values: **`CIRCUIT` / `SPRINT`** (parse case-insensitively; empty or
+  absent = `CIRCUIT`, so every legacy log parses correctly). "Sprint" is
+  the established motorsport term for one-at-a-time point-to-point timed
+  runs and covers autocross / hillclimb / stage-style events alike. The
+  column is deliberately just a **loading helper for the webapp** (pick
+  run-derivation vs lap-derivation — a GPS trace alone doesn't reveal the
+  mode) plus the replay page's Run-vs-Lap labels; nothing on-device
+  depends on it. The lap times line doubles as the run times line —
+  per-run sector/DNF detail, if ever wanted, would be a new line pair
+  after line 4 (old parsers never read past it), not a change to this
+  marker. Extend `tests/dovex_header_test.cpp`.
 - **Display**: reuse existing page IDs with mode-conditional labels
   (Lap → Run, Lap History → Run List, Best Lap → Best Run). The ordered
   page-constant blocks with their `ENDURANCE_MODE` / `SENSOREGG`
