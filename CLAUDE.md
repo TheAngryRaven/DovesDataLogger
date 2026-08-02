@@ -597,17 +597,26 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   powered; TIMER3 stopped) → IMU power rail off.
 - **System OFF entry** (`shutdownSystemOff()`, no return): wait for the
   entry combo's buttons to release (a held button = SENSE satisfied =
-  instant wake-reset), configure `nrf_gpio_cfg_sense_input(pull-up,
-  SENSE-LOW)` on the tach pin + all 3 buttons (P-numbers via
-  `g_ADigitalPinMap`, never hardcoded), clear the GPIO LATCH registers
+  instant wake-reset), **sample the tach line's parked idle level**
+  (15 reads over ~30 ms, majority vote in the host-tested
+  `wake_cause::tachIdleIsHigh()`) and configure
+  `nrf_gpio_cfg_sense_input(pull-up, SENSE opposite the idle level)` on
+  the tach pin — the pickup's Schmitt-inverter + optocoupler output
+  stage idles high or low depending on the circuit build, and arming
+  toward the idle level was an instant wake-reset loop on battery
+  (runtime RPM counting can't tell the polarities apart: one falling
+  edge per pulse either way). Buttons are fixed active-low →
+  `SENSE-LOW` on all 3 (P-numbers via `g_ADigitalPinMap`, never
+  hardcoded). Then clear the GPIO LATCH registers
   (a set latch = pending DETECT = instant re-wake), clear pending FPU
   exceptions, then `sd_power_system_off()` when the SoftDevice is enabled
   (BLE is lazy — check `sd_softdevice_is_enabled()`) else raw
   `NRF_POWER->SYSTEMOFF`. **GPREGRET is untouched** — register 0 belongs
   to the OTA/bootloader handoff (subsystem 11). The WDT halts in System
   OFF (all clocks stop); `wdtSetup()` re-arms on the fresh boot.
-- **Wake sources**: tach pulse (D0 falling, engine start), any button,
-  or VBUS (USB plug-in, always armed on nRF52840).
+- **Wake sources**: tach pulse (D0, engine start — any transition away
+  from the sampled idle level), any button, or VBUS (USB plug-in,
+  always armed on nRF52840).
 - **Wake-cause decode** (`captureBootWakeCause()`, FIRST thing in
   `setup()`): reads then clears `RESETREAS` + `NRF_P0/P1->LATCH` (sticky,
   cumulative) and decodes via the host-tested `wake_cause` unit. A tach

@@ -183,7 +183,12 @@ the last resort.
 ### Shutdown is System OFF, wake is a reboot
 There is no power switch (deliberately — the next hardware revision drops
 it), so "off" is nRF52 **System OFF** at ~µA with GPIO SENSE armed on the
-tach pin and the three buttons, plus VBUS. Waking is a full chip reset:
+tach pin and the three buttons, plus VBUS. The tach's SENSE polarity is
+not hardcoded: the pickup circuit's output stage idles high or low
+depending on the build, so shutdown samples the parked line and arms
+SENSE for the opposite level (majority vote in the host-tested
+`wake_cause` unit) — arming toward the idle level satisfied DETECT
+immediately and battery sleep reboot-looped. Waking is a full chip reset:
 `setup()` runs fresh, and the very first thing it does is read (then
 clear) the sticky `RESETREAS` + GPIO `LATCH` registers to decode *why* it
 booted (the host-tested `wake_cause` unit). An engine-start (tach) wake
