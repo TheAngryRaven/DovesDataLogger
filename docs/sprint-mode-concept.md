@@ -43,6 +43,33 @@ tracks stored separately so everything existing stays backwards compatible.
 | Fallback | Lap Anything (`WaypointLapTimer`) | none meaningful — no matched sprint track ⇒ log-only session (Lap Anything is a lap timer; it produces nothing useful point-to-point) |
 | Session | one `.dovex`, laps line in header | one `.dovex` for the whole event, runs line in header |
 
+### Real-world cadence (user report, 2026-08)
+
+An actual autocross entrant describes the day like this: runs happen in
+**heats of ~4** — one run at a time, then a stop of only **30–45 seconds**
+in the queue while others go, then the next run. After the 4th run the
+whole run group rotates out ("then the cars go") for a long break —
+tens of minutes — before another heat of 4. They leave the Insta360 X4
+recording across an entire heat and end up with "a couple of 20 min
+videos".
+
+That cadence pins the session model:
+
+- **Session = heat.** One heat = one `.dovex` = one camera video. This is
+  exactly what the camera-paired firmware already does today: the engine
+  stays running through a heat, so the camera keeps recording; 30 s of
+  engine-off at heat end auto-stops the recording *and* ends the log
+  session (`cameraConsumeAutoStop()`), and the next heat's engine start is
+  a fresh wake → new session. Sprint mode should preserve this mapping,
+  not fight it — and **run boundaries must never touch the camera**.
+- **Between-run stops are shorter than the 60 s auto-idle window**, so the
+  idle killer is less catastrophic than first assumed — but queue position
+  isn't guaranteed (grid delays, red flags), so the engine-aware idle rule
+  below is still wanted as a safety margin rather than a rewrite.
+- **Run counts are small** (4-ish per session), so run history/state is
+  trivial memory-wise; per-run re-arm through the same start line ~every
+  minute is the hot path to test.
+
 Key research finding that makes this cheap: **the crossing math is already
 line-agnostic.** `DovesLapTimer::_detectLineCrossing()`
 (`DovesLapTimer.cpp:198-306` on the library's BETA branch) takes an
@@ -131,13 +158,18 @@ track the library's BETA branch in CI, so co-development is wired).
   (DovesLapTimer / WaypointLapTimer); `SprintTimer` slots in as a third.
   Any new/changed helper must be mirrored in `sim/sim_prototypes.h` or the
   sim build breaks.
-- **Session lifecycle — the field-visible blocker**:
-  - Sprint-aware `checkAutoIdle()`: engine-aware idle (only start the
-    idle clock when tach reads 0 *and* stationary), a much longer window,
-    and re-arm the grace period at every run completion (today the 3-min
-    grace anchors once at session start and never re-arms). The
-    camera-recording yield at `BirdsEye.ino:1158` is the precedent for
-    "something else says we're still active".
+- **Session lifecycle** (shaped by the heat cadence in §2):
+  - Session = heat. The camera-paired path already ends the session on
+    30 s engine-off (`cameraConsumeAutoStop()`) — that *is* the heat
+    boundary, keep it. Run boundaries never touch the camera and never
+    end the session.
+  - Sprint-aware `checkAutoIdle()` for the no-camera case: engine-aware
+    idle (only start the idle clock when tach reads 0 *and* stationary)
+    and re-arm the grace at every run completion (today the 3-min grace
+    anchors once at session start and never re-arms). With 30–45 s
+    between-run stops this is a safety margin for queue delays, not the
+    main path. The camera-recording yield at `BirdsEye.ino:1158` is the
+    precedent for "something else says we're still active".
   - Multiple runs live inside **one session / one `.dovex`** — a run
     boundary must never call `endRaceSession()` (it deletes
     `courseManager` and wipes best-run state).
@@ -195,8 +227,12 @@ cutting a fresh beta branch. Nothing in the app anticipates modes today.
    a speed/launch threshold? What does a false start / DNF (never crosses
    finish, returns to start) record as?
 4. **Between-run state** — best run, run history, and the log file must
-   survive the loop-back and the wait (they will, as long as sessions
-   don't end between runs — see Phase 2 lifecycle).
+   survive the loop-back and the ~30–45 s queue wait (they will, as long
+   as sessions don't end between runs — see Phase 2 lifecycle).
+   Cross-heat: does "best run" span the whole day or reset per heat/
+   session? Per-session is what falls out naturally (one `.dovex` per
+   heat); a day-spanning best would need header aggregation in the
+   viewer, not firmware state.
 5. **Replay page** — header `race_mode` column makes the replay results
    page label runs vs laps correctly; anything more (per-run sectors) is
    later.
