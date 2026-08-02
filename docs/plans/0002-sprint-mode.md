@@ -124,12 +124,32 @@ track the library's BETA branch in CI, so co-development is wired).
   `insideLineThreshold()` / `pointOnSideOfLine()` / the crossing ring
   buffer into a reusable core (the `DovesLapTimer.cpp:143` TODO), rather
   than copy-pasting.
-- **Run accounting instead of lap accounting**: per-run state machine
-  `ARMED → RUNNING → FINISHED`, re-arming when the driver returns to the
-  start-line zone. Surface: run count, current run time, last run, best
-  run (+ run number), run history. No `laps`, no `DirectionDetector`
-  (direction is meaningless point-to-point), no S/F-restarts-sector-1
-  entanglement.
+- **Run accounting instead of lap accounting** (semantics decided):
+  **both lines are monitored continuously** — same as the circuit timer
+  monitors S/F + S2 + S3 every loop. Two states, purely line-driven:
+  - `WAITING` → **start crossing** begins a run (interpolated time).
+  - `RUNNING` → **finish crossing** completes the run;
+    **start crossing cancels the in-progress run and starts a brand new
+    one** (the botched-course case: driver messes up, drives back around,
+    re-launches — sprint's equivalent of circuit's
+    every-S/F-crossing-closes-and-opens-a-lap rule).
+  - Finish crossings while `WAITING` are **ignored** (driving back past
+    the finish on the return loop must not do anything).
+  - **DNF is just normal operation**: an abandoned run never completes and
+    records nothing; the driver eventually kills the engine and the
+    normal session-end paths take over. No special DNF state.
+  - Nuance: crossing detection is direction-agnostic, so a *backward*
+    start crossing on the return loop opens a bogus run — which the
+    restart rule then self-heals at the real launch (the forward crossing
+    cancels it). A backward *finish* crossing while `RUNNING` is the only
+    truly bogus completion; it requires re-entering the finish zone
+    mid-run (rare on a one-way autocross course). Cheap hardening if it
+    matters: gate the finish line on crossing sign
+    (`pointOnSideOfLine()` already returns signed sides).
+
+  Surface: run count, current run time, last run, best run (+ run
+  number), run history. No `laps`, no `DirectionDetector`, no
+  S/F-restarts-sector-1 entanglement.
 - **Course model**: add `finish_a/b_lat/lng` to the sprint course config.
   v1 sectors (decided): **start + finish required, up to 2 optional split
   lines** — matching the S2/S3 shape the device UI and circuit model
@@ -351,9 +371,15 @@ cutting a fresh beta branch. Nothing in the app anticipates modes today.
    the device's most recent single day of courses** (sync → delete → push
    new file). v1 may ship before it lands, with a loud disclaimer about
    the 4096-byte parse-buffer cap on un-synced devices.
-4. **Run arming semantics** — auto-arm on entering the start-line zone vs
-   a speed/launch threshold? What does a false start / DNF (never crosses
-   finish, returns to start) record as?
+4. ~~Run arming / DNF semantics?~~ **Decided.** Session arming is
+   unchanged from circuit: RPM held for ~a second brings up all systems
+   and recording, exactly like today. Run timing is purely line-driven
+   with both lines always hot: start crossing begins a run (and cancels +
+   restarts any run already in progress — the botched-course re-launch
+   rule); finish crossing completes it; finish crossings with no active
+   run are ignored. DNF needs no special record — the run just never
+   completes, and the engine eventually dying ends the session through
+   the normal paths. Full state machine in Phase 1 (§3).
 5. **Between-run state** — best run, run history, and the log file must
    survive the loop-back and the ~30–45 s queue wait (they will, as long
    as sessions don't end between runs — see Phase 2 lifecycle).
