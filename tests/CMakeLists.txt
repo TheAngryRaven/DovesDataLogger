@@ -29,6 +29,7 @@ add_executable(birdseye_tests
   sat_bars_test.cpp
   sensoregg_protocol_test.cpp
   sprint_select_test.cpp
+  crossing_pattern_test.cpp
   ${BIRDSEYE_DIR}/haversine.cpp
   ${BIRDSEYE_DIR}/gps_stats.cpp
   ${BIRDSEYE_DIR}/gps_time.cpp
@@ -47,6 +48,7 @@ add_executable(birdseye_tests
   ${BIRDSEYE_DIR}/sat_bars.cpp
   ${BIRDSEYE_DIR}/sensoregg_protocol.cpp
   ${BIRDSEYE_DIR}/sprint_select.cpp
+  ${BIRDSEYE_DIR}/crossing_pattern.cpp
 )
 
 target_include_directories(birdseye_tests PRIVATE
