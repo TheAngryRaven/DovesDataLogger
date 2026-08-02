@@ -35,13 +35,40 @@ tracks stored separately so everything existing stays backwards compatible.
 
 | Aspect | Circuit (today, unchanged) | Sprint (new) |
 |---|---|---|
-| Mode select | default | `race_mode=sprint` setting, set via webapp `SSET`, applied on reboot (the existing settings contract — BLE disconnect auto-reboots) |
+| Mode select | default | **automatic — mode follows the detected track** (decided): if the nearest manifest match came from `/TRACKS/SPRINT/`, the device knocks into sprint mode. **No `race_mode` device setting** — an earlier draft had one; dropped. |
 | Track storage | `/TRACKS/*.json` | `/TRACKS/SPRINT/*.json` (new folder; circuit tracks stay put) |
 | Track detection | haversine proximity vs manifest | same mechanism, scanning sprint manifest entries |
-| Course detection | `CourseDetector` (length-based) → Lap Anything fallback | **none** — single course, or webapp-selected `defaultCourse` when a track has several |
+| Course detection | `CourseDetector` (length-based) → Lap Anything fallback | **none** — **date-based selection** (decided): load only the most-recently-created course by `date_created`. One course in RAM. |
+| Course lines | S/F (+ S2+S3 pair) | **start + finish required; up to 2 optional sector lines** (a single split must be legal — see Phase 1) |
 | Timing | lap timer (S/F crossing, laps) | run timer (start line → finish line, N runs/session) |
-| Fallback | Lap Anything (`WaypointLapTimer`) | none meaningful — no matched sprint track ⇒ log-only session (Lap Anything is a lap timer; it produces nothing useful point-to-point) |
+| Fallback | Lap Anything (`WaypointLapTimer`) | none meaningful — no matched sprint track ⇒ log-only session; the real answer is the on-device course creator (§5) |
 | Session | one `.dovex`, laps line in header | one `.dovex` for the whole event, runs line in header |
+| Race entry | auto (RPM > 500 or ≥ 10 mph) or manual | same triggers — driving to the queue should clear 5–10 mph, and karts have RPM — but **expect more manual race entry** at autocross; keep the manual path prominent and don't make sprint depend on auto triggers |
+
+Future modes note: this two-value scheme (`CIRCUIT`/`SPRINT`) is expected to
+grow — a **drag mode** is on the horizon and will be a bigger lift (staging,
+reaction time, fixed distances). Everything mode-shaped (DOVEX marker, track
+`type` field, folder scheme) should be an open enum, not a boolean.
+
+### Course lifecycle at a sprint venue (user report #3) — date-based selection
+
+The same entrant attends the same venue most weekends, **and the course is
+different every event** (cones get re-laid). So sprint "courses" are
+disposable, dated layouts of a persistent venue (track):
+
+- New sprint-course JSON field: **`date_created`** — stamped automatically by
+  whatever created the course (webapp or the on-device creator, §5); the user
+  never edits it. *Recommendation: store a full sortable ISO-8601 timestamp
+  (`YYYY-MM-DDTHH:MM`), not `month/day/year` — autocross venues re-lay
+  courses same-day (morning/afternoon configs), and a date-only value can't
+  order those; lexicographic max = newest also falls out for free.*
+- Loading a sprint track loads **only the newest course** by `date_created`
+  into memory — no CourseDetector, no default-course setting, one course, tiny
+  RAM footprint. This may evolve (this user races weekly and will be a
+  valuable data source), but v1 is deliberately simple.
+- Old courses accumulate in the track file forever — see the open question on
+  pruning (§7): the on-device JSON parse buffer is 4096 bytes, so a weekly
+  venue overflows it within months if nothing trims history.
 
 ### Real-world cadence (user report, 2026-08)
 
@@ -98,18 +125,19 @@ track the library's BETA branch in CI, so co-development is wired).
   (direction is meaningless point-to-point), no S/F-restarts-sector-1
   entanglement.
 - **Course model**: add `finish_a/b_lat/lng` to the sprint course config.
-  Sectors become **N ordered split lines** between start and finish rather
-  than the circuit's all-or-nothing S2+S3 pair
-  (`areSectorLinesConfigured()` requires *both* today — a single
-  mid-course split is currently impossible; the webapp's data model
-  already carries an ordered `sectors[]` list, so the library is the
-  bottleneck, not the data).
+  v1 sectors (decided): **start + finish required, up to 2 optional split
+  lines** — matching the S2/S3 shape the device UI and circuit model
+  already speak — but **a single split must be legal**
+  (`areSectorLinesConfigured()` requires *both* today; that all-or-nothing
+  gate gets relaxed). The webapp's ordered `sectors[]` list means N splits
+  can come later without a data-model change.
 - **Course selection without detection**: a public `selectCourse(int)` on
   `CourseManager` (today `_activeCourseIndex` / `_detectionComplete` are
   private with no setter — `_activateLapAnything()` is the only way to
-  short-circuit detection). Sprint mode always uses it (webapp-chosen
-  `defaultCourse`); it's independently useful for circuit too (adjacent
-  to library issue #35, proximity-based detection).
+  short-circuit detection). Sprint mode always uses it — the firmware
+  picks the newest course by `date_created` (§2) and selects it directly;
+  it's independently useful for circuit too (adjacent to library issue
+  #35, proximity-based detection).
 - **Memory**: don't instantiate the 8-slot by-value course array for a
   mode that needs exactly one active course (~29 KB regardless of count
   today — library issue #22).
@@ -132,11 +160,15 @@ track the library's BETA branch in CI, so co-development is wired).
 
 ## 4. Phase 2 — DovesDataLogger (`BETA`): consume it
 
-- **`race_mode` setting**: default row in `ensureDefaultSettings()`
-  (`settings.ino:102-108`), loaded into a global in the settings block at
-  `BirdsEye.ino:765-795`. `SSET` is already generic (no key allowlist), so
-  the webapp can set it the moment the firmware reads it. Update the
-  settings tables in README.md and CLAUDE.md.
+- **Mode-by-folder detection** (replaces the earlier `race_mode` setting
+  idea): `trackDetectionLoop()` picks the nearest manifest entry as today;
+  if that entry's `kind` says sprint, the session runs in sprint mode —
+  build the sprint timer path instead of `CourseManager`+`CourseDetector`,
+  and select the course by newest `date_created` (§2). Open question: a
+  venue with both kinds in range needs a tiebreak (§7).
+- **RPM accuracy settings** (`spark_mode` + `cylinder_count`) are needed by
+  this same user group (autocross karts, possibly a 2-cyl monster) but are
+  independent of sprint mode — split out as **plan 0003**.
 - **`/TRACKS/SPRINT/`**: the `/TRACKS` literal is duplicated across
   `trackFolder[8]` (`BirdsEye.ino:469`), `makeFullTrackPath()`
   (`sd_functions.ino:64`), `sdEnsureTracksFolder()`, the
@@ -198,15 +230,76 @@ track the library's BETA branch in CI, so co-development is wired).
   reshuffles are the most fragile part of the UI — avoid new page
   constants.
 
-## 5. Phase 3 — DovesDataViewer (last)
+## 5. On-device course creator — the big ask
+
+Sprint entrants can **walk the course** before the event (cones are laid out
+fresh each time), so the device itself must be able to create a course —
+standing at each cone and capturing GPS positions. Hard rule: **no text entry
+on-device, ever.** All names are auto-generated and renameable later in the
+webapp.
+
+### UI flow (as specced)
+
+New main-menu option **"Create Course"**:
+
+1. **Track prompt** — run the normal proximity track search, then ask
+   `Are you at {TRACK NAME}?` with options **Yes / New Track**. A new track
+   is written as `NEWTRACK_{date}.json` (no typing; renamed in the app
+   later).
+2. **Type select** — choose **CIRCUIT** or **SPRINT** course.
+3. **Line menu** — one row per line, labeled
+   `{Name} {* if required} {DONE stamp when both points collected}`:
+   - `Start/Finish *` (labeled just `Start *` in sprint)
+   - `Sector 2`
+   - `Sector 3`
+   - `Finish *` (sprint only)
+   - `Save` — writes the course as `NEWCOURSE_{date}`, back to main menu
+   - `Cancel` — back to main menu, discard
+4. **Per-line menu**:
+   - `{Line label}` (reminder header)
+   - `Point A * {DONE}`
+   - `Point B * {DONE}`
+   - `Save` / `Back`
+5. **Point menu**: `{Line label : A/B}` → **Save current pos** / Back.
+
+### Design notes / constraints found in research
+
+- **GPS gating**: capture requires a fix, and the auto-generated names
+  require GPS date/time — same `timeValid` gate as log-file creation. The
+  point screen should show live `h_acc` and warn/refuse on poor accuracy.
+- **Point capture should average, not snapshot**: a single 25 Hz fix is
+  1–2 m noisy; standing at a cone for ~3–5 s and averaging fixes costs
+  nothing (the user is stationary anyway) and materially improves line
+  placement. Show a "hold still… n/N" progress.
+- **Name collisions**: `NEWTRACK_{date}` / `NEWCOURSE_{date}` collide on a
+  second same-day creation, and the track-browser display truncates names
+  to 13 chars (`MAX_LOCATION_LENGTH`) so date-suffixed names can also look
+  identical on screen. Recommendation: include time in the generated suffix
+  (fits the `date_created` ISO recommendation in §2) or append a counter.
+- **This is the firmware's first track-JSON writer**: today the device only
+  reads track files (settings JSON read-modify-write is the closest
+  precedent, `settings.ino`). Appending a course means parse-modify-write of
+  a `/TRACKS/SPRINT/*.json` under the 4096-byte parse buffer — reinforces
+  the pruning question (§7). Writes go through the existing SD arbitration.
+- **Save semantics**: captured points live in RAM until line-menu `Save`;
+  `Cancel`/power-loss discards. Fine for v1 — walking the course takes
+  minutes, not hours.
+- Circuit courses created on-device get S/F + optional S2/S3 — exactly the
+  existing model, so the creator serves both modes from day one.
+
+## 6. Phase 3 — DovesDataViewer (last)
 
 The old BETA branch was merged (PR #373) and deleted — this phase starts by
 cutting a fresh beta branch. Nothing in the app anticipates modes today.
 
-- **Settings UI**: `race_mode` auto-appears via the generic key/value list,
-  but a real toggle needs a new `boolean`/`enum` control type in
-  `deviceSettingsSchema.ts` + `DeviceSettingsTab.tsx` (today only
-  string/number text inputs exist). Update `docs/ble-protocol.md` §8.5.
+- **Track/course editor**: a **circuit/sprint toggle on the track & course
+  editor** (decided — this replaced the device-setting idea). Sprint
+  courses get a finish line + optional splits; `date_created` is stamped
+  automatically on course creation and is **not user-editable**. The
+  editor also needs rename support for device-generated
+  `NEWTRACK_*`/`NEWCOURSE_*` names.
+- (The `boolean`/`enum` settings control type is no longer needed for
+  sprint, but plan 0003's `spark_mode` setting will want it.)
 - **Track model**: `type: 'circuit' | 'sprint'` on `Course`/`Track`,
   flowing through `trackStorage.ts` ↔ `deviceTrackSync.ts` ↔
   `trackSubmission.ts` and a Supabase `courses` column. Relax
@@ -226,23 +319,29 @@ cutting a fresh beta branch. Nothing in the app anticipates modes today.
 - Per that repo's conventions: a numbered `docs/plans/` design doc and
   `docs/subsystems.md` updates.
 
-## 6. Open Questions
+## 7. Open Questions
 
-1. **Is `race_mode` really a device mode?** Alternative: mode follows the
-   detected track (which folder the nearest manifest entry came from), and
-   the setting is only a tiebreak when a venue has both kinds nearby.
-   Fewer webapp round-trips; slightly spookier behavior.
-2. **Minimum sector support for v1** — none (start + finish only) ships
-   faster; N ordered splits is where the library should end up.
-3. **Run arming semantics** — auto-arm on entering the start-line zone vs
+1. ~~Is `race_mode` a device mode?~~ **Decided: mode follows the detected
+   track's folder — no device setting.** Remaining sub-question: the
+   **tiebreak when a venue has both kinds in range** (a circuit that hosts
+   parking-lot autocross). Candidate heuristic: if the nearest sprint
+   track has a course created *today*, it's an event day — prefer sprint;
+   otherwise prefer circuit. Or just prompt on-device.
+2. ~~Minimum sector support?~~ **Decided: start + finish required, up to 2
+   optional splits, single split legal.**
+3. **Course-history pruning** — weekly events accumulate dated courses in
+   one track file; the 4096-byte parse buffer caps how long that works.
+   Device keeps only newest N? Webapp trims on sync? Needs an answer
+   before the course creator ships.
+4. **Run arming semantics** — auto-arm on entering the start-line zone vs
    a speed/launch threshold? What does a false start / DNF (never crosses
    finish, returns to start) record as?
-4. **Between-run state** — best run, run history, and the log file must
+5. **Between-run state** — best run, run history, and the log file must
    survive the loop-back and the ~30–45 s queue wait (they will, as long
    as sessions don't end between runs — see Phase 2 lifecycle).
    ~~Cross-heat best?~~ **Decided: best run is per-session** (one
    `.dovex` per heat); nothing spans the day — matches the existing
    per-session `best_lap_ms` semantics exactly.
-5. **Replay page** — header `race_mode` column makes the replay results
+6. **Replay page** — header `race_mode` column makes the replay results
    page label runs vs laps correctly; anything more (per-run sectors) is
    later.
