@@ -53,7 +53,9 @@ tens of minutes — before another heat of 4. They leave the Insta360 X4
 recording across an entire heat and end up with "a couple of 20 min
 videos".
 
-That cadence pins the session model:
+That cadence pins the session model (user has since **confirmed the
+engine stays running between runs**, so the mapping below holds with no
+caveats):
 
 - **Session = heat.** One heat = one `.dovex` = one camera video. This is
   exactly what the camera-paired firmware already does today: the engine
@@ -229,10 +231,9 @@ cutting a fresh beta branch. Nothing in the app anticipates modes today.
 4. **Between-run state** — best run, run history, and the log file must
    survive the loop-back and the ~30–45 s queue wait (they will, as long
    as sessions don't end between runs — see Phase 2 lifecycle).
-   Cross-heat: does "best run" span the whole day or reset per heat/
-   session? Per-session is what falls out naturally (one `.dovex` per
-   heat); a day-spanning best would need header aggregation in the
-   viewer, not firmware state.
+   ~~Cross-heat best?~~ **Decided: best run is per-session** (one
+   `.dovex` per heat); nothing spans the day — matches the existing
+   per-session `best_lap_ms` semantics exactly.
 5. **Replay page** — header `race_mode` column makes the replay results
    page label runs vs laps correctly; anything more (per-run sectors) is
    later.
