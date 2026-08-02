@@ -661,7 +661,12 @@ void displayPage_gps_lap_time() {
   bool raceStarted = activeTimerRaceStarted();
   unsigned long currentLapTimeMs = activeTimerCurrentLapTime();
 
-  if (raceStarted) {
+  if (sprintModeIsActive() && !activeTimerRunActive()) {
+    // Sprint mode, between runs: the session stays live (all pages work),
+    // but there is no lap ticking — say so instead of a dead 0:00.
+    display.setTextSize(2);
+    display.print(F(" *waiting*"));
+  } else if (raceStarted) {
     char lapStr[lap_format::kLapTimeStrLen];
     lap_format::formatLapTime(currentLapTimeMs, lap_format::kSpace, lapStr, sizeof(lapStr));
     display.print(lapStr);
@@ -701,7 +706,12 @@ void displayPage_gps_pace() {
   // main page into
   display.setTextColor(DISPLAY_TEXT_WHITE);
   const int lineHeight = 21;
-  if (paceRaceStarted && paceLaps >= 1) {
+  if (sprintModeIsActive() && !activeTimerRunActive()) {
+    // Sprint mode, between runs — no live pace to compare (see lap page).
+    display.setCursor(0, lineHeight);
+    display.setTextSize(2);
+    display.print(F(" *waiting*"));
+  } else if (paceRaceStarted && paceLaps >= 1) {
     display.setCursor(0, lineHeight);
     display.setTextSize(4);
     if (paceDiff > 0) {

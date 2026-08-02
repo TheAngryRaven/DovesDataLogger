@@ -26,7 +26,8 @@ Metadata fixtureMeta() {
         "OKC",                  // shortName
         62345UL,                // bestLapMs
         61890UL,                // optimalMs
-        "ApexTurbo"             // device
+        "ApexTurbo",            // device
+        "CIRCUIT"               // raceMode
     };
 }
 
@@ -59,7 +60,7 @@ TEST_CASE("format - line 1 is the column label with CRLF") {
     REQUIRE(dovex_header::format(buf, sizeof(buf), fixtureMeta(), laps, 1));
 
     const std::string expected =
-        "datetime,driver,course,short_name,best_lap_ms,optimal_ms,device_name\r\n";
+        "datetime,driver,course,short_name,best_lap_ms,optimal_ms,device_name,race_mode\r\n";
     CHECK(asString(buf, expected.size()) == expected);
 }
 
@@ -70,7 +71,7 @@ TEST_CASE("format - line 2 fields appear in order") {
 
     // The metadata line follows line 1's CRLF and ends with its own CRLF.
     const std::string head = asString(buf, kHeaderSize);
-    CHECK(head.find("2025-03-11 14:30:00,Driver,Normal,OKC,62345,61890,ApexTurbo\r\n")
+    CHECK(head.find("2025-03-11 14:30:00,Driver,Normal,OKC,62345,61890,ApexTurbo,CIRCUIT\r\n")
           != std::string::npos);
 }
 
@@ -84,7 +85,7 @@ TEST_CASE("format - bestLap / optimal of 0 become 'N/A'") {
     REQUIRE(dovex_header::format(buf, sizeof(buf), m, laps, 1));
 
     const std::string head = asString(buf, kHeaderSize);
-    CHECK(head.find(",N/A,N/A,ApexTurbo\r\n") != std::string::npos);
+    CHECK(head.find(",N/A,N/A,ApexTurbo,CIRCUIT\r\n") != std::string::npos);
 }
 
 TEST_CASE("format - empty lap list still produces valid 1024-byte buffer") {
@@ -201,7 +202,7 @@ TEST_CASE("format - null device renders an empty trailing column") {
 
     const std::string head = asString(buf, kHeaderSize);
     // Trailing comma then CRLF — the column exists but is empty.
-    CHECK(head.find("2025-03-11 14:30:00,Driver,Normal,OKC,62345,61890,\r\n")
+    CHECK(head.find("2025-03-11 14:30:00,Driver,Normal,OKC,62345,61890,,CIRCUIT\r\n")
           != std::string::npos);
 
     // And it round-trips back to an empty device.
@@ -333,4 +334,82 @@ TEST_CASE("parse - skips zero-value lap tokens (matches firmware behavior)") {
     CHECK(readLaps[0] == 1000UL);
     CHECK(readLaps[1] == 2000UL);
     CHECK(readLaps[2] == 3000UL);
+}
+
+// ---------------------------------------------------------------------------
+// race_mode trailing column (sprint mode, plan 0002)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("format/parse - race_mode round-trips (SPRINT)") {
+    Metadata m = fixtureMeta();
+    m.raceMode = "SPRINT";
+    char buf[kHeaderSize];
+    REQUIRE(dovex_header::format(buf, sizeof(buf), m, nullptr, 0));
+
+    ParsedHeader meta;
+    unsigned long readLaps[4];
+    size_t readCount = 0;
+    REQUIRE(dovex_header::parse(buf, sizeof(buf),
+                                meta, readLaps, 4, readCount));
+    CHECK(std::string(meta.raceMode) == "SPRINT");
+    CHECK(std::string(meta.device)   == "ApexTurbo");  // column order held
+}
+
+TEST_CASE("parse - legacy header without race_mode yields empty (= circuit)") {
+    // Headers written before the race_mode column existed: line 2 has
+    // only seven (or six) fields. raceMode must parse back as "".
+    char buf[kHeaderSize];
+    std::memset(buf, '\n', sizeof(buf));
+    const char* hdr =
+        "datetime,driver,course,short_name,best_lap_ms,optimal_ms,device_name\r\n"
+        "2025-03-11 14:30:00,Driver,Normal,OKC,58231,57900,ApexTurbo\r\n"
+        "laps_ms\r\n"
+        "58231\r\n";
+    std::memcpy(buf, hdr, std::strlen(hdr));
+
+    ParsedHeader meta;
+    unsigned long readLaps[4];
+    size_t readCount = 0;
+    REQUIRE(dovex_header::parse(buf, sizeof(buf),
+                                meta, readLaps, 4, readCount));
+    CHECK(std::string(meta.raceMode) == "");
+    CHECK(std::string(meta.device)   == "ApexTurbo");
+}
+
+TEST_CASE("format - null race_mode renders an empty trailing column") {
+    Metadata m = fixtureMeta();
+    m.raceMode = nullptr;
+    char buf[kHeaderSize];
+    REQUIRE(dovex_header::format(buf, sizeof(buf), m, nullptr, 0));
+
+    ParsedHeader meta;
+    unsigned long readLaps[4];
+    size_t readCount = 0;
+    REQUIRE(dovex_header::parse(buf, sizeof(buf),
+                                meta, readLaps, 4, readCount));
+    CHECK(std::string(meta.raceMode) == "");
+}
+
+TEST_CASE("parse - empty middle field does not shift later columns") {
+    // Regression for the strtok-era splitter: an empty device_name used
+    // to swallow race_mode into the device column. Positional fields must
+    // survive empties.
+    char buf[kHeaderSize];
+    std::memset(buf, '\n', sizeof(buf));
+    const char* hdr =
+        "datetime,driver,course,short_name,best_lap_ms,optimal_ms,device_name,race_mode\r\n"
+        "2025-03-11 14:30:00,Driver,,OKC,1000,1000,,SPRINT\r\n"
+        "laps_ms\r\n"
+        "1000\r\n";
+    std::memcpy(buf, hdr, std::strlen(hdr));
+
+    ParsedHeader meta;
+    unsigned long readLaps[4];
+    size_t readCount = 0;
+    REQUIRE(dovex_header::parse(buf, sizeof(buf),
+                                meta, readLaps, 4, readCount));
+    CHECK(std::string(meta.course)   == "");        // empty middle field
+    CHECK(std::string(meta.shortName)== "OKC");     // not shifted
+    CHECK(std::string(meta.device)   == "");        // empty middle field
+    CHECK(std::string(meta.raceMode) == "SPRINT");  // not swallowed
 }
