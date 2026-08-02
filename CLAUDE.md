@@ -120,6 +120,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `camera_fsm.{h,cpp}` | Insta360 auto-record lifecycle FSM (8 states, all debounce/retry/timeout timing + tunables); board-portable core shared with the nRF54 "Falcon" target |
 | `insta360_protocol.{h,cpp}` | Insta360 X4 BLE frame builders/parsers (wake advert, remote scan response, ce82 buttons, ce82 GPS/RMC frame, ce81 serial parsing, ce81 `0x10` record-timer state parse) with golden-byte tests |
 | `sensoregg_protocol.{h,cpp}` | SensorEgg `PW-ADV` v1+v2 advertising payload parser (magic filter, int16 deci-°C decode with `0x8000`→NaN sentinel, flags, sequence, v2 aux thermistor + battery) + wrap-safe 1 s staleness rule + passive-scan tuning constants |
+| `sprint_select.{h,cpp}` | Sprint mode selection: newest-course-by-`date_created` ordering (sortable ISO strings) + the circuit-vs-sprint tiebreak decision table (`race_mode` pref; circuit yields to a sprint course created today) |
 | `wake_cause.{h,cpp}` | Boot wake-cause decode: RESETREAS + GPIO LATCH register snapshots → tach / button / USB / watchdog / soft-reset / cold boot (System OFF shutdown, subsystem 10) |
 | `gps_status_page.{h,cpp}` | GPS status boot page state machine: hold, 3 s auto-close after fix+timeValid, button skip, exit destination (menu vs race), idle → shutdown |
 | `sd_format_page.{h,cpp}` | SD format-confirm boot page state machine: Select held 3 s continuously → format (release restarts the full window; other buttons never confirm), 5 min idle → shutdown |
@@ -573,7 +574,28 @@ loop()  ~250 Hz
   speed >= 10 mph, jumps directly to race mode.
 - **Auto-idle** (`checkAutoIdle()`): if speed < 2 mph for 60 seconds
   continuously, writes DOVEX header, closes file, cleans up CourseManager,
-  and returns to main menu.
+  and returns to main menu. **Sprint mode is engine-aware**: idle counts
+  only while the tach reads 0 too (between-run queue waits keep the engine
+  running), and every completed run re-arms the 3-minute grace period.
+- **Sprint mode (plan 0002)**: tracks under `/TRACKS/SPRINT/` make the
+  session point-to-point. `trackDetectionLoop()` finds the nearest
+  manifest entry PER KIND; with both kinds in range the `race_mode`
+  setting breaks the tie via the host-tested `sprint_select` unit (the
+  event-day heuristic parses the sprint file once for its newest
+  `date_created`). The sprint path skips CourseManager/CourseDetector
+  entirely — `createSprintSession()` picks the newest course
+  (`sprint_select::newestCourseIndex`) and stands up the library's
+  `SprintTimer` (start + separate finish + optional S2/S3 lines; ~11.6 KB
+  heap, one instance). `sprintTimer != nullptr` IS sprint mode —
+  `courseManager` stays null for the session and every `activeTimer*()`
+  helper checks the sprint branch first (runs duck-type as laps; "laps"
+  verbiage kept everywhere by design). Run completion is captured on the
+  RUN-COUNT EDGE in `checkForNewLapData()` (identical consecutive run
+  times are normal; value-change dedupe would drop them). Between runs
+  the Current Lap / Pace pages show `*waiting*`
+  (`sprintModeIsActive() && !activeTimerRunActive()`); everything else
+  stays live. The DOVEX header gets `race_mode=SPRINT` and the sprint
+  course name.
 
 ### 10. Shutdown (System OFF)
 
@@ -982,7 +1004,7 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
 ### DOVEX Log (`.dovex` files) — New UI default
 
 ```
-datetime,driver_name,course_name,short_name,best_lap_ms,optimal_lap_ms,device_name
+datetime,driver_name,course_name,short_name,best_lap_ms,optimal_lap_ms,device_name,race_mode
 lap1_ms,lap2_ms,lap3_ms,...
 \n padding to byte 1024
 timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z,Temp1,Junction1,Temp2
@@ -991,9 +1013,12 @@ timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x
 
 - **Reserved header** (bytes 0–1023): Line 1 = session metadata, Line 2 =
   all lap times (comma-separated ms values), padded with `\n` to 1024 bytes.
-- **`device_name`** is the trailing metadata column (after `optimal_lap_ms`).
-  Appending it keeps old logs readable (parsed as empty) and lets older
-  readers ignore the extra column — backwards compatible by design.
+- **`device_name`** and **`race_mode`** are trailing metadata columns
+  (after `optimal_lap_ms`, in that order). Appending keeps old logs
+  readable (parsed as empty) and lets older readers ignore the extra
+  columns — backwards compatible by design. `race_mode` is `CIRCUIT` /
+  `SPRINT` (empty = circuit): a webapp loading helper — with `SPRINT`,
+  the laps line is a runs line. Nothing on-device reads it back.
 - **GPS data** (byte 1024+): CSV column header then streaming GPS rows.
 - **`Temp1` / `Junction1` / `Temp2`** (trailing columns): SensorEgg EGT +
   cold junction + v2 aux intake-air temp, all °C. Literal `nan` when the
@@ -1043,6 +1068,13 @@ immediately.
 
 Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 
+**Sprint track JSON** (`/TRACKS/SPRINT/*.json`) uses the same object
+format plus `"type": "sprint"` (track level — redundant with the folder,
+which is authoritative) and per-course `finish_a/b_lat/lng` (required for
+timing; a course without a finish line can't run) and `date_created` (a
+sortable ISO-8601 stamp, `YYYY-MM-DDTHH:MM`; the newest course is always
+the one loaded). Sector lines stay optional — zero, one, or two.
+
 ### Settings JSON (`/SETTINGS.json`)
 
 ```json
@@ -1051,6 +1083,7 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
   "bluetooth_pin": "7391",
   "camera_serial": "",
   "device_name": "ApexTurbo",
+  "race_mode": "circuit",
   "driver_name": "Driver",
   "lap_detection_distance": "7",
   "waypoint_detection_distance": "30",
@@ -1065,6 +1098,7 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | `camera_serial` | string | `""` (empty = unpaired) | Paired Insta360 X4's 6-char serial (auto-captured on pairing, or entered manually) |
 | `device_name` | string | Random racing words | Identifies the logging device (DOVEX header) |
 | `driver_name` | string | `"Driver"` | Logged in DOVEX header |
+| `race_mode` | string | `"circuit"` | Tiebreak pref when BOTH a circuit and a sprint track are in range: `circuit` yields only to a sprint course created today; `sprint` always prefers the sprint track. Never overrides single-kind detection |
 | `lap_detection_distance` | int | `7` | DovesLapTimer crossing threshold (meters) |
 | `waypoint_detection_distance` | int | `30` | WaypointLapTimer proximity zone (meters) |
 | `waypoint_speed` | int | `30` | Speed threshold (mph) for waypoint/detection |

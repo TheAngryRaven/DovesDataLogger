@@ -13,6 +13,34 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **Sprint mode (plan 0002) — point-to-point run timing for autocross /
+  hillclimb events** (backwards compatible — MINOR). Sprint tracks live in
+  the new `/TRACKS/SPRINT/` SD folder (circuit tracks are untouched); the
+  detected track's folder selects the mode automatically. A sprint course
+  is a start line + a separate `finish_*` line (+ up to two optional
+  sector lines) with a sortable `date_created` stamp — the newest course
+  is always loaded (autocross venues re-lay the course every event; the
+  host-tested `sprint_select` unit owns the ordering + tiebreak rules).
+  Runs are timed by the DovesLapTimer library's new `SprintTimer` (BETA):
+  re-crossing the start cancels + restarts a run, finish crossings with no
+  active run are ignored, DNF records nothing. Between runs the device
+  stays in race mode with every page live — Current Lap and Pace show
+  `*waiting*` — and auto-idle becomes engine-aware in sprint (a running
+  engine at the start line never ends the session; each completed run
+  re-arms the grace period). Run times land in the existing lap history /
+  DOVEX laps line ("laps" verbiage is kept everywhere by design).
+- **New `race_mode` setting** (`circuit` default / `sprint`): ONLY the
+  tiebreak when both a circuit and a sprint track are within detection
+  range — `circuit` yields to a sprint track whose newest course was
+  created today (event day); `sprint` always prefers the sprint track
+  (fixed layouts, e.g. a permanent rally course). Never overrides what is
+  actually detected.
+- **DOVEX `race_mode` trailing header column** (`CIRCUIT`/`SPRINT`, empty
+  = circuit; same backwards-compatible append mechanism as
+  `device_name`): a loading helper so the webapp knows to interpret the
+  laps line as runs. Also fixed the header parser to preserve empty
+  middle fields — the old strtok splitter let a blank column shift every
+  later column left.
 - **SensorEgg PW-ADV v2 support** (backwards compatible — MINOR). The
   passive observer now accepts the egg's 16-byte v2 payload alongside v1:
   a new aux intake-air thermistor (`Temp2`) and a real battery percent.
