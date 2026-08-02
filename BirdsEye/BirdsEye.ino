@@ -1438,11 +1438,30 @@ static void shutdownSystemOff() {
   delay(50);  // contact settle
   wdtPet();
 
-  // Wake sources: SENSE-LOW with pull-up on the tach (idle-high, pulse =
-  // falling) and all three buttons (active-low). Pull + SENSE config is
-  // retained in System OFF. P-numbers via the board variant's pin map.
-  nrf_gpio_cfg_sense_input(g_ADigitalPinMap[tachInputPin],
-                           NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
+  // The tach line's parked level depends on the pickup circuit's output
+  // stage (Schmitt inverter + optocoupler builds idle either way), and
+  // arming SENSE toward the idle level = DETECT satisfied = instant
+  // wake-reset (the battery-sleep reboot loop). Sample the parked line
+  // and arm the opposite level; the vote lives in the host-tested
+  // wake_cause unit. Engine is off on every shutdown path, so the line
+  // is quiet — the spread-out burst just rides through stray noise.
+  unsigned tachHighSamples = 0;
+  const unsigned kTachIdleSamples = 15;
+  for (unsigned i = 0; i < kTachIdleSamples; i++) {
+    if (digitalRead(tachInputPin) == HIGH) tachHighSamples++;
+    delay(2);
+  }
+  const bool tachIdleHigh =
+      wake_cause::tachIdleIsHigh(tachHighSamples, kTachIdleSamples);
+  wdtPet();
+
+  // Wake sources: the tach (pull-up, SENSE opposite its sampled idle
+  // level — a spark pulse is a transition away from idle) and all three
+  // buttons (active-low, SENSE-LOW). Pull + SENSE config is retained in
+  // System OFF. P-numbers via the board variant's pin map.
+  nrf_gpio_cfg_sense_input(
+      g_ADigitalPinMap[tachInputPin], NRF_GPIO_PIN_PULLUP,
+      tachIdleHigh ? NRF_GPIO_PIN_SENSE_LOW : NRF_GPIO_PIN_SENSE_HIGH);
   nrf_gpio_cfg_sense_input(g_ADigitalPinMap[btn1->pin],
                            NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
   nrf_gpio_cfg_sense_input(g_ADigitalPinMap[btn2->pin],

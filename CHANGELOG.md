@@ -32,6 +32,17 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   format does not fork by channel.
 
 ### Fixed
+- **Battery sleep instantly reboot-looped when the tach line idles low.**
+  System OFF entry hardcoded the tach wake as `SENSE-LOW` (assuming an
+  idle-high line), but the pickup circuit's Schmitt-inverter +
+  optocoupler output stage can idle low — DETECT was satisfied the
+  moment System OFF was entered and the device reset within a second
+  (USB-powered sleep was unaffected: a cable parks in the charging loop
+  and never enters System OFF). Runtime RPM counting can't expose the
+  polarity — a spark pulse yields one falling edge either way. Shutdown
+  now samples the parked tach line (15 reads over ~30 ms, majority vote
+  in the host-tested `wake_cause::tachIdleIsHigh()`) and arms SENSE for
+  the opposite level; ties/floating inputs keep the original SENSE-LOW.
 - **`isnan()` was compiled out of egg paths by `-Ofast`** (the platform
   builds sketches with `-ffinite-math-only`, which constant-folds
   `isnan()` to false). The Temp1 race page rendered `lroundf(NaN)`
