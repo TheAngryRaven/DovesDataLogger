@@ -74,7 +74,7 @@ jobs:
           # project.h static_asserts on it — keep all three workflows in sync.
           cli-compile-flags: |
             - --build-property
-            - compiler.cpp.extra_flags=-D${{ matrix.board.define }} -DSERIAL_BUFFER_SIZE=256 ${{ env.FEATURE_FLAGS }}
+            - compiler.cpp.extra_flags=-D${{ matrix.board.define }} -DSERIAL_BUFFER_SIZE=256 -DDOVES_DISABLE_DEBUG ${{ env.FEATURE_FLAGS }}
           enable-deltas-report: true
 
       # Hard flash-size gate. The XIAO nRF52840's app flash is shared

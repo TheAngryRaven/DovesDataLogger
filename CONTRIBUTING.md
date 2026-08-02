@@ -58,6 +58,13 @@ the flag automatically.
   update).
 - **arduino-cli**: add
   `--build-property "compiler.cpp.extra_flags=-DSERIAL_BUFFER_SIZE=256"`
+
+**Optional — `-DDOVES_DISABLE_DEBUG`** (CI/production builds pass it):
+compiles out the DovesLapTimer library's debug strings and print
+call-sites (~6-8 KB of flash that a hardware build never uses — no debug
+Stream is attached). Local debug builds should OMIT it if you want the
+library's serial debug output; the firmware's own `HAS_DEBUG` is
+unaffected either way. The OTA size gate in CI assumes it is set.
   (merge it into the same property if you're already passing variant
   defines — a second `--build-property` for the same key replaces the
   first).

@@ -212,6 +212,7 @@ Settings are stored in `/SETTINGS.json` on the SD card. The file is created auto
 |---|---|---|
 | `bluetooth_name` | BLE device name visible during pairing | Random (e.g. `DovesDataLogger-042`) |
 | `bluetooth_pin` | PIN displayed on device for webapp pairing | Random 4-digit |
+| `race_mode` | Circuit-vs-sprint tiebreak when both track kinds are within detection range (`sprint` always prefers the sprint track; `circuit` yields only on an event day) | `circuit` |
 | `driver_name` | Driver name logged in DOVEX session header | `Driver` |
 | `lap_detection_distance` | Crossing detection threshold in meters | `7` |
 | `waypoint_detection_distance` | Waypoint proximity zone in meters (Lap Anything) | `30` |

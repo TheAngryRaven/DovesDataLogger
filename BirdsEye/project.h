@@ -218,17 +218,38 @@ struct TrackLayout {
   double sector_3_b_lat = 0.00;
   double sector_3_b_lng = 0.00;
   bool hasSector3 = false;
+
+  // Sprint-only: the separate finish line (a run is start -> finish).
+  double finish_a_lat = 0.00;
+  double finish_a_lng = 0.00;
+  double finish_b_lat = 0.00;
+  double finish_b_lng = 0.00;
+  bool hasFinish = false;
+
+  // Sprint-only: sortable ISO-8601 creation stamp ("YYYY-MM-DDTHH:MM",
+  // any prefix). Drives newest-course selection (sprint_select unit) —
+  // autocross venues re-lay the course every event. Empty on circuit
+  // courses and legacy files.
+  char date_created[20] = "";
 };
 
 ///////////////////////////////////////////
 // TRACK MANIFEST (in-RAM index for proximity detection)
 // Built during buildTrackList() at boot. Each entry stores
-// the filename and a representative lat/lon from the first course.
+// the filename, a representative lat/lon from the first course, and
+// which folder (= track kind) the file came from.
 ///////////////////////////////////////////
+
+// Track kinds: which SD folder a manifest entry came from. Values mirror
+// the host-tested sprint_select::Kind enum.
+#define TRACK_KIND_CIRCUIT 0  // /TRACKS
+#define TRACK_KIND_SPRINT  1  // /TRACKS/SPRINT
+
 struct TrackManifestEntry {
   char filename[32];   // track filename without extension (matches locations[])
   double lat;          // first course's start_a_lat
   double lon;          // first course's start_a_lng
+  uint8_t kind;        // TRACK_KIND_CIRCUIT / TRACK_KIND_SPRINT
 };
 
 ///////////////////////////////////////////
@@ -239,6 +260,8 @@ struct TrackMetadata {
   char shortName[16];
   char defaultCourse[MAX_LAYOUT_LENGTH];
   float courseLengthFt[MAX_LAYOUTS];  // per-course lengthFt
+  bool isSprint;  // track-level "type": "sprint" (redundant with the folder,
+                  // cheap validation that a file landed where it claims)
 };
 
 #endif
