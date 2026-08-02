@@ -510,7 +510,7 @@ loop()  ~250 Hz
     calls `processTrackUpload()` / `processTrackDelete()` for thread-safe SD
     access. Both call `buildTrackList()` after success.
 - **Firmware OTA commands** (`FW*`, handled by `firmware_ota.ino` — see
-  subsystem 11): `FWBEGIN`/`FWPUT`/`FWDONE`/`FWAPPLY`/`FWABORT`. The BLE
+  subsystem 11): `FWBEGIN`/`FWPUT`/`FWDONE`/`FWAPPLY`/`FWABORT`/`FWDFU`. The BLE
   callback dispatches them via `fwIsCommand()`/`fwHandleCommand()` and routes
   raw image chunks to `fwReceiveChunk()` while `fwReceiving()`. The request
   characteristic max length was raised from 64 to **244** so ~240-byte image
@@ -689,6 +689,17 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
     file) or `FWERR:CRC|SIZE|WRITE`.
   - `FWAPPLY` → `FWSTAGE:<pct>` (0–100, repeatable) → `FWAPPLIED` then reset,
     or `FWERR:<reason>`. `FWABORT` cancels at any point.
+  - `FWDFU` → `FWDFU:OK`, then the device reboots into the Adafruit
+    bootloader's **UF2 mass-storage DFU** (GPREGRET `0x57` =
+    `DFU_MAGIC_UF2_RESET` — a stock bootloader feature, same handoff
+    register the OTA recovery flag uses). The device enumerates as a USB
+    drive; copying a `.uf2` onto it flashes the app region directly — **no
+    image-size cap, no staging region**. This is the "pre-update" escape
+    hatch (plan 0004): any unit carrying this command can always be
+    updated with just a USB cable regardless of future image growth.
+    Exiting UF2 mode without flashing boots the existing app unchanged.
+    Accepted from any FW state (an in-flight OTA is cleanly aborted
+    first); executed on the main loop like all FW commands.
   - Error tokens: `CRC`, `SIZE`, `WRITE`, `BATTERY`, `VARIANT`, `STATE`,
     `FLASH`.
 - **CRC**: CRC-32/IEEE-802.3 (zlib), reflected poly `0xEDB88320`, init/xor

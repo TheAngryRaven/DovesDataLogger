@@ -13,6 +13,15 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **`FWDFU` BLE command — reboot into UF2 mass-storage DFU** (backwards
+  compatible — MINOR). Sends `FWDFU:OK`, then reboots into the stock
+  Adafruit/Seeed bootloader's UF2 mode: the device shows up as a USB
+  drive and flashing is a drag-and-drop of a `.uf2` file — no web app, no
+  nRF Connect, **no OTA image-size cap** (the bootloader writes the app
+  region directly; no staging). This is the "pre-update" for the planned
+  SD-staged OTA rework (plan 0004): any device updated to a build
+  carrying `FWDFU` has a permanent, size-unlimited update path over a
+  USB cable. The bootloader itself is unchanged.
 - **Sprint mode (plan 0002) — point-to-point run timing for autocross /
   hillclimb events** (backwards compatible — MINOR). Sprint tracks live in
   the new `/TRACKS/SPRINT/` SD folder (circuit tracks are untouched); the
