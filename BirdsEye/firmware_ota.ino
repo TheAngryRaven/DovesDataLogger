@@ -65,6 +65,13 @@ extern "C" {
 // bootloader's magic.)
 #define FW_GPREGRET_OTA_DFU 0xA8
 
+// UF2 mass-storage DFU magic (DFU_MAGIC_UF2_RESET on the Adafruit/Seeed
+// bootloader): rebooting with this in GPREGRET brings the device up as a
+// USB drive — drop a .uf2 on it and the bootloader flashes it. This is the
+// FWDFU command's escape hatch: an update path with NO image-size cap and
+// no web/BLE streaming, usable on any sealed unit with a USB cable.
+#define FW_GPREGRET_UF2_DFU 0x57
+
 // Minimum battery to allow APPLY. A brownout mid-swap bricks until the
 // recovery net kicks in, so we gate on a healthy pack. Uses the cached
 // reading (lastBatteryVoltage) that the BATT command and main loop maintain.
@@ -127,6 +134,7 @@ static volatile bool fwPutPending = false;
 static volatile bool fwDonePending = false;
 static volatile bool fwApplyPending = false;
 static volatile bool fwAbortPending = false;
+static volatile bool fwDfuPending = false;
 
 // Receive bookkeeping.
 static uint32_t fwBytesReceived = 0;
@@ -211,7 +219,8 @@ bool fwIsCommand(const char* cmd) {
           strncmp(cmd, "FWPUT:", 6) == 0 ||
           strcmp(cmd, "FWDONE") == 0 ||
           strcmp(cmd, "FWAPPLY") == 0 ||
-          strcmp(cmd, "FWABORT") == 0);
+          strcmp(cmd, "FWABORT") == 0 ||
+          strcmp(cmd, "FWDFU") == 0);
 }
 
 bool fwReceiving() {
@@ -297,6 +306,15 @@ void fwHandleCommand(const char* cmd, uint16_t len) {
     // Defer the teardown to FW_OTA_LOOP(): fwReset() closes the staging file
     // and releases SD, which must not run in this BLE callback task.
     fwAbortPending = true;
+    return;
+  }
+
+  if (strcmp(cmd, "FWDFU") == 0) {
+    // Reboot into the bootloader's UF2 mass-storage DFU mode. Accepted from
+    // any state — entering DFU abandons everything anyway, and the deferred
+    // handler tears down cleanly first. Executed on the main loop like every
+    // other state-changing FW command.
+    fwDfuPending = true;
     return;
   }
 }
@@ -672,7 +690,51 @@ static void fwDoApply() {
 ///////////////////////////////////////////
 // Main-loop service
 ///////////////////////////////////////////
+///////////////////////////////////////////
+// FWDFU — reboot into UF2 mass-storage DFU (main loop only)
+///////////////////////////////////////////
+
+// The "pre-update" escape hatch (plan 0004): reboot into the Adafruit/Seeed
+// bootloader's UF2 mode, where the device enumerates as a USB drive and the
+// bootloader flashes whatever .uf2 is copied onto it. Unlike the FW* OTA
+// this path has NO image-size cap (the bootloader writes the app region
+// directly — no staging), so any device carrying this command can always be
+// updated with just a USB cable, whatever the future firmware size.
+//
+// The bootloader is UNCHANGED by this — 0x57 (DFU_MAGIC_UF2_RESET) is a
+// stock feature of the shipped Adafruit-based bootloader, the same GPREGRET
+// handoff the OTA recovery flag already relies on. If UF2 mode is exited
+// without flashing (unplug / reset), the existing app boots normally.
+void fwEnterUf2Dfu() {
+  debugln(F("FW: entering UF2 DFU (bootloader mass-storage mode)"));
+
+  // Acknowledge BEFORE the reboot kills the link — the client otherwise
+  // never learns whether the command landed.
+  fwNotify("FWDFU:OK");
+
+  // Abort any in-flight OTA cleanly: closes the staging file, releases SD.
+  fwReset();
+
+  // Let the notify make it over the air (mirrors the disconnect-reboot
+  // path's settling delay).
+  delay(200);
+
+  // Same restricted-peripheral access pattern as the apply path: the
+  // SoftDevice owns POWER while BLE is up, so GPREGRET goes through the
+  // supervisor calls.
+  sd_power_gpregret_clr(0, 0xFF);
+  sd_power_gpregret_set(0, FW_GPREGRET_UF2_DFU);
+  NVIC_SystemReset();
+}
+
 void FW_OTA_LOOP() {
+  // Deferred FWDFU: acknowledge, tear down, reboot into UF2 bootloader.
+  // Checked first — a DFU request outranks any in-flight OTA state.
+  if (fwDfuPending) {
+    fwDfuPending = false;
+    fwEnterUf2Dfu();  // does not return
+  }
+
   // Deferred FWABORT: tear everything down (closes staging file, frees SD).
   if (fwAbortPending) {
     fwAbortPending = false;

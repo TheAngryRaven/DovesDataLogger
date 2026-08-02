@@ -13,6 +13,15 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **`FWDFU` BLE command — reboot into UF2 mass-storage DFU** (backwards
+  compatible — MINOR). Sends `FWDFU:OK`, then reboots into the stock
+  Adafruit/Seeed bootloader's UF2 mode: the device shows up as a USB
+  drive and flashing is a drag-and-drop of a `.uf2` file — no web app, no
+  nRF Connect, **no OTA image-size cap** (the bootloader writes the app
+  region directly; no staging). This is the "pre-update" for the planned
+  SD-staged OTA rework (plan 0004): any device updated to a build
+  carrying `FWDFU` has a permanent, size-unlimited update path over a
+  USB cable. The bootloader itself is unchanged.
 - **SensorEgg PW-ADV v2 support** (backwards compatible — MINOR). The
   passive observer now accepts the egg's 16-byte v2 payload alongside v1:
   a new aux intake-air thermistor (`Temp2`) and a real battery percent.
