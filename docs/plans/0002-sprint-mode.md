@@ -1,6 +1,7 @@
 # Sprint Mode (Autocross / Point-to-Point) — Concept & Cross-Repo Roadmap
 
-> Status: **CONCEPT** — research + direction only, no implementation yet.
+> Status: **CONCEPT — design complete, implementation-ready.** All §7
+> questions are decided; no implementation yet.
 > Scope spans three repos; each phase lands on that repo's beta branch
 > (DovesLapTimer `BETA` → DovesDataLogger `BETA` → DovesDataViewer, last).
 
@@ -252,11 +253,14 @@ track the library's BETA branch in CI, so co-development is wired).
   per-run sector/DNF detail, if ever wanted, would be a new line pair
   after line 4 (old parsers never read past it), not a change to this
   marker. Extend `tests/dovex_header_test.cpp`.
-- **Display**: reuse existing page IDs with mode-conditional labels
-  (Lap → Run, Lap History → Run List, Best Lap → Best Run). The ordered
-  page-constant blocks with their `ENDURANCE_MODE` / `SENSOREGG`
-  reshuffles are the most fragile part of the UI — avoid new page
-  constants.
+- **Display** (decided): **keep the existing "Lap" verbiage everywhere** —
+  the AX drivers call them laps anyway, so no mode-conditional relabeling,
+  no new page constants, and the fragile ordered page-constant blocks
+  (`ENDURANCE_MODE` / `SENSOREGG` reshuffles) stay untouched. The only
+  sprint-aware display change: while no run is active (`WAITING`), the
+  **Current Lap and Pace pages show `*waiting*`** — every other page
+  (tach, GPS debug, best lap, lap list, …) works normally, so the driver
+  can watch RPM etc. between runs.
 
 ## 5. On-device course creator — the big ask
 
@@ -380,12 +384,15 @@ cutting a fresh beta branch. Nothing in the app anticipates modes today.
    run are ignored. DNF needs no special record — the run just never
    completes, and the engine eventually dying ends the session through
    the normal paths. Full state machine in Phase 1 (§3).
-5. **Between-run state** — best run, run history, and the log file must
-   survive the loop-back and the ~30–45 s queue wait (they will, as long
-   as sessions don't end between runs — see Phase 2 lifecycle).
-   ~~Cross-heat best?~~ **Decided: best run is per-session** (one
-   `.dovex` per heat); nothing spans the day — matches the existing
-   per-session `best_lap_ms` semantics exactly.
-6. **Replay page** — header `race_mode` column makes the replay results
-   page label runs vs laps correctly; anything more (per-run sectors) is
-   later.
+5. ~~Between-run state?~~ **Decided: the device simply stays in normal
+   race mode between runs.** All pages remain live (tach/RPM, GPS debug,
+   best lap, lap list, …); the Current Lap and Pace pages show
+   `*waiting*` while no run is active. Best run, run history, and the log
+   file naturally survive the loop-back and queue wait since the session
+   never ends between runs (Phase 2 lifecycle). Best run is per-session
+   (one `.dovex` per heat) — matches existing `best_lap_ms` semantics.
+6. ~~Runs-vs-laps wording?~~ **Decided: keep "laps" for now** — the AX
+   drivers themselves call them laps. Applies on-device (display, replay
+   page) and means the DOVEX `laps_ms` line needs no renaming; the
+   `race_mode` header column alone tells the webapp how to interpret the
+   data. Per-run sector detail, if ever wanted, is later.
