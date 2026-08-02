@@ -42,6 +42,7 @@
 #include "gps_config.h"
 #include <DovesLapTimer.h>
 #include <CourseManager.h>
+#include <SprintTimer.h>
 
 // SdFat configuration. SD_FAT_TYPE must be defined BEFORE SdFat.h is
 // processed for the first time, which means before any module header
@@ -93,6 +94,7 @@
 #include "sd_functions.h"
 #include "sensoregg.h"
 #include "settings.h"
+#include "sprint_select.h"
 #include "tachometer.h"
 #include "usb_msc.h"
 #include "wake_cause.h"
@@ -141,6 +143,13 @@ CourseManager* courseManager = nullptr;
 TrackConfig activeTrackConfig;
 bool trackDetected = false;
 int detectedTrackIndex = -1;
+
+// Sprint mode (plan 0002): point-to-point runs instead of laps. The mode
+// follows the detected track's folder — a non-null sprintTimer IS sprint
+// mode (courseManager stays null for the session, and vice versa).
+SprintTimer* sprintTimer = nullptr;
+char sprintCourseName[MAX_LAYOUT_LENGTH] = "";
+int sprintLastRunCount = 0;  // run-complete edge for lap history capture
 unsigned long idleStartTime = 0;
 bool idleTimerRunning = false;
 bool raceActive = false;
@@ -152,6 +161,10 @@ float settingWaypointDetectionDistance = 30.0;
 float settingWaypointSpeed = 30.0;
 char settingDriverName[32] = "Driver";
 char settingDeviceName[32] = "BirdsEye";
+// race_mode preference — ONLY the tiebreak when both a circuit and a
+// sprint track are within detection range (sprint_select::chooseKind).
+// It never overrides what is actually detected.
+bool settingRaceModePrefSprint = false;
 
 // Track manifest for proximity detection
 TrackManifestEntry trackManifest[MAX_LOCATIONS];
@@ -185,7 +198,7 @@ bool btn3Held = false;
 #define SD_CARD_LOGGING_ENABLED
 // MAX_LOCATIONS, MAX_LOCATION_LENGTH, MAX_LAYOUTS, MAX_LAYOUT_LENGTH
 // are now defined in project.h for use by project-wide structs
-#define FILEPATH_MAX 50        // "/TRACKS/" (8) + name (13) + ".json" (5) + null = 27, using 50 for safety
+#define FILEPATH_MAX 64        // "/TRACKS/SPRINT/" (15) + manifest name (31) + ".json" (5) + null = 52, using 64 for safety
 #include <string.h>
 
 ///////////////////////////////////////////
@@ -387,6 +400,26 @@ unsigned long lapHistory[lapHistoryMaxLaps];
 int lapHistoryCount = 0;
 
 void checkForNewLapData() {
+  // Sprint mode: capture on the RUN-COMPLETE EDGE (run count increment),
+  // not on value change — two identical run times in a row are normal at
+  // autocross and the value-change dedupe below would silently drop the
+  // second. Each completed run also re-arms the auto-idle grace period:
+  // the between-run queue wait always starts fresh (plan 0002).
+  if (sprintTimer != nullptr) {
+    int runs = sprintTimer->getRuns();
+    if (runs > sprintLastRunCount) {
+      sprintLastRunCount = runs;
+      raceSessionStartedAt = millis();
+      if (lapHistoryCount < lapHistoryMaxLaps) {
+        lastLap = sprintTimer->getLastRunTime();
+        lapHistory[lapHistoryCount] = lastLap;
+        lapHistoryCount++;
+        debugln(F("New run added to history..."));
+      }
+    }
+    return;
+  }
+
   // Read from active timer (CourseManager owns either the course timer
   // or the Lap Anything waypoint timer).
   unsigned long activeLapTime = 0;
@@ -467,6 +500,9 @@ bool sdFormatLastFailed = false;
 unsigned long lastCardFlush = 0;
 unsigned long lastLogCreateAttempt = 0;  // Throttles log-file open retries (ms)
 const char trackFolder[8] = "/TRACKS";
+// Sprint (point-to-point) tracks live in their own folder so everything
+// existing stays untouched — the folder IS the track kind (plan 0002).
+const char trackFolderSprint[15] = "/TRACKS/SPRINT";
 
 char locations[MAX_LOCATIONS][MAX_LOCATION_LENGTH]; // 13-char FAT16 name limit
 int numOfLocations = 0;
@@ -739,9 +775,9 @@ void setup() {
   sdTrackSuccess = buildTrackList();
   if(sdSetupSuccess && sdTrackSuccess) {
     debugln(F("Obtained Track List"));
-    for (int i = 0; i < numOfLocations; i++) {
+    for (int i = 0; i < trackManifestCount; i++) {
       char filepath[FILEPATH_MAX];
-      makeFullTrackPath(locations[i], filepath);
+      makeFullTrackPath(trackManifest[i].filename, filepath, trackManifest[i].kind);
       debugln(filepath);
     }
   }
@@ -781,6 +817,9 @@ void setup() {
     if (getSetting("device_name", buf, sizeof(buf))) {
       strncpy(settingDeviceName, buf, sizeof(settingDeviceName) - 1);
       settingDeviceName[sizeof(settingDeviceName) - 1] = '\0';
+    }
+    if (getSetting("race_mode", buf, sizeof(buf))) {
+      settingRaceModePrefSprint = (strcasecmp(buf, "sprint") == 0);
     }
     crossingThresholdMeters = settingLapDetectionDistance;
     debug(F("Settings loaded: lap_dist="));
@@ -861,6 +900,29 @@ void setup() {
 ///////////////////////////////////////////
 
 /**
+ * @brief Sprint timer accessor — non-null exactly while a sprint session's
+ * track has been detected (mode follows the track folder, plan 0002).
+ */
+SprintTimer* getActiveTimerSprint() {
+  return sprintTimer;
+}
+
+bool sprintModeIsActive() {
+  return sprintTimer != nullptr;
+}
+
+/**
+ * @brief True while timing is "live": a sprint run in progress, or (in
+ * circuit mode) the race started. Drives the sprint pages' *waiting*
+ * state — between runs the device stays in race mode with all pages up,
+ * but Current Lap / Pace show *waiting* instead of a dead 0:00.
+ */
+bool activeTimerRunActive() {
+  if (sprintTimer != nullptr) return sprintTimer->isRunActive();
+  return activeTimerRaceStarted();
+}
+
+/**
  * @brief Get the active timer pointer for display/lap-history reads.
  * Returns whichever timer is active: course timer, lap anything, or nullptr.
  */
@@ -878,6 +940,7 @@ WaypointLapTimer* getActiveTimerWLT() {
 
 // Unified getter helpers for display pages
 bool activeTimerRaceStarted() {
+  if (sprintTimer != nullptr) return sprintTimer->getRaceStarted();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getRaceStarted();
   WaypointLapTimer* wlt = getActiveTimerWLT();
@@ -886,6 +949,7 @@ bool activeTimerRaceStarted() {
 }
 
 bool activeTimerCrossing() {
+  if (sprintTimer != nullptr) return sprintTimer->getCrossing();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getCrossing();
   WaypointLapTimer* wlt = getActiveTimerWLT();
@@ -894,6 +958,7 @@ bool activeTimerCrossing() {
 }
 
 int activeTimerLaps() {
+  if (sprintTimer != nullptr) return sprintTimer->getRuns();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getLaps();
   WaypointLapTimer* wlt = getActiveTimerWLT();
@@ -902,6 +967,7 @@ int activeTimerLaps() {
 }
 
 unsigned long activeTimerCurrentLapTime() {
+  if (sprintTimer != nullptr) return sprintTimer->getCurrentRunTime();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getCurrentLapTime();
   WaypointLapTimer* wlt = getActiveTimerWLT();
@@ -910,6 +976,7 @@ unsigned long activeTimerCurrentLapTime() {
 }
 
 unsigned long activeTimerLastLapTime() {
+  if (sprintTimer != nullptr) return sprintTimer->getLastRunTime();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getLastLapTime();
   WaypointLapTimer* wlt = getActiveTimerWLT();
@@ -918,6 +985,7 @@ unsigned long activeTimerLastLapTime() {
 }
 
 unsigned long activeTimerBestLapTime() {
+  if (sprintTimer != nullptr) return sprintTimer->getBestRunTime();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getBestLapTime();
   WaypointLapTimer* wlt = getActiveTimerWLT();
@@ -926,6 +994,7 @@ unsigned long activeTimerBestLapTime() {
 }
 
 int activeTimerBestLapNumber() {
+  if (sprintTimer != nullptr) return sprintTimer->getBestRunNumber();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getBestLapNumber();
   WaypointLapTimer* wlt = getActiveTimerWLT();
@@ -934,6 +1003,7 @@ int activeTimerBestLapNumber() {
 }
 
 float activeTimerPaceDifference() {
+  if (sprintTimer != nullptr) return sprintTimer->getPaceDifference();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getPaceDifference();
   WaypointLapTimer* wlt = getActiveTimerWLT();
@@ -942,6 +1012,7 @@ float activeTimerPaceDifference() {
 }
 
 float activeTimerTotalDistance() {
+  if (sprintTimer != nullptr) return sprintTimer->getTotalDistanceTraveled();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getTotalDistanceTraveled();
   WaypointLapTimer* wlt = getActiveTimerWLT();
@@ -950,20 +1021,83 @@ float activeTimerTotalDistance() {
 }
 
 unsigned long activeTimerOptimalLapTime() {
+  if (sprintTimer != nullptr) return sprintTimer->getOptimalLapTime();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getOptimalLapTime();
   return 0;
 }
 
 bool activeTimerSectorsConfigured() {
+  if (sprintTimer != nullptr) return sprintTimer->areSectorLinesConfigured();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->areSectorLinesConfigured();
   return false;
 }
 
 /**
+ * @brief Build the sprint session from the just-parsed track file: pick the
+ * newest course by date_created (autocross venues re-lay the course every
+ * event — see the host-tested sprint_select unit) and stand up a SprintTimer
+ * with its start/finish (+ optional split) lines. Returns false when no
+ * usable course exists (no finish line, degenerate lines).
+ */
+bool createSprintSession() {
+  const char* dates[MAX_LAYOUTS];
+  for (int i = 0; i < numOfTracks; i++) dates[i] = trackLayouts[i].date_created;
+  int idx = sprint_select::newestCourseIndex(dates, numOfTracks);
+  if (idx < 0) return false;
+
+  TrackLayout& L = trackLayouts[idx];
+  if (!L.hasFinish) {
+    debugln(F("Sprint course has no finish line — cannot time runs"));
+    return false;
+  }
+
+  // An RPM-wake may have created a Lap Anything CourseManager before
+  // detection ran — sprint replaces it (mirror of the circuit path).
+  if (courseManager != nullptr) {
+    delete courseManager;
+    courseManager = nullptr;
+  }
+  if (sprintTimer != nullptr) {
+    delete sprintTimer;
+    sprintTimer = nullptr;
+  }
+
+  sprintTimer = new SprintTimer(crossingThresholdMeters);
+  sprintTimer->setStartLine(L.start_a_lat, L.start_a_lng, L.start_b_lat, L.start_b_lng);
+  sprintTimer->setFinishLine(L.finish_a_lat, L.finish_a_lng, L.finish_b_lat, L.finish_b_lng);
+  if (L.hasSector2) {
+    sprintTimer->setSector2Line(L.sector_2_a_lat, L.sector_2_a_lng, L.sector_2_b_lat, L.sector_2_b_lng);
+  }
+  if (L.hasSector3) {
+    sprintTimer->setSector3Line(L.sector_3_a_lat, L.sector_3_a_lng, L.sector_3_b_lat, L.sector_3_b_lng);
+  }
+  sprintTimer->forceLinearInterpolation();
+
+  if (!sprintTimer->isStartLineConfigured() || !sprintTimer->isFinishLineConfigured()) {
+    debugln(F("Sprint course lines invalid — cannot time runs"));
+    delete sprintTimer;
+    sprintTimer = nullptr;
+    return false;
+  }
+
+  strncpy(sprintCourseName, tracks[idx], sizeof(sprintCourseName) - 1);
+  sprintCourseName[sizeof(sprintCourseName) - 1] = '\0';
+  sprintLastRunCount = 0;
+
+  debug(F("Sprint session ready — course: "));
+  debug(sprintCourseName);
+  debug(F(" (date_created: "));
+  debug(L.date_created[0] ? L.date_created : "n/a");
+  debugln(F(")"));
+  return true;
+}
+
+/**
  * @brief Scan track manifest for closest match to current GPS position
- * Creates CourseManager when a match is found within 5 miles
+ * Creates CourseManager (circuit) or SprintTimer (sprint) when a match is
+ * found within 5 miles — mode follows the matched track's folder.
  */
 void trackDetectionLoop() {
   if (trackDetected || !gpsData.fix || trackManifestCount == 0) return;
@@ -978,24 +1112,59 @@ void trackDetectionLoop() {
   if (millis() - lastManifestScan < 1000) return;
   lastManifestScan = millis();
 
-  double bestDist = 999999.0;
-  int bestIndex = -1;
+  // Nearest entry PER KIND — mode follows the detected track's folder,
+  // with the race_mode preference as the both-kinds-in-range tiebreak
+  // (host-tested sprint_select unit; plan 0002 §7 Q1).
+  double bestDistCircuit = 999999.0, bestDistSprint = 999999.0;
+  int bestCircuit = -1, bestSprint = -1;
 
   for (int i = 0; i < trackManifestCount; i++) {
     double dist = haversineDistanceMiles(
       gpsData.latitudeDegrees, gpsData.longitudeDegrees,
       trackManifest[i].lat, trackManifest[i].lon
     );
-    if (dist < bestDist) {
-      bestDist = dist;
-      bestIndex = i;
+    if (trackManifest[i].kind == TRACK_KIND_SPRINT) {
+      if (dist < bestDistSprint) { bestDistSprint = dist; bestSprint = i; }
+    } else {
+      if (dist < bestDistCircuit) { bestDistCircuit = dist; bestCircuit = i; }
     }
   }
 
-  if (bestIndex >= 0 && bestDist <= TRACK_DETECT_RADIUS_MILES) {
+  bool circuitInRange = bestCircuit >= 0 && bestDistCircuit <= TRACK_DETECT_RADIUS_MILES;
+  bool sprintInRange  = bestSprint  >= 0 && bestDistSprint  <= TRACK_DETECT_RADIUS_MILES;
+  if (!circuitInRange && !sprintInRange) return;
+
+  // Event-day heuristic: only needed when both kinds are near and the
+  // preference is circuit — the sprint file is parsed once to learn its
+  // newest course's date_created ("laid out today" = event day = sprint).
+  bool sprintCourseToday = false;
+  if (circuitInRange && sprintInRange && !settingRaceModePrefSprint) {
+    char filepath[FILEPATH_MAX];
+    makeFullTrackPath(trackManifest[bestSprint].filename, filepath, TRACK_KIND_SPRINT);
+    if (parseTrackFile(filepath) == PARSE_STATUS_GOOD && numOfTracks > 0) {
+      const char* dates[MAX_LAYOUTS];
+      for (int i = 0; i < numOfTracks; i++) dates[i] = trackLayouts[i].date_created;
+      int newest = sprint_select::newestCourseIndex(dates, numOfTracks);
+      char today[11];
+      snprintf(today, sizeof(today), "20%02d-%02d-%02d",
+               gpsData.year, gpsData.month, gpsData.day);
+      sprintCourseToday = newest >= 0 &&
+          sprint_select::isSameDay(trackLayouts[newest].date_created, today);
+    }
+  }
+
+  sprint_select::Kind useKind = sprint_select::chooseKind(
+      circuitInRange, sprintInRange,
+      settingRaceModePrefSprint ? sprint_select::kPrefSprint : sprint_select::kPrefCircuit,
+      sprintCourseToday);
+
+  int bestIndex = (useKind == sprint_select::kSprint) ? bestSprint : bestCircuit;
+  double bestDist = (useKind == sprint_select::kSprint) ? bestDistSprint : bestDistCircuit;
+
+  {
     debug(F("Track detected: "));
     debug(trackManifest[bestIndex].filename);
-    debug(F(" ("));
+    debug(useKind == sprint_select::kSprint ? F(" [sprint] (") : F(" [circuit] ("));
     debug(bestDist, 2);
     debugln(F(" miles)"));
 
@@ -1006,10 +1175,16 @@ void trackDetectionLoop() {
     // 8.3 limit), causing strcmp mismatches that silently skip real tracks.
     {
       char filepath[FILEPATH_MAX];
-      makeFullTrackPath(trackManifest[bestIndex].filename, filepath);
+      makeFullTrackPath(trackManifest[bestIndex].filename, filepath, trackManifest[bestIndex].kind);
       int parseStatus = parseTrackFile(filepath);
 
-      if (parseStatus == PARSE_STATUS_GOOD && numOfTracks > 0) {
+      if (useKind == sprint_select::kSprint) {
+        // Sprint path: no CourseManager, no CourseDetector — select the
+        // newest course by date_created and time point-to-point runs.
+        if (parseStatus == PARSE_STATUS_GOOD && numOfTracks > 0) {
+          trackDetected = createSprintSession();
+        }
+      } else if (parseStatus == PARSE_STATUS_GOOD && numOfTracks > 0) {
         // Build TrackConfig from parsed data
         activeTrackConfig.longName = activeTrackMetadata.longName[0] ? activeTrackMetadata.longName : trackManifest[bestIndex].filename;
         activeTrackConfig.shortName = activeTrackMetadata.shortName[0] ? activeTrackMetadata.shortName : trackManifest[bestIndex].filename;
@@ -1106,6 +1281,13 @@ void endRaceSession() {
     delete courseManager;
     courseManager = nullptr;
   }
+  // Clean up sprint session (mode follows detection; next session re-detects)
+  if (sprintTimer != nullptr) {
+    delete sprintTimer;
+    sprintTimer = nullptr;
+  }
+  sprintCourseName[0] = '\0';
+  sprintLastRunCount = 0;
   trackDetected = false;
   detectedTrackIndex = -1;
   raceActive = false;
@@ -1127,6 +1309,7 @@ void endRaceSession() {
  */
 void createLapAnythingCourseManager() {
   if (courseManager != nullptr) return;  // Already exists
+  if (sprintTimer != nullptr) return;    // Sprint session owns timing
   activeTrackConfig.longName = "Unknown";
   activeTrackConfig.shortName = "";
   activeTrackConfig.courseCount = 0;
@@ -1162,6 +1345,17 @@ void checkAutoIdle() {
   // track session) and GPS needs time to reacquire. Without this, the
   // 60s idle timer kills the session before the driver even moves.
   if (millis() - raceSessionStartedAt < 180000UL) return;
+
+  // Sprint mode: between-run queue waits are normal (engine running,
+  // stationary, ~30-45 s — sometimes longer on grid delays). Idle only
+  // counts while the engine is off too, so a running engine at the start
+  // line can never end the session (plan 0002: safety margin, and each
+  // completed run re-arms the grace period via checkForNewLapData()).
+  if (sprintTimer != nullptr && tachLastReported > 0) {
+    idleTimerRunning = false;
+    idleStartTime = 0;
+    return;
+  }
 
   if (gps_speed_mph >= 2.0) {
     idleTimerRunning = false;
@@ -1348,7 +1542,10 @@ void writeDovexHeader() {
 
   const char* courseName = "Lap Anything";
   const char* shortName  = "";
-  if (courseManager != nullptr) {
+  if (sprintTimer != nullptr) {
+    courseName = sprintCourseName[0] ? sprintCourseName : "Sprint";
+    shortName = activeTrackMetadata.shortName;  // from the session's parse
+  } else if (courseManager != nullptr) {
     const char* cn = courseManager->getActiveCourseName();
     if (cn) courseName = cn;
     shortName = courseManager->getShortName();
@@ -1362,6 +1559,8 @@ void writeDovexHeader() {
       activeTimerBestLapTime(),
       activeTimerOptimalLapTime(),
       settingDeviceName,
+      // Webapp loading helper: with SPRINT the laps line is a runs line.
+      sprintTimer != nullptr ? "SPRINT" : "CIRCUIT",
   };
 
   static char headerBuf[dovex_header::kHeaderSize];

@@ -25,6 +25,7 @@
 
 #include <CourseManager.h>
 #include <DovesLapTimer.h>
+#include <SprintTimer.h>
 
 #include "SdFat.h"
 
@@ -53,6 +54,10 @@ float activeTimerPaceDifference();
 float activeTimerTotalDistance();
 unsigned long activeTimerOptimalLapTime();
 bool activeTimerSectorsConfigured();
+SprintTimer* getActiveTimerSprint();
+bool sprintModeIsActive();
+bool activeTimerRunActive();
+bool createSprintSession();
 void trackDetectionLoop();
 void endRaceSession();
 void createLapAnythingCourseManager();
@@ -158,7 +163,8 @@ bool parseDovexHeader(const char* filename);
 bool acquireSDAccess(int mode);
 void releaseSDAccess(int mode);
 void forceReleaseSDAccess();
-void makeFullTrackPath(const char* trackName, char* filepath);
+void makeFullTrackPath(const char* trackName, char* filepath, uint8_t kind);
+bool scanTrackDir(const char* folder, uint8_t kind);
 bool sdSetSpiClock(uint32_t maxSck);
 void sdSetTransferSpeed(bool fast);
 bool SD_SETUP();

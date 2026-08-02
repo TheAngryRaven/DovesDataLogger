@@ -469,7 +469,9 @@ void GPS_LOOP() {
   if (gpsDataFresh) {
     gpsDataFresh = false;
 
-    // Feed fresh GPS data into the active course/timer
+    // Feed fresh GPS data into the active course/timer. courseManager and
+    // sprintTimer are mutually exclusive by construction (mode follows the
+    // detected track's folder) — exactly one branch runs per session.
     if (gpsData.fix && courseManager != nullptr) {
       double ltLat = gpsData.latitudeDegrees;
       double ltLng = gpsData.longitudeDegrees;
@@ -478,6 +480,10 @@ void GPS_LOOP() {
 
       courseManager->updateCurrentTime(getGpsTimeInMilliseconds());
       courseManager->loop(ltLat, ltLng, ltAlt, ltSpeed);
+    } else if (gpsData.fix && sprintTimer != nullptr) {
+      sprintTimer->updateCurrentTime(getGpsTimeInMilliseconds());
+      sprintTimer->loop(gpsData.latitudeDegrees, gpsData.longitudeDegrees,
+                        gpsData.altitude, gpsData.speed);
     }
 
   #ifdef SD_CARD_LOGGING_ENABLED

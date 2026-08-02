@@ -132,10 +132,13 @@ set(SIM_CORE_SOURCES
   ${BIRDSEYE_DIR}/sd_access_policy.cpp
   ${BIRDSEYE_DIR}/sd_format_page.cpp
   ${BIRDSEYE_DIR}/sensoregg_protocol.cpp
+  ${BIRDSEYE_DIR}/sprint_select.cpp
   ${BIRDSEYE_DIR}/tach_filter.cpp
   ${BIRDSEYE_DIR}/wake_cause.cpp
   # Real DovesLapTimer sources — the lap/sector timing IS the demo.
   ${doveslaptimer_SOURCE_DIR}/src/DovesLapTimer.cpp
+  ${doveslaptimer_SOURCE_DIR}/src/CrossingEngine.cpp
+  ${doveslaptimer_SOURCE_DIR}/src/SprintTimer.cpp
   ${doveslaptimer_SOURCE_DIR}/src/WaypointLapTimer.cpp
   ${doveslaptimer_SOURCE_DIR}/src/CourseDetector.cpp
   ${doveslaptimer_SOURCE_DIR}/src/CourseManager.cpp

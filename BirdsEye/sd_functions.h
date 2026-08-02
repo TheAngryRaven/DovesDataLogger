@@ -49,9 +49,15 @@ void releaseSDAccess(int mode);
 // error path forgets to release.
 void forceReleaseSDAccess();
 
-// Build "/TRACKS/<trackName>.json" into the caller's filepath buffer.
-// Caller MUST provide at least FILEPATH_MAX bytes.
-void makeFullTrackPath(const char* trackName, char* filepath);
+// Build "/TRACKS/<trackName>.json" (TRACK_KIND_CIRCUIT) or
+// "/TRACKS/SPRINT/<trackName>.json" (TRACK_KIND_SPRINT) into the caller's
+// filepath buffer. Caller MUST provide at least FILEPATH_MAX bytes.
+void makeFullTrackPath(const char* trackName, char* filepath, uint8_t kind);
+
+// Walk one track folder, appending entries to locations[] and
+// trackManifest[] (shared caps) with the given TRACK_KIND_*. Caller must
+// hold the SD mutex. Returns false only if the directory can't be opened.
+bool scanTrackDir(const char* folder, uint8_t kind);
 
 // Initialize the SD card (with EMI-tolerant retries). Returns true
 // on success. Populates the global SD object. On failure, probes the

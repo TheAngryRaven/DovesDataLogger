@@ -105,6 +105,7 @@ static void ensureDefaultSettings() {
     { "waypoint_detection_distance", "30" },
     { "waypoint_speed", "30" },
     { "camera_serial", "" },  // empty = no Insta360 paired
+    { "race_mode", "circuit" },  // tiebreak pref when circuit AND sprint tracks are in range
   };
 
   char buf[48];
