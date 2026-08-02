@@ -24,6 +24,9 @@
 //   <raw binary chunks>
 //   FWDONE                     -> FWOK:<crc32hex> | FWERR:CRC|SIZE|WRITE
 //   FWAPPLY                    -> FWSTAGE:<pct>* , FWAPPLIED | FWERR:...
+//   FWDFU                      -> FWDFU:OK, then reboot into the bootloader's
+//                                 UF2 mass-storage mode (drag-and-drop .uf2
+//                                 flashing over USB; no size cap, no staging)
 //
 // <variant> is the target board variant ("sense" / "nonsense"), which the web
 // app derives authoritatively from the device's own DIS Model Number. It is
