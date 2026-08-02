@@ -39,12 +39,21 @@ devices are unaffected by `ensureDefaultSettings()` auto-populating the keys.
 - Settings rows in `ensureDefaultSettings()` (`settings.ino:102-108`),
   loaded into globals in the settings block (`BirdsEye.ino:765-795`),
   applied on boot like every other setting (webapp `SSET` + auto-reboot).
-- Apply the divisor **once, at the period→RPM conversion in `TACH_LOOP()`**,
-  *before* the Kalman filter — the filter's Q (800 RPM², tuned for kart
-  inertia) and R are in true-RPM units, so feeding it corrected measurements
-  keeps the tuning meaningful. Every consumer (display 3 Hz, DOVEX rows
-  25 Hz, camera FSM, auto-race check) reads `tachLastReported`, so one
-  conversion point corrects them all.
+- **Single source of truth (decided)**: true RPM is computed **once** — at
+  the period→RPM conversion in `TACH_LOOP()`, *before* the Kalman filter —
+  and published as the one canonical value (`tachLastReported`). **No
+  consumer ever re-applies or re-derives the correction**: display (3 Hz),
+  DOVEX rows (25 Hz), camera FSM inputs, and the auto-race check all read
+  the same already-corrected number. Any future consumer must read it too,
+  never the raw pulse rate. While implementing, audit that nothing else
+  computes RPM from pulse periods independently.
+- **Kalman note**: the correction must sit *before* the filter because the
+  filter's tuning is in true-RPM units — Q = 800 RPM² models kart engine
+  inertia and R_BASE = 2500 RPM² models measurement noise
+  (`tach_filter.h`). Feeding pulse-RPM and dividing afterward would make a
+  2-cyl engine's process/measurement noise effectively half-scale, i.e.
+  differently-filtered behavior per engine type. Correct-then-filter keeps
+  one tuning valid for everyone.
 - The divisor math itself belongs in the host-tested `tach_filter` pure unit
   (or a tiny sibling) with tests per the repo convention.
 

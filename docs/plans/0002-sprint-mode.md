@@ -35,7 +35,7 @@ tracks stored separately so everything existing stays backwards compatible.
 
 | Aspect | Circuit (today, unchanged) | Sprint (new) |
 |---|---|---|
-| Mode select | default | **automatic — mode follows the detected track** (decided): if the nearest manifest match came from `/TRACKS/SPRINT/`, the device knocks into sprint mode. **No `race_mode` device setting** — an earlier draft had one; dropped. |
+| Mode select | default | **automatic — mode follows the detected track** (decided): if the nearest manifest match came from `/TRACKS/SPRINT/`, the device knocks into sprint mode. A `race_mode` **preference setting** (`circuit` default / `sprint`, webapp `SSET`) exists only as the **tiebreak when both kinds are in range** — see §7 Q1 for the decided rules (it also serves fixed sprint courses, e.g. a permanent rally layout, where the course-of-the-day heuristic never fires). |
 | Track storage | `/TRACKS/*.json` | `/TRACKS/SPRINT/*.json` (new folder; circuit tracks stay put) |
 | Track detection | haversine proximity vs manifest | same mechanism, scanning sprint manifest entries |
 | Course detection | `CourseDetector` (length-based) → Lap Anything fallback | **none** — **date-based selection** (decided): load only the most-recently-created course by `date_created`. One course in RAM. |
@@ -58,17 +58,23 @@ disposable, dated layouts of a persistent venue (track):
 
 - New sprint-course JSON field: **`date_created`** — stamped automatically by
   whatever created the course (webapp or the on-device creator, §5); the user
-  never edits it. *Recommendation: store a full sortable ISO-8601 timestamp
-  (`YYYY-MM-DDTHH:MM`), not `month/day/year` — autocross venues re-lay
-  courses same-day (morning/afternoon configs), and a date-only value can't
-  order those; lexicographic max = newest also falls out for free.*
+  never edits it. **Decided: full sortable ISO-8601 timestamp
+  (`YYYY-MM-DDTHH:MM`)** — autocross venues re-lay courses same-day
+  (morning/afternoon configs) and a date-only value can't order those;
+  lexicographic max = newest falls out for free. Device-generated file/course
+  name suffixes use the same timestamp, killing same-day collisions too.
 - Loading a sprint track loads **only the newest course** by `date_created`
   into memory — no CourseDetector, no default-course setting, one course, tiny
   RAM footprint. This may evolve (this user races weekly and will be a
   valuable data source), but v1 is deliberately simple.
-- Old courses accumulate in the track file forever — see the open question on
-  pruning (§7): the on-device JSON parse buffer is 4096 bytes, so a weekly
-  venue overflows it within months if nothing trims history.
+- Old courses accumulate in the track file — the on-device JSON parse buffer
+  is 4096 bytes, so a weekly venue overflows it within months. **Decided:
+  webapp-side prune on sync** — when the app syncs a sprint track it pulls
+  the full file (archiving all courses app-side), then rewrites the device
+  copy keeping only the **most recent single day of courses**
+  (sync → delete → push new file). v1 may ship *before* this lands, with a
+  loud documented disclaimer that un-synced devices will eventually hit the
+  course cap.
 
 ### Real-world cadence (user report, 2026-08)
 
@@ -160,12 +166,14 @@ track the library's BETA branch in CI, so co-development is wired).
 
 ## 4. Phase 2 — DovesDataLogger (`BETA`): consume it
 
-- **Mode-by-folder detection** (replaces the earlier `race_mode` setting
-  idea): `trackDetectionLoop()` picks the nearest manifest entry as today;
-  if that entry's `kind` says sprint, the session runs in sprint mode —
-  build the sprint timer path instead of `CourseManager`+`CourseDetector`,
-  and select the course by newest `date_created` (§2). Open question: a
-  venue with both kinds in range needs a tiebreak (§7).
+- **Mode-by-folder detection**: `trackDetectionLoop()` picks the nearest
+  manifest entry as today; if that entry's `kind` says sprint, the session
+  runs in sprint mode — build the sprint timer path instead of
+  `CourseManager`+`CourseDetector`, and select the course by newest
+  `date_created` (§2). When both kinds are in range, the `race_mode`
+  **preference setting** breaks the tie (rules in §7 Q1): default row in
+  `ensureDefaultSettings()` (`settings.ino:102-108`), global loaded at
+  `BirdsEye.ino:765-795`, values `circuit` (default) / `sprint`.
 - **RPM accuracy settings** (`spark_mode` + `cylinder_count`) are needed by
   this same user group (autocross karts, possibly a 2-cyl monster) but are
   independent of sprint mode — split out as **plan 0003**.
@@ -267,15 +275,16 @@ New main-menu option **"Create Course"**:
 - **GPS gating**: capture requires a fix, and the auto-generated names
   require GPS date/time — same `timeValid` gate as log-file creation. The
   point screen should show live `h_acc` and warn/refuse on poor accuracy.
-- **Point capture should average, not snapshot**: a single 25 Hz fix is
-  1–2 m noisy; standing at a cone for ~3–5 s and averaging fixes costs
-  nothing (the user is stationary anyway) and materially improves line
-  placement. Show a "hold still… n/N" progress.
-- **Name collisions**: `NEWTRACK_{date}` / `NEWCOURSE_{date}` collide on a
-  second same-day creation, and the track-browser display truncates names
-  to 13 chars (`MAX_LOCATION_LENGTH`) so date-suffixed names can also look
-  identical on screen. Recommendation: include time in the generated suffix
-  (fits the `date_created` ISO recommendation in §2) or append a counter.
+- **Point capture averages, not snapshots** (decided): "Save current pos"
+  runs a **3 s hold** — up to ~75 fixes at 25 Hz — averaged into the point,
+  with a "hold still… n/N" progress and live `h_acc` (warn/refuse on poor
+  accuracy). The user is standing at a cone anyway; this is free precision.
+- **Name collisions** (resolved by §2's ISO decision): generated
+  `NEWTRACK_`/`NEWCOURSE_` suffixes carry the same date+time stamp as
+  `date_created`, so a second same-day creation can't collide. Note the
+  track-browser display truncates to 13 chars (`MAX_LOCATION_LENGTH`), so
+  on-screen disambiguation may still need the time portion favored over the
+  literal `NEWTRACK_` prefix.
 - **This is the firmware's first track-JSON writer**: today the device only
   reads track files (settings JSON read-modify-write is the closest
   precedent, `settings.ino`). Appending a course means parse-modify-write of
@@ -293,13 +302,20 @@ The old BETA branch was merged (PR #373) and deleted — this phase starts by
 cutting a fresh beta branch. Nothing in the app anticipates modes today.
 
 - **Track/course editor**: a **circuit/sprint toggle on the track & course
-  editor** (decided — this replaced the device-setting idea). Sprint
+  editor** (decided — the primary mode signal; the `race_mode` device
+  setting is only the in-range tiebreak, §7 Q1). Sprint
   courses get a finish line + optional splits; `date_created` is stamped
   automatically on course creation and is **not user-editable**. The
   editor also needs rename support for device-generated
   `NEWTRACK_*`/`NEWCOURSE_*` names.
-- (The `boolean`/`enum` settings control type is no longer needed for
-  sprint, but plan 0003's `spark_mode` setting will want it.)
+- **Sync-prune for sprint tracks** (decided, may land after v1 with a loud
+  disclaimer): syncing a sprint track archives all courses app-side, then
+  rewrites the device file keeping only the most recent single day of
+  courses (sync → delete → push new file). See §2.
+- **Settings control type**: the `race_mode` preference (§2) and plan
+  0003's `spark_mode` both want a proper `boolean`/`enum` control in
+  `deviceSettingsSchema.ts` + `DeviceSettingsTab.tsx` (today only
+  string/number text inputs exist).
 - **Track model**: `type: 'circuit' | 'sprint'` on `Course`/`Track`,
   flowing through `trackStorage.ts` ↔ `deviceTrackSync.ts` ↔
   `trackSubmission.ts` and a Supabase `courses` column. Relax
@@ -321,18 +337,20 @@ cutting a fresh beta branch. Nothing in the app anticipates modes today.
 
 ## 7. Open Questions
 
-1. ~~Is `race_mode` a device mode?~~ **Decided: mode follows the detected
-   track's folder — no device setting.** Remaining sub-question: the
-   **tiebreak when a venue has both kinds in range** (a circuit that hosts
-   parking-lot autocross). Candidate heuristic: if the nearest sprint
-   track has a course created *today*, it's an event day — prefer sprint;
-   otherwise prefer circuit. Or just prompt on-device.
+1. ~~Mode selection?~~ **Decided: mode follows the detected track's
+   folder; the `race_mode` setting survives as the both-kinds-in-range
+   tiebreak.** Rules: with `race_mode=circuit` (default), prefer circuit —
+   *unless* the nearby sprint track has a course created **today** (event
+   day), in which case sprint wins. With `race_mode=sprint`, always prefer
+   the sprint track and load its newest course regardless of date — this
+   is the fixed-course case (e.g. a permanent rally layout that isn't
+   re-created per event).
 2. ~~Minimum sector support?~~ **Decided: start + finish required, up to 2
    optional splits, single split legal.**
-3. **Course-history pruning** — weekly events accumulate dated courses in
-   one track file; the 4096-byte parse buffer caps how long that works.
-   Device keeps only newest N? Webapp trims on sync? Needs an answer
-   before the course creator ships.
+3. ~~Course-history pruning?~~ **Decided: webapp prunes on sync, keeping
+   the device's most recent single day of courses** (sync → delete → push
+   new file). v1 may ship before it lands, with a loud disclaimer about
+   the 4096-byte parse-buffer cap on un-synced devices.
 4. **Run arming semantics** — auto-arm on entering the start-line zone vs
    a speed/launch threshold? What does a false start / DNF (never crosses
    finish, returns to start) record as?
