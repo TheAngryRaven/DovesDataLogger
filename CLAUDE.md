@@ -161,6 +161,7 @@ handoff spec.
 |---|---|
 | `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, sim-build (native sim TU + 60 s boot soak + determinism + goldens + lap oracles + two-session carryover, plus a wasm job: emsdk 3.1.61 build + node smoke + `birdseye-sim-wasm` artifact), release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). Per-channel build config: `BETA` builds track DovesLapTimer's `BETA` branch and pass `-DBIRDSEYE_ENABLE_SENSOREGG=1`; master/release pin `v4.2.0` and build the all-flags-off defaults |
 | `tests/` | Host doctest harness (CMake) for the pure-logic units |
+| `docs/plans/` | Numbered design records (`NNNN-slug.md`, see its README) — the rationale behind each chunk of work; plan-executing commits cite the number. Same convention as DovesDataViewer |
 | `CHANGELOG.md` | Keep-a-Changelog history; release workflow ties to version tags |
 | `ARCHITECTURE.md` | Human-facing architecture narrative (subsystems, design decisions) |
 | `CONTRIBUTING.md` | Build/test/PR workflow and code conventions |
@@ -682,7 +683,7 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   bootloader comes up in BLE DFU and the unit is re-flashable over the air via
   the nRF Connect mobile app — no pins. **The apply path needs the Phase 0
   hardware spikes signed off before field release** — see
-  `docs/firmware-ota-phase0.md`.
+  `docs/plans/0000-firmware-ota-phase0.md`.
 - **Fleet migration**: the first firmware carrying `FW*` is pushed to sealed
   units once via nRF Connect (native app, buttonless trigger works on the
   existing single-bank bootloader); all later updates go through the web app.
