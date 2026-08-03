@@ -8,7 +8,7 @@
 > |---|---|---|---|
 > | 1 | `FWDFU` pre-update (USB UF2 escape hatch) | n/a | **shipped**, master + BETA, field-tested |
 > | 2 | Even flash split (staging base `0xA4000` → `0x8E000`) | 320 → **408 KiB** | **shipped**, no hardware spike needed |
-> | 3 | SD-direct apply (delete the staging region) | 408 → **~792 KiB** | **spike-gated**, not implemented |
+> | 3 | SD-direct apply (delete the staging region) | 408 → **~792 KiB** | **spike-gated, parked to the end of the project** |
 >
 > Piece 2 was originally filed below as the "someday/never" fallback. It was
 > promoted because it is free: it needs no new code paths, only two
@@ -115,9 +115,10 @@ The fleet insurance policy, shipped ahead of the rework so devices updated
   command the device into UF2 mode over BLE, drag the file.
 - The web app can later grow a "prepare for update" button that issues
   `FWDFU` — deliberately out of scope now.
-- Release channels should publish a `.uf2` asset alongside the existing
-  DFU `.zip` so there is always a file to drag (follow-up to the release
-  workflow when the first post-FWDFU release is cut).
+- Both channels already publish a per-board `.uf2` alongside the `.hex` and
+  the DFU `.zip` (`release.yml` / `beta.yml` convert the `.hex` with
+  `uf2conv` if the BSP didn't emit one), so there is always a file to drag.
+  No follow-up needed — an earlier draft of this plan said otherwise.
 - A handful of sealed field units exist whose builders are out of contact;
   any of them that takes this update once (via the current ≤320 KB web OTA
   or nRF Connect) is permanently recoverable/updatable thereafter.
@@ -130,15 +131,54 @@ The fleet insurance policy, shipped ahead of the rework so devices updated
    (staging-layout move).~~ **Done, and promoted out of "someday"** — piece 2
    above. It cost two constants and bought 88 KiB, so there was no reason to
    hold it behind the spike. BETA first, then `master`.
-3. **Next, no hardware needed**: publish a `.uf2` asset from `release.yml` /
-   `beta.yml`. `FWDFU` gets you into UF2 mode but there is currently no
-   published file to drag once you are there, which makes the escape hatch
-   only half-real.
-4. **Spike**: the four hardware validations above, on bench hardware.
-5. **Implement**: SD-direct apply behind the spike results; delete
-   `FW_STAGE_BASE`/staging copy; CI OTA gate re-pointed at the app-region
-   bound. The options analysis lives in the PR #116 thread.
+3. ~~Publish a `.uf2` asset from `release.yml` / `beta.yml`.~~ **Already
+   done** — both workflows build a `.uf2` per board (converting the `.hex`
+   with `uf2conv` if the BSP didn't emit one) and stage it alongside the
+   `.hex` and `.zip`. An earlier draft of this plan claimed there was no
+   published file to drag after `FWDFU`; that was wrong. The escape hatch
+   is whole.
+4. **Later — DDV upgrade-path mapping** (see below). Not on the critical
+   path for anything, but it is what makes a mixed fleet safe to operate.
+5. **End of project — spike**: the four hardware validations above, on
+   bench hardware.
+6. **End of project — implement**: SD-direct apply behind the spike
+   results; delete `FW_STAGE_BASE`/staging copy; CI OTA gate re-pointed at
+   the app-region bound. The options analysis lives in the PR #116 thread.
 
 With piece 2 shipped the pressure is off — 93 KiB of headroom against a beta
-image that grew ~7.5 KiB for all of sprint mode. Piece 3 is now a
-"do it properly when the bench is free" item, not a blocker.
+image that grew ~7.5 KiB for all of sprint mode. **Piece 3 is deliberately
+parked until the end of the project**: it is the highest-risk change in the
+OTA path (a raw SD driver running with the SoftDevice disabled, interrupts
+off, from RAM, erasing the app region as it goes) and the headroom that
+justified rushing it no longer needs rushing. Do it when the bench is free
+and nothing else is in flight.
+
+## Follow-up: firmware upgrade-path mapping in DovesDataViewer
+
+Piece 2 introduced the first real instance of a general problem: **not every
+firmware can install every other firmware.** A device on 3.0.x enforces the
+old 320 KiB cap, so a >320 KiB build has to reach it over USB (`FWDFU` →
+UF2) rather than over the air. Today that constraint lives only in a CI
+warning and in this document — the web app will happily offer any release to
+any device and let it fail at `FWBEGIN` with `FWERR:SIZE`.
+
+At the end of this project, DDV should gain an **upgrade-path map**: given
+the device's reported firmware version (already available over DIS) and the
+target release, decide whether the OTA path is valid, and if not, say so up
+front and route the user to the USB/UF2 instructions instead of letting the
+transfer fail late.
+
+Open — **scheme to be decided later.** Candidates worth weighing when we get
+there: a per-release "minimum installed version for OTA" field in the
+`gh-pages` manifest; an explicit stepping-stone chain (`3.0.x → 3.1.0 →
+current`); or deriving it from the image size against a table of each
+version's cap. The manifest field is probably the cheapest, since the
+release workflow already publishes one — but the decision is deferred, not
+made here.
+
+Prerequisite to check first: this only works if the historical builds are
+actually still fetchable. **Believed yes — all master build versions look to
+be retained** (GitHub Releases keep their assets indefinitely and every
+version tag has one), but confirm before designing around it. Note the beta
+channel is explicitly *latest-only* (`beta.yml` overwrites a flat `beta/`
+path), so any stepping-stone chain can only be built from release builds.
