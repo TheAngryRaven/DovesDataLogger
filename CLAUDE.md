@@ -83,7 +83,7 @@ All sketch sources live in `BirdsEye/` so the folder name matches the
 | `project.h` | Shared types (`ButtonState`, `TrackLayout`, `TrackManifestEntry`, `TrackMetadata`), debug macros, `MAX_*` constants |
 | `display_config.h` | Display driver abstraction (SH110X vs SSD1306 toggle) |
 | `gps_config.h` | GPS configuration constants (baud rate, nav rate, serial port) |
-| `images.h` | PROGMEM bitmap data (splash screen, animations) |
+| `images.h` | PROGMEM bitmap data — the bird splash only; the crossing animation is generated (`crossing_pattern`) |
 | `accelerometer.{h,ino}` | LSM6DS3 IMU init and g-force reads (onboard XIAO Sense) |
 | `bluetooth.{h,ino}` | BLE service (file listing, transfer, settings, track sync), auto-reboot on disconnect; shared peripheral BLE core init (+ Just-Works bonding) + `bleOwner` radio-ownership routing |
 | `camera_ble.{h,ino}` | Insta360 X4 auto-record BLE glue: peripheral remote GATT (0xCE80), all control via ce82 button notifies, executes `camera_fsm` actions, deferred callback→loop pattern (see subsystem 13) |
@@ -119,6 +119,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `camera_fsm.{h,cpp}` | Insta360 auto-record lifecycle FSM (8 states, all debounce/retry/timeout timing + tunables); board-portable core shared with the nRF54 "Falcon" target |
 | `insta360_protocol.{h,cpp}` | Insta360 X4 BLE frame builders/parsers (wake advert, remote scan response, ce82 buttons, ce82 GPS/RMC frame, ce81 serial parsing, ce81 `0x10` record-timer state parse) with golden-byte tests |
 | `sensoregg_protocol.{h,cpp}` | SensorEgg `PW-ADV-1` advertising payload parser (magic filter, int16 deci-°C decode with `0x8000`→NaN sentinel, flags, sequence) + wrap-safe 1 s staleness rule + passive-scan tuning constants |
+| `crossing_pattern.{h,cpp}` | The two-frame crossing animation as geometry (eight 16x16 cells, odd row bands, alternating phase) instead of 2 KB of stored bitmap; golden-tested byte-identical to the images it replaced |
 | `wake_cause.{h,cpp}` | Boot wake-cause decode: RESETREAS + GPIO LATCH register snapshots → tach / button / USB / watchdog / soft-reset / cold boot (System OFF shutdown, subsystem 10) |
 | `gps_status_page.{h,cpp}` | GPS status boot page state machine: hold, 3 s auto-close after fix+timeValid, button skip, exit destination (menu vs race), idle → shutdown |
 | `sd_format_page.{h,cpp}` | SD format-confirm boot page state machine: Select held 3 s continuously → format (release restarts the full window; other buttons never confirm), 5 min idle → shutdown |
