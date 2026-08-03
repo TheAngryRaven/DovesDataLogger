@@ -257,6 +257,19 @@ bool SdFat::remove(const char* path) {
   return files().erase(normalize(path)) > 0;
 }
 
+bool SdFat::rename(const char* oldPath, const char* newPath) {
+  const std::string from = normalize(oldPath);
+  const std::string to = normalize(newPath);
+  auto it = files().find(from);
+  if (it == files().end()) return false;
+  // SdFat refuses to clobber an existing destination; match that so the
+  // firmware's remove-then-rename ordering stays load-bearing here too.
+  if (files().count(to)) return false;
+  files()[to] = it->second;
+  files().erase(it);
+  return true;
+}
+
 File32 SdFat::open(const char* path, oflag_t oflag) {
   File32 f;
   f.open(path, oflag);

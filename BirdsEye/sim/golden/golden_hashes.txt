@@ -1,8 +1,15 @@
 gps_status_no_fix 900 fb82cebc
 main_menu_race -1 34b50cd7
-main_menu_transfer -1 c79664ba
+main_menu_transfer -1 40da09f8
 transfer_menu -4 3013bbe2
 bluetooth_waiting -2 c0f9211b
 warning_no_dovex 100 f800764b
+warning_create_needs_gps 100 45982329
+course_type_select -12 35882070
+course_lines_circuit_empty -13 0a3d740a
+course_line_detail -14 5ff1d3f5
+course_point_idle -15 28961e61
+course_line_point_a_done -14 646ca520
+main_menu_after_create -1 34b50cd7
 pair_camera_unpaired -6 5d1129cc
 camera_serial_entry -7 56588408

@@ -78,7 +78,40 @@ constexpr int kPageTransferMenu = -4;
 constexpr int kPageBluetooth = -2;
 constexpr int kPagePairCamera = -6;
 constexpr int kPageCameraSerialEntry = -7;
+constexpr int kPageCourseTrack = -11;
+constexpr int kPageCourseType = -12;
+constexpr int kPageCourseLines = -13;
+constexpr int kPageCourseLine = -14;
+constexpr int kPageCoursePoint = -15;
 constexpr int kPageWarning = 100;
+
+// Somewhere with no track in the manifest, so the creator's prompt has
+// nothing to offer and the flow starts on the type picker. (The preloaded
+// asset track is OKC; this is deliberately nowhere near it.)
+constexpr double kOpenGroundLat = 39.5;
+constexpr double kOpenGroundLon = -98.35;
+
+// Feed the firmware a fix good enough to name a file and capture a point.
+// One PVT per step batch is the documented injection rate.
+void injectFix(int frames, double lat, double lon, double hAccM = 1.2) {
+  for (int i = 0; i < frames; i++) {
+    SimPvt p{};
+    // 2026-08-03T14:32Z — the creator stamps names from this, so the
+    // golden also pins the generated-name format.
+    p.timestamp_ms = 1785076320000ull + (unsigned long long)i * 40ull;
+    p.lat = lat;
+    p.lng = lon;
+    p.altitude_m = 100.0;
+    p.speed_mph = 0.0;
+    p.heading_deg = 0.0;
+    p.h_acc_m = hAccM;
+    p.hdop = 0.8;
+    p.sats = 12;
+    p.fix = 1;
+    sim_inject_pvt(&p);
+    sim_step_millis(40);
+  }
+}
 
 void runScript() {
   sim_init();
@@ -111,9 +144,60 @@ void runScript() {
   press(1);
   capture("warning_no_dovex", kPageWarning);
 
-  // Any button dismisses the warning back to the menu; walk to Camera
-  // (index 3) and select -> unpaired pairing screen.
+  // Any button dismisses the warning back to the menu; walk to Create
+  // Course (index 3) and select. With no fix injected yet, the creator
+  // refuses up front rather than letting the user walk a course it could
+  // neither capture nor name.
   press(1);
+  press(2);
+  press(2);
+  press(2);
+  press(1);
+  capture("warning_create_needs_gps", kPageWarning);
+
+  // Dismiss, feed a real fix, and enter the creator for real. Nothing in
+  // the manifest is within the detection radius out here, so the track
+  // prompt is skipped and the type picker comes up first.
+  press(1);
+  injectFix(60, kOpenGroundLat, kOpenGroundLon);
+  press(2);
+  press(2);
+  press(2);
+  press(1);
+  capture("course_type_select", kPageCourseType);
+
+  // Circuit -> the line menu, with Save refused until a start line exists.
+  press(1);
+  capture("course_lines_circuit_empty", kPageCourseLines);
+
+  // Open the start/finish line -> Point A / Point B, neither captured.
+  press(1);
+  capture("course_line_detail", kPageCourseLine);
+
+  // Point A -> the capture screen, idle, showing live accuracy.
+  press(1);
+  capture("course_point_idle", kPageCoursePoint);
+
+  // Run a real averaging hold: start it, then feed fixes across the
+  // window. The commit drops back to the line detail with A captured.
+  press(1);
+  injectFix(90, kOpenGroundLat, kOpenGroundLon);
+  capture("course_line_point_a_done", kPageCourseLine);
+
+  // Back out: row 3 of the line detail is Back (discards the scratch
+  // line), then row 4 of the line menu is Cancel (leaves the creator).
+  press(2);
+  press(2);
+  press(2);
+  press(1);
+  press(2);
+  press(2);
+  press(2);
+  press(2);
+  press(1);
+  capture("main_menu_after_create", kPageMainMenu);
+
+  press(2);
   press(2);
   press(2);
   press(2);
@@ -121,7 +205,7 @@ void runScript() {
   capture("pair_camera_unpaired", kPagePairCamera);
 
   // Left on the unpaired pairing screen opens the manual 6-char serial
-  // entry page (custom button branch) — the eighth fixture.
+  // entry page (custom button branch).
   press(0);
   capture("camera_serial_entry", kPageCameraSerialEntry);
 }

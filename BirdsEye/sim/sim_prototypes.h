@@ -29,6 +29,7 @@
 
 #include "SdFat.h"
 
+#include "course_creator.h"
 #include "gps_status_page.h"
 #include "sd_format_page.h"
 #include "wake_cause.h"
@@ -65,6 +66,12 @@ void checkAutoIdle();
 void autoRaceModeCheck();
 void gpsStatusPageLoop();
 void sdFormatPageLoop();
+int courseCreatorPage();
+bool courseCreatorActive();
+bool courseCreatorEnter();
+void courseCreatorSave();
+void courseCreatorSelect();
+void courseCreatorLoop();
 void updateGpsLockHold();
 void writeDovexHeader();
 bool isUsbConnected();
@@ -83,6 +90,11 @@ void displayPage_transfer_menu();
 void displayPage_usb_storage();
 void displayPage_pair_camera();
 void displayPage_camera_test();
+void displayPage_course_track();
+void displayPage_course_type();
+void displayPage_course_lines();
+void displayPage_course_line();
+void displayPage_course_point();
 void displayPage_camera_serial_entry();
 void displayPage_replay_file_select();
 void displayPage_replay_results();
