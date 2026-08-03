@@ -505,6 +505,16 @@ loop()  ~250 Hz
   - `TGET:name.json` → reuses existing file transfer (`SIZE:N` → data chunks → `DONE`)
   - `TPUT:name.json` → `TREADY` → app sends data chunks → `TDONE` → `TOK`
   - `TDEL:name.json` → `TOK` or `TERR:NO_FILE`
+  - **Sprint variants** (`/TRACKS/SPRINT`, plan 0002) — same four verbs with a
+    `TS` prefix, sharing the circuit code paths with a `kind` parameter:
+    `TSLIST` → `TSFILE:name.json` per file, then `TSEND` (distinct tokens so a
+    client can't confuse the two enumerations); `TSGET:` / `TSPUT:` / `TSDEL:`
+    behave exactly like their circuit twins and reuse their replies
+    (`SIZE:`/`DONE`, `TREADY`/`TDONE`/`TOK`, `TERR:*`).
+  - **The folder is never taken from the wire.** `filename_validator` still
+    rejects `/`, `..` and FAT-unsafe bytes on every track command; which of the
+    two folders a command targets is decided by the *opcode* alone
+    (`trackFolderFor()`), so a client cannot path its way between them.
   - Upload uses a 4096-byte static RAM buffer; `TERR:TOO_LARGE` if exceeded.
   - Error responses: `TERR:SD_BUSY`, `TERR:BUSY`, `TERR:WRITE_FAIL`, `TERR:NO_FILE`, `TERR:BAD_NAME`.
   - Upload/delete state machines: BLE callback sets flags, `BLUETOOTH_LOOP()`
