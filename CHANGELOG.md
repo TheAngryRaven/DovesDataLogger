@@ -12,6 +12,19 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Changed
+- **The crossing animation is generated, not stored — 2,048 B of flash
+  reclaimed.** The two "calculating" frames shown while inside a crossing
+  zone were hand-stored 1 KB PROGMEM bitmaps, but both were pure block
+  patterns: eight 16x16 px cells on the odd row bands, the two frames
+  offset by one cell. They are now emitted by the host-tested
+  `crossing_pattern` unit and drawn with `fillRect()`. The output is
+  proven byte-identical to the bitmaps it replaces —
+  `crossing_pattern_test.cpp` pins the original 2 KB as goldens and
+  rasterizes the generated rectangles against them, so what shows on the
+  device is unchanged. The bird splash stays a real bitmap (it is actual
+  artwork, not a pattern). Backported from the beta channel.
+
 ## [3.0.2] - 2026-08-03
 
 Ships the **`FWDFU` pre-update**: a device on this build can always be

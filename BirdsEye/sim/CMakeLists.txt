@@ -137,6 +137,7 @@ set(SIM_CORE_SOURCES
   # Pure-logic units the compiled firmware modules call (same files the
   # host test harness in tests/ builds).
   ${BIRDSEYE_DIR}/camera_fsm.cpp
+  ${BIRDSEYE_DIR}/crossing_pattern.cpp
   ${BIRDSEYE_DIR}/dovex_header.cpp
   ${BIRDSEYE_DIR}/gps_stats.cpp
   ${BIRDSEYE_DIR}/gps_status_page.cpp
