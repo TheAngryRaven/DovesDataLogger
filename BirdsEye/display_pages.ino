@@ -4,6 +4,7 @@
 ///////////////////////////////////////////
 
 #include "display_pages.h"  // also pulls in project.h's build feature flags
+#include "crossing_pattern.h"
 #include "gps_status_page.h"
 #include "lap_format.h"
 #include "sat_bars.h"
@@ -1217,12 +1218,16 @@ void displayCrossing() {
   display.setCursor(0, 0);
 
   #ifndef ENDURANCE_MODE
-    // Draw bitmap on the screen
+    // Two-frame block animation, generated rather than stored: the frames
+    // were 2 KB of PROGMEM describing eight 16x16 cells. The host-tested
+    // crossing_pattern unit emits those cells and its golden test asserts
+    // the raster is byte-identical to the bitmaps this replaced.
     calculatingFlip = calculatingFlip == true ? false : true;
-    if (calculatingFlip) {
-      display.drawBitmap(0, 0, image_data_calculating1, 128, 64, 1);
-    } else {
-      display.drawBitmap(0, 0, image_data_calculating2, 128, 64, 1);
+    crossing_pattern::Rect cells[crossing_pattern::kMaxRects];
+    const int cellCount =
+        crossing_pattern::frameRects(calculatingFlip, cells, crossing_pattern::kMaxRects);
+    for (int i = 0; i < cellCount; i++) {
+      display.fillRect(cells[i].x, cells[i].y, cells[i].w, cells[i].h, DISPLAY_TEXT_WHITE);
     }
   #else
   #endif
