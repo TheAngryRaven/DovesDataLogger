@@ -12,6 +12,19 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+- **BLE sprint-track sync — `TSLIST` / `TSGET:` / `TSPUT:` / `TSDEL:`**
+  (plan 0002). The four existing track verbs gained `TS`-prefixed twins that
+  target `/TRACKS/SPRINT` instead of `/TRACKS`, so sprint courses can be
+  pushed and pulled over Bluetooth like circuit tracks — previously the new
+  folder was only reachable by USB mass storage. `TSLIST` answers with its
+  own `TSFILE:` / `TSEND` tokens so a sprint enumeration can never be mistaken
+  for a circuit one; the other three reuse the existing replies. The variants
+  share the circuit implementations via a `kind` parameter rather than
+  duplicating handlers, and the filename validator stays strict — the target
+  folder is chosen by the opcode and never parsed from the wire, so a client
+  still cannot path out of the tracks folders.
+
 ### Changed
 - **The crossing animation is generated, not stored — 2,048 B of flash
   reclaimed.** The two "calculating" frames shown while inside a crossing

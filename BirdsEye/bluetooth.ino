@@ -24,6 +24,17 @@ static volatile uint16_t trackUploadOffset = 0;
 // Track delete state (BLE callback -> main loop)
 static volatile bool trackDeletePending = false;
 static char trackDeleteFilename[25];
+// Which folder a pending track upload/delete targets (TRACK_KIND_CIRCUIT /
+// TRACK_KIND_SPRINT). Sprint tracks live in /TRACKS/SPRINT — see plan 0002.
+static volatile uint8_t trackUploadKind = TRACK_KIND_CIRCUIT;
+static volatile uint8_t trackDeleteKind = TRACK_KIND_CIRCUIT;
+
+// Folder for a track kind. The BLE filename validator deliberately rejects
+// '/' so a client can never splice a path of its own — the folder is chosen
+// here, by opcode, and never comes off the wire.
+static const char* trackFolderFor(uint8_t kind) {
+  return (kind == TRACK_KIND_SPRINT) ? trackFolderSprint : trackFolder;
+}
 
 // Deferred file command buffer (BLE callback -> main loop). Carries the
 // SD-touching commands (LIST / GET: / DELETE: / TLIST / TGET:) so SdFat is
@@ -307,7 +318,12 @@ void bleSendFileList() {
   debugln(F(" files"));
 }
 
-void bleSendTrackList() {
+void bleSendTrackList(uint8_t kind) {
+  // Sprint listings answer with their own tokens (TSFILE:/TSEND) so a client
+  // can never confuse a sprint enumeration with a circuit one.
+  const bool sprint = (kind == TRACK_KIND_SPRINT);
+  const char* fileTok = sprint ? "TSFILE:%s" : "TFILE:%s";
+  const char* endTok  = sprint ? "TSEND" : "TEND";
   // Same locking discipline as bleSendFileList() — see the comment there.
   if (currentSDAccess != SD_ACCESS_NONE ||
       !acquireSDAccess(SD_ACCESS_BLE_TRANSFER)) {
@@ -316,11 +332,11 @@ void bleSendTrackList() {
     return;
   }
 
-  File32 trackDir2 = SD.open("/TRACKS/");
+  File32 trackDir2 = SD.open(trackFolderFor(kind));
   if (!trackDir2) {
     debugln(F("BLE: Failed to open TRACKS directory"));
     releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
-    fileStatusChar.notify((uint8_t*)"TEND", 4);
+    fileStatusChar.notify((uint8_t*)endTok, strlen(endTok));
     return;
   }
 
@@ -334,7 +350,7 @@ void bleSendTrackList() {
       entry.getName(name, sizeof(name));
 
       char msg[70];
-      int len = snprintf(msg, sizeof(msg), "TFILE:%s", name);
+      int len = snprintf(msg, sizeof(msg), fileTok, name);
       if (len > 0 && len < (int)sizeof(msg)) {
         fileStatusChar.notify((uint8_t*)msg, len);
         delay(10);
@@ -346,7 +362,7 @@ void bleSendTrackList() {
   trackDir2.close();
   releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
 
-  fileStatusChar.notify((uint8_t*)"TEND", 4);
+  fileStatusChar.notify((uint8_t*)endTok, strlen(endTok));
   debug(F("BLE: Track list sent, "));
   debug(fileCount);
   debugln(F(" files"));
@@ -538,14 +554,16 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
     settingsCmdPending = true;
 
   // Track management commands
-  } else if (strcmp(buffer, "TLIST") == 0) {
+  } else if (strcmp(buffer, "TLIST") == 0 || strcmp(buffer, "TSLIST") == 0) {
     if (!deferFileCommand(buffer)) {
       fileStatusChar.notify((uint8_t*)"TERR:BUSY", 9);
     }
-  } else if (strncmp(buffer, "TGET:", 5) == 0) {
-    // The name is spliced into "/TRACKS/%s"; validate it so it can't
-    // climb out of /TRACKS via ../ or carry FAT-unsafe characters.
-    if (!filename_validator::isValidFilename(buffer + 5, filename_validator::kMaxBleFilenameLen)) {
+  } else if (strncmp(buffer, "TGET:", 5) == 0 || strncmp(buffer, "TSGET:", 6) == 0) {
+    // The name is spliced into "<folder>/%s"; validate it so it can't
+    // climb out of the tracks folders via ../ or carry FAT-unsafe bytes.
+    // The folder itself comes from the opcode, never from the wire.
+    if (!filename_validator::isValidFilename(buffer + (buffer[1] == 'S' ? 6 : 5),
+                                             filename_validator::kMaxBleFilenameLen)) {
       debugln(F("BLE: TGET rejected — bad filename"));
       fileStatusChar.notify((uint8_t*)"TERR:BAD_NAME", 13);
       return;
@@ -553,17 +571,20 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
     if (!deferFileCommand(buffer)) {
       fileStatusChar.notify((uint8_t*)"TERR:BUSY", 9);
     }
-  } else if (strncmp(buffer, "TPUT:", 5) == 0) {
+  } else if (strncmp(buffer, "TPUT:", 5) == 0 || strncmp(buffer, "TSPUT:", 6) == 0) {
     if (trackUploadActive || bleTransferInProgress) {
       fileStatusChar.notify((uint8_t*)"TERR:BUSY", 9);
       return;
     }
-    if (!filename_validator::isValidFilename(buffer + 5, filename_validator::kMaxBleFilenameLen)) {
+    const bool putSprint = (buffer[1] == 'S');
+    const char* putName = buffer + (putSprint ? 6 : 5);
+    if (!filename_validator::isValidFilename(putName, filename_validator::kMaxBleFilenameLen)) {
       debugln(F("BLE: TPUT rejected — bad filename"));
       fileStatusChar.notify((uint8_t*)"TERR:BAD_NAME", 13);
       return;
     }
-    strncpy(trackUploadFilename, buffer + 5, sizeof(trackUploadFilename) - 1);
+    trackUploadKind = putSprint ? TRACK_KIND_SPRINT : TRACK_KIND_CIRCUIT;
+    strncpy(trackUploadFilename, putName, sizeof(trackUploadFilename) - 1);
     trackUploadFilename[sizeof(trackUploadFilename) - 1] = '\0';
     trackUploadOffset = 0;
     trackUploadError = false;
@@ -571,17 +592,20 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
     trackUploadReady = true;
     trackUploadActive = true;
     debugln(F("BLE: Track upload started"));
-  } else if (strncmp(buffer, "TDEL:", 5) == 0) {
+  } else if (strncmp(buffer, "TDEL:", 5) == 0 || strncmp(buffer, "TSDEL:", 6) == 0) {
     if (trackDeletePending) {
       fileStatusChar.notify((uint8_t*)"TERR:BUSY", 9);
       return;
     }
-    if (!filename_validator::isValidFilename(buffer + 5, filename_validator::kMaxBleFilenameLen)) {
+    const bool delSprint = (buffer[1] == 'S');
+    const char* delName = buffer + (delSprint ? 6 : 5);
+    if (!filename_validator::isValidFilename(delName, filename_validator::kMaxBleFilenameLen)) {
       debugln(F("BLE: TDEL rejected — bad filename"));
       fileStatusChar.notify((uint8_t*)"TERR:BAD_NAME", 13);
       return;
     }
-    strncpy(trackDeleteFilename, buffer + 5, sizeof(trackDeleteFilename) - 1);
+    trackDeleteKind = delSprint ? TRACK_KIND_SPRINT : TRACK_KIND_CIRCUIT;
+    strncpy(trackDeleteFilename, delName, sizeof(trackDeleteFilename) - 1);
     trackDeleteFilename[sizeof(trackDeleteFilename) - 1] = '\0';
     trackDeletePending = true;
 
@@ -793,10 +817,16 @@ static void processFileCommand() {
     while (*filename == ' ') filename++;
     bleDeleteFile(filename);
   } else if (strcmp(fileCmdBuffer, "TLIST") == 0) {
-    bleSendTrackList();
-  } else if (strncmp(fileCmdBuffer, "TGET:", 5) == 0) {
+    bleSendTrackList(TRACK_KIND_CIRCUIT);
+  } else if (strcmp(fileCmdBuffer, "TSLIST") == 0) {
+    bleSendTrackList(TRACK_KIND_SPRINT);
+  } else if (strncmp(fileCmdBuffer, "TGET:", 5) == 0 ||
+             strncmp(fileCmdBuffer, "TSGET:", 6) == 0) {
+    const bool sprint = (fileCmdBuffer[1] == 'S');
     char filepath[FILEPATH_MAX];
-    snprintf(filepath, sizeof(filepath), "/TRACKS/%s", fileCmdBuffer + 5);
+    snprintf(filepath, sizeof(filepath), "%s/%s",
+             trackFolderFor(sprint ? TRACK_KIND_SPRINT : TRACK_KIND_CIRCUIT),
+             fileCmdBuffer + (sprint ? 6 : 5));
     bleStartFileTransfer(filepath);
   }
 }
@@ -951,7 +981,8 @@ void processTrackUpload() {
   }
 
   char filepath[FILEPATH_MAX];
-  snprintf(filepath, sizeof(filepath), "/TRACKS/%s", trackUploadFilename);
+  snprintf(filepath, sizeof(filepath), "%s/%s",
+           trackFolderFor(trackUploadKind), trackUploadFilename);
 
   // Belt-and-suspenders: buildTrackList() provisions the folder at boot,
   // but re-ensure it before every upload so a missing folder can never
@@ -1005,7 +1036,8 @@ void processTrackDelete() {
   }
 
   char filepath[FILEPATH_MAX];
-  snprintf(filepath, sizeof(filepath), "/TRACKS/%s", trackDeleteFilename);
+  snprintf(filepath, sizeof(filepath), "%s/%s",
+           trackFolderFor(trackDeleteKind), trackDeleteFilename);
 
   if (!SD.exists(filepath)) {
     debugln(F("BLE: Track file not found"));
