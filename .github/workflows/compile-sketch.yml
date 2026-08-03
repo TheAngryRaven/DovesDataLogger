@@ -13,18 +13,31 @@ jobs:
     name: ${{ matrix.board.name }}
     runs-on: ubuntu-latest
     env:
-      # DovesLapTimer ref for this build: anything targeting (or running on)
-      # the BETA branch tracks the library's own BETA branch, so the two beta
-      # channels move together; everything else pins the known-good release
-      # tag (bump deliberately). base_ref is only set on pull_request events;
-      # ref_name covers push / workflow_dispatch.
-      LAPTIMER_REF: ${{ (github.base_ref == 'BETA' || github.ref_name == 'BETA') && 'BETA' || 'v4.2.0' }}
-      # Feature flags for this build, matched to the channel the code is
-      # headed for (see project.h). BETA enables the SensorEgg POC exactly
-      # as beta.yml does, so the flag-on build is compile-checked on the PR
-      # rather than first failing on the publish workflow. Everything else
-      # builds the master/release defaults (all flags off).
-      FEATURE_FLAGS: ${{ (github.base_ref == 'BETA' || github.ref_name == 'BETA') && '-DBIRDSEYE_ENABLE_SENSOREGG=1' || '' }}
+      # Channel this build belongs to. The channel follows the SOURCE tree
+      # being compiled, not just where it is headed:
+      #   base_ref == BETA  -> a feature PR into BETA (compiling BETA-era code)
+      #   head_ref == BETA  -> the long-lived BETA -> master integration PR
+      #                        (#113). Its source is still BETA's, so it must
+      #                        build with BETA's library + flags; without this
+      #                        it compiled BETA code against master's pins and
+      #                        failed on the sprint headers forever.
+      #   ref_name == BETA  -> push / workflow_dispatch on BETA itself
+      # Anything else is master/release. NOTE: merging BETA into master is
+      # what promotes the channel — at that point the fallbacks below must be
+      # bumped deliberately (a DovesLapTimer release tag carrying
+      # CrossingEngine/SprintTimer, plus a decision on the SensorEgg flag),
+      # here and in sim-build.yml / release.yml. (The condition is repeated
+      # rather than hoisted into its own env var because a job-level `env:`
+      # entry cannot reference its siblings.)
+      # DovesLapTimer ref: the beta channel tracks the library's own BETA
+      # branch so the two move together; everything else pins the known-good
+      # release tag.
+      LAPTIMER_REF: ${{ (github.base_ref == 'BETA' || github.head_ref == 'BETA' || github.ref_name == 'BETA') && 'BETA' || 'v4.2.0' }}
+      # Feature flags for this build (see project.h). BETA enables the
+      # SensorEgg POC exactly as beta.yml does, so the flag-on build is
+      # compile-checked on the PR rather than first failing on the publish
+      # workflow. Everything else builds the master/release defaults (off).
+      FEATURE_FLAGS: ${{ (github.base_ref == 'BETA' || github.head_ref == 'BETA' || github.ref_name == 'BETA') && '-DBIRDSEYE_ENABLE_SENSOREGG=1' || '' }}
     # Build both XIAO nRF52840 variants. The Sense board has the onboard
     # LSM6DS3 IMU; the plain board does not (accelerometer logging degrades
     # gracefully). Same MCU/BLE/bootloader otherwise.
