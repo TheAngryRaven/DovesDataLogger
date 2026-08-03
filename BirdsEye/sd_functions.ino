@@ -58,10 +58,11 @@ void forceReleaseSDAccess() {
   taskEXIT_CRITICAL();
 }
 
-void makeFullTrackPath(const char* trackName, char* filepath) {
+void makeFullTrackPath(const char* trackName, char* filepath, uint8_t kind) {
   // Use snprintf for bounds safety - prevents buffer overflow
   // Caller MUST provide buffer of at least FILEPATH_MAX bytes
-  snprintf(filepath, FILEPATH_MAX, "/TRACKS/%s.json", trackName);
+  const char* folder = (kind == TRACK_KIND_SPRINT) ? trackFolderSprint : trackFolder;
+  snprintf(filepath, FILEPATH_MAX, "%s/%s.json", folder, trackName);
 }
 
 // (Re)initialize the SD card at a given SPI clock. Re-calling SD.begin() is
@@ -121,12 +122,19 @@ bool SD_SETUP() {
   return false;
 }
 
-// Make sure /TRACKS exists (blank soldered-in card; SdFat's open() never
-// creates parent directories). Caller must already hold the SD mutex.
-// Returns true when the folder exists or was created.
+// Make sure /TRACKS and /TRACKS/SPRINT exist (blank soldered-in card;
+// SdFat's open() never creates parent directories). Caller must already
+// hold the SD mutex. Returns true when the circuit folder exists or was
+// created — the sprint subfolder is best-effort (a failure there must
+// not take out circuit operation).
 bool sdEnsureTracksFolder() {
-  if (SD.exists(trackFolder)) return true;
-  return SD.mkdir(trackFolder);
+  if (!SD.exists(trackFolder) && !SD.mkdir(trackFolder)) {
+    return false;
+  }
+  if (!SD.exists(trackFolderSprint) && !SD.mkdir(trackFolderSprint)) {
+    debugln(F("WARNING: could not create /TRACKS/SPRINT"));
+  }
+  return true;
 }
 
 ///////////////////////////////////////////
@@ -256,10 +264,30 @@ bool buildTrackList() {
   numOfLocations = 0;
   trackManifestCount = 0;
 
-  // If the TRACKS directory exists, open it
-  if (!trackDir.open(trackFolder)) {
+  // Circuit tracks are mandatory (the original folder); the sprint scan is
+  // best-effort — a missing/unreadable /TRACKS/SPRINT must never take out
+  // circuit operation. Both share the locations[]/manifest arrays and caps.
+  if (!scanTrackDir(trackFolder, TRACK_KIND_CIRCUIT)) {
     debugln(F("Failed to open TRACKS folder."));
     releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+    return false;
+  }
+  scanTrackDir(trackFolderSprint, TRACK_KIND_SPRINT);
+
+  debug(F("Tracks found: "));
+  debugln(numOfLocations);
+  debug(F("Manifest entries: "));
+  debugln(trackManifestCount);
+
+  releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+  return true;
+}
+
+// Walk one track folder, appending to locations[] and trackManifest[]
+// (shared caps). Caller must hold the SD mutex. Returns false only when
+// the directory cannot be opened.
+bool scanTrackDir(const char* folder, uint8_t kind) {
+  if (!trackDir.open(folder)) {
     return false;
   }
 
@@ -271,6 +299,13 @@ bool buildTrackList() {
     if (numOfLocations >= MAX_LOCATIONS) {
       file.close();
       break;
+    }
+
+    // Skip sub-directories (the /TRACKS scan would otherwise list the
+    // SPRINT folder itself as a "track").
+    if (file.isDir()) {
+      file.close();
+      continue;
     }
 
     // Create a buffer to store the filename
@@ -319,6 +354,7 @@ bool buildTrackList() {
             trackManifest[trackManifestCount].filename[sizeof(trackManifest[0].filename) - 1] = '\0';
             trackManifest[trackManifestCount].lat = firstLat;
             trackManifest[trackManifestCount].lon = firstLon;
+            trackManifest[trackManifestCount].kind = kind;
             trackManifestCount++;
           }
         }
@@ -334,13 +370,6 @@ bool buildTrackList() {
 
   // Close the directory to free up any memory it's using
   trackDir.close();
-
-  debug(F("Tracks found: "));
-  debugln(numOfLocations);
-  debug(F("Manifest entries: "));
-  debugln(trackManifestCount);
-
-  releaseSDAccess(SD_ACCESS_TRACK_PARSE);
   return true;
 }
 
@@ -422,6 +451,11 @@ int parseTrackFile(char* filepath) {
     const char* longName = trackJson["longName"] | "";
     const char* shortName = trackJson["shortName"] | "";
     const char* defaultCourse = trackJson["defaultCourse"] | "";
+    // Track-level type marker ("sprint"). Redundant with the folder the
+    // file lives in — the folder is authoritative — but parsed as cheap
+    // validation / future-proofing (plan 0002 keeps modes an open enum).
+    const char* trackType = trackJson["type"] | "";
+    activeTrackMetadata.isSprint = (strcasecmp(trackType, "sprint") == 0);
 
     strncpy(activeTrackMetadata.longName, longName, sizeof(activeTrackMetadata.longName) - 1);
     activeTrackMetadata.longName[sizeof(activeTrackMetadata.longName) - 1] = '\0';
@@ -445,6 +479,7 @@ int parseTrackFile(char* filepath) {
     activeTrackMetadata.longName[0] = '\0';
     activeTrackMetadata.shortName[0] = '\0';
     activeTrackMetadata.defaultCourse[0] = '\0';
+    activeTrackMetadata.isSprint = false;
   } else {
     debugln(F("ParseTrackFile: Unknown JSON format"));
     trackFile.close();
@@ -504,6 +539,27 @@ int parseTrackFile(char* filepath) {
       } else {
         trackLayouts[numOfTracks].hasSector3 = false;
       }
+
+      // Sprint-only: separate finish line (optional — same idiom as sectors)
+      if (layout.containsKey("finish_a_lat") && layout.containsKey("finish_a_lng") &&
+          layout.containsKey("finish_b_lat") && layout.containsKey("finish_b_lng")) {
+        trackLayouts[numOfTracks].finish_a_lat = layout["finish_a_lat"];
+        trackLayouts[numOfTracks].finish_a_lng = layout["finish_a_lng"];
+        trackLayouts[numOfTracks].finish_b_lat = layout["finish_b_lat"];
+        trackLayouts[numOfTracks].finish_b_lng = layout["finish_b_lng"];
+        trackLayouts[numOfTracks].hasFinish = true;
+        #ifdef HAS_DEBUG
+        debugln(F("  Finish line data loaded (sprint)"));
+        #endif
+      } else {
+        trackLayouts[numOfTracks].hasFinish = false;
+      }
+
+      // Sprint-only: sortable ISO date_created (drives newest-course pick)
+      const char* dateCreated = layout["date_created"] | "";
+      strncpy(trackLayouts[numOfTracks].date_created, dateCreated,
+              sizeof(trackLayouts[numOfTracks].date_created) - 1);
+      trackLayouts[numOfTracks].date_created[sizeof(trackLayouts[numOfTracks].date_created) - 1] = '\0';
 
       numOfTracks++;
     }

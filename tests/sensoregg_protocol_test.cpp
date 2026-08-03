@@ -8,10 +8,12 @@
 
 using namespace sensoregg_protocol;
 
-// Golden PW-ADV-1 frame: the byte layout is the wire contract with the
-// DovesSensorEgg firmware. If the layout changes, these vectors must
-// change with it — deliberately.
+// Golden frames: the byte layouts are the wire contract with the
+// DovesSensorEgg firmware — the v2 bytes are IDENTICAL to the egg
+// repo's pw_adv_encode golden fixture. If either layout changes, both
+// repos' vectors must change with it — deliberately.
 //
+// v1 (14 bytes):
 //   FF FF        company ID (SIG test/internal, inside the array)
 //   50 57        magic 'P' 'W'
 //   01           protocol version
@@ -24,6 +26,12 @@ using namespace sensoregg_protocol;
 static const uint8_t kGoldenFrame[kPayloadLen] = {
     0xFF, 0xFF, 0x50, 0x57, 0x01, 0x00, 0x64, 0x19,
     0x4D, 0x01, 0x00, 0xFF, 0x2A, 0x01};
+
+// v2 (16 bytes): version 02, battery real (0x57 = 87%), and the aux
+// thermistor appended: 0x00EA = 234 deci-degC = 23.4 C.
+static const uint8_t kGoldenFrameV2[kPayloadLenV2] = {
+    0xFF, 0xFF, 0x50, 0x57, 0x02, 0x00, 0x64, 0x19,
+    0x4D, 0x01, 0x00, 0x57, 0x2A, 0x01, 0xEA, 0x00};
 
 // ---------------------------------------------------------------------------
 // Magic filter
@@ -57,7 +65,7 @@ TEST_CASE("sensoregg_protocol - magic rejects null and short input") {
 // Payload parse
 // ---------------------------------------------------------------------------
 
-TEST_CASE("sensoregg_protocol - golden frame parses") {
+TEST_CASE("sensoregg_protocol - golden v1 frame parses (aux is NaN)") {
     Reading r;
     REQUIRE(parsePayload(kGoldenFrame, sizeof(kGoldenFrame), r));
 
@@ -69,6 +77,34 @@ TEST_CASE("sensoregg_protocol - golden frame parses") {
     CHECK(r.status == 0);
     CHECK(r.battery == 0xFF);
     CHECK(r.sequence == 298);
+    // v1 has no aux field: it must parse as NaN, never 0.0 (a fake
+    // freezing-point reading on the intake page/log).
+    CHECK(std::isnan(r.auxC));
+    CHECK(r.protoVersion == kProtocolVersion);
+}
+
+TEST_CASE("sensoregg_protocol - golden v2 frame parses (egg-repo fixture bytes)") {
+    Reading r;
+    REQUIRE(parsePayload(kGoldenFrameV2, sizeof(kGoldenFrameV2), r));
+
+    CHECK(r.egtC == doctest::Approx(650.0f));
+    CHECK(r.junctionC == doctest::Approx(33.3f));
+    CHECK(r.auxC == doctest::Approx(23.4f));
+    CHECK(r.battery == 87);
+    CHECK(r.sequence == 298);
+    CHECK(r.protoVersion == kProtocolVersionV2);
+}
+
+TEST_CASE("sensoregg_protocol - v2 aux sentinel becomes NaN") {
+    uint8_t frame[kPayloadLenV2];
+    for (size_t i = 0; i < kPayloadLenV2; i++) frame[i] = kGoldenFrameV2[i];
+    frame[14] = 0x00;  // 0x8000 LE: divider open/shorted on the egg
+    frame[15] = 0x80;
+
+    Reading r;
+    REQUIRE(parsePayload(frame, sizeof(frame), r));
+    CHECK(std::isnan(r.auxC));
+    CHECK(r.egtC == doctest::Approx(650.0f));  // other fields unaffected
 }
 
 TEST_CASE("sensoregg_protocol - negative temperatures decode") {
@@ -122,18 +158,35 @@ TEST_CASE("sensoregg_protocol - parse rejects short / null / bad version") {
 
     uint8_t frame[kPayloadLen];
     for (size_t i = 0; i < kPayloadLen; i++) frame[i] = kGoldenFrame[i];
-    frame[4] = 0x02;  // future protocol version — layout unknown, reject
+    frame[4] = 0x03;  // future protocol version — layout unknown, reject
     CHECK_FALSE(parsePayload(frame, sizeof(frame), r));
 }
 
-TEST_CASE("sensoregg_protocol - parse accepts longer-than-14 payloads") {
-    // Forward compatibility: a future egg may append fields.
-    uint8_t frame[kPayloadLen + 4] = {0};
-    for (size_t i = 0; i < kPayloadLen; i++) frame[i] = kGoldenFrame[i];
+TEST_CASE("sensoregg_protocol - truncated v2 is corrupt, not v1") {
+    // A frame CLAIMING v2 but shorter than 16 bytes must be rejected —
+    // parsing its first 14 bytes as v1 would be accepting corruption.
+    uint8_t frame[kPayloadLenV2];
+    for (size_t i = 0; i < kPayloadLenV2; i++) frame[i] = kGoldenFrameV2[i];
 
     Reading r;
-    REQUIRE(parsePayload(frame, sizeof(frame), r));
+    CHECK_FALSE(parsePayload(frame, kPayloadLen, r));       // 14 bytes
+    CHECK_FALSE(parsePayload(frame, kPayloadLenV2 - 1, r)); // 15 bytes
+    REQUIRE(parsePayload(frame, kPayloadLenV2, r));         // 16 is whole
+}
+
+TEST_CASE("sensoregg_protocol - parse accepts longer-than-spec payloads") {
+    // Forward compatibility: a future egg may append fields to either
+    // version's layout.
+    uint8_t f1[kPayloadLen + 4] = {0};
+    for (size_t i = 0; i < kPayloadLen; i++) f1[i] = kGoldenFrame[i];
+    uint8_t f2[kPayloadLenV2 + 4] = {0};
+    for (size_t i = 0; i < kPayloadLenV2; i++) f2[i] = kGoldenFrameV2[i];
+
+    Reading r;
+    REQUIRE(parsePayload(f1, sizeof(f1), r));
     CHECK(r.egtC == doctest::Approx(650.0f));
+    REQUIRE(parsePayload(f2, sizeof(f2), r));
+    CHECK(r.auxC == doctest::Approx(23.4f));
 }
 
 // ---------------------------------------------------------------------------
@@ -252,10 +305,12 @@ TEST_CASE("sensoregg_protocol - scan tuning: invariants") {
     CHECK(kScanWindowUnits < kScanIntervalUnits);
     CHECK(kScanWindowUnits * 100 <= kScanIntervalUnits * 45);
 
-    // The interval must sit off the egg's ~100 ms adv interval (160 units)
-    // so the phases sweep instead of locking; at least a 5 ms offset keeps
-    // a deaf-zone park escaping within ~1 s (kStalenessMs).
-    constexpr uint16_t kEggAdvUnits = 160;
+    // The interval must sit off the egg's adv interval so the phases
+    // sweep instead of locking; at least a 5 ms offset keeps a deaf-zone
+    // park escaping within ~1 s (kStalenessMs). The egg de-aliased its
+    // interval to 179 units (111.875 ms) — this pin was stale at 160
+    // until 2026-07-27.
+    constexpr uint16_t kEggAdvUnits = 179;
     uint16_t diff = kScanIntervalUnits > kEggAdvUnits
                         ? kScanIntervalUnits - kEggAdvUnits
                         : kEggAdvUnits - kScanIntervalUnits;

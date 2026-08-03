@@ -121,6 +121,7 @@ set(SIM_CORE_SOURCES
   # Pure-logic units the compiled firmware modules call (same files the
   # host test harness in tests/ builds).
   ${BIRDSEYE_DIR}/camera_fsm.cpp
+  ${BIRDSEYE_DIR}/crossing_pattern.cpp
   ${BIRDSEYE_DIR}/dovex_header.cpp
   ${BIRDSEYE_DIR}/gps_stats.cpp
   ${BIRDSEYE_DIR}/gps_status_page.cpp
@@ -132,10 +133,13 @@ set(SIM_CORE_SOURCES
   ${BIRDSEYE_DIR}/sd_access_policy.cpp
   ${BIRDSEYE_DIR}/sd_format_page.cpp
   ${BIRDSEYE_DIR}/sensoregg_protocol.cpp
+  ${BIRDSEYE_DIR}/sprint_select.cpp
   ${BIRDSEYE_DIR}/tach_filter.cpp
   ${BIRDSEYE_DIR}/wake_cause.cpp
   # Real DovesLapTimer sources — the lap/sector timing IS the demo.
   ${doveslaptimer_SOURCE_DIR}/src/DovesLapTimer.cpp
+  ${doveslaptimer_SOURCE_DIR}/src/CrossingEngine.cpp
+  ${doveslaptimer_SOURCE_DIR}/src/SprintTimer.cpp
   ${doveslaptimer_SOURCE_DIR}/src/WaypointLapTimer.cpp
   ${doveslaptimer_SOURCE_DIR}/src/CourseDetector.cpp
   ${doveslaptimer_SOURCE_DIR}/src/CourseManager.cpp

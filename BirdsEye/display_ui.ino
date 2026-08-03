@@ -584,6 +584,8 @@ void displayLoop() {
 #if !defined(ENDURANCE_MODE) && BIRDSEYE_ENABLE_SENSOREGG
     } else if (currentPage == SENSOR_TEMP) {
       displayPage_sensorTemp();
+    } else if (currentPage == SENSOR_TEMP2) {
+      displayPage_sensorTemp2();
 #endif
     } else if (currentPage == GPS_LAP_TIME) {
       displayPage_gps_lap_time();

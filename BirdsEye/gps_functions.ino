@@ -8,6 +8,7 @@
 #include "gps_stats.h"
 #include "gps_time.h"
 #include "gps_validation.h"
+#include "nan_bits.h"
 #include "sat_bars.h"
 
 ///////////////////////////////////////////
@@ -468,7 +469,9 @@ void GPS_LOOP() {
   if (gpsDataFresh) {
     gpsDataFresh = false;
 
-    // Feed fresh GPS data into the active course/timer
+    // Feed fresh GPS data into the active course/timer. courseManager and
+    // sprintTimer are mutually exclusive by construction (mode follows the
+    // detected track's folder) — exactly one branch runs per session.
     if (gpsData.fix && courseManager != nullptr) {
       double ltLat = gpsData.latitudeDegrees;
       double ltLng = gpsData.longitudeDegrees;
@@ -477,6 +480,10 @@ void GPS_LOOP() {
 
       courseManager->updateCurrentTime(getGpsTimeInMilliseconds());
       courseManager->loop(ltLat, ltLng, ltAlt, ltSpeed);
+    } else if (gpsData.fix && sprintTimer != nullptr) {
+      sprintTimer->updateCurrentTime(getGpsTimeInMilliseconds());
+      sprintTimer->loop(gpsData.latitudeDegrees, gpsData.longitudeDegrees,
+                        gpsData.altitude, gpsData.speed);
     }
 
   #ifdef SD_CARD_LOGGING_ENABLED
@@ -531,16 +538,22 @@ void GPS_LOOP() {
         dtostrf(accelY, 1, 3, accelYStr);
         dtostrf(accelZ, 1, 3, accelZStr);
 
-        // SensorEgg wireless EGT (Temp1) + cold junction (Junction1),
-        // degC. Stale link or egg-reported invalid -> literal "nan" so a
-        // dropout is a visible gap, never a held flat line. These fields
-        // must NEVER cause the GPS row to be skipped, so they are checked
-        // here (falling back to "nan") instead of joining the strs[]
-        // reject-the-row walk below.
-        char temp1Str[12], junc1Str[12];
+        // SensorEgg wireless EGT (Temp1) + cold junction (Junction1) +
+        // aux intake-air temp (Temp2, v2 eggs), degC. Stale link or
+        // egg-reported invalid -> literal "nan" so a dropout is a
+        // visible gap, never a held flat line; a v1 egg logs Temp2 as
+        // "nan" every row. These fields must NEVER cause the GPS row to
+        // be skipped, so they are checked here (falling back to "nan")
+        // instead of joining the strs[] reject-the-row walk below.
+        // isNanF, not isnan: -Ofast folds isnan() to false. (These
+        // columns previously survived that only because dtostrf(NaN)
+        // emits "nan" and isNumericString rejects it into the same
+        // fallback - luck, not design.)
+        char temp1Str[12], junc1Str[12], temp2Str[12];
         const float snapEgtC = sensoreggEgtC();
         const float snapJuncC = sensoreggJunctionC();
-        if (isnan(snapEgtC)) {
+        const float snapAuxC = sensoreggAuxC();
+        if (isNanF(snapEgtC)) {
           strcpy(temp1Str, "nan");
         } else {
           dtostrf(snapEgtC, 1, 1, temp1Str);
@@ -548,12 +561,20 @@ void GPS_LOOP() {
             strcpy(temp1Str, "nan");
           }
         }
-        if (isnan(snapJuncC)) {
+        if (isNanF(snapJuncC)) {
           strcpy(junc1Str, "nan");
         } else {
           dtostrf(snapJuncC, 1, 1, junc1Str);
           if (!gps_validation::isNumericString(junc1Str, sizeof(junc1Str) - 1)) {
             strcpy(junc1Str, "nan");
+          }
+        }
+        if (isNanF(snapAuxC)) {
+          strcpy(temp2Str, "nan");
+        } else {
+          dtostrf(snapAuxC, 1, 1, temp2Str);
+          if (!gps_validation::isNumericString(temp2Str, sizeof(temp2Str) - 1)) {
+            strcpy(temp2Str, "nan");
           }
         }
 
@@ -579,11 +600,11 @@ void GPS_LOOP() {
           gps_time::u64ToDecimalString(getGpsUnixTimestampMillis(),
                                         timestampStr, sizeof(timestampStr));
 
-          snprintf(csvLine, sizeof(csvLine), "%s,%d,%s,%s,%s,%s,%s,%s,%s,%d,%s,%s,%s,%s,%s",
+          snprintf(csvLine, sizeof(csvLine), "%s,%d,%s,%s,%s,%s,%s,%s,%s,%d,%s,%s,%s,%s,%s,%s",
                    timestampStr, snapSats, hdopStr, latStr, lngStr,
                    speedStr, altStr, headingStr, hAccStr,
                    tachLastReported, accelXStr, accelYStr, accelZStr,
-                   temp1Str, junc1Str);
+                   temp1Str, junc1Str, temp2Str);
 
           size_t written = dataFile.println(csvLine);
           if (written == 0) {
@@ -668,7 +689,7 @@ void GPS_LOOP() {
             releaseSDAccess(SD_ACCESS_LOGGING);
           } else {
             // Cursor is now at exactly DOVEX_HEADER_SIZE
-            dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z,Temp1,Junction1"));
+            dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z,Temp1,Junction1,Temp2"));
             debugln(F("CSV header written"));
             sdDataLogInitComplete = true;
           }

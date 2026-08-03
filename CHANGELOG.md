@@ -12,7 +12,121 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+- **BLE sprint-track sync — `TSLIST` / `TSGET:` / `TSPUT:` / `TSDEL:`**
+  (plan 0002). The four existing track verbs gained `TS`-prefixed twins that
+  target `/TRACKS/SPRINT` instead of `/TRACKS`, so sprint courses can be
+  pushed and pulled over Bluetooth like circuit tracks — previously the new
+  folder was only reachable by USB mass storage. `TSLIST` answers with its
+  own `TSFILE:` / `TSEND` tokens so a sprint enumeration can never be mistaken
+  for a circuit one; the other three reuse the existing replies. The variants
+  share the circuit implementations via a `kind` parameter rather than
+  duplicating handlers, and the filename validator stays strict — the target
+  folder is chosen by the opcode and never parsed from the wire, so a client
+  still cannot path out of the tracks folders.
+
 ### Changed
+- **The crossing animation is generated, not stored — 2,048 B of flash
+  reclaimed.** The two "calculating" frames shown while inside a crossing
+  zone were hand-stored 1 KB PROGMEM bitmaps, but both were pure block
+  patterns: eight 16x16 px cells on the odd row bands, the two frames
+  offset by one cell. They are now emitted by the host-tested
+  `crossing_pattern` unit and drawn with `fillRect()`. The output is
+  proven byte-identical to the bitmaps it replaces —
+  `crossing_pattern_test.cpp` pins the original 2 KB as goldens and
+  rasterizes the generated rectangles against them, so what shows on the
+  device is unchanged. The bird splash stays a real bitmap (it is actual
+  artwork, not a pattern).
+
+### Added
+- **`FWDFU` BLE command — reboot into UF2 mass-storage DFU** (backwards
+  compatible — MINOR). Sends `FWDFU:OK`, then reboots into the stock
+  Adafruit/Seeed bootloader's UF2 mode: the device shows up as a USB
+  drive and flashing is a drag-and-drop of a `.uf2` file — no web app, no
+  nRF Connect, **no OTA image-size cap** (the bootloader writes the app
+  region directly; no staging). This is the "pre-update" for the planned
+  SD-staged OTA rework (plan 0004): any device updated to a build
+  carrying `FWDFU` has a permanent, size-unlimited update path over a
+  USB cable. The bootloader itself is unchanged.
+- **Sprint mode (plan 0002) — point-to-point run timing for autocross /
+  hillclimb events** (backwards compatible — MINOR). Sprint tracks live in
+  the new `/TRACKS/SPRINT/` SD folder (circuit tracks are untouched); the
+  detected track's folder selects the mode automatically. A sprint course
+  is a start line + a separate `finish_*` line (+ up to two optional
+  sector lines) with a sortable `date_created` stamp — the newest course
+  is always loaded (autocross venues re-lay the course every event; the
+  host-tested `sprint_select` unit owns the ordering + tiebreak rules).
+  Runs are timed by the DovesLapTimer library's new `SprintTimer` (BETA):
+  re-crossing the start cancels + restarts a run, finish crossings with no
+  active run are ignored, DNF records nothing. Between runs the device
+  stays in race mode with every page live — Current Lap and Pace show
+  `*waiting*` — and auto-idle becomes engine-aware in sprint (a running
+  engine at the start line never ends the session; each completed run
+  re-arms the grace period). Run times land in the existing lap history /
+  DOVEX laps line ("laps" verbiage is kept everywhere by design).
+- **New `race_mode` setting** (`circuit` default / `sprint`): ONLY the
+  tiebreak when both a circuit and a sprint track are within detection
+  range — `circuit` yields to a sprint track whose newest course was
+  created today (event day); `sprint` always prefers the sprint track
+  (fixed layouts, e.g. a permanent rally course). Never overrides what is
+  actually detected.
+- **DOVEX `race_mode` trailing header column** (`CIRCUIT`/`SPRINT`, empty
+  = circuit; same backwards-compatible append mechanism as
+  `device_name`): a loading helper so the webapp knows to interpret the
+  laps line as runs. Also fixed the header parser to preserve empty
+  middle fields — the old strtok splitter let a blank column shift every
+  later column left.
+- **SensorEgg PW-ADV v2 support** (backwards compatible — MINOR). The
+  passive observer now accepts the egg's 16-byte v2 payload alongside v1:
+  a new aux intake-air thermistor (`Temp2`) and a real battery percent.
+  v1 eggs keep working (their `Temp2` parses as `nan`); a v2 frame
+  truncated below 16 bytes is rejected as corrupt rather than mis-read
+  as v1. The RX path previously truncated captures at 14 bytes — v2
+  bytes never reached the parser — and now captures up to the largest
+  known layout with per-slot lengths.
+- **`Temp2` race page**: second temperature page after Temp1, same
+  layout and staleness rules ('---' on stale/v1/invalid), with the egg's
+  battery percent as the subtext (`--` when unknown). Beta channel only,
+  like the rest of the SensorEgg POC.
+- **DOVEX `Temp2` trailing column** (backwards compatible append, same
+  mechanism as `device_name` and `Temp1`/`Junction1`): aux intake-air
+  temp in °C, literal `nan` on stale link / v1 egg / invalid divider.
+  Never causes a GPS row to be skipped; written on every build so the
+  format does not fork by channel.
+
+### Fixed
+- **Battery sleep instantly reboot-looped when the tach line idles low.**
+  System OFF entry hardcoded the tach wake as `SENSE-LOW` (assuming an
+  idle-high line), but the pickup circuit's Schmitt-inverter +
+  optocoupler output stage can idle low — DETECT was satisfied the
+  moment System OFF was entered and the device reset within a second
+  (USB-powered sleep was unaffected: a cable parks in the charging loop
+  and never enters System OFF). Runtime RPM counting can't expose the
+  polarity — a spark pulse yields one falling edge either way. Shutdown
+  now samples the parked tach line (15 reads over ~30 ms, majority vote
+  in the host-tested `wake_cause::tachIdleIsHigh()`) and arms SENSE for
+  the opposite level; ties/floating inputs keep the original SENSE-LOW.
+- **`isnan()` was compiled out of egg paths by `-Ofast`** (the platform
+  builds sketches with `-ffinite-math-only`, which constant-folds
+  `isnan()` to false). The Temp1 race page rendered `lroundf(NaN)`
+  garbage (`-214748`) instead of `---` on a stale link; the DOVEX temp
+  columns survived only because `dtostrf(NaN)` happens to emit a string
+  the numeric guard rejects into the same `nan` fallback. Egg paths now
+  use `isNanF()` (bit-pattern check, `nan_bits.h`) which the optimizer
+  cannot fold.
+
+### Changed
+- **CI/production builds pass `-DDOVES_DISABLE_DEBUG`** (new DovesLapTimer
+  BETA flag): the library's debug strings + print call-sites are dead
+  weight on hardware builds (no debug Stream is ever attached) and the
+  beta image had crossed 100% of the 320 KB OTA self-flash cap — it was
+  already at 98.2% before sprint mode. Dropping the resident debug pipeline
+  brings the image back under the cap with headroom instead of moving the
+  OTA staging layout. Local IDE debug builds are unaffected (the macro is
+  opt-in per build).
+- The scan-tuning test's pinned egg advertising interval was stale at
+  160 units; the egg de-aliased to 179 units (111.875 ms) — pin updated
+  (anti-phase-lock invariants still hold).
 - Companion web app references updated from HackTheTrack.net to
   [LapWingData.com](https://LapWingData.com) in the README and project
   docs (site rename; no firmware behavior change).
@@ -820,7 +934,7 @@ all breaking under this project's semver policy.
   before the app region is ever erased, and a GPREGRET bootloader-recovery
   flag so an interrupted swap leaves the unit re-flashable over BLE. The
   request characteristic max length was raised to 244 to carry ~240-byte
-  image chunks. See `docs/firmware-ota-phase0.md` for the apply-strategy
+  image chunks. See `docs/plans/0000-firmware-ota-phase0.md` for the apply-strategy
   decision and the hardware spikes that gate it. (The previously added
   `BLEDfu` buttonless Secure DFU service remains registered for the one-time
   fleet-migration push via the nRF Connect mobile app.)

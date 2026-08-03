@@ -64,8 +64,9 @@ Core capabilities:
   pure BLE peripheral — wakes the camera on engine start, records via a ce82
   shutter toggle, stops and powers off automatically (see subsystem 13)
 - **SensorEgg wireless EGT (POC)**: passive BLE observer receives the
-  DovesSensorEgg thermocouple pod's advertising broadcasts (`PW-ADV-1`),
-  logs `Temp1`/`Junction1` DOVEX columns + a Temp1 race page (subsystem 14)
+  DovesSensorEgg thermocouple pod's advertising broadcasts (`PW-ADV` v1
+  and v2), logs `Temp1`/`Junction1`/`Temp2` DOVEX columns + Temp1/Temp2
+  race pages (subsystem 14)
 
 ---
 
@@ -83,7 +84,7 @@ All sketch sources live in `BirdsEye/` so the folder name matches the
 | `project.h` | Shared types (`ButtonState`, `TrackLayout`, `TrackManifestEntry`, `TrackMetadata`), debug macros, `MAX_*` constants |
 | `display_config.h` | Display driver abstraction (SH110X vs SSD1306 toggle) |
 | `gps_config.h` | GPS configuration constants (baud rate, nav rate, serial port) |
-| `images.h` | PROGMEM bitmap data (splash screen, animations) |
+| `images.h` | PROGMEM bitmap data — the bird splash only; the crossing animation is generated (`crossing_pattern`) |
 | `accelerometer.{h,ino}` | LSM6DS3 IMU init and g-force reads (onboard XIAO Sense) |
 | `bluetooth.{h,ino}` | BLE service (file listing, transfer, settings, track sync), auto-reboot on disconnect; shared peripheral BLE core init (+ Just-Works bonding) + `bleOwner` radio-ownership routing |
 | `camera_ble.{h,ino}` | Insta360 X4 auto-record BLE glue: peripheral remote GATT (0xCE80), all control via ce82 button notifies, executes `camera_fsm` actions, deferred callback→loop pattern (see subsystem 13) |
@@ -118,7 +119,9 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `tach_filter.{h,cpp}` | Tachometer 1-D Kalman filter (predict/update math + Q/R tuning constants) |
 | `camera_fsm.{h,cpp}` | Insta360 auto-record lifecycle FSM (8 states, all debounce/retry/timeout timing + tunables); board-portable core shared with the nRF54 "Falcon" target |
 | `insta360_protocol.{h,cpp}` | Insta360 X4 BLE frame builders/parsers (wake advert, remote scan response, ce82 buttons, ce82 GPS/RMC frame, ce81 serial parsing, ce81 `0x10` record-timer state parse) with golden-byte tests |
-| `sensoregg_protocol.{h,cpp}` | SensorEgg `PW-ADV-1` advertising payload parser (magic filter, int16 deci-°C decode with `0x8000`→NaN sentinel, flags, sequence) + wrap-safe 1 s staleness rule + passive-scan tuning constants |
+| `sensoregg_protocol.{h,cpp}` | SensorEgg `PW-ADV` v1+v2 advertising payload parser (magic filter, int16 deci-°C decode with `0x8000`→NaN sentinel, flags, sequence, v2 aux thermistor + battery) + wrap-safe 1 s staleness rule + passive-scan tuning constants |
+| `crossing_pattern.{h,cpp}` | The two-frame crossing animation as geometry (eight 16x16 cells, odd row bands, alternating phase) instead of 2 KB of stored bitmap; golden-tested byte-identical to the images it replaced |
+| `sprint_select.{h,cpp}` | Sprint mode selection: newest-course-by-`date_created` ordering (sortable ISO strings) + the circuit-vs-sprint tiebreak decision table (`race_mode` pref; circuit yields to a sprint course created today) |
 | `wake_cause.{h,cpp}` | Boot wake-cause decode: RESETREAS + GPIO LATCH register snapshots → tach / button / USB / watchdog / soft-reset / cold boot (System OFF shutdown, subsystem 10) |
 | `gps_status_page.{h,cpp}` | GPS status boot page state machine: hold, 3 s auto-close after fix+timeValid, button skip, exit destination (menu vs race), idle → shutdown |
 | `sd_format_page.{h,cpp}` | SD format-confirm boot page state machine: Select held 3 s continuously → format (release restarts the full window; other buttons never confirm), 5 min idle → shutdown |
@@ -160,6 +163,7 @@ handoff spec.
 |---|---|
 | `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, sim-build (native sim TU + 60 s boot soak + determinism + goldens + lap oracles + two-session carryover, plus a wasm job: emsdk 3.1.61 build + node smoke + `birdseye-sim-wasm` artifact), release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). Per-channel build config: `BETA` builds track DovesLapTimer's `BETA` branch and pass `-DBIRDSEYE_ENABLE_SENSOREGG=1`; master/release pin `v4.2.0` and build the all-flags-off defaults |
 | `tests/` | Host doctest harness (CMake) for the pure-logic units |
+| `docs/plans/` | Numbered design records (`NNNN-slug.md`, see its README) — the rationale behind each chunk of work; plan-executing commits cite the number. Same convention as DovesDataViewer |
 | `CHANGELOG.md` | Keep-a-Changelog history; release workflow ties to version tags |
 | `ARCHITECTURE.md` | Human-facing architecture narrative (subsystems, design decisions) |
 | `CONTRIBUTING.md` | Build/test/PR workflow and code conventions |
@@ -501,13 +505,23 @@ loop()  ~250 Hz
   - `TGET:name.json` → reuses existing file transfer (`SIZE:N` → data chunks → `DONE`)
   - `TPUT:name.json` → `TREADY` → app sends data chunks → `TDONE` → `TOK`
   - `TDEL:name.json` → `TOK` or `TERR:NO_FILE`
+  - **Sprint variants** (`/TRACKS/SPRINT`, plan 0002) — same four verbs with a
+    `TS` prefix, sharing the circuit code paths with a `kind` parameter:
+    `TSLIST` → `TSFILE:name.json` per file, then `TSEND` (distinct tokens so a
+    client can't confuse the two enumerations); `TSGET:` / `TSPUT:` / `TSDEL:`
+    behave exactly like their circuit twins and reuse their replies
+    (`SIZE:`/`DONE`, `TREADY`/`TDONE`/`TOK`, `TERR:*`).
+  - **The folder is never taken from the wire.** `filename_validator` still
+    rejects `/`, `..` and FAT-unsafe bytes on every track command; which of the
+    two folders a command targets is decided by the *opcode* alone
+    (`trackFolderFor()`), so a client cannot path its way between them.
   - Upload uses a 4096-byte static RAM buffer; `TERR:TOO_LARGE` if exceeded.
   - Error responses: `TERR:SD_BUSY`, `TERR:BUSY`, `TERR:WRITE_FAIL`, `TERR:NO_FILE`, `TERR:BAD_NAME`.
   - Upload/delete state machines: BLE callback sets flags, `BLUETOOTH_LOOP()`
     calls `processTrackUpload()` / `processTrackDelete()` for thread-safe SD
     access. Both call `buildTrackList()` after success.
 - **Firmware OTA commands** (`FW*`, handled by `firmware_ota.ino` — see
-  subsystem 11): `FWBEGIN`/`FWPUT`/`FWDONE`/`FWAPPLY`/`FWABORT`. The BLE
+  subsystem 11): `FWBEGIN`/`FWPUT`/`FWDONE`/`FWAPPLY`/`FWABORT`/`FWDFU`. The BLE
   callback dispatches them via `fwIsCommand()`/`fwHandleCommand()` and routes
   raw image chunks to `fwReceiveChunk()` while `fwReceiving()`. The request
   characteristic max length was raised from 64 to **244** so ~240-byte image
@@ -571,7 +585,28 @@ loop()  ~250 Hz
   speed >= 10 mph, jumps directly to race mode.
 - **Auto-idle** (`checkAutoIdle()`): if speed < 2 mph for 60 seconds
   continuously, writes DOVEX header, closes file, cleans up CourseManager,
-  and returns to main menu.
+  and returns to main menu. **Sprint mode is engine-aware**: idle counts
+  only while the tach reads 0 too (between-run queue waits keep the engine
+  running), and every completed run re-arms the 3-minute grace period.
+- **Sprint mode (plan 0002)**: tracks under `/TRACKS/SPRINT/` make the
+  session point-to-point. `trackDetectionLoop()` finds the nearest
+  manifest entry PER KIND; with both kinds in range the `race_mode`
+  setting breaks the tie via the host-tested `sprint_select` unit (the
+  event-day heuristic parses the sprint file once for its newest
+  `date_created`). The sprint path skips CourseManager/CourseDetector
+  entirely — `createSprintSession()` picks the newest course
+  (`sprint_select::newestCourseIndex`) and stands up the library's
+  `SprintTimer` (start + separate finish + optional S2/S3 lines; ~11.6 KB
+  heap, one instance). `sprintTimer != nullptr` IS sprint mode —
+  `courseManager` stays null for the session and every `activeTimer*()`
+  helper checks the sprint branch first (runs duck-type as laps; "laps"
+  verbiage kept everywhere by design). Run completion is captured on the
+  RUN-COUNT EDGE in `checkForNewLapData()` (identical consecutive run
+  times are normal; value-change dedupe would drop them). Between runs
+  the Current Lap / Pace pages show `*waiting*`
+  (`sprintModeIsActive() && !activeTimerRunActive()`); everything else
+  stays live. The DOVEX header gets `race_mode=SPRINT` and the sprint
+  course name.
 
 ### 10. Shutdown (System OFF)
 
@@ -596,17 +631,26 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   powered; TIMER3 stopped) → IMU power rail off.
 - **System OFF entry** (`shutdownSystemOff()`, no return): wait for the
   entry combo's buttons to release (a held button = SENSE satisfied =
-  instant wake-reset), configure `nrf_gpio_cfg_sense_input(pull-up,
-  SENSE-LOW)` on the tach pin + all 3 buttons (P-numbers via
-  `g_ADigitalPinMap`, never hardcoded), clear the GPIO LATCH registers
+  instant wake-reset), **sample the tach line's parked idle level**
+  (15 reads over ~30 ms, majority vote in the host-tested
+  `wake_cause::tachIdleIsHigh()`) and configure
+  `nrf_gpio_cfg_sense_input(pull-up, SENSE opposite the idle level)` on
+  the tach pin — the pickup's Schmitt-inverter + optocoupler output
+  stage idles high or low depending on the circuit build, and arming
+  toward the idle level was an instant wake-reset loop on battery
+  (runtime RPM counting can't tell the polarities apart: one falling
+  edge per pulse either way). Buttons are fixed active-low →
+  `SENSE-LOW` on all 3 (P-numbers via `g_ADigitalPinMap`, never
+  hardcoded). Then clear the GPIO LATCH registers
   (a set latch = pending DETECT = instant re-wake), clear pending FPU
   exceptions, then `sd_power_system_off()` when the SoftDevice is enabled
   (BLE is lazy — check `sd_softdevice_is_enabled()`) else raw
   `NRF_POWER->SYSTEMOFF`. **GPREGRET is untouched** — register 0 belongs
   to the OTA/bootloader handoff (subsystem 11). The WDT halts in System
   OFF (all clocks stop); `wdtSetup()` re-arms on the fresh boot.
-- **Wake sources**: tach pulse (D0 falling, engine start), any button,
-  or VBUS (USB plug-in, always armed on nRF52840).
+- **Wake sources**: tach pulse (D0, engine start — any transition away
+  from the sampled idle level), any button, or VBUS (USB plug-in,
+  always armed on nRF52840).
 - **Wake-cause decode** (`captureBootWakeCause()`, FIRST thing in
   `setup()`): reads then clears `RESETREAS` + `NRF_P0/P1->LATCH` (sticky,
   cumulative) and decodes via the host-tested `wake_cause` unit. A tach
@@ -656,6 +700,17 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
     file) or `FWERR:CRC|SIZE|WRITE`.
   - `FWAPPLY` → `FWSTAGE:<pct>` (0–100, repeatable) → `FWAPPLIED` then reset,
     or `FWERR:<reason>`. `FWABORT` cancels at any point.
+  - `FWDFU` → `FWDFU:OK`, then the device reboots into the Adafruit
+    bootloader's **UF2 mass-storage DFU** (GPREGRET `0x57` =
+    `DFU_MAGIC_UF2_RESET` — a stock bootloader feature, same handoff
+    register the OTA recovery flag uses). The device enumerates as a USB
+    drive; copying a `.uf2` onto it flashes the app region directly — **no
+    image-size cap, no staging region**. This is the "pre-update" escape
+    hatch (plan 0004): any unit carrying this command can always be
+    updated with just a USB cable regardless of future image growth.
+    Exiting UF2 mode without flashing boots the existing app unchanged.
+    Accepted from any FW state (an in-flight OTA is cleanly aborted
+    first); executed on the main loop like all FW commands.
   - Error tokens: `CRC`, `SIZE`, `WRITE`, `BATTERY`, `VARIANT`, `STATE`,
     `FLASH`.
 - **CRC**: CRC-32/IEEE-802.3 (zlib), reflected poly `0xEDB88320`, init/xor
@@ -681,7 +736,7 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   bootloader comes up in BLE DFU and the unit is re-flashable over the air via
   the nRF Connect mobile app — no pins. **The apply path needs the Phase 0
   hardware spikes signed off before field release** — see
-  `docs/firmware-ota-phase0.md`.
+  `docs/plans/0000-firmware-ota-phase0.md`.
 - **Fleet migration**: the first firmware carrying `FW*` is pushed to sealed
   units once via nRF Connect (native app, buttonless trigger works on the
   existing single-bank bootloader); all later updates go through the web app.
@@ -971,22 +1026,26 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
 ### DOVEX Log (`.dovex` files) — New UI default
 
 ```
-datetime,driver_name,course_name,short_name,best_lap_ms,optimal_lap_ms,device_name
+datetime,driver_name,course_name,short_name,best_lap_ms,optimal_lap_ms,device_name,race_mode
 lap1_ms,lap2_ms,lap3_ms,...
 \n padding to byte 1024
-timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z,Temp1,Junction1
+timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z,Temp1,Junction1,Temp2
 1710512400123,12,0.8,35.12345678,-97.12345678,65.32,234.56,...
 ```
 
 - **Reserved header** (bytes 0–1023): Line 1 = session metadata, Line 2 =
   all lap times (comma-separated ms values), padded with `\n` to 1024 bytes.
-- **`device_name`** is the trailing metadata column (after `optimal_lap_ms`).
-  Appending it keeps old logs readable (parsed as empty) and lets older
-  readers ignore the extra column — backwards compatible by design.
+- **`device_name`** and **`race_mode`** are trailing metadata columns
+  (after `optimal_lap_ms`, in that order). Appending keeps old logs
+  readable (parsed as empty) and lets older readers ignore the extra
+  columns — backwards compatible by design. `race_mode` is `CIRCUIT` /
+  `SPRINT` (empty = circuit): a webapp loading helper — with `SPRINT`,
+  the laps line is a runs line. Nothing on-device reads it back.
 - **GPS data** (byte 1024+): CSV column header then streaming GPS rows.
-- **`Temp1` / `Junction1`** (trailing columns): SensorEgg EGT + cold
-  junction in °C. Literal `nan` when the egg link is stale (>1 s) or the
-  egg reports an invalid probe — a dropout must be a visible gap, never a
+- **`Temp1` / `Junction1` / `Temp2`** (trailing columns): SensorEgg EGT +
+  cold junction + v2 aux intake-air temp, all °C. Literal `nan` when the
+  egg link is stale (>1 s), the egg reports an invalid probe/divider, or
+  (for `Temp2`) the egg is v1 — a dropout must be a visible gap, never a
   held value. These fields never cause a GPS row to be skipped.
 - **Crash safety**: file created with pre-filled newlines to 1024 bytes
   before any data. Header written on session end. If header is empty
@@ -1031,6 +1090,13 @@ immediately.
 
 Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 
+**Sprint track JSON** (`/TRACKS/SPRINT/*.json`) uses the same object
+format plus `"type": "sprint"` (track level — redundant with the folder,
+which is authoritative) and per-course `finish_a/b_lat/lng` (required for
+timing; a course without a finish line can't run) and `date_created` (a
+sortable ISO-8601 stamp, `YYYY-MM-DDTHH:MM`; the newest course is always
+the one loaded). Sector lines stay optional — zero, one, or two.
+
 ### Settings JSON (`/SETTINGS.json`)
 
 ```json
@@ -1039,6 +1105,7 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
   "bluetooth_pin": "7391",
   "camera_serial": "",
   "device_name": "ApexTurbo",
+  "race_mode": "circuit",
   "driver_name": "Driver",
   "lap_detection_distance": "7",
   "waypoint_detection_distance": "30",
@@ -1053,6 +1120,7 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | `camera_serial` | string | `""` (empty = unpaired) | Paired Insta360 X4's 6-char serial (auto-captured on pairing, or entered manually) |
 | `device_name` | string | Random racing words | Identifies the logging device (DOVEX header) |
 | `driver_name` | string | `"Driver"` | Logged in DOVEX header |
+| `race_mode` | string | `"circuit"` | Tiebreak pref when BOTH a circuit and a sprint track are in range: `circuit` yields only to a sprint course created today; `sprint` always prefers the sprint track. Never overrides single-kind detection |
 | `lap_detection_distance` | int | `7` | DovesLapTimer crossing threshold (meters) |
 | `waypoint_detection_distance` | int | `30` | WaypointLapTimer proximity zone (meters) |
 | `waypoint_speed` | int | `30` | Speed threshold (mph) for waypoint/detection |

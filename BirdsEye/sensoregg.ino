@@ -1,8 +1,8 @@
 ///////////////////////////////////////////
 // SENSOREGG MODULE (wireless EGT pod — passive BLE observer)
 //
-// Receives the DovesSensorEgg's PW-ADV-1 broadcasts and exposes the
-// latest EGT / cold-junction reading. See sensoregg.h for the role,
+// Receives the DovesSensorEgg's PW-ADV broadcasts (v1 and v2) and
+// exposes the latest readings. See sensoregg.h for the role,
 // pairing, and threading contracts, and sensoregg_protocol.{h,cpp}
 // (host-tested) for the byte layout and staleness rule.
 //
@@ -43,7 +43,8 @@ static const uint8_t kSensorEggMac[6] = SENSOREGG_MAC;
 // ---- RX double-buffer (BLE scan callback fills, SENSOREGG_LOOP drains;
 // mirrors camera_ble.ino's ce81 idiom: payload arrays are plain RAM, the
 // per-slot ready flags are the synchronization points) ----
-static uint8_t           eggBuf[2][sensoregg_protocol::kPayloadLen];
+static uint8_t           eggBuf[2][sensoregg_protocol::kPayloadLenMax];
+static volatile uint8_t  eggLen[2] = {0, 0};   // actual bytes captured
 static volatile uint32_t eggAtMs[2] = {0, 0};
 static volatile bool     eggReady[2] = {false, false};
 static volatile uint8_t  eggWriteIdx = 0;  // callback writes (Bluefruit task)
@@ -91,7 +92,15 @@ static void sensoreggScanCallback(ble_gap_evt_adv_report_t* report) {
       sensoregg_protocol::matchesMagic(buf, len) &&
       sensoreggMacAccepted(report->peer_addr.addr)) {
     const uint8_t w = eggWriteIdx;
-    memcpy(eggBuf[w], buf, sensoregg_protocol::kPayloadLen);
+    // Capture up to the largest known layout; the parser applies the
+    // per-version length gate. (The old fixed-14 copy silently truncated
+    // v2 frames — bytes 14-15 never reached the parser.)
+    const uint8_t copyLen =
+        len < sensoregg_protocol::kPayloadLenMax
+            ? len
+            : (uint8_t)sensoregg_protocol::kPayloadLenMax;
+    memcpy(eggBuf[w], buf, copyLen);
+    eggLen[w] = copyLen;
     eggAtMs[w] = millis();
     eggReady[w] = true;
     eggWriteIdx = w ^ 1;
@@ -145,14 +154,15 @@ void SENSOREGG_SETUP() {
 void SENSOREGG_LOOP() {
   // Drain everything queued (usually 0 or 1 slots); the newest parse wins.
   while (eggReady[eggReadIdx]) {
-    uint8_t local[sensoregg_protocol::kPayloadLen];
+    uint8_t local[sensoregg_protocol::kPayloadLenMax];
     memcpy(local, eggBuf[eggReadIdx], sizeof(local));
+    const uint8_t localLen = eggLen[eggReadIdx];
     const uint32_t atMs = eggAtMs[eggReadIdx];
     eggReady[eggReadIdx] = false;
     eggReadIdx ^= 1;
 
     sensoregg_protocol::Reading r;
-    if (sensoregg_protocol::parsePayload(local, sizeof(local), r)) {
+    if (sensoregg_protocol::parsePayload(local, localLen, r)) {
       eggReading = r;
       eggRxMs = atMs;
       eggHaveReading = true;
@@ -200,6 +210,20 @@ float sensoreggJunctionC() {
   return eggReading.junctionC;
 }
 
+float sensoreggAuxC() {
+  // Same gating as the EGT: stale link or hung app -> NaN. Also NaN when
+  // the egg is v1 (no aux field) or its divider reported the sentinel.
+  if (!sensoreggLinkUp() || sensoreggAppHung()) return NAN;
+  return eggReading.auxC;
+}
+
+uint8_t sensoreggBatteryPct() {
+  // 0xFF = unknown: stale/hung link, v1 stub, or the egg's own
+  // no-pack-fitted gate. Never report a stale percent as current.
+  if (!sensoreggLinkUp() || sensoreggAppHung()) return 0xFF;
+  return eggReading.battery;
+}
+
 bool sensoreggTcFault() {
   // A frozen payload's fault flag is stale information — suppress it.
   return sensoreggLinkUp() && !sensoreggAppHung() && eggReading.tcFault;
@@ -237,6 +261,8 @@ bool sensoreggLinkUp() { return false; }
 bool sensoreggAppHung() { return false; }
 float sensoreggEgtC() { return NAN; }
 float sensoreggJunctionC() { return NAN; }
+float sensoreggAuxC() { return NAN; }
+uint8_t sensoreggBatteryPct() { return 0xFF; }
 bool sensoreggTcFault() { return false; }
 uint16_t sensoreggSequence() { return 0; }
 
