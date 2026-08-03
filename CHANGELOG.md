@@ -12,7 +12,41 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-08-03
+
+Makes room. The self-flash OTA capped images at 320 KB, and the beta image
+was at 99% of it — every new feature was fighting the cap. Splitting the
+flash evenly raises the ceiling to 408 KiB with no change to how updating
+works, so this release is purely "more headroom, same behavior". Nothing
+user-facing moves.
+
+**MINOR, not PATCH**: the device now accepts OTA images it would previously
+have rejected with `FWERR:SIZE` — backwards-compatible new device behavior.
+
 ### Changed
+- **OTA image cap raised 320 KiB → 408 KiB by splitting the flash evenly.**
+  The app and the OTA staging region share one 820 KiB stretch, and both
+  must be able to hold the image — the incoming one is staged up top, then
+  copied down over the app — so the largest installable image is half that
+  span. The split was lopsided: 320 KiB of staging against 500 KiB of app
+  region, which capped OTA at 320 KiB while leaving ~180 KiB of app region
+  that no legal image could ever reach. The staging base moves `0xA4000` →
+  `0x8E000`, making it 408 KiB of staging against 412 KiB of app. Nothing
+  about the apply sequence, the `FW*` protocol, or the CRC changes — only
+  two constants, now backed by `static_assert`s for page alignment and
+  app-region fit. **No companion-app change is needed**: the web client
+  never enforced a cap of its own, it relies on the device's `FWERR:SIZE`.
+  - Upgrading to this release is safe from any earlier build: the staging
+    location is chosen at apply time from the *installed* firmware's
+    constants, so a 3.0.x device stages at the old `0xA4000` and installs
+    this one normally. The new app region also ends below that old staging
+    base, so a new-layout image can never collide with an old device's
+    staging area.
+  - **Devices still on 3.0.x keep their own 320 KiB limit** until they take
+    this release. A future build larger than 320 KiB cannot be sent to one
+    over the air — it would answer `FWERR:SIZE` — and would have to go over
+    USB via `FWDFU` → UF2 instead. CI now warns when a build crosses that
+    line so the split is visible before release rather than in the field.
 - **The crossing animation is generated, not stored — 2,048 B of flash
   reclaimed.** The two "calculating" frames shown while inside a crossing
   zone were hand-stored 1 KB PROGMEM bitmaps, but both were pure block
@@ -947,7 +981,8 @@ Initial tagged release. Core capabilities:
 - 8+ OLED display pages, Bluetooth LE file download / settings / track
   sync, and a low-power sleep mode.
 
-[Unreleased]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v3.0.2...HEAD
+[Unreleased]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v3.1.0...HEAD
+[3.1.0]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v3.0.2...v3.1.0
 [3.0.2]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v3.0.1...v3.0.2
 [3.0.1]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v2.2.3...v3.0.0
