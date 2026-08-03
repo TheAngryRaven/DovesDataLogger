@@ -12,9 +12,19 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [3.0.2] - 2026-08-03
+
+Ships the **`FWDFU` pre-update**: a device on this build can always be
+reflashed over a USB cable, whatever a future image weighs. That matters
+because the self-flash OTA caps images at the 320 KB staging region and
+the beta image is already at ~99% of it — the planned SD-staged rework
+(plan 0004) removes that cap, and this release is the escape hatch that
+makes migrating to it safe on sealed units.
+
 ### Added
-- **`FWDFU` BLE command — reboot into UF2 mass-storage DFU** (backwards
-  compatible — MINOR). Sends `FWDFU:OK`, then reboots into the stock
+- **`FWDFU` BLE command — reboot into UF2 mass-storage DFU** (additive;
+  every existing command keeps its wire behaviour). Sends `FWDFU:OK`,
+  then reboots into the stock
   Adafruit/Seeed bootloader's UF2 mode: the device shows up as a USB
   drive and flashing is a drag-and-drop of a `.uf2` file — no web app, no
   nRF Connect, **no OTA image-size cap** (the bootloader writes the app
@@ -924,7 +934,8 @@ Initial tagged release. Core capabilities:
 - 8+ OLED display pages, Bluetooth LE file download / settings / track
   sync, and a low-power sleep mode.
 
-[Unreleased]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v3.0.1...HEAD
+[Unreleased]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v3.0.2...HEAD
+[3.0.2]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v3.0.1...v3.0.2
 [3.0.1]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v2.2.3...v3.0.0
 [2.2.3]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v2.2.2...v2.2.3
