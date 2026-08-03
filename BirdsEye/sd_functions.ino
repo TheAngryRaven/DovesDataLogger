@@ -5,6 +5,8 @@
 
 #include "sd_functions.h"
 
+#include "track_json.h"
+
 /**
  * @brief Attempt to acquire SD card access for a subsystem
  * @param mode The access mode being requested (SD_ACCESS_*)
@@ -570,4 +572,179 @@ int parseTrackFile(char* filepath) {
   trackFile.close();
   releaseSDAccess(SD_ACCESS_TRACK_PARSE);
   return PARSE_STATUS_GOOD;
+}
+
+///////////////////////////////////////////
+// TRACK WRITING (on-device course creator, plan 0002 §5)
+//
+// This is the firmware's first track-file WRITER — until the course
+// creator it only ever read them. The JSON text itself is built by the
+// host-tested track_json unit; everything here is file plumbing.
+///////////////////////////////////////////
+
+// Scratch for one serialized course. A course is four coordinate lines at
+// ~28 bytes a field plus keys — comfortably under 700 bytes even with all
+// four lines and a date stamp. Static, not stack: the sketch keeps big
+// buffers out of the main loop's stack (same reason jsonFileBuffer is).
+static char courseJsonBuffer[768];
+// A course parsed back into its own document so it can be grafted into the
+// existing track. Sized to hold that same one course.
+static StaticJsonDocument<768> courseJson;
+
+/**
+ * @brief Append a course to an existing track file.
+ *
+ * Read-modify-write, the same shape settings.ino uses, with one addition:
+ * the rewrite goes to a temp file that REPLACES the original only once it
+ * is safely closed. Writing in place would mean a power loss (or a card
+ * yank) mid-serialize leaves a truncated file where a working track used
+ * to be — and this runs in a field, on a battery, at an event.
+ *
+ * Caller must hold the SD mutex.
+ */
+static SdCourseWriteResult appendCourseToTrackFile(const char* filepath,
+                                                   const char* courseText) {
+  trackFile.open(filepath, O_READ);
+  if (!trackFile) {
+    debugln(F("SaveCourse: append target missing"));
+    return SD_COURSE_WRITE_NO_TRACK;
+  }
+  const int bytesRead = trackFile.read(jsonFileBuffer, sizeof(jsonFileBuffer) - 1);
+  trackFile.close();
+  if (bytesRead <= 0) return SD_COURSE_WRITE_NO_TRACK;
+  jsonFileBuffer[bytesRead] = '\0';
+
+  trackJson.clear();
+  if (deserializeJson(trackJson, jsonFileBuffer) != DeserializationError::Ok) {
+    debugln(F("SaveCourse: existing track will not parse"));
+    return SD_COURSE_WRITE_NO_TRACK;
+  }
+
+  // Both on-disk shapes are appendable: the object format's "courses"
+  // array, and the legacy bare array which IS the course list.
+  JsonArray courses;
+  if (trackJson.is<JsonObject>()) {
+    courses = trackJson["courses"];
+    if (courses.isNull()) courses = trackJson.createNestedArray("courses");
+  } else if (trackJson.is<JsonArray>()) {
+    courses = trackJson.as<JsonArray>();
+  } else {
+    return SD_COURSE_WRITE_NO_TRACK;
+  }
+  if (courses.isNull()) return SD_COURSE_WRITE_NO_TRACK;
+
+  if ((int)courses.size() >= MAX_LAYOUTS) {
+    // The device only ever loads MAX_LAYOUTS courses, so an appended one
+    // past the cap would be written and then silently ignored.
+    debugln(F("SaveCourse: track already holds MAX_LAYOUTS courses"));
+    return SD_COURSE_WRITE_TOO_BIG;
+  }
+
+  courseJson.clear();
+  if (deserializeJson(courseJson, courseText) != DeserializationError::Ok) {
+    return SD_COURSE_WRITE_TOO_BIG;
+  }
+  const size_t before = courses.size();
+  courses.add(courseJson);
+  // The whole file has to fit the 4 KB parse budget on the next boot, so a
+  // grafted course that overflowed the document must not reach the card.
+  if (courses.size() != before + 1 || trackJson.overflowed()) {
+    debugln(F("SaveCourse: track file is full"));
+    return SD_COURSE_WRITE_TOO_BIG;
+  }
+
+  char tempPath[FILEPATH_MAX];
+  snprintf(tempPath, sizeof(tempPath), "%s.tmp", filepath);
+  SD.remove(tempPath);  // a temp left by an interrupted earlier attempt
+
+  File32 outFile;
+  outFile.open(tempPath, O_CREAT | O_WRITE | O_TRUNC);
+  if (!outFile) return SD_COURSE_WRITE_IO;
+  const size_t written = serializeJson(trackJson, outFile);
+  outFile.sync();
+  outFile.close();
+
+  if (written == 0) {
+    SD.remove(tempPath);
+    return SD_COURSE_WRITE_IO;
+  }
+
+  // Swap only now that the replacement is complete on the card.
+  if (!SD.remove(filepath)) {
+    SD.remove(tempPath);
+    return SD_COURSE_WRITE_IO;
+  }
+  if (!SD.rename(tempPath, filepath)) {
+    debugln(F("SaveCourse: rename failed"));
+    return SD_COURSE_WRITE_IO;
+  }
+  return SD_COURSE_WRITE_OK;
+}
+
+SdCourseWriteResult sdSaveCreatedCourse(const CreatedCourseWrite& req) {
+  if (req.course == nullptr) return SD_COURSE_WRITE_IO;
+
+  const uint8_t kind = (req.course->kind == course_creator::CourseKind::kSprint)
+                           ? TRACK_KIND_SPRINT
+                           : TRACK_KIND_CIRCUIT;
+
+  const int courseLen = track_json::formatCourse(
+      courseJsonBuffer, sizeof(courseJsonBuffer),
+      *req.course, req.courseName, req.dateCreated);
+  if (courseLen < 0) return SD_COURSE_WRITE_TOO_BIG;
+
+  if (!acquireSDAccess(SD_ACCESS_TRACK_PARSE)) {
+    debugln(F("SaveCourse: SD busy"));
+    return SD_COURSE_WRITE_BUSY;
+  }
+
+  // Both folders, since SdFat's open() never creates parents and a course
+  // can be the very first thing ever written to a blank soldered-in card.
+  if (!sdEnsureTracksFolder() ||
+      (kind == TRACK_KIND_SPRINT && !SD.exists(trackFolderSprint))) {
+    releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+    return SD_COURSE_WRITE_IO;
+  }
+
+  char filepath[FILEPATH_MAX];
+  makeFullTrackPath(req.trackName, filepath, kind);
+
+  SdCourseWriteResult result;
+  if (req.newTrack) {
+    if (SD.exists(filepath)) {
+      // Names carry the GPS clock down to the minute, so this means the
+      // same minute twice — refuse rather than overwrite someone's course.
+      debugln(F("SaveCourse: track file already exists"));
+      result = SD_COURSE_WRITE_EXISTS;
+    } else {
+      const int fileLen = track_json::formatTrackFile(
+          jsonFileBuffer, sizeof(jsonFileBuffer),
+          req.trackName, req.shortName,
+          *req.course, req.courseName, req.dateCreated);
+      if (fileLen < 0) {
+        result = SD_COURSE_WRITE_TOO_BIG;
+      } else {
+        File32 outFile;
+        outFile.open(filepath, O_CREAT | O_WRITE | O_TRUNC);
+        if (!outFile) {
+          result = SD_COURSE_WRITE_IO;
+        } else {
+          const size_t written = outFile.write(jsonFileBuffer, (size_t)fileLen);
+          outFile.sync();
+          outFile.close();
+          result = (written == (size_t)fileLen) ? SD_COURSE_WRITE_OK : SD_COURSE_WRITE_IO;
+          if (result != SD_COURSE_WRITE_OK) SD.remove(filepath);
+        }
+      }
+    }
+  } else {
+    result = appendCourseToTrackFile(filepath, courseJsonBuffer);
+  }
+
+  releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+
+  // The manifest drives proximity detection, so a course that isn't in it
+  // doesn't exist as far as the next session is concerned.
+  if (result == SD_COURSE_WRITE_OK) buildTrackList();
+  return result;
 }

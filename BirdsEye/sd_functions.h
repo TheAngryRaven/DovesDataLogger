@@ -7,6 +7,9 @@
 // access mutex to avoid corrupting SdFat's internal state.
 ///////////////////////////////////////////
 
+#include <stdint.h>
+
+#include "course_creator.h"  // CreatedCourseWrite carries a walked course
 #include "sd_access_policy.h"
 
 // SD access modes — used by acquireSDAccess / releaseSDAccess. Aliases of
@@ -93,3 +96,39 @@ bool buildTrackList();
 // trackLayouts[]. Auto-detects new (object) vs legacy (bare array)
 // JSON format. Returns one of the PARSE_STATUS_* codes.
 int parseTrackFile(char* filepath);
+
+///////////////////////////////////////////
+// TRACK WRITING (on-device course creator, plan 0002 §5)
+///////////////////////////////////////////
+
+// Why a course write failed, so the creator can say something more useful
+// than "error" on a 128x64 screen.
+enum SdCourseWriteResult : uint8_t {
+  SD_COURSE_WRITE_OK = 0,
+  SD_COURSE_WRITE_BUSY,        // another subsystem holds the card
+  SD_COURSE_WRITE_NO_TRACK,    // append target missing or unparseable
+  SD_COURSE_WRITE_TOO_BIG,     // the course would not fit the 4 KB parse budget
+  SD_COURSE_WRITE_IO,          // open/write/rename failed
+  SD_COURSE_WRITE_EXISTS,      // a track file of that name is already there
+};
+
+// One walked course, ready to be written.
+struct CreatedCourseWrite {
+  const course_creator::State* course = nullptr;
+  bool newTrack = false;      // create a track file vs append to an existing one
+  const char* trackName = ""; // file basename, without folder or .json
+  const char* shortName = ""; // new tracks only
+  const char* courseName = "";
+  const char* dateCreated = ""; // sprint only; "" on circuit courses
+};
+
+// Write a freshly-walked course to the card.
+//
+// A NEW track becomes /TRACKS/<name>.json (or /TRACKS/SPRINT/<name>.json)
+// holding exactly this course. An APPEND parses the existing file, adds the
+// course to its "courses" array, and rewrites it — via a temp file and a
+// rename, so a power loss mid-write cannot leave a half-written track file
+// where a working one used to be.
+//
+// Takes the SD mutex itself; the caller must not hold it.
+SdCourseWriteResult sdSaveCreatedCourse(const CreatedCourseWrite& req);
