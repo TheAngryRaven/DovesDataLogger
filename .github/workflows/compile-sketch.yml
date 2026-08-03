@@ -126,10 +126,21 @@ jobs:
       # bootloader is exactly that size. The program's flash usage equals the
       # app .bin that gets streamed/flashed, so gate it against that cap: warn
       # as it approaches, fail if it crosses (the image would be un-OTA-able).
+      #
+      # There are TWO caps, because the cap lives in the *installed* firmware,
+      # not in the image being delivered:
+      #   OTA_IMAGE_MAX_BYTES  — this layout's cap. Hard failure past it.
+      #   OTA_LEGACY_MAX_BYTES — the cap on units still running <= 3.0.x, which
+      #     stage at the old 0xA4000. Those units reject a larger image with
+      #     FWERR:SIZE and would need the USB UF2 path (FWDFU) instead, so
+      #     crossing it is a warning: it means the fleet has split.
+      # Drop the legacy warning once every unit you care about has taken a
+      # build carrying the 0x8E000 layout.
       - name: OTA image size gate
         env:
           # Keep in sync with FW_MAX_IMAGE_SIZE in BirdsEye/firmware_ota.ino.
-          OTA_IMAGE_MAX_BYTES: 327680   # 320 KiB
+          OTA_IMAGE_MAX_BYTES: 417792   # 408 KiB
+          OTA_LEGACY_MAX_BYTES: 327680  # 320 KiB — pre-3.1 staging layout
           OTA_WARN_PERCENT: 90
         run: |
           report="$(find sketches-reports -name '*.json' | head -1)"
@@ -149,12 +160,17 @@ jobs:
           pct="$(awk "BEGIN { printf \"%.1f\", ($flash_abs / $OTA_IMAGE_MAX_BYTES) * 100 }")"
           echo "OTA image: ${flash_abs} / ${OTA_IMAGE_MAX_BYTES} bytes (${pct}% of the OTA cap)"
           if [ "$flash_abs" -gt "$OTA_IMAGE_MAX_BYTES" ]; then
-            echo "::error::Image ${flash_abs} B exceeds the OTA cap ${OTA_IMAGE_MAX_BYTES} B — FWBEGIN would reject it (FWERR:SIZE). Shrink the image or raise FW_MAX_IMAGE_SIZE (which moves the staging base down, costing app space)."
+            echo "::error::Image ${flash_abs} B exceeds the OTA cap ${OTA_IMAGE_MAX_BYTES} B — FWBEGIN would reject it (FWERR:SIZE). Shrink the image, or finish plan 0004's SD-direct apply (which removes the staging region and the cap with it)."
             exit 1
           fi
           warn="$(awk "BEGIN { print (($flash_abs / $OTA_IMAGE_MAX_BYTES) * 100 >= ${OTA_WARN_PERCENT}) ? 1 : 0 }")"
           if [ "$warn" = "1" ]; then
             echo "::warning::OTA image at ${pct}% of the ${OTA_IMAGE_MAX_BYTES} B cap (>= ${OTA_WARN_PERCENT}%) — getting close to un-OTA-able; plan to shrink or raise the cap."
+          fi
+          # Fleet-split check: an image past the legacy cap can no longer be
+          # installed by units still running the pre-3.1 staging layout.
+          if [ "$flash_abs" -gt "$OTA_LEGACY_MAX_BYTES" ]; then
+            echo "::warning::Image ${flash_abs} B exceeds the legacy ${OTA_LEGACY_MAX_BYTES} B cap — units still on <= 3.0.x will answer FWERR:SIZE and can only take this build over USB (FWDFU -> UF2). Ship a <= ${OTA_LEGACY_MAX_BYTES} B build first if any such unit still needs to migrate."
           fi
 
       - name: Upload size deltas report

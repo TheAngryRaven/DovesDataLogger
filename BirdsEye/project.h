@@ -31,7 +31,7 @@
 #ifdef FIRMWARE_VERSION_OVERRIDE
   #define FIRMWARE_VERSION _BE_TOSTRING(FIRMWARE_VERSION_OVERRIDE)
 #else
-  #define FIRMWARE_VERSION "3.0.2"
+  #define FIRMWARE_VERSION "3.1.0"
 #endif
 
 ///////////////////////////////////////////

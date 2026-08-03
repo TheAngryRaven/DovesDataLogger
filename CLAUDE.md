@@ -1126,8 +1126,8 @@ Stored in `trackLayouts[MAX_LAYOUTS]` (max 10 per track).
 | OTA staging path | `/fw/pending.bin` | `firmware_ota.ino` |
 | OTA receive buffer | 2 × 4096 (double-buffer) | `firmware_ota.ino` |
 | OTA app base | `0x27000` | `firmware_ota.ino` |
-| OTA staging flash base | `0xA4000` | `firmware_ota.ino` |
-| OTA max image size | 320 KB | `firmware_ota.ino` |
+| OTA staging flash base | `0x8E000` | `firmware_ota.ino` |
+| OTA max image size | 408 KiB (half the 820 KiB app+staging span, page-aligned; `static_assert`ed) | `firmware_ota.ino` |
 | OTA min apply voltage | 3.6 V | `firmware_ota.ino` |
 | Camera record-start gate | RPM ≥ 1500 (`kRecordRpmThreshold`) held 5 s, strict — dips restart the clock (no GPS gate) | `camera_fsm.h` |
 | Camera stop-record delay | 30 s engine-off (RPM only) → also ends log session | `camera_fsm.h` |

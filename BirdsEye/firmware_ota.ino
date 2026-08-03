@@ -37,22 +37,55 @@ extern "C" {
 //   0x00000000  MBR + SoftDevice S140 7.3.0
 //   0x00027000  CODE_REGION_1_START — application starts here  (FW_APP_BASE)
 //   ...         running application (this firmware)
-//   0x000A4000  staging region for the incoming image          (FW_STAGE_BASE)
+//   0x0008E000  staging region for the incoming image          (FW_STAGE_BASE)
 //   0x000F4000  Adafruit bootloader                            (FW_BOOTLOADER_ADDR)
 //   0x000FE000  MBR parameter page
 //   0x000FF000  bootloader settings page
 //
-// The staging region [FW_STAGE_BASE, FW_BOOTLOADER_ADDR) is 320 KB and must
-// not overlap the running app, which leaves [0x27000, 0xA4000) = 512 KB for
-// the app — comfortably larger than the current image. PHASE 0 must confirm
-// FW_STAGE_BASE sits above this firmware's actual end (check the .map file)
-// and below the installed bootloader on the target units.
+// The app and the staging region share one 820 KiB stretch
+// [0x27000, 0xF4000) = 839 680 B, and BOTH must be able to hold the image:
+// the incoming one is staged up top, then copied down over the app. So the
+// largest OTA-able image is half that span, and the split should be even.
+// It was not: 320 KiB staging / 500 KiB app capped OTA at 320 KiB while
+// leaving 180 KiB of app region no image could ever legally reach. Splitting
+// evenly (rounded to a 4 KiB erase page) raises the cap to 408 KiB at no
+// cost to anything reachable:
+//
+//   staging  [0x8E000, 0xF4000) = 417 792 B = 408 KiB  <- FW_MAX_IMAGE_SIZE
+//   app      [0x27000, 0x8E000) = 421 888 B = 412 KiB  (>= the cap, so any
+//                                                       legal image fits)
+//
+// Migration is one-way-safe. A unit still on pre-3.1 firmware stages at the
+// OLD 0xA4000 using its OWN constants — staging is chosen at apply time and
+// nothing about it is baked into the image — so it installs this firmware
+// normally as long as the image clears the old 320 KiB cap. And because the
+// new app region ends at 0x8E000, BELOW the old 0xA4000 staging base, an
+// image built for this layout can never collide with an old unit's staging
+// region. Growing the cap is therefore purely additive for the fleet.
+//
+// This is the low-risk half of plan 0004. The other half (stage straight
+// from SD, deleting the internal staging region entirely and taking the cap
+// to ~792 KiB) needs the hardware spikes in that plan and is NOT done here.
+//
+// PHASE 0 must confirm FW_STAGE_BASE sits above this firmware's actual end
+// (check the .map file) and below the installed bootloader on the target
+// units. fwDoApply() also checks the first half at runtime.
 ///////////////////////////////////////////
 #define FW_APP_BASE         0x00027000UL
 #define FW_BOOTLOADER_ADDR  0x000F4000UL
 #define FW_FLASH_PAGE_SIZE  4096UL
-#define FW_MAX_IMAGE_SIZE   (320UL * 1024UL)
-#define FW_STAGE_BASE       (FW_BOOTLOADER_ADDR - FW_MAX_IMAGE_SIZE)  // 0xA4000
+// Half the app+staging span, rounded down to a whole erase page. Keep
+// OTA_IMAGE_MAX_BYTES in .github/workflows/compile-sketch.yml in sync.
+#define FW_MAX_IMAGE_SIZE   (408UL * 1024UL)
+#define FW_STAGE_BASE       (FW_BOOTLOADER_ADDR - FW_MAX_IMAGE_SIZE)  // 0x8E000
+
+// The two halves must fit the span and the app region must be able to hold
+// any image the cap admits — get either wrong and the apply either erases
+// live code or accepts an image it cannot install.
+static_assert(FW_STAGE_BASE % FW_FLASH_PAGE_SIZE == 0,
+              "FW_STAGE_BASE must be flash-page aligned (it is erased page by page)");
+static_assert(FW_MAX_IMAGE_SIZE <= FW_STAGE_BASE - FW_APP_BASE,
+              "app region must be at least as large as the max image");
 
 // Bootloader recovery flag written to GPREGRET before the destructive swap.
 // If the swap is interrupted (power loss mid-erase) the app is left invalid;
