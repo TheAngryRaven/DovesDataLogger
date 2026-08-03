@@ -29,6 +29,14 @@ are implemented and host-tested independently of these findings (see
 
 ## Memory map assumed by the implementation
 
+> **Superseded — the staging base moved.** Plan 0004 piece 2 split the
+> app+staging span evenly: `FW_STAGE_BASE` is now `0x0008E000` and
+> `FW_MAX_IMAGE_SIZE` is 408 KiB (app region `[0x27000, 0x8E000)` = 412 KiB).
+> The table below records the layout as originally specced. Anyone actually
+> running these spikes should validate against the CURRENT constants in
+> `BirdsEye/firmware_ota.ino` — spike 3 in particular erases the staging
+> region by address.
+
 | Region | Address | Notes |
 |---|---|---|
 | MBR + SoftDevice S140 7.3.0 | `0x00000000`–`0x00026FFF` | |
