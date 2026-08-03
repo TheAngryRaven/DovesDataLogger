@@ -1026,7 +1026,7 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
 ### DOVEX Log (`.dovex` files) — New UI default
 
 ```
-datetime,driver_name,course_name,short_name,best_lap_ms,optimal_lap_ms,device_name,race_mode
+datetime,driver,course,short_name,best_lap_ms,optimal_ms,device_name,race_mode
 lap1_ms,lap2_ms,lap3_ms,...
 \n padding to byte 1024
 timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z,Temp1,Junction1,Temp2
@@ -1036,7 +1036,7 @@ timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x
 - **Reserved header** (bytes 0–1023): Line 1 = session metadata, Line 2 =
   all lap times (comma-separated ms values), padded with `\n` to 1024 bytes.
 - **`device_name`** and **`race_mode`** are trailing metadata columns
-  (after `optimal_lap_ms`, in that order). Appending keeps old logs
+  (after `optimal_ms`, in that order). Appending keeps old logs
   readable (parsed as empty) and lets older readers ignore the extra
   columns — backwards compatible by design. `race_mode` is `CIRCUIT` /
   `SPRINT` (empty = circuit): a webapp loading helper — with `SPRINT`,
