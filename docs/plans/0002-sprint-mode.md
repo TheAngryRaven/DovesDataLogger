@@ -1,9 +1,19 @@
 # Sprint Mode (Autocross / Point-to-Point) — Concept & Cross-Repo Roadmap
 
-> Status: **CONCEPT — design complete, implementation-ready.** All §7
-> questions are decided; no implementation yet.
+> Status: **SHIPPED.** All §7 questions are decided and all three repos
+> have landed their phase: `DovesLapTimer` (`SprintTimer` +
+> `CrossingEngine`), `DovesDataLogger` (`/TRACKS/SPRINT/`, `TS*` opcodes,
+> `race_mode`, and the on-device course creator of §5), and
+> `DovesDataViewer` (its own plan 0015 — course model, editor, sync,
+> Device tab, and reading runs back out of a log).
 > Scope spans three repos; each phase lands on that repo's beta branch
 > (DovesLapTimer `BETA` → DovesDataLogger `BETA` → DovesDataViewer, last).
+>
+> Still open, both sequenced to the end on purpose and tracked in the
+> webapp's plan 0015: the **Android IPC `TS*` parity** (gated on that app's
+> release) and the **sync-prune** of §2. The creator makes the second one
+> matter more — every event walked adds a course to a file the device
+> re-parses through a 4 KB budget.
 
 ## 1. Problem & Goal
 
@@ -264,6 +274,12 @@ track the library's BETA branch in CI, so co-development is wired).
 
 ## 5. On-device course creator — the big ask
 
+> **Status: BUILT.** Main menu → **Create** → walk the cones. The model,
+> validation, point averaging, name generation and JSON emission are the
+> host-tested `course_creator` + `track_json` units; the sketch supplies
+> rendering, GPS and SD. What actually shipped, and where it departs from
+> the spec below, is recorded in *§5.1 What was built*.
+
 Sprint entrants can **walk the course** before the event (cones are laid out
 fresh each time), so the device itself must be able to create a course —
 standing at each cone and capturing GPS positions. Hard rule: **no text entry
@@ -319,6 +335,70 @@ New main-menu option **"Create Course"**:
   minutes, not hours.
 - Circuit courses created on-device get S/F + optional S2/S3 — exactly the
   existing model, so the creator serves both modes from day one.
+
+### 5.1 What was built — decisions that differ from the spec above
+
+**Generated names favour the timestamp over the prefix.** The spec asked
+for `NEWTRACK_{date}` / `NEWCOURSE_{date}` and flagged, in its own design
+notes, that the track browser truncates to 13 chars
+(`MAX_LOCATION_LENGTH`) so the prefix would swallow the disambiguating
+part. That note is resolved here rather than left as a papercut: names are
+**`N{YYMMDD}_{HHMM}`** — e.g. `N260803_1432`, 12 characters, unique to the
+minute, chronologically sortable, and still obviously machine-generated.
+A new track's `shortName` is **`MMDDHHMM`** (8 chars), which is exactly
+the webapp's `Track.shortName` budget *and* half of the `(kind, shortName)`
+key its device-sync merge uses — so two tracks walked on the same day
+cannot collide there either.
+
+> **Webapp import, read this:** these two formats are the contract the
+> import flow should match. `date_created` is unchanged — the sortable
+> `YYYY-MM-DDTHH:MM` stamp — and is written for **sprint courses only**,
+> matching the webapp's own "sprint-only" documentation of the field.
+
+**Two validation rules exist purely to keep courses editable in the
+webapp.** Both are enforced before Save is allowed, because a course the
+device writes and the app then refuses to save is worse than one that was
+never written:
+
+- **Circuit sectors are all-or-nothing.** The webapp's `validateCourseSectors`
+  accepts zero sectors or exactly three majors (start/finish + two), so a
+  course carrying only sector 2 would load there but could never be saved
+  again.
+- **Sprint splits fill in order.** The webapp stores splits as an ordered
+  list and re-exports them *positionally* into `sector_2` / `sector_3`, so
+  a lone sector 3 would come back as a sector 2 after one sync round trip
+  — a silent edit nobody made.
+
+**Line edits are scratch-then-commit.** Opening a line copies it into a
+scratch buffer; `Save line` commits, `Back` discards. That makes Back a
+real undo — re-walk one endpoint, decide you stood in the wrong place, and
+leave the stored line untouched.
+
+**The capture hold can fail.** Three seconds at 25 Hz should gather ~75
+fixes; anything under 8 usable ones ends the hold as FAILED rather than
+averaging noise into a timing line. Fixes worse than 10 m horizontal
+accuracy are dropped outright (a point built from them is most of a cone
+away), and fixes arriving after the window closes are ignored so a mean
+the user has already been shown can't shift underneath them.
+
+**Appends are write-to-temp-then-rename.** Adding a course to an existing
+track file is a read-modify-write; it serializes to `<file>.tmp` and only
+then replaces the original. Writing in place would mean a power loss
+mid-serialize leaves a truncated file where a working track used to be —
+and this runs in a field, on a battery, at an event.
+
+**Entry requires a fix and a time lock.** Every screen past the prompt
+needs GPS (to capture) and the clock (to name the file), so the menu entry
+refuses up front instead of letting someone walk a whole course and fail
+at Save.
+
+**A new global, `gpsPvtSequence`.** The capture needed "is this a new PVT
+sample?" and `gpsDataFresh` could not answer it — `GPS_LOOP()` consumes
+that flag earlier in the same loop iteration, and `gpsData` holds its last
+value between updates, so an un-gated feed would have averaged the same
+fix ~250 times a second and reported a confidence the fix never had.
+`gpsFrameCounter` is no help either (it zeroes every second for the
+frame-rate maths). The new counter is monotonic and never reset.
 
 ## 6. Phase 3 — DovesDataViewer (last)
 

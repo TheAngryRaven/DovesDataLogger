@@ -13,6 +13,32 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **Create a course on the device — walk the cones, no laptop** (plan 0002
+  §5). New **Create** entry on the main menu: pick the track you're at (or
+  start a new one), pick Circuit or Sprint, then capture each timing line by
+  standing at the cone and holding for three seconds. Autocross venues
+  re-lay their course every event, so this is what makes a sprint course
+  authorable at the event instead of the night before on a computer. Circuit
+  courses work the same way, with one fewer line to walk.
+  - **Points are averaged, not snapshotted.** "Save current pos" collects
+    fixes for three seconds — around 75 of them at 25 Hz — and stores the
+    mean. You're standing at the cone anyway, so the accuracy is free. Loose
+    fixes are dropped, and a hold that can't gather enough usable ones says
+    so and asks you to try again rather than quietly writing a bad line.
+  - **No typing on the device.** Names are generated from the GPS clock
+    (`N260803_1432`, unique to the minute) and are meant to be renamed in
+    the web app afterwards — which is also why the whole name fits the
+    track browser instead of being cut off.
+  - **Save is refused, with the reason, until the course is actually
+    usable**: a start line always, a finish line for sprint, and the sector
+    rules the web app's editor enforces — so a course written here can
+    always be opened and edited there later.
+  - **Back is a real undo.** Re-walk one endpoint of a line and change your
+    mind, and the stored line is untouched.
+  - Adding a course to an existing track rewrites the file through a temp
+    copy, so losing power mid-save can't leave a broken track file behind.
+  - Needs a GPS fix and time lock, and says so up front rather than at the
+    end of a walked course.
 - **BLE sprint-track sync — `TSLIST` / `TSGET:` / `TSPUT:` / `TSDEL:`**
   (plan 0002). The four existing track verbs gained `TS`-prefixed twins that
   target `/TRACKS/SPRINT` instead of `/TRACKS`, so sprint courses can be
