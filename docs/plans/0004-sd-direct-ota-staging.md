@@ -1,9 +1,19 @@
 # SD-Direct OTA Staging — Spike + the FWDFU Pre-Update
 
-> Status: **SPIKE** — the pre-update (`FWDFU`) ships now on both channels;
-> the SD-direct apply path is design + hardware validation work, not yet
-> implemented. Grew out of the OTA cap incident on PR #116 (image hit
-> 100.9% of the 320 KB self-flash cap; it was at 98.2% before sprint mode).
+> Status: **PARTIALLY SHIPPED**, in three pieces. Grew out of the OTA cap
+> incident on PR #116 (image hit 100.9% of the 320 KB self-flash cap; it was
+> at 98.2% before sprint mode).
+>
+> | # | Piece | Cap after | Status |
+> |---|---|---|---|
+> | 1 | `FWDFU` pre-update (USB UF2 escape hatch) | n/a | **shipped**, master + BETA, field-tested |
+> | 2 | Even flash split (staging base `0xA4000` → `0x8E000`) | 320 → **408 KiB** | **shipped**, no hardware spike needed |
+> | 3 | SD-direct apply (delete the staging region) | 408 → **~792 KiB** | **spike-gated**, not implemented |
+>
+> Piece 2 was originally filed below as the "someday/never" fallback. It was
+> promoted because it is free: it needs no new code paths, only two
+> constants, and it alone took the beta image from 99.0% of the cap to 77.6%.
+> Piece 3 is still the endgame and still needs bench hardware.
 
 ## Problem
 
@@ -15,7 +25,41 @@ tax on app space. The debug kill switch (DovesLapTimer#48) bought back
 ~5 KB — the image sits at 99.4% of the cap. Every future feature refights
 this.
 
-## Chosen direction: stage from the SD card
+## Piece 2 (shipped): split the shared span evenly
+
+Before touching the apply path at all, the existing layout was simply
+lopsided. App and staging share `[0x27000, 0xF4000)` = 839 680 B, and
+**both** must be able to hold the image — the incoming one is staged up top,
+then copied down over the app. So the largest installable image is half the
+span. The split was 320 KiB staging against 500 KiB app, which capped OTA at
+320 KiB while leaving ~180 KiB of app region no legal image could ever reach.
+
+Splitting evenly, rounded down to a 4 KiB erase page:
+
+```
+staging  [0x8E000, 0xF4000) = 417 792 B = 408 KiB   FW_MAX_IMAGE_SIZE
+app      [0x27000, 0x8E000) = 421 888 B = 412 KiB   >= the cap
+```
+
+Two constants, plus `static_assert`s for page alignment and app-region fit.
+No change to the apply sequence, the `FW*` protocol, the CRC, or the web app
+(which never enforced a cap of its own — it relies on `FWERR:SIZE`).
+
+**Why this is safe for the existing fleet.** The staging base is read from
+the *installed* firmware's constants at apply time; nothing about it is baked
+into the image being delivered. A unit still on 3.0.x therefore stages at the
+old `0xA4000` and installs a new-layout build normally. And because the new
+app region ends at `0x8E000`, **below** the old `0xA4000` staging base, an
+image built for this layout can never grow into an old unit's staging region.
+Growing the cap is purely additive.
+
+**The one transitional constraint**: a unit on 3.0.x still enforces the old
+320 KiB cap, so an image past that is un-installable *on that unit* until it
+has taken a new-layout build (its fallback is the USB `FWDFU` → UF2 path).
+CI warns on crossing the legacy cap for exactly this reason. Drop the warning
+once the stragglers have migrated.
+
+## Piece 3 (spike-gated): stage from the SD card
 
 The image is **already fully staged and CRC-verified on the SD card**
 (`/fw/pending.bin`) before it is ever copied to internal flash — the flash
@@ -80,11 +124,21 @@ The fleet insurance policy, shipped ahead of the rework so devices updated
 
 ## Sequencing
 
-1. **Now**: `FWDFU` to `master` and `BETA` (this plan's PRs). Test on BETA.
-2. **Spike**: the four hardware validations above, on bench hardware.
-3. **Implement**: SD-direct apply behind the spike results; delete
+1. ~~**Now**: `FWDFU` to `master` and `BETA` (this plan's PRs). Test on
+   BETA.~~ **Done** — merged both channels, flashed twice on beta clean.
+2. ~~**Someday/never**: fall back to raising `FW_MAX_IMAGE_SIZE`
+   (staging-layout move).~~ **Done, and promoted out of "someday"** — piece 2
+   above. It cost two constants and bought 88 KiB, so there was no reason to
+   hold it behind the spike. BETA first, then `master`.
+3. **Next, no hardware needed**: publish a `.uf2` asset from `release.yml` /
+   `beta.yml`. `FWDFU` gets you into UF2 mode but there is currently no
+   published file to drag once you are there, which makes the escape hatch
+   only half-real.
+4. **Spike**: the four hardware validations above, on bench hardware.
+5. **Implement**: SD-direct apply behind the spike results; delete
    `FW_STAGE_BASE`/staging copy; CI OTA gate re-pointed at the app-region
-   bound.
-4. **Someday/never**: if the spike fails hard, fall back to raising
-   `FW_MAX_IMAGE_SIZE` (staging-layout move, plan 0002 discussion) — the
-   options analysis lives in the PR #116 thread.
+   bound. The options analysis lives in the PR #116 thread.
+
+With piece 2 shipped the pressure is off — 93 KiB of headroom against a beta
+image that grew ~7.5 KiB for all of sprint mode. Piece 3 is now a
+"do it properly when the bench is free" item, not a blocker.

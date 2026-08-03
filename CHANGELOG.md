@@ -26,6 +26,31 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   still cannot path out of the tracks folders.
 
 ### Changed
+- **OTA image cap raised 320 KiB → 408 KiB by splitting the flash evenly**
+  (plan 0004, low-risk half). The app and the OTA staging region share one
+  820 KiB stretch, and both must be able to hold the image — so the largest
+  installable image is half that span. The split was lopsided: 320 KiB of
+  staging against 500 KiB of app region, which capped OTA at 320 KiB while
+  leaving ~180 KiB of app region that no legal image could ever reach. The
+  staging base moves `0xA4000` → `0x8E000`, making it 408 KiB of staging
+  against 412 KiB of app. Nothing about the apply sequence, the `FW*`
+  protocol, or the CRC changes — only two constants, now backed by
+  `static_assert`s for page alignment and app-region fit. The beta image
+  went from 99.0% of the cap to 77.6%, which is what unblocks further
+  firmware work. **No web-app change is needed**: the client never enforced
+  a cap of its own, it relies on the device's `FWERR:SIZE`.
+  - Migration is one-way-safe: staging is chosen at apply time from the
+    *installed* firmware's constants, so a unit still on 3.0.x stages at the
+    old `0xA4000` and installs this build normally. And because the new app
+    region ends below the old staging base, an image built for this layout
+    can never collide with an old unit's staging region.
+  - Until every field unit has taken a build with the new layout, images
+    must stay under the legacy 320 KiB to remain OTA-installable on the
+    stragglers — CI now warns when a build crosses that line, naming the
+    USB `FWDFU` → UF2 path as the fallback for those units.
+  - The other half of plan 0004 — staging straight from the SD card, which
+    deletes the internal staging region and takes the cap to ~792 KiB —
+    still needs its hardware spikes and is **not** included here.
 - **The crossing animation is generated, not stored — 2,048 B of flash
   reclaimed.** The two "calculating" frames shown while inside a crossing
   zone were hand-stored 1 KB PROGMEM bitmaps, but both were pure block
