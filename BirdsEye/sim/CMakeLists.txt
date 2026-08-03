@@ -29,11 +29,27 @@ option(SIM_DEBUG_OUTPUT "Enable the firmware's HAS_DEBUG serial prints" ON)
 include(FetchContent)
 
 # Lap timing — the REAL library; its math being real firmware code is the
-# sim's second-highest fidelity priority. Ref policy matches CI: BETA-channel
-# builds track the library's BETA branch (master/release builds pin a tag).
+# sim's second-highest fidelity priority.
+#
+# The ref MUST match what this channel's firmware links, or the sim silently
+# validates different code than ships — and can fail to link outright when the
+# branch gains sources this file doesn't list. That is exactly what happened
+# when the library's BETA gained CrossingEngine.cpp while master's sim was
+# hardcoded to BETA: master's firmware pins v4.2.0, its sim tracked BETA.
+#
+# So: default to the stable tag (master/release policy) and let CI override
+# per channel, mirroring LAPTIMER_REF in compile-sketch.yml. sim-build.yml
+# passes -DDOVESLAPTIMER_REF=BETA for BETA-targeted builds.
+#
+# Keep this ref and the library source list below in lockstep: bumping the
+# pin at release time (CLAUDE.md: "bump deliberately") may add or remove
+# library .cpp files, and the list is explicit, not globbed.
+set(DOVESLAPTIMER_REF "v4.2.0" CACHE STRING
+    "Git ref of DovesLapTimer to build the sim against")
+message(STATUS "DovesLapTimer ref: ${DOVESLAPTIMER_REF}")
 FetchContent_Declare(doveslaptimer
   GIT_REPOSITORY https://github.com/TheAngryRaven/DovesLapTimer.git
-  GIT_TAG BETA
+  GIT_TAG ${DOVESLAPTIMER_REF}
   GIT_SHALLOW TRUE
 )
 
