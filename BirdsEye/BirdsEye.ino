@@ -184,6 +184,12 @@ char dovexReplayOptimal[16];
 unsigned long menuIdleStartTime = 0;
 bool menuIdleTimerRunning = false;
 
+// When the main menu was last ARRIVED at, stamped by switchToDisplayPage().
+// autoRaceModeCheck() uses it (with the button stamps) to tell "the user just
+// landed here" from "the device has been sitting on the menu" — see
+// AUTO_RACE_MENU_GRACE_MS.
+unsigned long mainMenuEnteredAtMs = 0;
+
 // Button hold tracking (for long-press combos)
 unsigned long btn1HoldStart = 0;
 unsigned long btn2HoldStart = 0;
@@ -1423,6 +1429,22 @@ void checkAutoIdle() {
 void autoRaceModeCheck() {
   if (currentPage != PAGE_MAIN_MENU) return;
   if (currentPage == PAGE_BLUETOOTH || bleConnected) return;
+
+  // Don't hijack a deliberate navigation. Exiting a page — the course creator
+  // especially, since it is used out on the course where you may well be
+  // rolling — lands here, and above the trigger the NEXT loop iteration would
+  // jump straight into race mode, ~4 ms later. The menu is never drawn and the
+  // user has no idea what happened.
+  //
+  // Anchor on the newest of "arrived at the menu" and the button stamps, so
+  // actively navigating at speed defers it too. The debouncer's lastPressed
+  // values persist across iterations (same reason the menu-idle block uses
+  // them), which makes this independent of where in loop() we run.
+  unsigned long settledSince = mainMenuEnteredAtMs;
+  if ((long)(btn1->lastPressed - settledSince) > 0) settledSince = btn1->lastPressed;
+  if ((long)(btn2->lastPressed - settledSince) > 0) settledSince = btn2->lastPressed;
+  if ((long)(btn3->lastPressed - settledSince) > 0) settledSince = btn3->lastPressed;
+  if (millis() - settledSince < AUTO_RACE_MENU_GRACE_MS) return;
 
   bool rpmTriggered = tachLastReported > 500;
   bool speedTriggered = gps_speed_mph >= 10.0;
