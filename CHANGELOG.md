@@ -13,6 +13,19 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Fixed
+- **Leaving a page while moving no longer throws you straight into race
+  mode.** Auto-race fires from the main menu above 500 RPM or 10 mph — but it
+  was checked the instant the menu appeared, so exiting any page while rolling
+  landed on the menu and jumped into race mode on the very next loop pass,
+  about four milliseconds later. The menu was never drawn; from the driver's
+  seat the device just did something on its own. The course creator made it
+  easy to hit, being the one screen you use out on the course with the vehicle
+  possibly moving — walk a course, exit, and you were suddenly logging a
+  session. Auto-race now waits for the menu to have been **settled for three
+  seconds** — nothing arriving, no buttons pressed — which also stops it
+  firing while you are actively navigating the menu at speed. The ordinary
+  case is untouched: a device parked on the menu has been quiet for minutes
+  before you drive off.
 - **The GPS status page no longer reads as though a good fix is a bad one.**
   Once a position fix came up, the page said `FIX (time sync)` — which parses
   as a *kind* of fix (a time-only, position-less one) rather than what it

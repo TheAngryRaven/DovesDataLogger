@@ -170,6 +170,13 @@ inline void dummy_debug(...) {
 #define SLEEP_LONG_PRESS_MS       5000     // 5s hold for shutdown/reboot combos
 #define CHARGE_DISPLAY_TIMEOUT_MS 10000    // Show charging screen for 10s then display off
 #define USB_MENU_CHARGE_IDLE_MS   60000    // USB on menu: charging loop after 60s of no buttons
+// Auto-race must not hijack a deliberate navigation. Leaving a page drops the
+// user on the main menu, and above the speed/RPM trigger the very next loop
+// iteration would convert that into "start racing" — the menu never even gets
+// drawn. Require the menu to have been settled (no arrival, no button) this
+// long first. Only bites right after an interaction: the normal auto-race case
+// (parked on the menu, then drive off) has been quiet for minutes.
+#define AUTO_RACE_MENU_GRACE_MS   3000
 
 ///////////////////////////////////////////
 // BLE RADIO OWNERSHIP

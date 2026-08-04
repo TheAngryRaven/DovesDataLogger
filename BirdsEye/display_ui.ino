@@ -237,6 +237,12 @@ void forceDisplayRefresh() {
 }
 
 void switchToDisplayPage(int newDisplayPage) {
+  // Stamp arrival at the main menu. This is the ONLY path to it (the direct
+  // `currentPage =` assignments elsewhere are all race-page rotation clamps),
+  // so autoRaceModeCheck() can trust it to mean "the user just got here".
+  if (newDisplayPage == PAGE_MAIN_MENU && currentPage != PAGE_MAIN_MENU) {
+    mainMenuEnteredAtMs = millis();
+  }
   currentPage = newDisplayPage;
   forceDisplayRefresh();
 }

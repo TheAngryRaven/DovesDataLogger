@@ -92,8 +92,10 @@ constexpr double kOpenGroundLat = 39.5;
 constexpr double kOpenGroundLon = -98.35;
 
 // Feed the firmware a fix good enough to name a file and capture a point.
-// One PVT per step batch is the documented injection rate.
-void injectFix(int frames, double lat, double lon, double hAccM = 1.2) {
+// One PVT per step batch is the documented injection rate. `speedMph` is the
+// auto-race lever: at or above 10 mph a main-menu frame can enter race mode.
+void injectFix(int frames, double lat, double lon, double hAccM = 1.2,
+               double speedMph = 0.0) {
   for (int i = 0; i < frames; i++) {
     SimPvt p{};
     // 2026-08-03T14:32Z — the creator stamps names from this, so the
@@ -102,7 +104,7 @@ void injectFix(int frames, double lat, double lon, double hAccM = 1.2) {
     p.lat = lat;
     p.lng = lon;
     p.altitude_m = 100.0;
-    p.speed_mph = 0.0;
+    p.speed_mph = speedMph;
     p.heading_deg = 0.0;
     p.h_acc_m = hAccM;
     p.hdop = 0.8;
@@ -184,6 +186,14 @@ void runScript() {
   injectFix(90, kOpenGroundLat, kOpenGroundLon);
   capture("course_line_point_a_done", kPageCourseLine);
 
+  // Now roll. The creator is used out on the course, so leaving it while
+  // still moving is the normal case — and above the 10 mph auto-race
+  // trigger, exiting used to land on the menu and jump straight into race
+  // mode on the very next loop iteration. This fixture is the regression
+  // test: if the grace window ever goes away, the page below is a race
+  // page and the assertion fails loudly.
+  injectFix(20, kOpenGroundLat, kOpenGroundLon, 1.2, 15.0);
+
   // Back out: row 3 of the line detail is Back (discards the scratch
   // line), then row 4 of the line menu is Cancel (leaves the creator).
   press(2);
@@ -196,6 +206,11 @@ void runScript() {
   press(2);
   press(1);
   capture("main_menu_after_create", kPageMainMenu);
+
+  // Coast back to a stop before the rest of the walk: gpsData holds its
+  // last value between PVTs, so leaving 15 mph latched would trip
+  // auto-race the moment the grace window expires.
+  injectFix(20, kOpenGroundLat, kOpenGroundLon, 1.2, 0.0);
 
   press(2);
   press(2);
