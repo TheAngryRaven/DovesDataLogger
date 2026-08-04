@@ -1,4 +1,4 @@
-gps_status_no_fix 900 fb82cebc
+gps_status_no_fix 900 f2276ffc
 main_menu_race -1 34b50cd7
 main_menu_transfer -1 40da09f8
 transfer_menu -4 3013bbe2
