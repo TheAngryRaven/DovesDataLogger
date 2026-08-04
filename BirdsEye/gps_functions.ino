@@ -219,6 +219,7 @@ void onPVTReceived(UBX_NAV_PVT_data_t *pvt) {
   gpsData.milliseconds = (pvt->iTOW % 1000);       // ms from GPS time-of-week
 
   gpsDataFresh = true;
+  gpsPvtSequence++;  // monotonic; for consumers that run after GPS_LOOP()
   gpsFrameCounter++;
 }
 

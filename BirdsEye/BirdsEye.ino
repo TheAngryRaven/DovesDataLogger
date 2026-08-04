@@ -82,6 +82,7 @@
 #include "accelerometer.h"
 #include "bluetooth.h"
 #include "camera_ble.h"
+#include "course_creator.h"
 #include "display_pages.h"
 #include "display_ui.h"
 #include "dovex_header.h"
@@ -346,6 +347,14 @@ struct GpsData {
 
 volatile bool gpsDataFresh = false;  // Set by PVT callback, cleared by GPS_LOOP()
 
+// Monotonic count of PVT samples delivered, bumped by the callback and
+// never reset. gpsDataFresh is a one-shot that GPS_LOOP() consumes, so a
+// consumer running LATER in the same iteration can't use it to tell a new
+// sample from a repeat — gpsData holds its last value between updates.
+// Compare this against a remembered value instead. (gpsFrameCounter is no
+// help: it zeroes every second for the frame-rate maths.)
+volatile uint32_t gpsPvtSequence = 0;
+
 // GPS nav-rate target: the rate GPS_RECONFIGURE() (and every wake/recovery
 // path that calls it) re-asserts. Boot starts in status mode (5 Hz +
 // NAV-SAT for the GPS status page); gpsEnterRaceMode() moves it to 25 Hz
@@ -497,6 +506,25 @@ bool enableLogging = false;
 sd_format_page::State sdFormatState;
 bool sdFormatLastFailed = false;
 
+///////////////////////////////////////////
+// ON-DEVICE COURSE CREATOR (plan 0002 §5)
+//
+// Walk the cones, capture the lines, write a track file. The model,
+// validation, point averaging and name generation all live in the
+// host-tested course_creator unit; these globals are the live instance
+// plus what the renderer needs to show. Menu input rides the sketch's
+// existing menuSelectionIndex/menuLimit machinery.
+///////////////////////////////////////////
+course_creator::State courseCreator;
+// Track this course attaches to when the user picked "Here" — captured at
+// entry from the proximity scan so the prompt can name it.
+char courseCreatorTrackName[MAX_LOCATION_LENGTH] = "";
+// Result of the last save attempt, for the renderer. SD_COURSE_WRITE_OK
+// doubles as "nothing has failed".
+SdCourseWriteResult courseCreatorLastError = SD_COURSE_WRITE_OK;
+// Last PVT sample folded into an averaging hold — see courseCreatorLoop().
+uint32_t courseCreatorLastPvtSeq = 0;
+
 unsigned long lastCardFlush = 0;
 unsigned long lastLogCreateAttempt = 0;  // Throttles log-file open retries (ms)
 const char trackFolder[8] = "/TRACKS";
@@ -596,6 +624,13 @@ const int PAGE_CAMERA_SERIAL_ENTRY = -7; // manual 6-char camera serial entry
 const int PAGE_REPLAY_RESULTS = -8;
 const int PAGE_REPLAY_EXIT = -9;
 const int PAGE_CAMERA_TEST = -10;    // bench test menu (paired camera controls)
+// On-device course creator (plan 0002 §5) — walk the cones, capture the
+// lines. Five screens, all driven by the host-tested course_creator unit.
+const int PAGE_COURSE_TRACK = -11;   // "Are you at X?"  Here / New Track
+const int PAGE_COURSE_TYPE = -12;    // Circuit / Sprint
+const int PAGE_COURSE_LINES = -13;   // one row per timing line + Save/Cancel
+const int PAGE_COURSE_LINE = -14;    // Point A / Point B / Save / Back
+const int PAGE_COURSE_POINT = -15;   // "Save current pos" averaging hold
 
 // running menu (these must be in order)
 const int GPS_DEBUG = 3;
@@ -1493,6 +1528,190 @@ void sdFormatPageLoop() {
   }
 }
 
+///////////////////////////////////////////
+// ON-DEVICE COURSE CREATOR — SKETCH GLUE (plan 0002 §5)
+//
+// The model lives in the host-tested course_creator unit. Everything here
+// is the parts that need hardware: which page constant a screen maps to,
+// feeding real GPS fixes into an averaging hold, and writing the result.
+///////////////////////////////////////////
+
+/**
+ * @brief Page constant for the creator's current screen.
+ */
+int courseCreatorPage() {
+  switch (courseCreator.screen) {
+    case course_creator::Screen::kTrackPrompt:  return PAGE_COURSE_TRACK;
+    case course_creator::Screen::kTypeSelect:   return PAGE_COURSE_TYPE;
+    case course_creator::Screen::kLineMenu:     return PAGE_COURSE_LINES;
+    case course_creator::Screen::kLineDetail:   return PAGE_COURSE_LINE;
+    case course_creator::Screen::kPointCapture: return PAGE_COURSE_POINT;
+  }
+  return PAGE_MAIN_MENU;
+}
+
+/** @brief True while any of the creator's screens is up. */
+bool courseCreatorActive() {
+  return currentPage <= PAGE_COURSE_TRACK && currentPage >= PAGE_COURSE_POINT;
+}
+
+/**
+ * @brief Enter the course creator from the main menu.
+ *
+ * Runs the same haversine proximity scan track detection uses, so the
+ * prompt can offer "you're at X" instead of making the user think about
+ * which file a new course belongs in. Without a fix there is no scan and
+ * no capture, so the creator refuses to open at all — every screen past
+ * here needs GPS.
+ */
+bool courseCreatorEnter() {
+  if (!gpsData.fix || !gpsData.timeValid) return false;
+
+  courseCreatorTrackName[0] = '\0';
+  double bestDist = TRACK_DETECT_RADIUS_MILES;
+  int best = -1;
+  for (int i = 0; i < trackManifestCount; i++) {
+    const double dist = haversineDistanceMiles(
+        gpsData.latitudeDegrees, gpsData.longitudeDegrees,
+        trackManifest[i].lat, trackManifest[i].lon);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = i;
+    }
+  }
+  if (best >= 0) {
+    strncpy(courseCreatorTrackName, trackManifest[best].filename,
+            sizeof(courseCreatorTrackName) - 1);
+    courseCreatorTrackName[sizeof(courseCreatorTrackName) - 1] = '\0';
+  }
+
+  courseCreatorLastError = SD_COURSE_WRITE_OK;
+  course_creator::begin(courseCreator, best >= 0);
+  menuSelectionIndex = 0;
+  switchToDisplayPage(courseCreatorPage());
+  return true;
+}
+
+/**
+ * @brief Write the walked course to the card.
+ *
+ * Names are generated from the GPS clock — the creator never takes text
+ * input (plan 0002 §5), so this is the only naming path. A new track keeps
+ * the same stamp for its file, its long name and its first course, which
+ * is what lets the webapp show them as one thing to rename.
+ */
+void courseCreatorSave() {
+  char name[course_creator::kNameSize];
+  char shortName[course_creator::kShortNameSize];
+  char dateCreated[course_creator::kDateCreatedSize] = "";
+
+  course_creator::generatedName(name, sizeof(name), gpsData.year, gpsData.month,
+                                gpsData.day, gpsData.hour, gpsData.minute);
+  course_creator::generatedShortName(shortName, sizeof(shortName), gpsData.month,
+                                     gpsData.day, gpsData.hour, gpsData.minute);
+  if (courseCreator.kind == course_creator::CourseKind::kSprint) {
+    course_creator::generatedDateCreated(dateCreated, sizeof(dateCreated),
+                                         gpsData.year, gpsData.month, gpsData.day,
+                                         gpsData.hour, gpsData.minute);
+  }
+
+  CreatedCourseWrite req;
+  req.course = &courseCreator;
+  req.newTrack = courseCreator.newTrack;
+  req.trackName = courseCreator.newTrack ? name : courseCreatorTrackName;
+  req.shortName = shortName;
+  req.courseName = name;
+  req.dateCreated = dateCreated;
+
+  courseCreatorLastError = sdSaveCreatedCourse(req);
+  if (courseCreatorLastError == SD_COURSE_WRITE_OK) {
+    debug(F("Course saved: "));
+    debugln(name);
+    switchToDisplayPage(PAGE_MAIN_MENU);
+  } else {
+    // Stay on the line menu with everything still captured — walking the
+    // course again because the card was busy would be unforgivable.
+    debugln(F("Course save FAILED"));
+    switchToDisplayPage(PAGE_COURSE_LINES);
+  }
+}
+
+/**
+ * @brief Act on a menu selection inside the creator.
+ *
+ * Called from handleMenuPageSelection(); the generic menu machinery has
+ * already tracked the row index.
+ */
+void courseCreatorSelect() {
+  const course_creator::Action action =
+      course_creator::select(courseCreator, (uint8_t)menuSelectionIndex);
+
+  switch (action) {
+    case course_creator::Action::kBeginCapture:
+      course_creator::captureBegin(courseCreator, millis());
+      break;
+    case course_creator::Action::kSaveCourse:
+      courseCreatorSave();
+      return;
+    case course_creator::Action::kExit:
+      switchToDisplayPage(PAGE_MAIN_MENU);
+      return;
+    case course_creator::Action::kNone:
+      break;
+  }
+
+  const int page = courseCreatorPage();
+  if (page != currentPage) {
+    menuSelectionIndex = 0;
+    switchToDisplayPage(page);
+  } else {
+    forceDisplayRefresh();
+  }
+}
+
+/**
+ * @brief Feed GPS into a running capture and finish it when the hold ends.
+ *
+ * Runs every loop iteration while the creator is up. Only NEW PVT samples
+ * count — gpsData holds its last value between updates, so an un-gated
+ * feed would average the same fix 250 times a second and report a
+ * confidence the fix never had. gpsDataFresh can't be that gate: GPS_LOOP()
+ * consumes it earlier in the same iteration, so this runs on the sequence
+ * counter instead.
+ */
+void courseCreatorLoop() {
+  if (!courseCreatorActive()) return;
+  if (course_creator::capturePoll(courseCreator, millis()) ==
+      course_creator::CaptureResult::kIdle) {
+    return;
+  }
+
+  const uint32_t seq = gpsPvtSequence;
+  if (seq != courseCreatorLastPvtSeq && gpsData.fix) {
+    courseCreatorLastPvtSeq = seq;
+    course_creator::captureAddFix(courseCreator, gpsData.latitudeDegrees,
+                                  gpsData.longitudeDegrees,
+                                  gpsData.horizontalAccuracy, millis());
+  }
+
+  const course_creator::CaptureResult result =
+      course_creator::capturePoll(courseCreator, millis());
+  if (result == course_creator::CaptureResult::kRunning) {
+    return;
+  }
+
+  // kDone commits and drops back to the line detail; kFailed clears the
+  // hold and leaves captureFailed set so the page can offer a retry.
+  course_creator::captureCommit(courseCreator, millis());
+  const int page = courseCreatorPage();
+  if (page != currentPage) {
+    menuSelectionIndex = 0;
+    switchToDisplayPage(page);
+  } else {
+    forceDisplayRefresh();
+  }
+}
+
 /**
  * @brief Maintain the GPS-lock hold state (see gpsLockHoldActive).
  *
@@ -1984,6 +2203,7 @@ void loop() {
   readButtons();
   gpsStatusPageLoop();  // boot status page: consume presses, hold/auto-close
   sdFormatPageLoop();   // boot format-confirm page: hold Select 3s to format
+  courseCreatorLoop();  // course creator: feed GPS into an averaging hold
   displayLoop();
   resetButtons();
 

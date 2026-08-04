@@ -117,7 +117,7 @@ void displayPage_main_menu() {
   // a size-1 scroll-hint line. Four full size-2 rows fill the panel's
   // nominal 64 px exactly, but the last row is cut off on real hardware
   // — so the window follows the selection instead.
-  static const char* const kMenuItems[] = {"Race", "Review", "Transfer", "Camera"};
+  static const char* const kMenuItems[] = {"Race", "Review", "Transfer", "Create", "Camera"};
   const int itemCount = (int)(sizeof(kMenuItems) / sizeof(kMenuItems[0]));
   const int visibleRows = 3;
 
@@ -1231,6 +1231,221 @@ void displayCrossing() {
     }
   #else
   #endif
+
+  safeDisplayUpdate();
+}
+
+///////////////////////////////////////////
+// ON-DEVICE COURSE CREATOR PAGES (plan 0002 §5)
+//
+// Five screens over the host-tested course_creator model. Every row shown
+// here comes from course_creator::rowAt() rather than a local list, so a
+// row can never render in one order and act in another.
+///////////////////////////////////////////
+
+// Shared header: what is being built and where it lands, so the user
+// always knows whether they are walking a circuit or a sprint course.
+//
+// Budget is the panel's 21 size-1 characters and a track name can use 13
+// of them (MAX_LOCATION_LENGTH), so the type is abbreviated to keep the
+// name whole — the name is the part that answers "am I adding this to the
+// right track?".
+static void courseCreatorHeader() {
+  display.setTextSize(1);
+  display.print(courseCreator.kind == course_creator::CourseKind::kSprint
+                    ? F("SPRINT @") : F("CIRC @"));
+  display.println(courseCreator.newTrack ? "NEW" : courseCreatorTrackName);
+}
+
+void displayPage_course_track() {
+  resetDisplay();
+
+  display.setTextSize(1);
+  display.println(F("  CREATE COURSE"));
+  display.println(F("Are you at:"));
+  display.setTextSize(2);
+  display.println(courseCreatorTrackName);
+
+  display.setTextSize(1);
+  display.println();
+  display.print(menuSelectionIndex == 0 ? F("->") : F("  "));
+  display.println(F("Yes - add course"));
+  display.print(menuSelectionIndex == 1 ? F("->") : F("  "));
+  display.println(F("No - new track"));
+
+  safeDisplayUpdate();
+}
+
+void displayPage_course_type() {
+  resetDisplay();
+
+  display.setTextSize(1);
+  display.println(F("   COURSE TYPE"));
+  display.println();
+  display.setTextSize(2);
+
+  display.print(menuSelectionIndex == 0 ? F("->") : F("  "));
+  display.println(F("Circuit"));
+  display.print(menuSelectionIndex == 1 ? F("->") : F("  "));
+  display.println(F("Sprint"));
+
+  // The difference that matters when you are about to walk it.
+  display.setTextSize(1);
+  display.println();
+  display.println(menuSelectionIndex == 0 ? F("one start/finish line")
+                                          : F("start + finish lines"));
+
+  safeDisplayUpdate();
+}
+
+// Short reason Save is refused, for the Save row. Kept to the panel width.
+static const __FlashStringHelper* courseSaveBlockText() {
+  switch (course_creator::saveBlocked(courseCreator)) {
+    case course_creator::SaveBlock::kStartMissing:  return F("need start");
+    case course_creator::SaveBlock::kFinishMissing: return F("need finish");
+    case course_creator::SaveBlock::kSectorPair:    return F("need S2+S3");
+    case course_creator::SaveBlock::kSplitOrder:    return F("S2 before S3");
+    case course_creator::SaveBlock::kNone:          return F("");
+  }
+  return F("");
+}
+
+// Why the last save attempt failed, or nullptr when nothing has failed.
+static const __FlashStringHelper* courseSaveErrorText() {
+  switch (courseCreatorLastError) {
+    case SD_COURSE_WRITE_BUSY:     return F("SD busy - retry");
+    case SD_COURSE_WRITE_NO_TRACK: return F("track file bad");
+    case SD_COURSE_WRITE_TOO_BIG:  return F("track file full");
+    case SD_COURSE_WRITE_IO:       return F("SD write failed");
+    case SD_COURSE_WRITE_EXISTS:   return F("name taken");
+    case SD_COURSE_WRITE_OK:       return nullptr;
+  }
+  return nullptr;
+}
+
+void displayPage_course_lines() {
+  resetDisplay();
+  courseCreatorHeader();
+
+  const uint8_t rows = course_creator::rowCount(courseCreator);
+  for (uint8_t i = 0; i < rows; i++) {
+    const course_creator::RowRef ref = course_creator::rowAt(courseCreator, i);
+    display.print(menuSelectionIndex == (int)i ? F("->") : F("  "));
+
+    if (ref.row == course_creator::Row::kLine) {
+      display.print(course_creator::lineLabel(ref.line, courseCreator.kind));
+      if (course_creator::lineRequired(ref.line, courseCreator.kind)) {
+        display.print(F("*"));
+      }
+      if (course_creator::lineDone(course_creator::lineOf(courseCreator, ref.line))) {
+        display.print(F(" DONE"));
+      }
+      display.println();
+    } else if (ref.row == course_creator::Row::kSave) {
+      display.print(F("Save"));
+      // Saying WHY beats a row that silently does nothing when pressed.
+      if (!course_creator::canSave(courseCreator)) {
+        display.print(F(" - "));
+        display.print(courseSaveBlockText());
+      }
+      display.println();
+    } else {
+      display.println(F("Cancel"));
+    }
+  }
+
+  const __FlashStringHelper* err = courseSaveErrorText();
+  if (err != nullptr) display.print(err);
+
+  safeDisplayUpdate();
+}
+
+void displayPage_course_line() {
+  resetDisplay();
+
+  display.setTextSize(1);
+  display.print(F("LINE: "));
+  display.println(course_creator::lineLabel(courseCreator.editing, courseCreator.kind));
+  display.println();
+
+  // Point rows read from the SCRATCH copy — what Save would commit, not
+  // what is already stored. That is what makes Back a real undo.
+  display.print(menuSelectionIndex == 0 ? F("->") : F("  "));
+  display.print(F("Point A"));
+  display.println(courseCreator.scratch.hasA ? F(" DONE") : F(" *"));
+
+  display.print(menuSelectionIndex == 1 ? F("->") : F("  "));
+  display.print(F("Point B"));
+  display.println(courseCreator.scratch.hasB ? F(" DONE") : F(" *"));
+
+  display.println();
+  display.print(menuSelectionIndex == 2 ? F("->") : F("  "));
+  display.println(F("Save line"));
+  display.print(menuSelectionIndex == 3 ? F("->") : F("  "));
+  display.println(F("Back (discard)"));
+
+  safeDisplayUpdate();
+}
+
+void displayPage_course_point() {
+  resetDisplay();
+
+  display.setTextSize(1);
+  display.print(course_creator::lineLabel(courseCreator.editing, courseCreator.kind));
+  display.print(F(" : "));
+  display.println(courseCreator.editingPointB ? F("B") : F("A"));
+
+  const uint32_t now = millis();
+  const course_creator::CaptureResult result =
+      course_creator::capturePoll(courseCreator, now);
+
+  if (result == course_creator::CaptureResult::kRunning) {
+    // Hold-still feedback: the average is only as good as the user standing
+    // still for it, so show both the countdown and the fix count.
+    display.setTextSize(2);
+    display.print(course_creator::capturePercent(courseCreator, now));
+    display.println(F("%"));
+    display.setTextSize(1);
+    display.println(F("hold still..."));
+    display.print(F("fixes: "));
+    display.println(courseCreator.capture.fixes);
+    if (courseCreator.capture.rejected > 0) {
+      display.print(F("dropped: "));
+      display.println(courseCreator.capture.rejected);
+    }
+    safeDisplayUpdate();
+    return;
+  }
+
+  // Live accuracy, so the user can wait for the fix to settle before
+  // starting a hold instead of discovering it afterwards.
+  display.print(F("acc: "));
+  if (gpsData.fix) {
+    display.print(gpsData.horizontalAccuracy, 1);
+    display.print(F("m"));
+    if (gpsData.horizontalAccuracy > course_creator::kCaptureMaxHAccM) {
+      display.println(F(" TOO POOR"));
+    } else if (gpsData.horizontalAccuracy > course_creator::kCaptureWarnHAccM) {
+      display.println(F(" weak"));
+    } else {
+      display.println();
+    }
+  } else {
+    display.println(F("NO FIX"));
+  }
+
+  if (courseCreator.captureFailed) {
+    display.println(F("too few fixes -"));
+    display.println(F("try again"));
+  } else {
+    display.println();
+    display.println();
+  }
+
+  display.print(menuSelectionIndex == 0 ? F("->") : F("  "));
+  display.println(F("Save current pos"));
+  display.print(menuSelectionIndex == 1 ? F("->") : F("  "));
+  display.println(F("Back"));
 
   safeDisplayUpdate();
 }

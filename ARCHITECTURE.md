@@ -36,7 +36,8 @@ own header first so declaration/definition drift is caught at compile
 time.
 
 The **pure units** (`haversine`, `gps_time`, `gps_validation`,
-`dovex_header`, `filename_validator`) deliberately avoid Arduino headers.
+`dovex_header`, `filename_validator`, `course_creator`, `track_json`, …)
+deliberately avoid Arduino headers.
 The *same* `.cpp` is compiled into both the firmware (Arduino picks up
 `.cpp` files in the sketch folder) and the host test binary (CMake). There
 is no copy-paste — the tests exercise the exact code that ships.
@@ -109,6 +110,13 @@ to the matching `*_LOOP()`.
   pages are compiled out, BLE returns to lazy init, and the DOVEX
   `Temp1`/`Junction1`/`Temp2` columns are written as `nan` so the log
   format stays identical across channels.
+- **Course creator** (`course_creator` + `track_json` pure units, glued
+  into the menu/pages/SD modules) — authors a track course on the device
+  by walking to each cone and holding for a 3 s GPS average. Autocross
+  venues re-lay their course every event, so the alternative was a laptop
+  in a paddock. No text is ever entered on-device: names come from the GPS
+  clock and are renamed later in the web app. This is also the firmware's
+  only track-JSON *writer* — everywhere else the format is read-only.
 - **Replay** (`replay`) — instant DOVEX header replay.
 - **Settings** (`settings`) — JSON key/value store on the SD card.
 - **CourseManager** (external library) — owns course detection, sector

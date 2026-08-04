@@ -122,6 +122,8 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `sensoregg_protocol.{h,cpp}` | SensorEgg `PW-ADV` v1+v2 advertising payload parser (magic filter, int16 deci-°C decode with `0x8000`→NaN sentinel, flags, sequence, v2 aux thermistor + battery) + wrap-safe 1 s staleness rule + passive-scan tuning constants |
 | `crossing_pattern.{h,cpp}` | The two-frame crossing animation as geometry (eight 16x16 cells, odd row bands, alternating phase) instead of 2 KB of stored bitmap; golden-tested byte-identical to the images it replaced |
 | `sprint_select.{h,cpp}` | Sprint mode selection: newest-course-by-`date_created` ordering (sortable ISO strings) + the circuit-vs-sprint tiebreak decision table (`race_mode` pref; circuit yields to a sprint course created today) |
+| `course_creator.{h,cpp}` | On-device course creator model (subsystem 15): screen/row table, required-vs-optional lines, the two webapp-compat save rules, the point-averaging hold (3 s, ≥8 fixes, ≤10 m h_acc), and `N{YYMMDD}_{HHMM}` name generation |
+| `track_json.{h,cpp}` | The firmware's only track-JSON **writer** — course/track object emitters + a fixed-point coordinate formatter (integer math: no working `%f` on this core, and `dtostrf` doesn't exist on the host) |
 | `wake_cause.{h,cpp}` | Boot wake-cause decode: RESETREAS + GPIO LATCH register snapshots → tach / button / USB / watchdog / soft-reset / cold boot (System OFF shutdown, subsystem 10) |
 | `gps_status_page.{h,cpp}` | GPS status boot page state machine: hold, 3 s auto-close after fix+timeValid, button skip, exit destination (menu vs race), idle → shutdown |
 | `sd_format_page.{h,cpp}` | SD format-confirm boot page state machine: Select held 3 s continuously → format (release restarts the full window; other buttons never confirm), 5 min idle → shutdown |
@@ -420,6 +422,11 @@ loop()  ~250 Hz
   - Camera: `PAGE_PAIR_CAMERA` (-6) pairing / paired-status management,
     `PAGE_CAMERA_SERIAL_ENTRY` (-7) manual 6-char serial entry fallback,
     `PAGE_CAMERA_TEST` (-10) bench test menu (paired-only manual controls).
+  - Course creator (subsystem 15): `PAGE_COURSE_TRACK` (-11) track prompt,
+    `PAGE_COURSE_TYPE` (-12) circuit/sprint, `PAGE_COURSE_LINES` (-13) line
+    menu, `PAGE_COURSE_LINE` (-14) per-line points, `PAGE_COURSE_POINT`
+    (-15) averaging hold. All five are contiguous so `courseCreatorActive()`
+    is a range test.
   - Errors: `PAGE_INTERNAL_WARNING` (100), `PAGE_INTERNAL_FAULT` (105),
     `PAGE_SD_FORMAT` (106, card responds but FAT won't mount — driven by
     `sdFormatPageLoop()`, buttons live unlike FAULT).
@@ -1019,6 +1026,55 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   modules; `module_stubs.cpp` returns NaN/false so the page renders `---`
   and rows log `nan`.
 
+### 15. On-device Course Creator (`course_creator.{h,cpp}`, `track_json.{h,cpp}`)
+
+- **What**: main menu → **Create** → walk the cones and capture the timing
+  lines. Sprint venues re-lay their course every event, so the device has
+  to be able to author one without a laptop (plan 0002 §5). Serves circuit
+  courses too — same lines, one fewer of them.
+- **HARD RULE — no text entry on-device, ever.** Names are generated from
+  the GPS clock and renamed later in the webapp. A track file and its first
+  course are both `N{YYMMDD}_{HHMM}` (12 chars, so the 13-char track
+  browser shows it whole); a new track's `shortName` is `MMDDHHMM` —
+  exactly the webapp's 8-char budget and half of the `(kind, shortName)`
+  key its sync merge uses. Sprint courses also get the sortable
+  `date_created` stamp `sprint_select` compares.
+- **Five screens**, all driven by `course_creator`'s row table (nothing
+  renders a local list, so a row can't display in one order and act in
+  another): track prompt (`Here` / `New Track`, skipped when nothing is in
+  range) → type picker → line menu → per-line Point A/B → the capture hold.
+  Input rides the sketch's existing `menuSelectionIndex`/`menuLimit`
+  machinery; `rowCount()` supplies the limit, which changes with course
+  type (sprint grows a Finish row).
+- **Point capture averages, it does not snapshot**: a 3 s hold folds every
+  fresh PVT into a mean. Under `kCaptureMinFixes` (8) usable fixes the hold
+  **fails** rather than averaging noise into a timing line; fixes worse
+  than 10 m h_acc are dropped; fixes after the window are ignored so a mean
+  already shown to the user can't shift. Feeding it needed a new monotonic
+  **`gpsPvtSequence`** — `gpsDataFresh` is consumed by `GPS_LOOP()` earlier
+  in the same iteration, and `gpsData` holds its last value between
+  updates, so an un-gated feed averaged one fix 250 times a second.
+- **Line edits are scratch-then-commit**: opening a line copies it, `Save
+  line` commits, `Back` discards. Back is a real undo.
+- **Two save rules exist to keep courses editable in the webapp**, and Save
+  is refused (with the reason on the row) until they hold: circuit sectors
+  are **all-or-nothing** (the app accepts zero or exactly three majors), and
+  sprint splits **fill in order** (the app re-exports them positionally, so
+  a lone sector 3 returns as a sector 2). A course the device writes and the
+  app then can't save is worse than one never written.
+- **Writing** (`sdSaveCreatedCourse`, in `sd_functions.ino` with the other
+  track I/O): a new track is one emitted object; an append is a
+  read-modify-write through the existing 4 KB `trackJson` document, capped
+  at `MAX_LAYOUTS` and rejected on overflow. Appends serialize to
+  `<file>.tmp` and **rename over the original only once closed** — in-place
+  rewriting would leave a truncated track file after a power loss in a
+  field, on a battery, at an event. `buildTrackList()` re-runs on success so
+  the new course is in the manifest for the next session.
+- **Entry needs a fix and a time lock** (capture + filename), refused at the
+  menu rather than at Save.
+- **Sim**: fully exercised — five golden fixtures walk the real menus,
+  inject real PVT, run a real averaging hold, and lock the rendered pixels.
+
 ---
 
 ## Data Formats
@@ -1159,6 +1215,10 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | DOVEX header size | 1 024 bytes | `project.h` |
 | Auto-idle timeout | 60 s at <2 mph | `BirdsEye.ino` |
 | Track detect radius | 5 miles | `BirdsEye.ino` |
+| Course creator point hold | 3 s, ≥8 usable fixes else FAILED | `course_creator.h` |
+| Course creator h_acc gate | drop >10 m, warn >5 m | `course_creator.h` |
+| Course creator name format | `N{YYMMDD}_{HHMM}` (+ `MMDDHHMM` short name) | `course_creator.h` |
+| Track JSON coordinate precision | 8 decimals (~1.1 mm) | `track_json.h` |
 | Tach min pulse gap | 3 ms | `BirdsEye.ino` |
 | Tach ring buffer | 16 entries | `BirdsEye.ino` |
 | Tach Kalman Q | 800 RPM² | `tach_filter.h` |

@@ -283,6 +283,12 @@ void displaySetup() {
 }
 
 void handleMenuPageSelection() {
+  if (courseCreatorActive()) {
+    // All five creator screens route through the model, which owns both
+    // the row table and the screen transitions.
+    courseCreatorSelect();
+    return;
+  }
   if (currentPage == PAGE_MAIN_MENU) {
     if (menuSelectionIndex == 0) {
       // Race selected — go directly to race mode, start logging on GPS fix
@@ -308,6 +314,18 @@ void handleMenuPageSelection() {
       // Transfer selected — open the Bluetooth-vs-USB submenu
       debugln(F("Main Menu: Transfer selected"));
       switchToDisplayPage(PAGE_TRANSFER_MENU);
+    } else if (menuSelectionIndex == 3) {
+      // Create Course — walk the cones and capture the timing lines.
+      debugln(F("Main Menu: Create Course selected"));
+      if (!courseCreatorEnter()) {
+        // Every screen past the prompt needs a fix (to capture) and the
+        // clock (to name the file), so refuse up front rather than let the
+        // user walk a whole course and fail at Save.
+        strncpy(internalNotification, "Need GPS lock to\ncreate a course",
+                sizeof(internalNotification) - 1);
+        internalNotification[sizeof(internalNotification) - 1] = '\0';
+        switchToDisplayPage(PAGE_INTERNAL_WARNING);
+      }
     } else {
       // Camera selected — paired shows status/unpair, unpaired starts pairing
       debugln(F("Main Menu: Camera selected"));
@@ -567,6 +585,16 @@ void displayLoop() {
       displayPage_pair_camera();
     } else if (currentPage == PAGE_CAMERA_TEST) {
       displayPage_camera_test();
+    } else if (currentPage == PAGE_COURSE_TRACK) {
+      displayPage_course_track();
+    } else if (currentPage == PAGE_COURSE_TYPE) {
+      displayPage_course_type();
+    } else if (currentPage == PAGE_COURSE_LINES) {
+      displayPage_course_lines();
+    } else if (currentPage == PAGE_COURSE_LINE) {
+      displayPage_course_line();
+    } else if (currentPage == PAGE_COURSE_POINT) {
+      displayPage_course_point();
     } else if (currentPage == PAGE_CAMERA_SERIAL_ENTRY) {
       displayPage_camera_serial_entry();
     } else if (currentPage == PAGE_REPLAY_FILE_SELECT) {
@@ -653,11 +681,16 @@ void displayLoop() {
     // custom (non-menu) button handling below. Deriving this per frame
     // flips the page into menu mode the moment a serial is captured.
     (currentPage == PAGE_PAIR_CAMERA && cameraIsPaired()) ||
-    currentPage == PAGE_CAMERA_TEST
+    currentPage == PAGE_CAMERA_TEST ||
+    courseCreatorActive()
   ) {
     insideMenu = true;
     if (currentPage == PAGE_MAIN_MENU) {
-      menuLimit = 4; // Race, Review, Transfer, Camera
+      menuLimit = 5; // Race, Review, Transfer, Create Course, Camera
+    } else if (courseCreatorActive()) {
+      // Row count is the model's to decide — it changes with course type
+      // (sprint grows a finish row) and with which screen is up.
+      menuLimit = course_creator::rowCount(courseCreator);
     } else if (currentPage == PAGE_BLUETOOTH) {
       menuLimit = 1; // Only "Exit" option
     } else if (currentPage == PAGE_TRANSFER_MENU) {
@@ -698,7 +731,8 @@ void displayLoop() {
     // Power Off) (#7).
     bool reverseDirection = (currentPage == PAGE_MAIN_MENU ||
                              currentPage == PAGE_PAIR_CAMERA ||
-                             currentPage == PAGE_CAMERA_TEST);
+                             currentPage == PAGE_CAMERA_TEST ||
+                             courseCreatorActive());
 
     // BUTTON UP (or DOWN for reversed menus)
     if (btn1->pressed) {
