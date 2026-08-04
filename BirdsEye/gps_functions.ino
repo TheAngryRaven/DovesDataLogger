@@ -207,9 +207,10 @@ void onPVTReceived(UBX_NAV_PVT_data_t *pvt) {
   // Time is only usable for naming/saving the log once the module reports the
   // date AND time AND a fully-resolved UTC. Before this, the module emits a
   // placeholder date (e.g. 2021-03-07) that must NOT drive file creation.
-  gpsData.timeValid = (pvt->valid.bits.validDate != 0) &&
-                      (pvt->valid.bits.validTime != 0) &&
-                      (pvt->valid.bits.fullyResolved != 0);
+  gpsData.timeDateValid = (pvt->valid.bits.validDate != 0) &&
+                          (pvt->valid.bits.validTime != 0);
+  gpsData.timeResolved = (pvt->valid.bits.fullyResolved != 0);
+  gpsData.timeValid = gpsData.timeDateValid && gpsData.timeResolved;
   gpsData.year = pvt->year - 2000;
   gpsData.month = pvt->month;
   gpsData.day = pvt->day;
