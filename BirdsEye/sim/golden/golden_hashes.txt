@@ -11,5 +11,6 @@ course_line_detail -14 5ff1d3f5
 course_point_idle -15 28961e61
 course_line_point_a_done -14 646ca520
 main_menu_after_create -1 34b50cd7
+main_menu_parked_on_line -1 34b50cd7
 pair_camera_unpaired -6 5d1129cc
 camera_serial_entry -7 56588408
