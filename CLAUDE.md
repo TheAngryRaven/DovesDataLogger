@@ -123,7 +123,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `crossing_pattern.{h,cpp}` | The two-frame crossing animation as geometry (eight 16x16 cells, odd row bands, alternating phase) instead of 2 KB of stored bitmap; golden-tested byte-identical to the images it replaced |
 | `sprint_select.{h,cpp}` | Sprint mode selection: newest-course-by-`date_created` ordering (sortable ISO strings) + the circuit-vs-sprint tiebreak decision table (`race_mode` pref; circuit yields to a sprint course created today) |
 | `wake_cause.{h,cpp}` | Boot wake-cause decode: RESETREAS + GPIO LATCH register snapshots → tach / button / USB / watchdog / soft-reset / cold boot (System OFF shutdown, subsystem 10) |
-| `gps_status_page.{h,cpp}` | GPS status boot page state machine: hold, 3 s auto-close after fix+timeValid, button skip, exit destination (menu vs race), idle → shutdown |
+| `gps_status_page.{h,cpp}` | GPS status boot page state machine: hold, 3 s auto-close after fix+timeValid, button skip, exit destination (menu vs race), idle → shutdown; `timeSyncState()` names which time milestone is outstanding (date/time vs the slow `fullyResolved`) |
 | `sd_format_page.{h,cpp}` | SD format-confirm boot page state machine: Select held 3 s continuously → format (release restarts the full window; other buttons never confirm), 5 min idle → shutdown |
 | `sat_bars.{h,cpp}` | Status-page satellite signal bars: NAV-SAT CNO selection (used-in-nav first, strongest first) + bar x/w/h layout math for the 128×~30 px bottom half |
 
@@ -1141,6 +1141,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | GPS nav rate (race) | 25 Hz | `gps_config.h` |
 | GPS nav rate (boot/status page) | 5 Hz + NAV-SAT ~1 Hz | `gps_config.h` |
 | Status page auto-close | 3 s after fix+timeValid | `gps_status_page.h` |
+| UTC resolve worst case | ~12.5 min cold start (nav-msg subframe 4 page 18) | `gps_status_page.h` |
 | Status page idle shutdown | 5 min (no lock, no engine) | `gps_status_page.h` |
 | SD format confirm hold | 3 s continuous Select | `sd_format_page.h` |
 | SD format page idle shutdown | 5 min | `sd_format_page.h` |

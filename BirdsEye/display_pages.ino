@@ -69,7 +69,12 @@ void displayPage_gps_status() {
     display.println(countdown);
   } else {
     if (gpsData.fix) {
-      display.print(F("FIX (time sync) "));
+      // "FIX ok" and not "FIX (time sync)": the old wording read as a fix
+      // TYPE — a time-only, position-less fix — when it actually meant the
+      // opposite (position is good, the clock isn't yet). That misreading
+      // cost a bench session, and the natural reaction to it (power-cycle)
+      // restarts the very countdown being waited on.
+      display.print(F("FIX ok  UTC.. "));
     } else {
       display.print(F("ACQUIRING "));
     }
@@ -80,9 +85,23 @@ void displayPage_gps_status() {
     display.println(F("s"));
   }
 
-  // Constellation only — the configured/live update rates confused more
-  // than they informed on a boot screen.
-  display.println(F("Mode:GPS-only"));
+  // Line 3 carries whichever is more useful right now: while the clock is
+  // still catching up, WHICH milestone is outstanding (the whole point of
+  // this line — a bare "no lock" gives the user nothing to wait for or act
+  // on); once it is locked, the constellation the module is configured for.
+  switch (gps_status_page::timeSyncState(gpsData.timeDateValid, gpsData.timeResolved)) {
+    case gps_status_page::TimeSync::kNoDateTime:
+      display.println(F("UTC: no date/time"));
+      break;
+    case gps_status_page::TimeSync::kResolving:
+      // Bounded, not estimated: the UTC page repeats every ~12.5 min, so
+      // this is the worst case, and seeing it stops the power-cycling.
+      display.println(F("UTC: resolving <=12m"));
+      break;
+    case gps_status_page::TimeSync::kLocked:
+      display.println(F("Mode:GPS-only"));
+      break;
+  }
 
   if (millis() - lastBatteryCheck > batteryUpdateInterval) {
     lastBatteryCheck = millis();

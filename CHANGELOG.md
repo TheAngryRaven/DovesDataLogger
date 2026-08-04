@@ -12,6 +12,25 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Fixed
+- **The GPS status page no longer reads as though a good fix is a bad one.**
+  Once a position fix came up, the page said `FIX (time sync)` — which parses
+  as a *kind* of fix (a time-only, position-less one) rather than what it
+  actually meant: position is good, the clock isn't ready yet. A perfectly
+  healthy device looked broken, and the natural response — power-cycling —
+  restarts the very countdown being waited on. It now reads `FIX ok  UTC..`,
+  and a new line says which milestone is outstanding: `UTC: no date/time`
+  while the module has neither, `UTC: resolving <=12m` once it has the date
+  and time but not the fully-resolved UTC. That second one is the slow, normal
+  case — the receiver has to decode the leap-second parameters out of the GPS
+  navigation message, which only repeats every ~12.5 minutes, so a clean fix
+  in under a minute followed by several more minutes of waiting is expected,
+  not a fault. Weak signal makes it worse: tracking a satellite well enough to
+  range off it is a far lower bar than decoding its data bits cleanly.
+  - The constellation readout (`Mode:GPS-only`) still occupies that line once
+    the clock is locked, so nothing was lost — the diagnostic only takes the
+    space while there is something to diagnose.
+
 ### Added
 - **BLE sprint-track sync — `TSLIST` / `TSGET:` / `TSPUT:` / `TSDEL:`**
   (plan 0002). The four existing track verbs gained `TS`-prefixed twins that

@@ -335,6 +335,12 @@ struct GpsData {
   int satellites;
   bool fix;
   bool timeValid;        // true only when the module reports validDate+validTime+fullyResolved
+  // The two halves of timeValid, kept separately so the status page can say
+  // WHICH milestone is outstanding. fullyResolved is the slow one — it needs
+  // the UTC/leap-second parameters decoded off the nav message (~12.5 min
+  // worst case from a cold start), long after a position fix is up.
+  bool timeDateValid;    // validDate && validTime
+  bool timeResolved;     // fullyResolved
   uint16_t year;         // 2-digit (e.g. 25 for 2025) for compat with existing code
   uint8_t month;
   uint8_t day;
