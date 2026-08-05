@@ -565,13 +565,23 @@ void displayLoop() {
 
     bool isCrossing = activeTimerCrossing();
 
+    // The crossing animation is a RACING overlay, so gate it on being ON a
+    // racing page rather than on a list of pages to skip. The blocklist this
+    // replaces never grew as pages were added, so every screen introduced
+    // since — the camera pages, the replay browser, the transfer menus, even
+    // the main menu — got the animation painted straight over it the moment
+    // the vehicle sat inside a crossing zone. Standing still beside a timing
+    // line is exactly when those screens are in use.
+    //
+    // The running rotation is a contiguous block (see BirdsEye.ino): the two
+    // diagnostic pages at the bottom and the stop-logging page at the top stay
+    // excluded as before, and everything outside the block — negative menu
+    // ids, the 90+ confirm/warning/fault pages, the 900+ boot pages — is now
+    // excluded by construction rather than by remembering to list it.
+    const bool onRacingPage = (currentPage > GPS_STATS && currentPage < LOGGING_STOP);
+
     if (
-      currentPage != GPS_STATS &&
-      currentPage != GPS_DEBUG &&
-      currentPage != LOGGING_STOP &&
-      currentPage != LOGGING_STOP_CONFIRM &&
-      currentPage != PAGE_INTERNAL_FAULT &&
-      currentPage != PAGE_INTERNAL_WARNING &&
+      onRacingPage &&
       isCrossing &&
       inEndurance == false
     ) {

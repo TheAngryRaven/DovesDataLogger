@@ -13,6 +13,15 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Fixed
+- **The crossing animation no longer paints over menus and setup screens.**
+  The flag animation shown while the vehicle is inside a timing-line zone was
+  gated by a list of pages to *skip*, and that list never grew as pages were
+  added — so every screen introduced since got the animation drawn straight
+  over it whenever the lap timer said "in the zone". Standing still beside a
+  timing line is exactly when you are using those screens, so the camera
+  pages, replay browser, transfer menus, the main menu and the course creator
+  could all be interrupted by it. It is now shown only on the live racing
+  pages, which is the only place it ever meant anything.
 - **Leaving a page while moving no longer throws you straight into race
   mode.** Auto-race fires from the main menu above 500 RPM or 10 mph — but it
   was checked the instant the menu appeared, so exiting any page while rolling
@@ -23,8 +32,6 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   pressed — which also stops it firing while you are actively navigating the
   menu at speed. The ordinary case is untouched: a device parked on the menu
   has been quiet for minutes before you drive off.
-
-### Fixed
 - **The GPS status page no longer reads as though a good fix is a bad one.**
   Once a position fix came up, the page said `FIX (time sync)` — which parses
   as a *kind* of fix (a time-only, position-less one) rather than what it

@@ -85,6 +85,11 @@ constexpr int kPageCourseLine = -14;
 constexpr int kPageCoursePoint = -15;
 constexpr int kPageWarning = 100;
 
+// Midpoint of the preloaded OKC track's start/finish line — parking here puts
+// the vehicle inside that line's crossing zone.
+constexpr double kOkcStartLat = 28.41271928;
+constexpr double kOkcStartLon = -81.37965158;
+
 // Somewhere with no track in the manifest, so the creator's prompt has
 // nothing to offer and the flow starts on the type picker. (The preloaded
 // asset track is OKC; this is deliberately nowhere near it.)
@@ -212,6 +217,19 @@ void runScript() {
   // between PVTs, so a latched 15 mph would trip auto-race once the settle
   // window expired and break every fixture after this one.
   injectFix(20, kOpenGroundLat, kOpenGroundLon, 1.2, 0.0);
+
+  // Sit on the menu parked ON the OKC start/finish line, with the track
+  // detected. Locks that the menu still renders as a menu in that state — its
+  // hash is expected to be IDENTICAL to main_menu_after_create above.
+  //
+  // NOT a regression test for the crossing overlay leaking onto non-racing
+  // pages, though it is the closest this harness gets: reaching a true
+  // crossing flag needs an ARMED timer, and OKC ships eight courses, so
+  // CourseDetector never locks one without actually driving a lap. Verified by
+  // restoring the old blocklist — this fixture does not change. The overlay
+  // gate itself is argued from the page-id ranges, not proven here.
+  injectFix(120, kOkcStartLat, kOkcStartLon);
+  capture("main_menu_parked_on_line", kPageMainMenu);
 
   press(2);
   press(2);
