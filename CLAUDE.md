@@ -589,7 +589,13 @@ loop()  ~250 Hz
   pages. They check CourseManager's active timer (DovesLapTimer or
   WaypointLapTimer) and return appropriate values.
 - **Auto-race** (`autoRaceModeCheck()`): from main menu, if RPM > 500 or
-  speed >= 10 mph, jumps directly to race mode.
+  speed >= 10 mph, jumps directly to race mode — but only once the menu has
+  been **settled** for `AUTO_RACE_MENU_GRACE_MS` (3 s), anchored on the newest
+  of the menu-arrival stamp (`mainMenuEnteredAtMs`, set by
+  `switchToDisplayPage()`) and the three button `lastPressed` values. Without
+  it, exiting any page while moving landed on the menu and entered race mode on
+  the very next loop iteration (~4 ms), so the menu was never drawn and the
+  device looked like it acted on its own.
 - **Auto-idle** (`checkAutoIdle()`): if speed < 2 mph for 60 seconds
   continuously, writes DOVEX header, closes file, cleans up CourseManager,
   and returns to main menu. **Sprint mode is engine-aware**: idle counts
@@ -1215,6 +1221,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | Max replay files | 20 | `replay.ino` |
 | DOVEX header size | 1 024 bytes | `project.h` |
 | Auto-idle timeout | 60 s at <2 mph | `BirdsEye.ino` |
+| Auto-race menu grace | 3 s settled (arrival + buttons) before auto-race can fire | `project.h` |
 | Track detect radius | 5 miles | `BirdsEye.ino` |
 | Course creator point hold | 3 s, ≥8 usable fixes else FAILED | `course_creator.h` |
 | Course creator h_acc gate | drop >10 m, warn >5 m | `course_creator.h` |
