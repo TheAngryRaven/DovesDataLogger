@@ -106,6 +106,11 @@ static void ensureDefaultSettings() {
     { "waypoint_speed", "30" },
     { "camera_serial", "" },  // empty = no Insta360 paired
     { "race_mode", "circuit" },  // tiebreak pref when circuit AND sprint tracks are in range
+    // Engine geometry for true RPM (plan 0003). These defaults are exactly the
+    // old hardcoded behaviour, so auto-populating them on an existing device
+    // changes nothing until the user says otherwise.
+    { "spark_mode", "wasted" },   // "wasted" = 1 spark/rev (2T or 4T wasted); "single" = 1 per 2 revs
+    { "cylinder_count", "1" },    // cylinders the PICKUP SEES, not the engine's
   };
 
   char buf[48];

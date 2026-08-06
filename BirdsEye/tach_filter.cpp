@@ -30,4 +30,31 @@ float rpmFromMeanPeriodUs(float meanPeriodUs, float revsPerPulse) {
   return (60.0e6f * revsPerPulse) / meanPeriodUs;
 }
 
+namespace {
+
+// Shared by both public helpers so they can never disagree about the
+// geometry — a mismatch would scale RPM by one factor and the debounce by
+// another.
+float pulsesPerRev(int cylinderCount, bool wastedSpark) {
+  if (cylinderCount < kMinCylinders) cylinderCount = kMinCylinders;
+  if (cylinderCount > kMaxCylinders) cylinderCount = kMaxCylinders;
+  return (float)cylinderCount * (wastedSpark ? kPulsesPerRevWasted : kPulsesPerRevSingle);
+}
+
+}  // namespace
+
+float revsPerPulse(int cylinderCount, bool wastedSpark) {
+  return 1.0f / pulsesPerRev(cylinderCount, wastedSpark);
+}
+
+uint32_t minPulseGapUs(int cylinderCount, bool wastedSpark) {
+  const float ppr = pulsesPerRev(cylinderCount, wastedSpark);
+  const float gap = (float)kBasePulseGapUs / ppr;
+  if (gap < (float)kMinPulseGapFloorUs) return kMinPulseGapFloorUs;
+  // Fewer pulses per rev (4-stroke single-fire) widens the gap, which is
+  // free: there are genuinely fewer edges to catch, so the extra margin
+  // only buys more ringing rejection at the same true-RPM ceiling.
+  return (uint32_t)(gap + 0.5f);
+}
+
 }  // namespace tach_filter

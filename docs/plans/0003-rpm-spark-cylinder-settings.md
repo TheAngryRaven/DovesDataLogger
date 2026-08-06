@@ -1,9 +1,13 @@
 # RPM Accuracy — Spark Type & Cylinder Count Settings
 
-> Status: **CONCEPT** — split out of plan 0002 (sprint mode); independent of
+> Status: **SHIPPED.** Split out of plan 0002 (sprint mode); independent of
 > it. Prompted by the same autocross-kart user group: unknown engine, "kart
 > kart or some wacky 2cyl monster", so the logger can no longer assume one
 > ignition pulse per revolution.
+>
+> Settings key is **`cylinder_count`** as drafted. The webapp's `enum` control
+> landed alongside it (DovesDataViewer), so `spark_mode` is a real dropdown
+> rather than the free-text stopgap this plan allowed for.
 
 ## Goal / problem
 
@@ -63,11 +67,18 @@ devices are unaffected by `ensureDefaultSettings()` auto-populating the keys.
   camera wake/record/stop (500 / 1500 / 300) currently assume 1 pulse/rev;
   on a 2-cyl they'd fire at half the true RPM. With correction, thresholds
   mean what they say on every engine.
-- **Pulse-rate ceiling**: the 3 ms minimum pulse gap caps at ~20 000
-  pulses/min. At divisor 2 (2-cyl every-rev) that's only **~10 000 true
-  RPM** — a screaming 2-cyl 2T could exceed it. The min-gap likely needs to
-  derive from `pulses_per_rev` (e.g. 3 ms ÷ ppr, floor ~1.5 ms) — verify
-  ISR headroom before lowering.
+- **Pulse-rate ceiling** (resolved): the min gap now derives from
+  `pulses_per_rev` — 3 ms ÷ ppr — in `tach_filter::minPulseGapUs()`.
+  **The floor is 750 µs, not the 1.5 ms sketched here**: 1.5 ms still put a
+  3-cylinder at ~13 300 true RPM, below the old ceiling. 750 µs holds the
+  full ~20 000 through four cylinders; past that the floor binds (10 000 at
+  eight), which is far clear of anything this logger targets.
+  ISR headroom was never the constraint — the body is <1 µs, so the floor's
+  worst case (~1300 int/s) is negligible. Ringing was, and the margin holds
+  from both ends: the tach input is RC-filtered (~100 µs) and the documented
+  pickup circuits emit pulses **milliseconds** wide — `TACHOMETER/README.md`
+  records circuit 1's 5 ms pulse as itself the ~9800 RPM limit on that
+  hardware, i.e. the pulse width, not the debounce, is what binds there.
 - **Pickup placement nuance (document for users)**: `cylinder_count` is
   "cylinders the pickup *sees*". A pickup clamped around ONE plug wire of a
   2-cyl sees one cylinder → leave `cylinder_count = 1`. Only a pickup on a
@@ -84,6 +95,30 @@ nothing else right now — plain string works until then).
 
 ## Status
 
-Concept only. No dependency on plan 0002 — can ship before or after sprint
-mode. Should ship *before* any camera/auto-race tuning work for multi-cyl
-engines.
+**Shipped.** No dependency on plan 0002. Landed before any camera/auto-race
+tuning for multi-cylinder engines, as intended — those thresholds now mean
+what they say on every engine.
+
+### What actually landed
+
+- `tach_filter::revsPerPulse()` / `minPulseGapUs()` — the geometry, in the
+  host-tested pure unit, sharing one private `pulsesPerRev()` so the RPM
+  scale and the debounce can never disagree.
+- `tachRevsPerPulse` / `tachMinPulseGapUs` became boot-set globals; the
+  correction point in `TACH_LOOP()` was already there and already ahead of
+  the Kalman filter, so no restructuring was needed.
+- Settings default in `ensureDefaultSettings()`; loaded in `setup()`.
+  Anything other than an explicit `"single"` degrades to `wasted`, so a
+  blank or future value reads as today rather than doubling every RPM.
+- The audit the plan asked for came back clean: nothing else derives RPM
+  from pulse periods. The only other `60e6` in the tree is the simulator's
+  pulse *generator*, which is the inverse and matches the default.
+
+### Verified
+
+Unit tests cover the geometry, the clamps (a corrupt `cylinder_count` can
+never divide by zero) and the ceiling property. End-to-end in the simulator:
+6000 pulses/min reports 6000 RPM at the defaults and 3000 with
+`revsPerPulse` forced to a twin — so the wiring is proven, not just the
+math. Golden fixtures and the lap oracle are unchanged, which is the
+evidence that existing devices are unaffected.
