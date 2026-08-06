@@ -1,12 +1,12 @@
 
 # Datalogger case "build guide"
-This is an advance level build, in a very tight case, that i designed on a computer screen where things look much bigger.
+This is an advance level build, in a very tight case, that I designed on a computer screen where things look much bigger.
 I built this, you can too, stay strong.
 
 The build guide is still a to-do... but with a couple of pictures and a pin guide, I think yall got it.... maybe do a dry run on a bench to make sure its wired right :^)
 
 
-## NOTE
+## Preview
 <p align="center">
   <img src="preview.png" />
 </p>
@@ -21,25 +21,27 @@ The build guide is still a to-do... but with a couple of pictures and a pin guid
 Use these parts as a reference, you can buy most of the parts from digikey in a single order
 
  - Seeed XIAO NRF52840 (sense version optional)
-	 - https://www.amazon.com/dp/B09T9VVQG7
+	- https://www.amazon.com/dp/B09T9VVQG7
  - SPI Flash Module
-	 - https://www.adafruit.com/product/6039
+	- https://www.adafruit.com/product/6039
  - USBC Charger Module 
-	 - https://www.adafruit.com/product/4410
+	- https://www.adafruit.com/product/4410
  - MATEK SAM-m10Q GPS, super easy to solder
  	- CAN SUBSTITUTE BARE GPS MODULE
  	- https://www.digikey.com/en/products/detail/u-blox/SAM-M10Q-00B/16672678
  - 2.45" 128x64 OLED LCD (SH110X or SSD1306 compatible)
-	 - MODIFIED for i2c mode
-	 - https://www.amazon.com/dp/B0CFF1XC2T
+	- MODIFIED for i2c mode
+	- https://www.amazon.com/dp/B0CFF1XC2T
  - 1500mAh 103050 LiPo (or smaller)
 	 - https://www.amazon.com/dp/B09DPNCLQZ
  - 3X 8mm panel mount buttons
-	 - https://www.amazon.com/dp/B0FSZ446QM
-- JST-PH 2.0 Pigtails
+	- https://www.amazon.com/dp/B0FSZ446QM
+ - JST-PH 2.0 Pigtails
 	- https://www.amazon.com/dp/B07NWNPB77
-- little USBC-4 pin breakout plug
+ - little USBC-4 pin breakout plug
 	- https://www.amazon.com/dp/B0B9N4DHTW
+ - tachometer (us shipping only)
+ 	- https://www.paypal.com/ncp/payment/D5QVSKE7W4CFQ
  - 1mm Acrylic sheet
  - 4x m3 30mm + nylock nuts
  - 8x m3 washers
@@ -48,12 +50,15 @@ Use these parts as a reference, you can buy most of the parts from digikey in a 
  - bunch of 30AWG silicone wires
 
 ## Mounting Hardware  (/case-back.3MF)
+#### Parts
  - 2x 1/4 carriage bolt 1in long
  - 1x 1/4 nylon nut
  - 1x 1/8 thick 1/4 ID rubber washer
  - 1x 1/4 ID metal washer
  - 1/16th thick rubber sheet 2in wide
  - 1/4in thick rubber 2in wide
+
+#### Assembly
  - cut thin rubber strip same width as device
  - cut thick strinp a thumbs width longer than the device to allow for easier grip
  - punch holes in straps to match the two outer bolt holes
@@ -67,7 +72,8 @@ Use these parts as a reference, you can buy most of the parts from digikey in a 
  - 1x 5/16 nylon nut
  - 1x 5/16 metal washer
  - 1-3x 1/8th rubber washer
-#### Building
+
+#### Assembly
  - nylon washer against datalogger body so it sits off a bit from the wheel
  - rubber washer between datalogger and wheel for vibration dampning
  - metal washer and nut from backside of wheel
@@ -111,14 +117,12 @@ The Seeed XIAO nRF52840 (Sense) has limited pins — almost every one is used. R
 | BAT pads | -- | Battery | 103050 1500mAh LiPo. Use the JST connector or solder to the BAT+/BAT- pads. |
 | USB-C | -- | Power / Debug | USB-C port for charging, programming, and serial debug. |
 
-**CRITICAL: Do NOT call `analogRead()` on pins D0-D5 (A0-A5).** On the nRF52840, `analogRead()` permanently disables the digital input buffer on that pin for the rest of the session. Every analog-capable pin is dual-purpose (tach, buttons, I2C), so calling `analogRead()` on any of them will silently break that function. PIN_VBAT (pin 32) is the only safe analog pin — it's a dedicated battery ADC with no digital function.
-
 **Power wiring:**
-- LiPo connects to the XIAO's battery pads/JST connector
-- No external voltage regulator needed — the XIAO regulates 3.3V internally
+- LiPo connects to the adafruit battery charger
 - adafruit power wiring:
   - wire dead simple usb-c breakout to 5v, ground, data+/- and plug it into the xiao
-  - battery and ground, to xiao battery pads
+  - battery and ground pads, to xiao battery pads
+  - desolder JST socket on adafruit board, solder pigtail directly to adafruit board
 
 **Signal wiring tips:**
 - Keep tach wire (D0) physically separated from button wires to reduce EMI coupling
@@ -127,16 +131,30 @@ The Seeed XIAO nRF52840 (Sense) has limited pins — almost every one is used. R
 
 ---
 
-## Worst Case Scenario
+## Pricing estimates
 
-If you don't have a printer. you can get the 1.25in screen and shove it in a tiny project box with whatever battery will fit, this is how i did the originally software proof of concept, and exactly why the display has two build options.
+Pricing calculations were done on 8/6/2026.
+Sadly this cannot also account for shipping from various vendors, or being forced to bulk order items like screws
 
+Since I have also needed to buy some bulk I am willing to sell a bundled parts kit + print service
+https://www.paypal.com/ncp/payment/5GT3CFJCLHMTE
 
-I placed a magnet in the back to attach to the rental kart steering wheels, and used a drone battery strap wrapped around it to make sure it stayed.
+| Datalogger | 111.21 | Mount A | 4.82 | Mount B | 4.05 |
+|----------|----------|----------|----------|----------|----------|
+| MCU | 15.9 | carriage bolts | 0.9 | Mounting type B | 4.05 |
+| GPS | 13.36 | plastic knob | 1.5 | carriage bolt | 0.98 |
+| Memory | 12.5 | rubber strap | 1.69 | nylon washer | 0.9 |
+| Power board | 5.95 | rubber guard | 0.2 | rubber washer x3 | 1.89 |
+| usbc breakout | 1.75 | lock nut | 0.12 | lock nut | 0.26 |
+| Screen | 15 | metal washer | 0.05 | metal washer | 0.02 |
+| power pigtail | 0.8 | rubber washer | 0.36 | -- | -- |
+| buttons | 15.2 | -- | -- | -- | -- |
+| battery | 8 | -- | -- | -- | -- |
+| tachometer  | 20 | -- | -- | -- | -- |
+| screws | 1.5 | -- | -- | -- | -- |
+| wire and such  | 1 | -- | -- | -- | -- |
+| acrylic  | 0.25 | -- | -- | -- | -- |
+| 3d print | 10 | -- | -- | -- | -- |
+| tach wire + print | 3 | -- | -- | -- | -- |
 
-
-It should be more than obvious you cant fit a tachometer in here but you will have every other feature, anything is possible.
-
-<p align="center">
-  <img src="projectbox.jpg" />
-</p>
+Message support@perchwerks.com if you have any questions, or need help acquiring supplies
