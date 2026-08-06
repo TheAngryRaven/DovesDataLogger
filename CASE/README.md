@@ -1,3 +1,4 @@
+
 # Datalogger case "build guide"
 This is an advance level build, in a very tight case, that i designed on a computer screen where things look much bigger.
 I built this, you can too, stay strong.
@@ -6,9 +7,6 @@ The build guide is still a to-do... but with a couple of pictures and a pin guid
 
 
 ## NOTE
-	- This was just finished, all the files are in the compiled 3mf, folder, in cura/bambu/etc click the object and "seperate by object" or however your slicer works.
-	- I'll update with individual files soon
-
 <p align="center">
   <img src="preview.png" />
 </p>
@@ -20,31 +18,61 @@ The build guide is still a to-do... but with a couple of pictures and a pin guid
 </p>
 
 ## Materials List
- - bunch of wires
- - Seeed XIAO NRF52840 (sense optional but cooler if you did)
- - SPI Flash Module - https://www.adafruit.com/product/6039
- - USBC Charger Module - https://www.adafruit.com/product/4410
- - little USBC-4 pin breakout plug
+Use these parts as a reference, you can buy most of the parts from digikey in a single order
+
+ - Seeed XIAO NRF52840 (sense version optional)
+	 - https://www.amazon.com/dp/B09T9VVQG7
+ - SPI Flash Module
+	 - https://www.adafruit.com/product/6039
+ - USBC Charger Module 
+	 - https://www.adafruit.com/product/4410
  - MATEK SAM-m10Q GPS, super easy to solder
  	- CAN SUBSTITUTE BARE GPS MODULE
+ 	- https://www.digikey.com/en/products/detail/u-blox/SAM-M10Q-00B/16672678
  - 2.45" 128x64 OLED LCD (SH110X or SSD1306 compatible)
+	 - MODIFIED for i2c mode
+	 - https://www.amazon.com/dp/B0CFF1XC2T
  - 1500mAh 103050 LiPo (or smaller)
+	 - https://www.amazon.com/dp/B09DPNCLQZ
  - 3X 8mm panel mount buttons
+	 - https://www.amazon.com/dp/B0FSZ446QM
+- JST-PH 2.0 Pigtails
+	- https://www.amazon.com/dp/B07NWNPB77
+- little USBC-4 pin breakout plug
+	- https://www.amazon.com/dp/B0B9N4DHTW
  - 1mm Acrylic sheet
  - 4x m3 30mm + nylock nuts
  - 8x m3 washers
+ - 10x 2mm x 4mm screws
+ - 4x 1mm x 4mm screws
+ - bunch of 30AWG silicone wires
 
-## Mounting Hardware
- - 2x 1/4 carriage bolt
+## Mounting Hardware  (/case-back.3MF)
+ - 2x 1/4 carriage bolt 1in long
+ - 1x 1/4 nylon nut
+ - 1x 1/8 thick 1/4 ID rubber washer
+ - 1x 1/4 ID metal washer
  - 1/16th thick rubber sheet 2in wide
  - 1/4in thick rubber 2in wide
  - cut thin rubber strip same width as device
- - cut thick spray a thumbs width longer
- - >punch holes in straps to match the two outer bolt holes
- - bolt one cariage bolt tight with nylon nut
+ - cut thick strinp a thumbs width longer than the device to allow for easier grip
+ - punch holes in straps to match the two outer bolt holes
+ - bolt one cariage bolt tight with nylon nut and rubber/metal washers
  - use chunky hand turn nut on other side to allow to quick release/attachment
 
+## Mounting Hardware  (/case-back-single.3MF)
+#### Parts
+ - 1x 5/16 carriage bolt 1-1/4in long
+ - 1x 5/16 ID 1/8th thick nylon washer
+ - 1x 5/16 nylon nut
+ - 1x 5/16 metal washer
+ - 1-3x 1/8th rubber washer
+#### Building
+ - nylon washer against datalogger body so it sits off a bit from the wheel
+ - rubber washer between datalogger and wheel for vibration dampning
+ - metal washer and nut from backside of wheel
 
+---
 ### Build guide (very much todo)
 
 - print all the parts
@@ -55,8 +83,10 @@ The build guide is still a to-do... but with a couple of pictures and a pin guid
 
 #### Tips
  - DONT LET THE BATTERY WIGGLE AROUND, IT WILL CAUSE FAILURE EVENTUALLY
-
-#### Pin guide
+ - DONT LET THE GPS WIGGLE AROUND EITHER
+ - bit of paper works great for both
+---
+#### Wiring guide
 
 The Seeed XIAO nRF52840 (Sense) has limited pins — almost every one is used. Reference the [official XIAO nRF52840 pinout](https://wiki.seeedstudio.com/XIAO_BLE/) for the physical board layout.
 
@@ -84,8 +114,11 @@ The Seeed XIAO nRF52840 (Sense) has limited pins — almost every one is used. R
 **CRITICAL: Do NOT call `analogRead()` on pins D0-D5 (A0-A5).** On the nRF52840, `analogRead()` permanently disables the digital input buffer on that pin for the rest of the session. Every analog-capable pin is dual-purpose (tach, buttons, I2C), so calling `analogRead()` on any of them will silently break that function. PIN_VBAT (pin 32) is the only safe analog pin — it's a dedicated battery ADC with no digital function.
 
 **Power wiring:**
-- LiPo connects to the XIAO's battery pads/JST connector (onboard BQ25100 charge IC handles charging via USB-C)
+- LiPo connects to the XIAO's battery pads/JST connector
 - No external voltage regulator needed — the XIAO regulates 3.3V internally
+- adafruit power wiring:
+  - wire dead simple usb-c breakout to 5v, ground, data+/- and plug it into the xiao
+  - battery and ground, to xiao battery pads
 
 **Signal wiring tips:**
 - Keep tach wire (D0) physically separated from button wires to reduce EMI coupling
