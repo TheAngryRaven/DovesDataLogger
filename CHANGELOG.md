@@ -12,6 +12,27 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+- **RPM is now correct on engines that aren't single-cylinder karts**
+  (plan 0003). The pickup counts ignition sparks, and the logger treated one
+  spark as one revolution — true only for a 2-stroke, or a 4-stroke with
+  wasted spark, running one cylinder. On anything else RPM was out by a fixed
+  factor: a twin firing every revolution read **double** the real speed.
+  Two new settings fix it, editable over Bluetooth:
+  - **Spark Mode** — `wasted` (one spark per revolution: 2-stroke, or
+    4-stroke wasted spark) or `single` (4-stroke single-fire, one spark per
+    two revolutions).
+  - **Cylinders** — the cylinders the **pickup can see**, which is not always
+    the engine's. A clamp around one plug wire of a twin sees one, so that
+    stays at 1; only a shared coil or all-cylinder harness sees them all.
+  - The defaults reproduce the old behaviour exactly, so a logger you never
+    configure reads identically to before.
+  - Knock-on benefit: the RPM thresholds the device acts on — auto-race entry,
+    and the camera's wake / start-recording / stop triggers — now mean what
+    they say on every engine, instead of firing at half the real RPM on a twin.
+  - The ignition-noise debounce follows the setting too, so the higher spark
+    rate of a multi-cylinder engine doesn't run into it and read low.
+
 ### Fixed
 - **The crossing animation no longer paints over menus and setup screens.**
   The flag animation shown while the vehicle is inside a timing-line zone was

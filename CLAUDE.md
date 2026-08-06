@@ -116,7 +116,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `crc32.{h,cpp}` | CRC-32/IEEE-802.3 (zlib) incremental + hex; pins firmware-OTA CRC to the web client |
 | `sd_access_policy.{h,cpp}` | SD access arbitration decision table (mode values + grant/deny rules) |
 | `lap_format.{h,cpp}` | ms → `M:SS.mmm` lap-time rendering (three zero-minutes styles), used by all display pages |
-| `tach_filter.{h,cpp}` | Tachometer 1-D Kalman filter (predict/update math + Q/R tuning constants) |
+| `tach_filter.{h,cpp}` | Tachometer 1-D Kalman filter (predict/update math + Q/R tuning constants) **and the engine geometry** — `revsPerPulse` / `minPulseGapUs` from `spark_mode` + `cylinder_count` |
 | `camera_fsm.{h,cpp}` | Insta360 auto-record lifecycle FSM (8 states, all debounce/retry/timeout timing + tunables); board-portable core shared with the nRF54 "Falcon" target |
 | `insta360_protocol.{h,cpp}` | Insta360 X4 BLE frame builders/parsers (wake advert, remote scan response, ce82 buttons, ce82 GPS/RMC frame, ce81 serial parsing, ce81 `0x10` record-timer state parse) with golden-byte tests |
 | `sensoregg_protocol.{h,cpp}` | SensorEgg `PW-ADV` v1+v2 advertising payload parser (magic filter, int16 deci-°C decode with `0x8000`→NaN sentinel, flags, sequence, v2 aux thermistor + battery) + wrap-safe 1 s staleness rule + passive-scan tuning constants |
@@ -298,7 +298,9 @@ loop()  ~250 Hz
 ### 2. Tachometer (`tachometer.ino`)
 
 - ISR `TACH_COUNT_PULSE()` fires on falling edge of D0.
-- 3 ms minimum pulse gap (supports up to ~20 000 RPM).
+- Minimum pulse gap is **derived**, not fixed: `tach_filter::minPulseGapUs()`
+  returns 3 ms ÷ pulses-per-rev with a 750 µs floor, so the ~20 000 true-RPM
+  ceiling holds up to four cylinders instead of halving with each one added.
 - **Ring buffer architecture**: ISR timestamps every valid pulse into a
   16-entry ring buffer (`tachRingBuf`). The ISR checks full before
   publishing (SPSC, one slot sacrificed) and drops + sets
@@ -312,8 +314,24 @@ loop()  ~250 Hz
   `tach_filter` pure unit. Process noise
   Q = 800 (tuned for kart engine inertia). Measurement noise R scales
   inversely with pulse count (more pulses = more confident).
-- Time-based debounce only (3 ms). Old volatile flag gate removed — ISR
+- Time-based debounce only. Old volatile flag gate removed — ISR
   body is trivially fast (<1 µs) and cannot cause interrupt storms.
+- **True RPM, one correction, one place.** The pickup counts ignition
+  pulses; the tach reports revolutions, and those differ on anything but a
+  single-cylinder engine firing every rev.
+  `pulses_per_rev = cylinder_count × (spark_mode == wasted ? 1.0 : 0.5)`,
+  and the reciprocal (`tachRevsPerPulse`, set once at boot) is applied at
+  the period→RPM conversion in `TACH_LOOP()` — **before the Kalman
+  filter**, because the filter's tuning is in true-RPM units (Q = 800 RPM²
+  models crank inertia), so correcting afterwards would filter each engine
+  type differently. Defaults (1 cylinder, wasted) give 1.0 — byte-identical
+  to the old hardcoded behaviour.
+  **No consumer may re-derive or re-apply this**: display, DOVEX rows, the
+  camera FSM and auto-race all read the already-corrected
+  `tachLastReported`. Any new consumer must too.
+- Because RPM is now true RPM, the **thresholds mean what they say on every
+  engine** — auto-race (>500), camera wake/record/stop (500/1500/300) no
+  longer fire at half the real RPM on a twin.
 - `tachLastReported` updates every main-loop call (~250 Hz). Consumers
   (display at 3 Hz, logging at 25 Hz) rate-limit themselves.
 - 500 ms timeout sets RPM to 0 (engine stopped), resets Kalman state.
@@ -1168,6 +1186,8 @@ the one loaded). Sector lines stay optional — zero, one, or two.
   "camera_serial": "",
   "device_name": "ApexTurbo",
   "race_mode": "circuit",
+  "spark_mode": "wasted",
+  "cylinder_count": "1",
   "driver_name": "Driver",
   "lap_detection_distance": "7",
   "waypoint_detection_distance": "30",
@@ -1186,6 +1206,8 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | `lap_detection_distance` | int | `7` | DovesLapTimer crossing threshold (meters) |
 | `waypoint_detection_distance` | int | `30` | WaypointLapTimer proximity zone (meters) |
 | `waypoint_speed` | int | `30` | Speed threshold (mph) for waypoint/detection |
+| `spark_mode` | string | `"wasted"` | Ignition rate: `wasted` = 1 spark/rev (2T, or 4T wasted spark); `single` = 1 spark per 2 revs (4T single-fire). Anything other than an explicit `single` is treated as `wasted` |
+| `cylinder_count` | int | `1` | Cylinders the **pickup sees** — a clamp on one plug wire of a twin sees ONE. Only a shared coil / all-cylinder harness sees them all |
 
 - Created automatically on first boot with random BLE values.
 - Missing keys auto-populated on boot via `ensureDefaultSettings()`.
@@ -1227,7 +1249,8 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | Course creator h_acc gate | drop >10 m, warn >5 m | `course_creator.h` |
 | Course creator name format | `N{YYMMDD}_{HHMM}` (+ `MMDDHHMM` short name) | `course_creator.h` |
 | Track JSON coordinate precision | 8 decimals (~1.1 mm) | `track_json.h` |
-| Tach min pulse gap | 3 ms | `BirdsEye.ino` |
+| Tach min pulse gap | 3 ms ÷ pulses-per-rev, floor 750 µs | `tach_filter.h` (`minPulseGapUs`) |
+| Tach pulses per rev | `cylinder_count` × (`wasted` ? 1.0 : 0.5); default 1.0 | `tach_filter.h` (`revsPerPulse`) |
 | Tach ring buffer | 16 entries | `BirdsEye.ino` |
 | Tach Kalman Q | 800 RPM² | `tach_filter.h` |
 | Tach Kalman R_BASE | 2500 RPM² | `tach_filter.h` |

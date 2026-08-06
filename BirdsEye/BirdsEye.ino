@@ -96,6 +96,7 @@
 #include "sensoregg.h"
 #include "settings.h"
 #include "sprint_select.h"
+#include "tach_filter.h"
 #include "tachometer.h"
 #include "usb_msc.h"
 #include "wake_cause.h"
@@ -288,9 +289,14 @@ const int tachInputPin = D0;
 volatile int tachLastReported = 0;  // Volatile: written by TACH_LOOP, read by display/logging/sleep
 int topTachReported = 0;
 
-// Debounce timing: ignore pulses faster than this (filters ignition ringing)
-// 3000us = 3ms minimum gap, allows up to 20,000 RPM max (333Hz)
-static const uint32_t tachMinPulseGapUs = 3000;
+// Debounce timing: ignore pulses faster than this (filters ignition ringing).
+// Derived at boot from the engine settings by tach_filter::minPulseGapUs() so
+// the true-RPM ceiling is the same on every engine — a fixed 3 ms caps
+// ~20,000 pulses/min, which on a twin firing every rev is only ~10,000 real
+// RPM. Defaults to the historical 3 ms (1 cyl, wasted spark).
+// Volatile: the ISR reads it; setup() writes it once before the interrupt is
+// attached, so there is no race, only a visibility guarantee.
+static volatile uint32_t tachMinPulseGapUs = tach_filter::kBasePulseGapUs;
 volatile uint32_t tachLastPulseUs = 0;
 
 // Ring buffer: ISR writes pulse timestamps, TACH_LOOP reads and computes periods.
@@ -306,8 +312,12 @@ volatile uint8_t  tachRingHead = 0;  // ISR write index (only ISR writes)
 volatile uint8_t  tachRingTail = 0;  // Main-loop read index (only TACH_LOOP writes)
 volatile bool     tachRingOverflow = false;  // ISR sets on drop; TACH_LOOP clears
 
-// Tunable constants
-static const float tachRevsPerPulse = 1.0f;          // Wasted spark = 1 pulse/rev
+// Revolutions per ignition pulse — the single place the engine's geometry
+// enters the RPM path. Set once at boot from spark_mode + cylinder_count;
+// the default (1 cyl, wasted spark) is 1.0, exactly today's behaviour.
+// Applied ONCE, before the Kalman filter, in TACH_LOOP(). No consumer may
+// re-derive or re-apply it — they all read the corrected tachLastReported.
+static float tachRevsPerPulse = 1.0f;
 static const uint32_t tachStopTimeoutUs = 500000;    // 500ms = engine stopped
 
 ///////////////////////////////////////////
@@ -867,6 +877,30 @@ void setup() {
     }
     if (getSetting("race_mode", buf, sizeof(buf))) {
       settingRaceModePrefSprint = (strcasecmp(buf, "sprint") == 0);
+    }
+    // Engine geometry. Anything other than an explicit "single" is treated as
+    // wasted spark, so a blank, garbled or future value degrades to today's
+    // behaviour rather than doubling every RPM reading.
+    {
+      bool wastedSpark = true;
+      int cylinders = 1;
+      if (getSetting("spark_mode", buf, sizeof(buf))) {
+        wastedSpark = (strcasecmp(buf, "single") != 0);
+      }
+      if (getSetting("cylinder_count", buf, sizeof(buf))) {
+        const int n = atoi(buf);
+        if (n >= tach_filter::kMinCylinders) cylinders = n;
+      }
+      tachRevsPerPulse = tach_filter::revsPerPulse(cylinders, wastedSpark);
+      tachMinPulseGapUs = tach_filter::minPulseGapUs(cylinders, wastedSpark);
+      debug(F("Engine: cyl="));
+      debug(cylinders);
+      debug(F(" spark="));
+      debug(wastedSpark ? F("wasted") : F("single"));
+      debug(F(" revsPerPulse="));
+      debug(tachRevsPerPulse);
+      debug(F(" minGapUs="));
+      debugln((uint32_t)tachMinPulseGapUs);
     }
     crossingThresholdMeters = settingLapDetectionDistance;
     debug(F("Settings loaded: lap_dist="));

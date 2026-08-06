@@ -204,7 +204,9 @@ Settings are stored in `/SETTINGS.json` on the SD card. The file is created auto
   "driver_name": "Driver",
   "lap_detection_distance": "7",
   "waypoint_detection_distance": "30",
-  "waypoint_speed": "30"
+  "waypoint_speed": "30",
+  "spark_mode": "wasted",
+  "cylinder_count": "1"
 }
 ```
 
@@ -217,6 +219,8 @@ Settings are stored in `/SETTINGS.json` on the SD card. The file is created auto
 | `lap_detection_distance` | Crossing detection threshold in meters | `7` |
 | `waypoint_detection_distance` | Waypoint proximity zone in meters (Lap Anything) | `30` |
 | `waypoint_speed` | Minimum speed in mph to activate lap timing | `30` |
+| `spark_mode` | How often the ignition fires: `wasted` = once per revolution (2-stroke, or 4-stroke wasted spark), `single` = once per two revolutions (4-stroke single-fire) | `wasted` |
+| `cylinder_count` | Cylinders the **pickup sees** — a clamp on one plug wire of a twin sees ONE; only a shared coil or all-cylinder harness sees them all | `1` |
 
 ## Data Format
 
