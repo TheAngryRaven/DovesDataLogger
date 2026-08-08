@@ -20,6 +20,10 @@ void safeDisplayUpdate();
 // the boot splash. Call once from setup().
 void displaySetup();
 
+// Apply the user's colour preference (false = normal, true = inverted).
+// Remembered, so it survives the panel being re-begun by I2C recovery.
+void displaySetInverted(bool inverted);
+
 // Helpers callable from any displayPage_*() function.
 void resetDisplay();
 void forceDisplayRefresh();

@@ -19,6 +19,40 @@
 
 static bool i2cRecoveryNeeded = false;
 
+// Whether the panel is showing inverted colours (black-on-lit instead of
+// lit-on-black). Kept here rather than as a cross-module global because the
+// only thing that ever needs it is the panel start-up path below.
+static bool displayInverted = false;
+
+/**
+ * Start the OLED panel.
+ *
+ * The ONLY place `display.begin()` is called, and that is deliberate:
+ * `begin()` re-initialises the controller, which clears the inversion bit.
+ * Routing every start through here means the preference is restored by
+ * construction. The I2C recovery path re-begins mid-session, so a second
+ * hand-written `begin()` would silently un-invert the screen on the first
+ * EMI glitch — exactly the kind of bug nobody reports because it looks like
+ * the setting "just stopped working".
+ */
+static void displayBeginPanel() {
+#ifdef USE_1306_DISPLAY
+  display.begin(SSD1306_SWITCHCAPVCC, I2C_DISPLAY_ADDRESS);
+#else
+  display.begin(I2C_DISPLAY_ADDRESS, true);
+#endif
+  display.invertDisplay(displayInverted);
+}
+
+/**
+ * Apply the user's colour preference. Safe to call any time after the panel
+ * is up; the value is remembered so it survives a later re-begin.
+ */
+void displaySetInverted(bool inverted) {
+  displayInverted = inverted;
+  display.invertDisplay(inverted);
+}
+
 void i2cBusRecover() {
   debugln(F("I2C: Bus recovery - bit-banging 9 SCL clocks"));
 
@@ -57,13 +91,9 @@ void i2cBusRecover() {
   Wire.begin();
   Wire.setClock(400000);  // Must re-set after begin() (resets to 100kHz)
 
-  // Re-init display
+  // Re-init display (restores the colour preference — see displayBeginPanel)
   wdtPet();
-  #ifdef USE_1306_DISPLAY
-    display.begin(SSD1306_SWITCHCAPVCC, I2C_DISPLAY_ADDRESS);
-  #else
-    display.begin(I2C_DISPLAY_ADDRESS, true);
-  #endif
+  displayBeginPanel();
 
   wdtPet();
   debugln(F("I2C: Bus recovery complete"));
@@ -256,11 +286,10 @@ void displaySetup() {
   // Set I2C timeout to prevent infinite hangs from EMI-induced bus faults
   Wire.setTimeout(100);
 
-#ifdef USE_1306_DISPLAY
-  display.begin(SSD1306_SWITCHCAPVCC, I2C_DISPLAY_ADDRESS);
-#else
-  display.begin(I2C_DISPLAY_ADDRESS, true);
-#endif
+  // Starts uninverted: this runs BEFORE the SD card is up, so the stored
+  // preference is not readable yet. setup() applies it as soon as settings
+  // exist — see the displaySetInverted() call after SETTINGS_SETUP().
+  displayBeginPanel();
 
   // 400kHz I2C: reduces display.display() from ~100ms to ~25ms.
   // At 100kHz, the 1024-byte framebuffer transfer blocks long enough
