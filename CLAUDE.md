@@ -765,9 +765,13 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   reset.
 - **Recovery net**: an interrupted swap leaves an invalid app, so the
   bootloader comes up in BLE DFU and the unit is re-flashable over the air via
-  the nRF Connect mobile app — no pins. **The apply path needs the Phase 0
-  hardware spikes signed off before field release** — see
-  `docs/plans/0000-firmware-ota-phase0.md`.
+  the nRF Connect mobile app — no pins. **This is the one Phase 0 spike still
+  unproven on hardware.** The apply path itself has shipped and is flashing
+  units in the field, which closes the other spikes by demonstration; but a
+  *successful* update never walks the recovery path, so it stays untested
+  until someone deliberately corrupts an app region and confirms the unit
+  comes back. See `docs/plans/0000-firmware-ota-phase0.md` → *The one test
+  still outstanding*.
 - **Fleet migration**: the first firmware carrying `FW*` is pushed to sealed
   units once via nRF Connect (native app, buttonless trigger works on the
   existing single-bank bootloader); all later updates go through the web app.

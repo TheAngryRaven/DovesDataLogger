@@ -7,14 +7,27 @@ are implemented and host-tested independently of these findings (see
 `BirdsEye/firmware_ota.{h,ino}`, `BirdsEye/crc32.{h,cpp}`, and
 `tests/crc32_test.cpp`).
 
-> **Status of these findings.** The spikes below require the physical sealed
-> hardware (XIAO nRF52840, Adafruit bootloader, S140 7.3.0) and a BLE host.
-> They could not be run in the CI/build environment. Each item states the
-> best-evidence answer from the platform documentation and core source, and
-> exactly what must be confirmed on a bench unit before the **apply** path is
-> enabled in a field release. The receive/verify pipeline (everything up to,
-> but not including, the destructive app-region swap) is safe to ship and
-> exercise on its own — nothing it does can brick a unit.
+> **Status: mostly settled by field use. ONE spike outstanding — #1.**
+>
+> This document was written *before* the apply path shipped, when all five
+> spikes were open and each item recorded a best-evidence answer plus what to
+> confirm on a bench unit. The apply path has since shipped and has been
+> flashing real loggers over the air for weeks, including a full end-to-end
+> run on a bench vehicle. **Ordinary successful updates exercise spikes #2, #3
+> and the soft-reset half of #5 every single time** — those are no longer
+> open questions, and #4 is moot because it was only ever the fallback for a
+> #3 that failed.
+>
+> **Spike #1 — the recovery net — is the one a successful update can never
+> prove.** It only fires when an update is *interrupted*: a half-written
+> vector table, or power lost mid-swap. Every update so far has succeeded, so
+> that path has never been walked. On sealed units it is the difference
+> between a recoverable brick and a brick, which is why it is still called out
+> here. It needs one deliberately destructive bench test (below).
+>
+> Per-spike status is recorded inline. Anyone running the remaining test
+> should validate against the CURRENT constants in `BirdsEye/firmware_ota.ino`
+> — the staging base moved (see the memory-map note).
 
 ## Why we self-flash at all (settled, do not re-litigate)
 
@@ -54,6 +67,10 @@ reject any image larger than `FW_MAX_IMAGE_SIZE` (320 KB) with `FWERR:SIZE`.
 ## Phase 0 spikes
 
 ### 1. Recovery net — invalid app ⇒ re-flashable over BLE with no pins
+> **STATUS: OPEN — the only one left.** Field use cannot close this. Every
+> update so far has *succeeded*, and this path only exists for the ones that
+> don't. Closing it needs the destructive test below, deliberately performed.
+
 **Why it matters:** this is what makes self-flashing acceptable on sealed
 units. If the swap is interrupted, the unit must still be recoverable.
 
@@ -70,6 +87,12 @@ advertises and is re-flashable over BLE via nRF Connect with **no** button /
 USB / SWD interaction. This is the make-or-break safety gate.
 
 ### 2. App can erase+write the upper free-flash region (SoftDevice flash API)
+> **STATUS: CLOSED by field use.** Every OTA stages the incoming image into
+> the upper region over a live BLE connection; a failure here would surface as
+> `FWERR:FLASH` or a stalled transfer, and updates complete normally. The
+> timing concern (page erase starving the connection) is answered by the same
+> evidence — transfers hold up.
+
 **Best-evidence answer:** with the SoftDevice enabled, page erase / word write
 go through `sd_flash_page_erase` / `sd_flash_write`, which complete
 asynchronously via a SoftDevice flash event. The implementation uses the
@@ -85,6 +108,13 @@ copy pads the final block to a word with `0xFF`).
 core version.
 
 ### 3. RAM flasher — erase app region + copy staged image, then boot it
+> **STATUS: CLOSED by field use.** This was written as "the spike that decides
+> whether to ship the RAM flasher". It shipped, and it is what performs every
+> update: each successful OTA is a full erase-app-region → copy-staged-image →
+> reset → boot-the-new-image cycle. The `.map` inspection and NVMC
+> single-stepping below were pre-ship de-risking; the mechanism is now
+> demonstrated by the thing itself working repeatedly, on more than one unit.
+
 **Best-evidence answer:** the app-region swap erases the very flash the app
 runs from, so it must execute from RAM with the SoftDevice disabled and IRQs
 off, touching only the raw NVMC. `fwRamFlasher()` is marked
@@ -99,12 +129,23 @@ This is the spike that decides whether to ship the RAM flasher or fall back to
 the dual-bank alternative (#4).
 
 ### 4. Fallback — dual-bank Adafruit bootloader via nRF Connect (no pins)
+> **STATUS: MOOT.** This was only ever contingent on #3 failing validation.
+> #3 works in the field, so this migration is not happening. Kept for the
+> record — if a future flash-layout change (plan 0004 piece 3) destabilises
+> the swap, this is still the documented escape route.
+
 **If the RAM flasher proves shaky:** a one-time, over-the-air move to a
 dual-bank Adafruit bootloader makes the swap bootloader-managed. The
 bootloader update itself is pushed via nRF Connect (native app → buttonless
 trigger works) with no pins. Evaluate only if #3 fails validation.
 
 ### 5. GPREGRET behavior across soft-reset vs power-loss
+> **STATUS: soft-reset half CLOSED by field use** — the normal flow arms the
+> flag and soft-resets, and updates land correctly. **The power-loss half is
+> not independently testable and does not need to be:** the whole point is
+> that GPREGRET is *lost* on brownout, which is precisely why recovery there
+> falls through to spike #1. Confirming #1 confirms this.
+
 **Best-evidence answer:** `GPREGRET` is a RETAINED register in the always-on
 power domain; it survives a soft reset (`NVIC_SystemReset`) but **not** a full
 power loss / brownout. So GPREGRET is the recovery path for the *soft-reset*
@@ -117,10 +158,14 @@ on the invalid-app fallback).
 
 ## Decision
 
-**Leading plan adopted:** SD → upper-flash staging via `flash_nrf5x`, in-flash
-CRC re-verify, GPREGRET recovery flag, then a RAM-resident flasher for the
-app-region swap (spikes #1–#3, #5). The dual-bank migration (#4) is the
-documented fallback if spike #3 fails on hardware.
+**Leading plan adopted, and since shipped:** SD → upper-flash staging via
+`flash_nrf5x`, in-flash CRC re-verify, GPREGRET recovery flag, then a
+RAM-resident flasher for the app-region swap (spikes #1–#3, #5). The dual-bank
+migration (#4) was the documented fallback if spike #3 failed on hardware; it
+did not, so #4 is moot.
+
+This is the path in the field today. What follows are the safety invariants it
+enforces — all of them still current, and all of them still load-bearing.
 
 **Safety invariants enforced in code:**
 - The app region is **never** erased until the staged copy is CRC-verified
@@ -135,6 +180,29 @@ documented fallback if spike #3 fails on hardware.
 - The GPREGRET recovery flag is armed *before* the destructive swap.
 - Every step before the RAM flasher is abortable; the running firmware stays
   intact until the flasher actually runs.
+
+## The one test still outstanding
+
+Everything else here is answered. This is the whole remaining scope of Phase 0:
+
+**Prove that an interrupted update leaves a recoverable unit** (spike #1).
+
+1. On a bench unit, erase one page at `FW_APP_BASE` (`0x27000`) — enough to
+   invalidate the application's vector table.
+2. Power-cycle. Do **not** press anything, plug in USB, or attach SWD.
+3. Confirm the Adafruit bootloader comes up advertising BLE DFU.
+4. Push a fresh image over the air with nRF Connect (native app — not subject
+   to the Chrome Web Bluetooth blocklist that forced self-flashing in the
+   first place) and confirm the unit boots it.
+
+If that holds, the recovery net is real and Phase 0 is closed. If it does
+not, the honest consequence is that a sealed unit interrupted mid-swap is
+unrecoverable, and the apply path needs the dual-bank migration (#4) before it
+is safe to keep shipping to sealed hardware.
+
+Worth doing on a unit you are willing to lose, and worth doing *before* plan
+0004 piece 3 (SD-direct apply) touches the swap — that change would otherwise
+land on an unproven recovery net.
 
 ## Fleet migration
 
