@@ -13,6 +13,11 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **The screen can be inverted.** A new **Display Colours** setting, editable
+  over Bluetooth, switches the panel between the white-on-black it has always
+  used and black-on-lit. Useful in direct sun, where a mostly-dark screen is
+  the harder one to read. The default is unchanged, so nothing looks different
+  until you ask for it.
 - **RPM is now correct on engines that aren't single-cylinder karts**
   (plan 0003). The pickup counts ignition sparks, and the logger treated one
   spark as one revolution — true only for a 2-stroke, or a 4-stroke with

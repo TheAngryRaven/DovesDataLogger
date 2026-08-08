@@ -111,6 +111,9 @@ static void ensureDefaultSettings() {
     // changes nothing until the user says otherwise.
     { "spark_mode", "wasted" },   // "wasted" = 1 spark/rev (2T or 4T wasted); "single" = 1 per 2 revs
     { "cylinder_count", "1" },    // cylinders the PICKUP SEES, not the engine's
+    // Panel colours. "normal" is lit-on-black, exactly as shipped; "inverted"
+    // swaps lit and unlit pixels for glare/daylight readability.
+    { "display_invert", "normal" },
   };
 
   char buf[48];

@@ -416,6 +416,17 @@ loop()  ~250 Hz
 ### 5. Display & UI (`display_ui.ino`, `display_pages.ino`, `display_config.h`)
 
 - Driver selected at compile time (`USE_1306_DISPLAY` define).
+- **Colour inversion** (`display_invert` setting): `displaySetInverted()` issues
+  the controller's invert command — it swaps lit/unlit pixels on the panel and
+  does **not** touch the framebuffer, so nothing that renders needs to know.
+  `display.begin()` is called from exactly one place, `displayBeginPanel()`,
+  which re-applies the preference: `begin()` resets the controller and clears
+  the bit, and the I2C recovery path re-begins mid-session, so a second
+  hand-written `begin()` would silently un-invert the screen on the first EMI
+  glitch. The preference is applied right after `SETTINGS_SETUP()` rather than
+  in the main settings block, because `displaySetup()` runs before the SD card
+  exists — see the comment there. **No sim coverage is possible**: the golden
+  frame hash is over the framebuffer, which inversion does not alter.
 - Button debounce: 3 samples at 500 us intervals, 200 ms refire lockout.
 - All lap times render via the host-tested `lap_format::formatLapTime()`
   (ms → `M:SS.mmm`, always 3-digit ms; zero-minutes styles: `kOmit` for
@@ -1190,6 +1201,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
   "camera_serial": "",
   "device_name": "ApexTurbo",
   "race_mode": "circuit",
+  "display_invert": "normal",
   "spark_mode": "wasted",
   "cylinder_count": "1",
   "driver_name": "Driver",
@@ -1211,6 +1223,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | `waypoint_detection_distance` | int | `30` | WaypointLapTimer proximity zone (meters) |
 | `waypoint_speed` | int | `30` | Speed threshold (mph) for waypoint/detection |
 | `spark_mode` | string | `"wasted"` | Ignition rate: `wasted` = 1 spark/rev (2T, or 4T wasted spark); `single` = 1 spark per 2 revs (4T single-fire). Anything other than an explicit `single` is treated as `wasted` |
+| `display_invert` | string | `"normal"` | Panel colours: `normal` = lit-on-black as shipped, `inverted` = black-on-lit. Anything other than an explicit `inverted` means normal |
 | `cylinder_count` | int | `1` | Cylinders the **pickup sees** — a clamp on one plug wire of a twin sees ONE. Only a shared coil / all-cylinder harness sees them all |
 
 - Created automatically on first boot with random BLE values.
