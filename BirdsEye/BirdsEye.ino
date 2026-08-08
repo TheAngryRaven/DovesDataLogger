@@ -842,6 +842,20 @@ void setup() {
   // Load settings from SD (creates defaults on first boot)
   SETTINGS_SETUP();
 
+  // Colour preference is applied HERE, not in the settings block further
+  // down, because displaySetup() runs before the SD card exists — the panel
+  // cannot learn the preference until settings are readable. This is the
+  // earliest moment it can, which keeps the boot splash from visibly
+  // flipping part-way through GPS_SETUP() (over a second on a cold start).
+  // Anything other than an explicit "inverted" means normal, so a blank or
+  // future value leaves the screen as it has always looked.
+  {
+    char displayBuf[16];
+    if (getSetting("display_invert", displayBuf, sizeof(displayBuf))) {
+      displaySetInverted(strcasecmp(displayBuf, "inverted") == 0);
+    }
+  }
+
   // Register the USB mass-storage callbacks (no drive presented until the
   // user enters USB transfer mode). Needs a working SD card for block I/O.
   if (sdSetupSuccess) {
