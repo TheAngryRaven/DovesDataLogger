@@ -1379,6 +1379,33 @@ void displayPage_course_lines() {
   safeDisplayUpdate();
 }
 
+/**
+ * @brief "The track is full — drop the oldest runs?" (plan 0005).
+ *
+ * Only reached when at least one course being dropped still carries the name
+ * the DEVICE gave it, so it has never been through the webapp and this card
+ * may be the only place it exists. A drop of courses renamed in the app is
+ * done quietly — there is nothing at stake to interrupt anyone for.
+ */
+void displayPage_course_prune() {
+  resetDisplay();
+
+  display.println(F("TRACK FULL"));
+  display.println();
+  display.print(F("Drop "));
+  display.print(coursePruneDropCount);
+  display.println(coursePruneDropCount == 1 ? F(" old run?") : F(" old runs?"));
+  display.println(F("Not saved in app."));
+  display.println();
+
+  display.print(menuSelectionIndex == 0 ? F("->") : F("  "));
+  display.println(F("Keep them"));
+  display.print(menuSelectionIndex == 1 ? F("->") : F("  "));
+  display.println(F("Drop + save"));
+
+  safeDisplayUpdate();
+}
+
 void displayPage_course_line() {
   resetDisplay();
 
