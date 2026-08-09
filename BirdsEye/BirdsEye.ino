@@ -43,6 +43,14 @@
 #include <DovesLapTimer.h>
 #include <CourseManager.h>
 #include <SprintTimer.h>
+// ArduinoJson is here for the same reason, and it is load-bearing: the track
+// helpers in sd_functions.ino take and return JsonArray, and Arduino generates
+// their prototypes ABOVE this point. Included further down (where the JSON
+// globals live) those prototypes see no such type, quietly degrade the
+// parameter to `int`, and every one of them fails to compile with "redeclared
+// as different kind of entity". The simulator cannot catch this — it hand-writes
+// its prototypes — so the only signal is the Arduino build.
+#include <ArduinoJson.h>
 
 // SdFat configuration. SD_FAT_TYPE must be defined BEFORE SdFat.h is
 // processed for the first time, which means before any module header
@@ -569,7 +577,7 @@ int numOfLocations = 0;
 ///////////////////////////////////////////
 // JSON PARSING GLOBALS
 ///////////////////////////////////////////
-#include <ArduinoJson.h>
+// (ArduinoJson itself is included in the top block — see the note there.)
 // The maximum size of a track file, in every direction: the raw read buffer
 // and the ArduinoJson document that parses it (sd_functions.ino), and the BLE
 // upload staging buffer (bluetooth.ino). One constant so those cannot drift —

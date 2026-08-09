@@ -1453,7 +1453,13 @@ This device operates in ignition-noise environments. Three layers of defense:
 - Cross-module globals (e.g. `dovexReplay*`, `trackManifest[]`, `courseManager`)
   are declared and defined in `BirdsEye.ino`. Module headers may `extern`-declare
   them where the module's own API touches that state.
-- Library includes that define return types used in auto-prototyped functions
-  (`DovesLapTimer.h`, `CourseManager.h`, `SparkFun_u-blox_GNSS_v3.h`) must be
-  in the top include block of `BirdsEye.ino` (before Arduino generates
-  prototypes).
+- Library includes that define **parameter or return types** used in
+  auto-prototyped functions (`DovesLapTimer.h`, `CourseManager.h`,
+  `SparkFun_u-blox_GNSS_v3.h`, `ArduinoJson.h`) must be in the top include
+  block of `BirdsEye.ino` (before Arduino generates prototypes). Included any
+  later, the generated prototype cannot see the type, silently degrades it to
+  `int`, and the function fails with *"redeclared as different kind of
+  entity"*. **The simulator cannot catch this** — it hand-writes its
+  prototypes in `sim/sim_prototypes.h` — so a green sim build says nothing
+  about it; only the Arduino compile does. `ArduinoJson.h` joined this list
+  when `sd_functions.ino` grew helpers taking `JsonArray` (plan 0005).
