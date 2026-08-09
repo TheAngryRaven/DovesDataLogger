@@ -39,6 +39,19 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
     rate of a multi-cylinder engine doesn't run into it and read low.
 
 ### Fixed
+- **A track with many courses no longer disappears from the device.** Track
+  files were read and parsed through a 4 KB budget, and a file past it was cut
+  mid-JSON: the parse failed, no manifest entry was built, and the track
+  silently stopped being detected at the venue — not just losing its extra
+  courses, but vanishing entirely. Sprint tracks hit this first, since a sprint
+  course carries a finish line plus splits (~528 bytes each) and a venue accrues
+  a dated course per event: **eight courses was enough**, below the ten the
+  device claims to support. The budget is now 8 KB, which clears ten courses of
+  every shape with headroom, and the BLE upload buffer is sized from the same
+  constant so the largest track the device can read is also the largest it will
+  accept. Costs RAM only (there was 167 KB free), no flash. This raises the
+  ceiling rather than removing it — a truncated read now also says so on the
+  debug serial instead of failing silently.
 - **The crossing animation no longer paints over menus and setup screens.**
   The flag animation shown while the vehicle is inside a timing-line zone was
   gated by a list of pages to *skip*, and that list never grew as pages were

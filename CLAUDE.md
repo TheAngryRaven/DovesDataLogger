@@ -551,7 +551,9 @@ loop()  ~250 Hz
     rejects `/`, `..` and FAT-unsafe bytes on every track command; which of the
     two folders a command targets is decided by the *opcode* alone
     (`trackFolderFor()`), so a client cannot path its way between them.
-  - Upload uses a 4096-byte static RAM buffer; `TERR:TOO_LARGE` if exceeded.
+  - Upload uses a static RAM buffer sized from `JSON_BUFFER_SIZE` (8192), so
+    the largest track the device can parse is also the largest it can
+    receive; `TERR:TOO_LARGE` if exceeded.
   - Error responses: `TERR:SD_BUSY`, `TERR:BUSY`, `TERR:WRITE_FAIL`, `TERR:NO_FILE`, `TERR:BAD_NAME`.
   - Upload/delete state machines: BLE callback sets flags, `BLUETOOTH_LOOP()`
     calls `processTrackUpload()` / `processTrackDelete()` for thread-safe SD
@@ -596,7 +598,7 @@ loop()  ~250 Hz
 - `setSetting(key, value)` does read-modify-write to update a single key.
 - Uses `SD_ACCESS_TRACK_PARSE` mode for brief SD access.
 - Separate `StaticJsonDocument<512>` — does not share the track parser's
-  4096-byte buffer.
+  `JSON_BUFFER_SIZE` buffer.
 - Total RAM cost: ~1 KB (512-byte file buffer + 512-byte JSON document).
 
 ### 9. CourseManager Integration
@@ -1103,7 +1105,8 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   app then can't save is worse than one never written.
 - **Writing** (`sdSaveCreatedCourse`, in `sd_functions.ino` with the other
   track I/O): a new track is one emitted object; an append is a
-  read-modify-write through the existing 4 KB `trackJson` document, capped
+  read-modify-write through the existing `JSON_BUFFER_SIZE` `trackJson`
+  document, capped
   at `MAX_LAYOUTS` and rejected on overflow. Appends serialize to
   `<file>.tmp` and **rename over the original only once closed** — in-place
   rewriting would leave a truncated track file after a power loss in a
@@ -1279,10 +1282,10 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | SD SPI clock (transfer) | 8 MHz (`SD_SPI_SPEED_FAST`) | `BirdsEye.ino` |
 | Battery check interval | 5 s | `BirdsEye.ino` |
 | BLE default MTU | 23 | `bluetooth.ino` |
-| JSON buffer | 4096 (SIM builds too) | `sd_functions.ino` |
+| JSON buffer (`JSON_BUFFER_SIZE`) | 8192 (SIM builds too) — read buffer + `trackJson` doc | `BirdsEye.ino` |
 | Settings JSON buffer | 512 | `settings.ino` |
 | Settings file path | `/SETTINGS.json` | `settings.ino` |
-| Track upload buffer | 4096 | `bluetooth.ino` |
+| Track upload buffer | `JSON_BUFFER_SIZE` (8192) | `bluetooth.ino` |
 | GPS serial buffer | 4096 | `gps_functions.ino` |
 | GPS serial timer | TIMER3, 5 ms (`GPS_DRAIN_INTERVAL_US`) | `gps_config.h` |
 | Core Serial1 RX/TX rings | 256 B via required `-DSERIAL_BUFFER_SIZE=256` (asserted) | `project.h` + workflows |

@@ -18,7 +18,11 @@ static volatile bool trackUploadReady = false;      // signals main loop to send
 static volatile bool trackUploadComplete = false;    // signals main loop to write file
 static volatile bool trackUploadError = false;
 static char trackUploadFilename[25];                 // just the filename (e.g. "OKC.json")
-static char trackUploadBuffer[4096];
+// Sized from JSON_BUFFER_SIZE so the largest track the device can PARSE is
+// also the largest it can RECEIVE. When these were separate 4 KB constants,
+// raising one alone would have produced a device that reads an 8 KB track off
+// its own card but answers TERR:TOO_LARGE when the app tries to send one back.
+static char trackUploadBuffer[JSON_BUFFER_SIZE];
 static volatile uint16_t trackUploadOffset = 0;
 
 // Track delete state (BLE callback -> main loop)
