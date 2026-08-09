@@ -561,10 +561,34 @@ int numOfLocations = 0;
 // JSON PARSING GLOBALS
 ///////////////////////////////////////////
 #include <ArduinoJson.h>
-// 4 KB handles tracks with up to 10 courses with full sector data.
+// The maximum size of a track file, in every direction: the raw read buffer
+// and the ArduinoJson document that parses it (sd_functions.ino), and the BLE
+// upload staging buffer (bluetooth.ino). One constant so those cannot drift —
+// a device able to READ a size it cannot RECEIVE is a confusing half-limit.
+//
+// Raised 4 KB -> 8 KB. Measured cost per course, in the shape this firmware's
+// own writer emits (8-decimal coords):
+//
+//   circuit, start line only        148 B      ~26 courses in 4 KB
+//   circuit + 2 sector lines        384 B       ~10 courses in 4 KB
+//   sprint, finish + 2 splits       528 B        ~7 courses in 4 KB
+//
+// That last row was a live bug: MAX_LAYOUTS is 10, but a sprint track hit
+// 4 KB at EIGHT courses. Past that the read truncates mid-JSON, the parse
+// fails, and buildTrackList() adds no manifest entry — so the track silently
+// vanishes from proximity detection rather than merely losing its tail. A
+// sprint venue accrues a dated course per event, so it was a matter of time.
+//
+// 8 KB restores headroom past MAX_LAYOUTS for every shape. It does NOT bound
+// growth — that is what course compaction is for; this only buys room.
+//
+// Affordable: the build reports 70,532 B of RAM in use (29%) with 167,036 B
+// free, so the +12 KB across the three buffers is noise. The tighter budget is
+// FLASH, at 82% of the 408 KiB OTA cap — and buffers cost none of it.
+//
 // The sim uses the same size: a smaller buffer silently truncated real
 // track files (the old Wokwi target's RAM constraint doesn't apply).
-#define JSON_BUFFER_SIZE 4096
+#define JSON_BUFFER_SIZE 8192
 
 // extern matches the forward declaration in sd_functions.h so the
 // constants have external linkage; otherwise their default internal

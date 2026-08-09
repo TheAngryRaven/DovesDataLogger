@@ -107,7 +107,7 @@ enum SdCourseWriteResult : uint8_t {
   SD_COURSE_WRITE_OK = 0,
   SD_COURSE_WRITE_BUSY,        // another subsystem holds the card
   SD_COURSE_WRITE_NO_TRACK,    // append target missing or unparseable
-  SD_COURSE_WRITE_TOO_BIG,     // the course would not fit the 4 KB parse budget
+  SD_COURSE_WRITE_TOO_BIG,     // the course would not fit JSON_BUFFER_SIZE
   SD_COURSE_WRITE_IO,          // open/write/rename failed
   SD_COURSE_WRITE_EXISTS,      // a track file of that name is already there
 };
