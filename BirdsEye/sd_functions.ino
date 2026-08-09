@@ -237,7 +237,8 @@ void sdPerformFormat() {
   NVIC_SystemReset();
 }
 
-// Static buffers for JSON parsing — saves ~4KB of stack per call.
+// Static buffers for JSON parsing — keeps JSON_BUFFER_SIZE off the stack
+// on every call (which is why raising that constant is cheap here).
 // Only one parseTrackFile() call can be active at a time (single-threaded).
 // Also reused by buildTrackList() for manifest extraction.
 static char jsonFileBuffer[JSON_BUFFER_SIZE];
@@ -330,6 +331,15 @@ bool scanTrackDir(const char* folder, uint8_t kind) {
     // Reuses the static JSON buffer (safe: single-threaded, one file at a time)
     if (trackManifestCount < MAX_LOCATIONS) {
       int bytesRead = file.read(jsonFileBuffer, sizeof(jsonFileBuffer) - 1);
+      if (bytesRead == (int)sizeof(jsonFileBuffer) - 1) {
+        // Same truncation as parseTrackFile, but the consequence here is
+        // worse: no manifest entry is added below, so the track becomes
+        // invisible to proximity detection entirely rather than merely
+        // failing to open later.
+        debug(F("buildTrackList: "));
+        debug(filename);
+        debugln(F(" >= buffer - TRUNCATED, track will not be detected"));
+      }
       if (bytesRead > 0) {
         jsonFileBuffer[bytesRead] = '\0';
         trackJson.clear();
@@ -417,7 +427,14 @@ int parseTrackFile(char* filepath) {
   if (bytesRead < (int)sizeof(jsonFileBuffer)) {
     jsonFileBuffer[bytesRead] = '\0';
   } else {
+    // Filled the buffer exactly, so the file is at least this big and has
+    // almost certainly been cut mid-JSON. Say so: the parse below fails with
+    // a generic InvalidInput/IncompleteInput that gives no hint the cause was
+    // SIZE, and the track then just stops working with no signal at all.
     jsonFileBuffer[sizeof(jsonFileBuffer) - 1] = '\0';
+    debug(F("ParseTrackFile: file >= buffer ("));
+    debug((int)sizeof(jsonFileBuffer));
+    debugln(F(" B) - TRUNCATED, parse will fail. Too many courses?"));
   }
 
   // Parse JSON (using file-scope static document to save stack)
@@ -646,7 +663,7 @@ static SdCourseWriteResult appendCourseToTrackFile(const char* filepath,
   }
   const size_t before = courses.size();
   courses.add(courseJson);
-  // The whole file has to fit the 4 KB parse budget on the next boot, so a
+  // The whole file has to fit JSON_BUFFER_SIZE on the next boot, so a
   // grafted course that overflowed the document must not reach the card.
   if (courses.size() != before + 1 || trackJson.overflowed()) {
     debugln(F("SaveCourse: track file is full"));
