@@ -108,6 +108,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | File | Purpose |
 |---|---|
 | `haversine.{h,cpp}` | Great-circle distance in miles (track proximity) |
+| `idle_policy.{h,cpp}` | Auto-idle session-end decision table (tach 60 s/2 mph vs manual/speed 5 min/5 mph, camera-yield + GPS-lock-hold exception, sprint engine-aware reset) + the SPEED→TACH cause promotion |
 | `gps_stats.{h,cpp}` | GPS pipeline drop accounting: expected-vs-received PVT window math (exact fractional carry, 1-frame jitter slack, capped credit, rate-switch suppression) feeding the debug-page `Drops` counter |
 | `gps_time.{h,cpp}` | Leap-year/Unix-epoch math, `u64ToDecimalString` |
 | `gps_validation.{h,cpp}` | PVT sample sanity gate + dtostrf-output check |
@@ -210,7 +211,7 @@ loop()  ~250 Hz
  ├─ SENSOREGG_LOOP()        drain SensorEgg scan buffer → Temp1/Junction1
  ├─ trackDetectionLoop()    haversine scan → create CourseManager on match
  ├─ checkForNewLapData()    reads from active timer (CourseManager or lapTimer)
- ├─ checkAutoIdle()         60s at <2mph → end session (yields while camera recording)
+ ├─ checkAutoIdle()         tach: 60s <2mph; manual/speed: 5min <5mph (+ camera stop)
  ├─ updateGpsLockHold()     pin user to tach page until GPS time lock
  ├─ CAMERA_LOOP()           step Insta360 auto-record FSM (GPS/tach fresh)
  ├─ cameraConsumeAutoStop() camera 30s-engine-off stop → endRaceSession + menu
@@ -437,12 +438,18 @@ loop()  ~250 Hz
   - Boot/menu: `PAGE_BOOT` (999), `PAGE_GPS_STATUS` (900, satellite status
     page every boot lands on — driven by `gpsStatusPageLoop()`, buttons
     deliberately no-op'd in `displayLoop()`), `PAGE_MAIN_MENU` (-1).
-  - Racing: `GPS_DEBUG` (3, GPS pipeline counters + lap debug — first in
-    the rotation) through `LOGGING_STOP`; `SENSOR_TEMP` (7, SensorEgg
-    Temp1) sits after `TACHOMETER` (6) — non-endurance only, and only
-    when `BIRDSEYE_ENABLE_SENSOREGG` is set (beta). With the POC off (the
+  - Racing: `GPS_DEBUG` (3, GPS pipeline counters + lap debug) and
+    `GPS_STATS` (4, battery/sats/SD/track status) through `LOGGING_STOP`.
+    The two diagnostic pages are **hidden by default at runtime**: the
+    `debug_pages` setting (default `hide`) leaves `runningPageStart` at
+    `GPS_SPEED`; an explicit `show` lowers it to `GPS_DEBUG`. The constants
+    always exist — hiding is purely the rotation's start bound, so the
+    contiguous-block navigation needs no holes. `SENSOR_TEMP` (7, SensorEgg
+    Temp1) and `SENSOR_TEMP2` (8, v2 aux intake-air temp) sit after
+    `TACHOMETER` (6) — non-endurance only, and only when
+    `BIRDSEYE_ENABLE_SENSOREGG` is set (beta). With the POC off (the
     master/release default) the block closes up behind the tach page and
-    `LOGGING_STOP` is 12 instead of 13, same reshuffle idea as
+    `LOGGING_STOP` is 12 instead of 14, same reshuffle idea as
     `ENDURANCE_MODE`. Page ids are internal — nothing external sees them.
   - Replay: `PAGE_REPLAY_FILE_SELECT` (-3), `PAGE_REPLAY_RESULTS` (-8),
     `PAGE_REPLAY_EXIT` (-9).
@@ -630,11 +637,31 @@ loop()  ~250 Hz
   it, exiting any page while moving landed on the menu and entered race mode on
   the very next loop iteration (~4 ms), so the menu was never drawn and the
   device looked like it acted on its own.
-- **Auto-idle** (`checkAutoIdle()`): if speed < 2 mph for 60 seconds
-  continuously, writes DOVEX header, closes file, cleans up CourseManager,
-  and returns to main menu. **Sprint mode is engine-aware**: idle counts
-  only while the tach reads 0 too (between-run queue waits keep the engine
-  running), and every completed run re-arms the 3-minute grace period.
+- **Race-entry cause** (`startRaceSession(RaceEntryCause)` — the single
+  session-start entry point; the three triggers all route through it):
+  `RACE_ENTRY_MANUAL` (menu Race select), `RACE_ENTRY_SPEED` (auto-race
+  speed trip), `RACE_ENTRY_TACH` (auto-race RPM trip / tach-wake boot).
+  The cause picks the session-end rule and the camera driver below;
+  `endRaceSession()` resets it to `RACE_ENTRY_NONE`. **SPEED promotes to
+  TACH** the moment the tach proves itself (>500 rpm,
+  `idle_policy::tachProven`) — a push/bump-started tach kart trips the
+  speed gate before the engine fires and must not carry no-tach rules
+  all session. MANUAL never promotes (a deliberate menu entry keeps the
+  5 min rule the user asked for).
+- **Auto-idle** (`checkAutoIdle()`, cause-aware; the decision table —
+  rule selection, camera yield, resets — is the host-tested `idle_policy`
+  unit, the sketch keeps only the clock and side effects): **tach
+  sessions** — if
+  speed < 2 mph for 60 seconds continuously, writes DOVEX header, closes
+  file, cleans up CourseManager, and returns to main menu (yields to an
+  active camera recording, which owns its own 30 s engine-off end).
+  **Manual/speed sessions** — speed < 5 mph for 5 minutes ends the session
+  AND stops the camera (`CAMERA_NOTIFY_SESSION_END()` before
+  `endRaceSession()`); these sessions have no engine signal, so this timer
+  never yields to the camera — it is the only ender. **Sprint mode is
+  engine-aware**: idle counts only while the tach reads 0 too (between-run
+  queue waits keep the engine running), and every completed run re-arms
+  the 3-minute grace period.
 - **Sprint mode (plan 0002)**: tracks under `/TRACKS/SPRINT/` make the
   session point-to-point. `trackDetectionLoop()` finds the nearest
   manifest entry PER KIND; with both kinds in range the `race_mode`
@@ -673,9 +700,17 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   short — the plain 5-min idle still fires and still parks on VBUS.
 - **Teardown order** (wdtPet-bracketed — `CAMERA_SLEEP()`'s 3 s ce82
   power-off hold is the longest step under the armed ~4 s WDT): end race
-  session → `CAMERA_SLEEP()` → `BLE_STOP()` if active → `DISPLAY_SLEEP()`
-  → `GPS_SLEEP()` (u-blox software backup, µA, config retained while
-  powered; TIMER3 stopped) → IMU power rail off.
+  session → `CAMERA_SLEEP()` → `BLE_STOP()` if active →
+  `SENSOREGG_SLEEP()` + `bleShutdownQuiesce()` (**unconditional** radio
+  quiesce: stop the egg scanner and any advertising, drop a surviving
+  link with a bounded WDT-fed settle, then `bleConnLedOff()` LAST —
+  `BLE_STOP()` is transfer-only, so a camera-owned radio used to reach
+  System OFF with the conn LED still driven; GPIO state is retained
+  there, hence the "blue light stays on after sleep" field report) →
+  `DISPLAY_SLEEP()` → `GPS_SLEEP()` (u-blox software backup, µA, config
+  retained while powered; TIMER3 stopped) → IMU power rail off. The
+  charging-loop soft resume (`softResumeFromCharging()`) restarts the
+  egg scanner via `SENSOREGG_WAKE()`; BLE/camera stay lazy.
 - **System OFF entry** (`shutdownSystemOff()`, no return): wait for the
   entry combo's buttons to release (a held button = SENSE satisfied =
   instant wake-reset), **sample the tach line's parked idle level**
@@ -873,7 +908,18 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   there's no fix), paused only during a power-off hold. GPS still logs to
   SD independently.
 - **Lifecycle FSM** (`camera_fsm` pure unit, host-tested): the race-mode
-  lifecycle is deliberately **RPM-driven and simple**. 7 states — UNPAIRED /
+  lifecycle is deliberately **RPM-driven and simple** — with one parallel
+  driver, `Inputs::sessionDemand`, for **manual/speed-entered sessions**
+  (no tachometer, RPM pinned at 0): the glue sets it from `raceActive` +
+  `raceEntryCause` (MANUAL/SPEED), and it substitutes for the RPM gates —
+  wake immediately from IDLE (no debounce), suppress the WAKING rpm-gone
+  abort, arm the record clock (the 5 s `kRecordStartDelayMs` still
+  applies), and **suppress the 30 s rpm<300 auto-stop** (rpm=0 would end
+  every such recording); these recordings end only via
+  `sessionEndRequested` — the sketch's 5 min/<5 mph idle timer
+  (`checkAutoIdle()`, which calls `CAMERA_NOTIFY_SESSION_END()`) or the
+  manual stop confirm. Tach sessions (`RACE_ENTRY_TACH`) never set it and
+  behave exactly as below. 7 states — UNPAIRED /
   IDLE / WAKING / AWAIT_READY / RECORDING / **WATCHING** / PAIRING (the old
   COOLDOWN/POWERING_OFF tail is gone — power-off is now sleep-only).
   RPM > 500 held 2 s enters WAKING, which broadcasts the 31-byte CONNECTABLE
@@ -1001,7 +1047,7 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
 - **BUILD FLAG — `BIRDSEYE_ENABLE_SENSOREGG` (`project.h`)**: this whole
   subsystem is a beta-channel feature. `0` (master/release default)
   compiles `sensoregg.ino` down to no-op `SENSOREGG_SETUP/LOOP` and NaN
-  accessors, drops the Temp1 race page from the rotation
+  accessors, drops the Temp1 and Temp2 race pages from the rotation
   (`display_pages.ino` + the page-constant block in `BirdsEye.ino`), and
   returns BLE to lazy init. `1` (passed by `beta.yml`, and by
   `compile-sketch.yml` for PRs targeting `BETA`) is everything described
@@ -1228,6 +1274,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
   "device_name": "ApexTurbo",
   "race_mode": "circuit",
   "display_invert": "normal",
+  "debug_pages": "hide",
   "spark_mode": "wasted",
   "cylinder_count": "1",
   "driver_name": "Driver",
@@ -1250,6 +1297,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | `waypoint_speed` | int | `30` | Speed threshold (mph) for waypoint/detection |
 | `spark_mode` | string | `"wasted"` | Ignition rate: `wasted` = 1 spark/rev (2T, or 4T wasted spark); `single` = 1 spark per 2 revs (4T single-fire). Anything other than an explicit `single` is treated as `wasted` |
 | `display_invert` | string | `"normal"` | Panel colours: `normal` = lit-on-black as shipped, `inverted` = black-on-lit. Anything other than an explicit `inverted` means normal |
+| `debug_pages` | string | `"hide"` | Race-rotation diagnostic pages (`GPS_DEBUG` + `GPS_STATS`): `hide` = rotation starts at the speed page (end-user default), `show` = diagnostics restored at the front. Anything other than an explicit `show` means hide. No-op under `ENDURANCE_MODE` (already starts at speed) |
 | `cylinder_count` | int | `1` | Cylinders the **pickup sees** — a clamp on one plug wire of a twin sees ONE. Only a shared coil / all-cylinder harness sees them all |
 
 - Created automatically on first boot with random BLE values.
@@ -1285,7 +1333,8 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | Max layouts/track | 10 | `project.h` |
 | Max replay files | 20 | `replay.ino` |
 | DOVEX header size | 1 024 bytes | `project.h` |
-| Auto-idle timeout | 60 s at <2 mph | `BirdsEye.ino` |
+| Auto-idle timeout (tach sessions) | 60 s at <2 mph | `BirdsEye.ino` |
+| Auto-idle timeout (manual/speed sessions) | 5 min at <5 mph → ends data + camera | `BirdsEye.ino` |
 | Auto-race menu grace | 3 s settled (arrival + buttons) before auto-race can fire | `project.h` |
 | Track detect radius | 5 miles | `BirdsEye.ino` |
 | Course creator point hold | 3 s, ≥8 usable fixes else FAILED | `course_creator.h` |
@@ -1321,7 +1370,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | OTA max image size | 408 KiB (half the 820 KiB app+staging span, page-aligned; `static_assert`ed) | `firmware_ota.ino` |
 | OTA min apply voltage | 3.6 V | `firmware_ota.ino` |
 | Camera record-start gate | RPM ≥ 1500 (`kRecordRpmThreshold`) held 5 s, strict — dips restart the clock (no GPS gate) | `camera_fsm.h` |
-| Camera stop-record delay | 30 s engine-off (RPM only) → also ends log session | `camera_fsm.h` |
+| Camera stop-record delay | 30 s engine-off (RPM only) → also ends log session; suppressed while `sessionDemand` (manual/speed sessions end via the 5 min idle timer) | `camera_fsm.h` |
 | Camera power-off | shutdown only (no post-record cooldown/timeout) | `camera_ble.ino` (`CAMERA_SLEEP`) |
 | Camera RPM on/off thresholds | 500 / 300 (2 s on-debounce) | `camera_fsm.h` |
 | Camera wake attempt window | 20 s ×3 (beacon) | `camera_fsm.h` |

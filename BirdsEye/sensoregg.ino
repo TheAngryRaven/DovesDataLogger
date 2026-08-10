@@ -57,6 +57,14 @@ static bool     eggHaveReading = false;
 static sensoregg_protocol::SeqMonitor eggSeqMon;  // zombie-egg detection
 
 static bool eggScannerRunning = false;
+static bool eggSetupDone = false;   // scanner configured — self-heal may (re)start it
+// Sleep gate, read by the scan callback (BLE task): a report accepted just
+// before SENSOREGG_SLEEP() has its rx callback deferred, and the callback's
+// mandatory Scanner.resume() would restart the scan AFTER the stop (the
+// core's resume() never checks the running flag) — the scanner then runs
+// through the entire charging park. volatile: written on the main loop,
+// read in BLE task context.
+static volatile bool eggSleeping = false;
 static uint32_t eggLastKickMs = 0;  // last scanner self-heal kick (main loop)
 
 ///////////////////////////////////////////
@@ -108,8 +116,13 @@ static void sensoreggScanCallback(ble_gap_evt_adv_report_t* report) {
 
   // MANDATORY: without resume() the scanner halts after the first report
   // — symptom is exactly one reading then permanent silence,
-  // indistinguishable from a dead egg.
-  Bluefruit.Scanner.resume();
+  // indistinguishable from a dead egg. Skipped while sleeping: this
+  // deferred callback may run AFTER SENSOREGG_SLEEP()'s stop, and resume()
+  // restarts the scan unconditionally — resurrecting the scanner the sleep
+  // just killed.
+  if (!eggSleeping) {
+    Bluefruit.Scanner.resume();
+  }
 }
 
 ///////////////////////////////////////////
@@ -138,6 +151,7 @@ void SENSOREGG_SETUP() {
   // RSSI floor (phones, PCs, the X4) took that slow accepted path just to
   // be magic-rejected in our callback, collapsing scan duty in bursts.
   Bluefruit.Scanner.filterMSD(sensoregg_protocol::kCompanyId);
+  eggSetupDone = true;
   eggScannerRunning = Bluefruit.Scanner.start(0);  // 0 = forever
 
   if (eggScannerRunning) {
@@ -148,6 +162,31 @@ void SENSOREGG_SETUP() {
     // one unused central connection slot). Not taken by default — do not
     // change the shared begin() without re-soaking the camera link.
     debugln(F("SensorEgg: scanner FAILED to start (see begin(1,1) note)"));
+  }
+}
+
+void SENSOREGG_SLEEP() {
+  // Shutdown path: stop the forever-scan so the SoftDevice radio is quiet
+  // before System OFF / the charging loop. Without this the scanner ran
+  // through the entire "powered off while charging" park. Idempotent.
+  // Gate FIRST: a scan report accepted just before this stop has a deferred
+  // rx callback whose resume() would otherwise restart the scan afterwards
+  // (see eggSleeping). The stop itself can also no-op while the scanner is
+  // paused on an accepted report — the gate covers that hole too, since the
+  // paused scanner only resumes through the callback we just muted.
+  eggSleeping = true;
+  if (eggSetupDone) {
+    Bluefruit.Scanner.stop();
+  }
+  eggScannerRunning = false;
+}
+
+void SENSOREGG_WAKE() {
+  // Charging-loop soft resume: the scanner config (callback, interval,
+  // filters) survives a stop, so a bare start() restores reception.
+  eggSleeping = false;
+  if (eggSetupDone && !eggScannerRunning) {
+    eggScannerRunning = Bluefruit.Scanner.start(0);  // 0 = forever
   }
 }
 
@@ -176,14 +215,20 @@ void SENSOREGG_LOOP() {
   // kScannerSelfHealMs, kick stop+start — harmless when the egg is just
   // off, curative when the scanner wedged. Throttled by its own stamp so
   // an absent egg costs one kick per interval, not one per loop.
-  if (eggScannerRunning) {
+  // Gated on eggSetupDone, NOT eggScannerRunning: a start() the SoftDevice
+  // rejected (boot race, charging-loop resume) leaves the scanner down, and
+  // this kick is the only retry path — gating on "running" made that state
+  // permanent until reboot. (SENSOREGG_LOOP never runs after
+  // SENSOREGG_SLEEP — shutdown parks or powers off — so the kick cannot
+  // resurrect a deliberately stopped scanner.)
+  if (eggSetupDone) {
     const uint32_t now = millis();
     const uint32_t lastAlive = eggHaveReading ? eggRxMs : 0;
     if ((uint32_t)(now - lastAlive) >= sensoregg_protocol::kScannerSelfHealMs &&
         (uint32_t)(now - eggLastKickMs) >= sensoregg_protocol::kScannerSelfHealMs) {
       eggLastKickMs = now;
       Bluefruit.Scanner.stop();
-      Bluefruit.Scanner.start(0);
+      eggScannerRunning = Bluefruit.Scanner.start(0);
     }
   }
 }
@@ -256,6 +301,8 @@ uint16_t sensoreggSequence() {
 
 void SENSOREGG_SETUP() {}
 void SENSOREGG_LOOP() {}
+void SENSOREGG_SLEEP() {}
+void SENSOREGG_WAKE() {}
 
 bool sensoreggLinkUp() { return false; }
 bool sensoreggAppHung() { return false; }

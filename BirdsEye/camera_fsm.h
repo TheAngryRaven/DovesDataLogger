@@ -35,6 +35,9 @@ namespace camera_fsm {
 // engine has been off a while (which also ends the log session), then WATCH —
 // stay connected, ready to re-record if the engine restarts (stall recovery).
 // The camera powers off ONLY on device sleep.
+// Sessions without a tachometer (manual menu entry / speed-trip auto-race)
+// drive the same lifecycle through Inputs::sessionDemand instead of RPM —
+// see its comment for exactly which gates it replaces.
 constexpr uint32_t kRecordStartDelayMs  = 5000;    // RPM held at/above the record threshold this long -> start recording
 constexpr uint32_t kStopRecordDelayMs   = 30000;   // RPM below OFF this long -> stop recording + end session
 
@@ -65,6 +68,15 @@ constexpr uint8_t  kConnectRetries     = 3;      // wake attempts before giving 
 // looping connect->timeout->re-advertise forever.
 constexpr uint32_t kSubscribeTimeoutMs = 10000;
 constexpr uint8_t  kSubscribeRetries   = 3;      // connect-but-never-subscribe cycles before IDLE
+// After a full wake cycle (or the subscribe bound) gives up, IDLE must not
+// re-wake immediately: the wake trigger (RPM, or a manual/speed session's
+// sessionDemand) persists, so an instant re-entry erased both retry bounds
+// and turned "camera left at home" into continuous advertising for the whole
+// session (blinking conn LED, radio never resting). One cooldown between
+// cycles caps the duty while still retrying — a camera brought into range
+// mid-session connects on the next cycle (or is adopted instantly if it
+// connects to a stale advert during the cooldown).
+constexpr uint32_t kWakeRetryCooldownMs = 60000;
 constexpr uint32_t kPairingTimeoutMs   = 120000; // pairing screen gives up after 2 min
 // RECORDING: if the camera's observed state (0x10 timer) reports IDLE this
 // long while we believe we're recording, the start shutter never landed — so
@@ -106,7 +118,16 @@ enum class Action : uint8_t {
 // The one-shot event flags must be true for exactly one step() call.
 struct Inputs {
   uint32_t nowMs = 0;             // millis()
-  int32_t  rpm = 0;               // tachLastReported — the ONLY driver of record/stop now
+  int32_t  rpm = 0;               // tachLastReported — drives record/stop for tach sessions
+  // A manual/speed-entered race session is active and wants the camera. With
+  // no tachometer rpm is stuck at 0, so this substitutes for the RPM gates:
+  // wake immediately (session start is deliberate — no debounce), arm the
+  // record-start clock, and SUPPRESS the rpm<OFF auto-stop (rpm=0 would stop
+  // every session-driven recording in 30 s). While true, the recording ends
+  // only via sessionEndRequested — the sketch's speed-idle timer or the
+  // manual stop confirm. False for tach-entered sessions: RPM rules apply
+  // unchanged.
+  bool     sessionDemand = false;
   bool     remoteConnected = false;   // camera connected to our ce80 remote service (THE link)
   bool     ce82Subscribed = false;    // camera wrote our ce82 CCCD — button frames now deliverable
   RecordObs recordObserved = RecordObs::kUnknown;  // camera-reported record state (0x10 timer)
@@ -135,6 +156,7 @@ struct Fsm {
   uint32_t stopCondSince = 0;       // RECORDING: engine-off hold start
   uint32_t recordIdleSince = 0;     // RECORDING: camera-reports-idle-while-believed-recording since
   bool     recordRetryUsed = false; // RECORDING: single re-assert-shutter latch (re-armed on confirmed recording)
+  uint32_t wakeCooldownSince = 0;   // IDLE: wake give-up cooldown start (0 = not cooling down)
   uint32_t pairingSince = 0;
   State    pairingReturnState = State::kUnpaired;  // where pairing cancel/timeout goes back to
   bool     entryPending = false;    // current state's entry action not yet emitted

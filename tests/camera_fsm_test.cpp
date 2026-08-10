@@ -735,3 +735,176 @@ TEST_CASE("camera_fsm - stateName labels every state and never returns null") {
     CHECK(strcmp(stateName(State::kPairing), "PAIRING") == 0);
     CHECK(strcmp(stateName(static_cast<State>(200)), "?") == 0);
 }
+
+// ---------------------------------------------------------------------------
+// sessionDemand — manual/speed race sessions (no tachometer, rpm stuck at 0)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("camera_fsm - sessionDemand wakes immediately from IDLE, rpm 0") {
+    Sim s;
+    s.in.rpm = 0;
+    s.in.sessionDemand = true;
+    // No debounce: the session start is a deliberate act.
+    CHECK(s.tick(0) == Action::kStartWakeBurst);
+    CHECK(s.f.state == State::kWaking);
+}
+
+TEST_CASE("camera_fsm - sessionDemand adopts a stale link instead of waking") {
+    Sim s;
+    s.in.rpm = 0;
+    s.in.remoteConnected = true;  // camera still on our service from last session
+    s.in.sessionDemand = true;
+    CHECK(s.tick(0) == Action::kNone);
+    CHECK(s.f.state == State::kAwaitReady);
+}
+
+TEST_CASE("camera_fsm - sessionDemand reaches RECORDING with rpm 0") {
+    Sim s;
+    s.in.rpm = 0;
+    s.in.sessionDemand = true;
+    REQUIRE(s.tick(0) == Action::kStartWakeBurst);
+    s.in.remoteConnected = true;
+    REQUIRE(s.tick(10) == Action::kNone);
+    REQUIRE(s.f.state == State::kAwaitReady);
+    s.in.ce82Subscribed = true;
+    REQUIRE(s.tick(10) == Action::kNone);
+    REQUIRE(s.f.state == State::kWatching);
+    // The record-start delay still applies, measured from the demand arm.
+    CHECK(s.tick(kRecordStartDelayMs) == Action::kSendShutter);
+    CHECK(s.f.state == State::kRecording);
+    CHECK(s.f.recordingActive == true);
+}
+
+TEST_CASE("camera_fsm - sessionDemand suppresses the WAKING rpm-gone abort") {
+    Sim s;
+    s.in.rpm = 0;
+    s.in.sessionDemand = true;
+    REQUIRE(s.tick(0) == Action::kStartWakeBurst);
+    // rpm 0 for far longer than kRpmGoneAbortMs must NOT abort the wake; the
+    // attempt window keeps retrying instead.
+    const auto acts = s.run(kConnectTimeoutMs - 1000, 500);
+    CHECK(s.f.state == State::kWaking);
+    CHECK(countOf(acts, Action::kStopAdvertising) == 0);
+}
+
+TEST_CASE("camera_fsm - sessionDemand suppresses the 30s engine-off stop") {
+    Sim s;
+    s.in.rpm = 0;
+    s.in.sessionDemand = true;
+    REQUIRE(s.tick(0) == Action::kStartWakeBurst);
+    s.in.remoteConnected = true;
+    REQUIRE(s.tick(10) == Action::kNone);
+    s.in.ce82Subscribed = true;
+    REQUIRE(s.tick(10) == Action::kNone);
+    REQUIRE(s.tick(kRecordStartDelayMs) == Action::kSendShutter);
+    REQUIRE(s.f.state == State::kRecording);
+    // rpm is 0 the whole time; without sessionDemand this would stop after
+    // kStopRecordDelayMs. It must keep recording indefinitely.
+    const auto acts = s.run(kStopRecordDelayMs * 4, 1000);
+    CHECK(s.f.state == State::kRecording);
+    CHECK(countOf(acts, Action::kSendShutter) == 0);
+}
+
+TEST_CASE("camera_fsm - session end stops a sessionDemand recording") {
+    Sim s;
+    s.in.rpm = 0;
+    s.in.sessionDemand = true;
+    REQUIRE(s.tick(0) == Action::kStartWakeBurst);
+    s.in.remoteConnected = true;
+    REQUIRE(s.tick(10) == Action::kNone);
+    s.in.ce82Subscribed = true;
+    REQUIRE(s.tick(10) == Action::kNone);
+    REQUIRE(s.tick(kRecordStartDelayMs) == Action::kSendShutter);
+    REQUIRE(s.f.state == State::kRecording);
+    // The sketch's 5min/5mph idle timer ends the session: demand drops and
+    // sessionEndRequested pulses in the same snapshot.
+    s.in.sessionDemand = false;
+    CHECK(s.pulse(&Inputs::sessionEndRequested, 10) == Action::kSendShutter);
+    CHECK(s.f.state == State::kWatching);
+    CHECK(s.f.recordingActive == false);
+    // With no demand and no rpm it stays parked in WATCHING (camera powers
+    // off only on device sleep).
+    CHECK(s.tick(60000) == Action::kNone);
+    CHECK(s.f.state == State::kWatching);
+}
+
+TEST_CASE("camera_fsm - a new sessionDemand re-records from WATCHING") {
+    Sim s;
+    s.in.rpm = 0;
+    s.in.sessionDemand = true;
+    REQUIRE(s.tick(0) == Action::kStartWakeBurst);
+    s.in.remoteConnected = true;
+    REQUIRE(s.tick(10) == Action::kNone);
+    s.in.ce82Subscribed = true;
+    REQUIRE(s.tick(10) == Action::kNone);
+    REQUIRE(s.tick(kRecordStartDelayMs) == Action::kSendShutter);
+    s.in.sessionDemand = false;
+    REQUIRE(s.pulse(&Inputs::sessionEndRequested, 10) == Action::kSendShutter);
+    REQUIRE(s.f.state == State::kWatching);
+    // Next manual session: demand returns, the arm clock restarts fresh.
+    s.in.sessionDemand = true;
+    s.in.recordObserved = RecordObs::kIdle;  // camera confirmed stopped
+    CHECK(s.tick(10) == Action::kNone);
+    CHECK(s.tick(kRecordStartDelayMs) == Action::kSendShutter);
+    CHECK(s.f.state == State::kRecording);
+}
+
+TEST_CASE("camera_fsm - rpm rules unchanged when sessionDemand is false") {
+    // Guard test: a tach session must behave exactly as before — 30 s of
+    // engine-off stops the recording (and the glue ends the log session).
+    Sim s;
+    s.toRecording();
+    s.in.rpm = 0;
+    REQUIRE(s.tick(10) == Action::kNone);  // stop timer starts
+    CHECK(s.tick(kStopRecordDelayMs) == Action::kSendShutter);
+    CHECK(s.f.state == State::kWatching);
+    CHECK(s.f.recordingActive == false);
+}
+
+// ---------------------------------------------------------------------------
+// Wake-retry cooldown — absent camera must not mean continuous advertising
+// ---------------------------------------------------------------------------
+
+TEST_CASE("camera_fsm - wake give-up cools down instead of instantly re-waking") {
+    Sim s;
+    s.in.rpm = 3000;  // persistent trigger (same shape as sessionDemand)
+    REQUIRE(s.tick(0) == Action::kNone);
+    REQUIRE(s.tick(kRpmOnDebounceMs) == Action::kStartWakeBurst);
+    // Burn through the full wake cycle with no camera.
+    int bursts = 1;
+    for (int i = 0; i < 200 && s.f.state == State::kWaking; i++) {
+        if (s.tick(1000) == Action::kStartWakeBurst) bursts++;
+    }
+    CHECK(bursts == (int)kConnectRetries);
+    REQUIRE(s.f.state == State::kIdle);
+    // The cooldown must hold: no advertising for kWakeRetryCooldownMs.
+    const auto acts = s.run(kWakeRetryCooldownMs - 5000, 1000);
+    CHECK(countOf(acts, Action::kStartWakeBurst) == 0);
+    CHECK(s.f.state == State::kIdle);
+    // ...and then a fresh cycle begins.
+    const auto after = s.run(10000 + kRpmOnDebounceMs, 1000);
+    CHECK(countOf(after, Action::kStartWakeBurst) >= 1);
+}
+
+TEST_CASE("camera_fsm - sessionDemand wake give-up cools down too") {
+    Sim s;
+    s.in.rpm = 0;
+    s.in.sessionDemand = true;
+    REQUIRE(s.tick(0) == Action::kStartWakeBurst);
+    for (int i = 0; i < 200 && s.f.state == State::kWaking; i++) s.tick(1000);
+    REQUIRE(s.f.state == State::kIdle);
+    const auto acts = s.run(kWakeRetryCooldownMs / 2, 1000);
+    CHECK(countOf(acts, Action::kStartWakeBurst) == 0);
+}
+
+TEST_CASE("camera_fsm - a camera connecting during the cooldown is adopted") {
+    Sim s;
+    s.in.rpm = 0;
+    s.in.sessionDemand = true;
+    REQUIRE(s.tick(0) == Action::kStartWakeBurst);
+    for (int i = 0; i < 200 && s.f.state == State::kWaking; i++) s.tick(1000);
+    REQUIRE(s.f.state == State::kIdle);
+    s.in.remoteConnected = true;  // late connect to the last advert
+    CHECK(s.tick(1000) == Action::kNone);
+    CHECK(s.f.state == State::kAwaitReady);
+}

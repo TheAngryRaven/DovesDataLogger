@@ -312,6 +312,11 @@ void bleSendFileList() {
       }
     }
     entry.close();
+    // The whole walk runs inside one loop() iteration: 10 ms per file
+    // (plus up to ~100 ms per congested notify) exceeds the ~4 s WDT on a
+    // card holding a season of logs — feed it per entry, like the SD
+    // formatter does.
+    wdtPet();
   }
   root.close();
   releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
@@ -362,6 +367,7 @@ void bleSendTrackList(uint8_t kind) {
       }
     }
     entry.close();
+    wdtPet();  // same in-one-iteration walk as bleSendFileList
   }
   trackDir2.close();
   releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
@@ -785,9 +791,7 @@ void BLE_STOP() {
   Bluefruit.Advertising.stop();
 
   // Turn off the BLE LED
-  Bluefruit.autoConnLed(false);
-  Bluefruit.setConnLedInterval(0);
-  digitalWrite(LED_BLUE, HIGH);
+  bleConnLedOff();
 
   bleConnected = false;
   // bleActive already set false at top of BLE_STOP()
@@ -800,6 +804,55 @@ void BLE_STOP() {
   sdSetTransferSpeed(false);
 
   debugln(F("BLE: Bluetooth stopped"));
+}
+
+// Force the Bluefruit connection LED off and keep it off. Bluefruit drives
+// LED_CONN (the XIAO's blue LED, active-low) whenever _led_conn is enabled —
+// which is the library DEFAULT, so camera-owned advertising/links blink it
+// even though this module never called autoConnLed(true) for them. Disabling
+// autoConnLed stops the library re-lighting it; the digitalWrite parks the
+// pin high (off) — nRF52 GPIO state is retained in System OFF, so a lit pin
+// would stay lit on a "powered off" device.
+//
+// The Bluefruit calls MUST stay behind bleInitialized: this core's
+// setConnLedInterval() passes _led_blink_th to FreeRTOS with no null guard,
+// and that timer is only created in Bluefruit.begin() — calling it on a
+// never-initialized radio (stock device, BLE fully lazy) hands the timer
+// daemon a NULL handle. The pin park below is the only pre-begin-safe part,
+// and the only part such a device needs.
+void bleConnLedOff() {
+  if (bleInitialized) {
+    Bluefruit.autoConnLed(false);
+    Bluefruit.setConnLedInterval(0);
+  }
+  pinMode(LED_BLUE, OUTPUT);
+  digitalWrite(LED_BLUE, HIGH);
+}
+
+// Shutdown-path radio quiesce, UNCONDITIONAL on owner. BLE_STOP() only runs
+// for the transfer service (bleActive), so a camera-owned radio — or a peer
+// whose async disconnect hasn't been serviced by the Bluefruit task yet —
+// used to sail through enterShutdown() with the conn LED still driven (the
+// "blue light stays on after sleep" field report). Called from
+// enterShutdown() after CAMERA_SLEEP()/BLE_STOP(): stop any advertising,
+// drop any surviving link, give the async disconnect a bounded window to be
+// serviced (WDT-fed), then force the LED off LAST so nothing re-lights it.
+void bleShutdownQuiesce() {
+  if (bleInitialized) {
+    Bluefruit.Advertising.restartOnDisconnect(false);
+    Bluefruit.Advertising.stop();
+    if (Bluefruit.connected()) {
+      Bluefruit.disconnect(Bluefruit.connHandle());
+    }
+    // Bounded settle: the disconnect (and the library's own LED-off) run on
+    // the Bluefruit task; System OFF follows within milliseconds otherwise.
+    for (int i = 0; i < 5; i++) {
+      if (!Bluefruit.connected()) break;
+      wdtPet();
+      delay(50);
+    }
+  }
+  bleConnLedOff();  // pre-begin() it only parks the pin (see its guard)
 }
 
 // Execute a deferred file command (main-loop context — the only place
@@ -885,7 +938,12 @@ void processSettingsCommand() {
     int count = 0;
     for (JsonPair kv : doc.as<JsonObject>()) {
       char entry[64];
-      snprintf(entry, sizeof(entry), "SVAL:%s=%s", kv.key().c_str(), kv.value().as<const char*>());
+      // A hand-edited SETTINGS.json can hold a non-string value, and
+      // as<const char*>() returns NULL for those — %s on NULL streams
+      // garbage from address 0 on this core.
+      const char* val = kv.value().as<const char*>();
+      snprintf(entry, sizeof(entry), "SVAL:%s=%s", kv.key().c_str(),
+               val ? val : "");
       debug(F("BLE: SLIST - sending: "));
       debugln(entry);
       fileStatusChar.notify((uint8_t*)entry, strlen(entry));
@@ -1157,7 +1215,13 @@ void BLUETOOTH_LOOP() {
 
       if (bytesRead > 0) {
         if (!fileDataChar.notify(buffer, bytesRead)) {
-          break;  // Disconnected or error
+          // Failed notify (HVN pool starved >100 ms, or disconnect). The
+          // read already advanced the file position, so REWIND before
+          // bailing — dropping the chunk and reading the next one on the
+          // following iteration silently punched a hole in the delivered
+          // file while the transfer carried on to a clean-looking DONE.
+          bleCurrentFile.seekCur(-(int32_t)bytesRead);
+          break;
         }
         bleBytesTransferred += bytesRead;
       } else {

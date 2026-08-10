@@ -41,6 +41,9 @@ void BLE_STOP() {
   bleConnected = false;
 }
 
+void bleConnLedOff() {}
+void bleShutdownQuiesce() {}
+
 void BLUETOOTH_LOOP() {}
 
 // ---- camera_ble.ino surface ----
@@ -90,6 +93,8 @@ bool cameraTestPowerOff() { return false; }
 
 void SENSOREGG_SETUP() {}
 void SENSOREGG_LOOP() {}
+void SENSOREGG_SLEEP() {}
+void SENSOREGG_WAKE() {}
 
 bool sensoreggLinkUp() { return false; }
 bool sensoreggAppHung() { return false; }

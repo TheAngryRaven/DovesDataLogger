@@ -13,6 +13,25 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **The camera now works without a tachometer.** Auto-record used to be
+  driven entirely by engine RPM, so on a device with no tach pickup a paired
+  Insta360 never woke up. Now a race session started from the menu, or by the
+  speed trip, drives the camera itself: it wakes at session start and begins
+  recording a few seconds after it connects. These sessions end — data
+  logging and camera recording together — after **5 minutes below 5 mph**
+  (previously the data log ended alone after 60 seconds below 2 mph).
+  Tach-equipped devices are unchanged: RPM still runs the whole show,
+  including the 30-second engine-off stop — and a push/bump-started kart
+  that trips the speed gate before its engine fires is handed back to the
+  RPM rules the moment real ignition is counted.
+- **The diagnostic pages are hidden by default.** The two pages at the front
+  of the race rotation (GPS/RF debug counters, and the battery/sats/SD stats
+  page) are developer tools, and a new **Debug Pages** setting (editable over
+  Bluetooth) now controls them. Out of the box the rotation starts at the
+  speed page — a driver only ever sees speed, RPM, and lap pages. Set
+  `debug_pages` to `show` to put the diagnostics back. **Note this is a
+  behaviour change**: existing devices hide the pages after updating until
+  the setting is flipped.
 - **A full sprint track can now make room for one more run** (plan 0005).
   A sprint venue re-lays its course every event, so walked courses pile up in
   one track file — and once that file is bigger than the logger can read, the
@@ -55,6 +74,32 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
     rate of a multi-cylinder engine doesn't run into it and read low.
 
 ### Fixed
+- **A Bluetooth file download can no longer arrive silently corrupted.** If a
+  notification stalled for more than a moment (phone screen off, radio
+  congestion), the logger dropped that chunk and carried on with the next one
+  — the received file ended shorter than promised with no error. The unsent
+  chunk is now rewound and resent.
+- **Listing a card full of logs no longer crash-reboots the logger
+  mid-transfer.** The file listing walked the whole directory in one go and
+  a season's worth of logs could outlast the hardware watchdog; it is now
+  fed during the walk.
+- **The screen now says so when logging dies mid-session.** An SD write
+  failure stops logging for the session (the race deliberately continues) —
+  but with the diagnostics hidden by default nothing on screen showed it, so
+  a bad card could silently cost a whole day's data. The speed page shows a
+  `NO LOG` corner flag and the tach page a `** NOT LOGGING **` footer.
+- **A dead SD card no longer drains the battery on the fault screen.** The
+  FAULT page (card dead at boot, buttons disabled) had no idle timeout, so a
+  sealed unit sat there flashing until the pack was flat. It now powers down
+  after the same 5-minute idle as the menu.
+- **The blue Bluetooth light no longer stays on after the device sleeps.**
+  Sleep only tore the radio down when the *file-transfer* page had been used;
+  a camera-owned Bluetooth link (or one still mid-disconnect) kept the
+  connection LED driven straight into power-off — and the chip keeps pin
+  states in that mode, so the light burned all night. Shutdown now quiesces
+  the radio unconditionally and forces the LED off as the last step. On beta
+  builds the SensorEgg scanner is also stopped at sleep (it previously ran
+  through the entire charging park) and restarts on charging resume.
 - **A track with many courses no longer disappears from the device.** Track
   files were read and parsed through a 4 KB budget, and a file past it was cut
   mid-JSON: the parse failed, no manifest entry was built, and the track

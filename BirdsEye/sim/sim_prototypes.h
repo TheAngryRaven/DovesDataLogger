@@ -60,6 +60,7 @@ bool sprintModeIsActive();
 bool activeTimerRunActive();
 bool createSprintSession();
 void trackDetectionLoop();
+void startRaceSession(RaceEntryCause cause);
 void endRaceSession();
 void createLapAnythingCourseManager();
 void checkAutoIdle();
