@@ -1,28 +1,26 @@
 # Tachometer Circuits
 
-I have spent a great deal of work attempting to create a capacitive circuit for sensing RPM. I am not an electrical engineer, but after throwing many things at the wall I am getting something to stick.
+### Paid Circuits
 
+Spent well over a year on this, and well I gave up, I want to build a much better datalogger, and this damn circuit is holding me up.
 
-Currently If you want a tachometer you will need to source and hand solder SMD components... through hole components aint gonna cut it... sorry
+This was designed by a professional RF engineer, and work drastically better than the ones I managed to hobble together.
+
+<p align="center">
+  <img src="tach.jpg" />
+</p>
+
+I've built and tested them and they are now available for purchase here
+https://www.paypal.com/ncp/payment/D5QVSKE7W4CFQ
+
+### My Circuits
+
+These circuits are semi buildable at home, but really wouldnt reccoment.
+If you decide to build EITHER circuit, if you do not connect an isolated dc-dc converter, you will suffer from serious issues as the powerline swings -+10v+ from the magneto driven ignition
 
 
 * the first circuit, has a ~9800 RPM (4t wasted spark or 2t) limit due to it generating 5mS pulses each spark.
 * the second circuit would work at drastically higher RPMs but I need to make sure the coil ringing isn't causing higher than should-be reads
-
-
-### Paid Circuits
-
-Well i gave up, i want to build a much better datalogger, and this damn circuit is holding me up.
-
-Not yet tested, this was designed by a professional RF engineer, and should work drastically better than the ones i managed to hobble together.
-
-<p align="center">
-  <img src="tach_test_3.jpg" />
-</p>
-
-### My Circuits
-
-If you decide to build EITHER circuit, if you do not connect an isolated dc-dc converter, you will suffer from serious issues as the powerline swings -+10v+ from the magneto driven ignition
 
 This is the dc-dc converter I used, it can "convert" 3v to 3v. 
 
