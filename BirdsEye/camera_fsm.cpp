@@ -316,9 +316,7 @@ Action stepRecording(Fsm& f, const Inputs& in) {
   //    ends the log session. SUPPRESSED while sessionDemand: a manual/speed
   //    session has rpm pinned at 0, and its stop comes from the sketch's
   //    speed-idle timer via sessionEndRequested (case 1 above).
-  if (in.sessionDemand) {
-    f.stopCondSince = 0;
-  } else if (in.rpm < kRpmOffThreshold) {
+  if (!in.sessionDemand && in.rpm < kRpmOffThreshold) {
     if (f.stopCondSince == 0) {
       f.stopCondSince = seedNow(in.nowMs);
     } else if (elapsed(in.nowMs, f.stopCondSince, kStopRecordDelayMs)) {
@@ -330,6 +328,8 @@ Action stepRecording(Fsm& f, const Inputs& in) {
       return enterWatching(f, Action::kNone, /*resetArm=*/true);
     }
   } else {
+    // Engine running again, or the stop belongs to the sketch (sessionDemand):
+    // either way no stop is pending.
     f.stopCondSince = 0;
   }
   return Action::kNone;
