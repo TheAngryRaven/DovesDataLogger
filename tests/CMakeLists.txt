@@ -32,6 +32,7 @@ add_executable(birdseye_tests
   crossing_pattern_test.cpp
   course_creator_test.cpp
   track_json_test.cpp
+  course_prune_test.cpp
   ${BIRDSEYE_DIR}/haversine.cpp
   ${BIRDSEYE_DIR}/gps_stats.cpp
   ${BIRDSEYE_DIR}/gps_time.cpp
@@ -50,6 +51,7 @@ add_executable(birdseye_tests
   ${BIRDSEYE_DIR}/sat_bars.cpp
   ${BIRDSEYE_DIR}/sensoregg_protocol.cpp
   ${BIRDSEYE_DIR}/sprint_select.cpp
+  ${BIRDSEYE_DIR}/course_prune.cpp
   ${BIRDSEYE_DIR}/crossing_pattern.cpp
   ${BIRDSEYE_DIR}/course_creator.cpp
   ${BIRDSEYE_DIR}/track_json.cpp

@@ -41,6 +41,7 @@ void displayPage_course_type();
 void displayPage_course_lines();
 void displayPage_course_line();
 void displayPage_course_point();
+void displayPage_course_prune();
 
 // Live racing pages.
 void displayPage_gps_stats();

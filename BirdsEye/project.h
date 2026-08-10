@@ -31,7 +31,12 @@
 #ifdef FIRMWARE_VERSION_OVERRIDE
   #define FIRMWARE_VERSION _BE_TOSTRING(FIRMWARE_VERSION_OVERRIDE)
 #else
-  #define FIRMWARE_VERSION "3.0.1"
+  // Ahead of the last release (v3.1.0), not behind it. The webapp decides a
+  // logger's track JSON budget by comparing this against the last release —
+  // 8 KB at or above 3.2.0, 4 KB below — so a beta build still stamped 3.0.1
+  // would be handed the smaller budget it does not have, and the app would
+  // make the user drop courses that fit perfectly well.
+  #define FIRMWARE_VERSION "3.2.0"
 #endif
 
 ///////////////////////////////////////////

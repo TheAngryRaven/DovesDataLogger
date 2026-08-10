@@ -122,6 +122,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `sensoregg_protocol.{h,cpp}` | SensorEgg `PW-ADV` v1+v2 advertising payload parser (magic filter, int16 deci-°C decode with `0x8000`→NaN sentinel, flags, sequence, v2 aux thermistor + battery) + wrap-safe 1 s staleness rule + passive-scan tuning constants |
 | `crossing_pattern.{h,cpp}` | The two-frame crossing animation as geometry (eight 16x16 cells, odd row bands, alternating phase) instead of 2 KB of stored bitmap; golden-tested byte-identical to the images it replaced |
 | `sprint_select.{h,cpp}` | Sprint mode selection: newest-course-by-`date_created` ordering (sortable ISO strings) + the circuit-vs-sprint tiebreak decision table (`race_mode` pref; circuit yields to a sprint course created today) |
+| `course_prune.{h,cpp}` | Which sprint courses to drop when a track file is full (subsystem 15): `N{YYMMDD}_{HHMM}` matcher, and the drop order — **renamed-in-the-app before device-named** (a rename proves the app has a copy), then oldest by `date_created` |
 | `course_creator.{h,cpp}` | On-device course creator model (subsystem 15): screen/row table, required-vs-optional lines, the two webapp-compat save rules, the point-averaging hold (3 s, ≥8 fixes, ≤10 m h_acc), and `N{YYMMDD}_{HHMM}` name generation |
 | `track_json.{h,cpp}` | The firmware's only track-JSON **writer** — course/track object emitters + a fixed-point coordinate formatter (integer math: no working `%f` on this core, and `dtostrf` doesn't exist on the host) |
 | `wake_cause.{h,cpp}` | Boot wake-cause decode: RESETREAS + GPIO LATCH register snapshots → tach / button / USB / watchdog / soft-reset / cold boot (System OFF shutdown, subsystem 10) |
@@ -455,7 +456,9 @@ loop()  ~250 Hz
     `PAGE_COURSE_TYPE` (-12) circuit/sprint, `PAGE_COURSE_LINES` (-13) line
     menu, `PAGE_COURSE_LINE` (-14) per-line points, `PAGE_COURSE_POINT`
     (-15) averaging hold. All five are contiguous so `courseCreatorActive()`
-    is a range test.
+    is a range test. `PAGE_COURSE_PRUNE` (-16) sits deliberately OUTSIDE that
+    range: it is a plain two-row confirm, not one of the model's screens, so it
+    must not be handed to `course_creator::rowCount()`.
   - Errors: `PAGE_INTERNAL_WARNING` (100), `PAGE_INTERNAL_FAULT` (105),
     `PAGE_SD_FORMAT` (106, card responds but FAT won't mount — driven by
     `sdFormatPageLoop()`, buttons live unlike FAULT).
@@ -1112,6 +1115,26 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   rewriting would leave a truncated track file after a power loss in a
   field, on a battery, at an event. `buildTrackList()` re-runs on success so
   the new course is in the manifest for the next session.
+- **A full SPRINT track can make room** (plan 0005). A sprint venue re-lays
+  its cones every event, so the file fills with runs nobody drives again;
+  before this, walking a course onto a full track just lost it. On
+  `SD_COURSE_WRITE_TOO_BIG`, `sdPlanSprintPrune()` works out what would have
+  to go **without touching the card** (it parses into RAM and discards the
+  copy) and `sdSaveCreatedCourse(req, dropOldest)` commits through the same
+  temp-file + rename swap. The order comes from the host-tested
+  `course_prune` unit: **renamed-in-the-app first** (the device has no text
+  entry ever, so a course still called `N260803_1432` may exist nowhere but
+  this card, while a renamed one is provably in the app and on cloud sync),
+  then oldest by `date_created`. Dropping only renamed courses happens
+  **silently**; anything device-named raises `PAGE_COURSE_PRUNE` first.
+  **Circuit is deliberately still a dead end** — its layouts are all driven,
+  so nothing is safe to drop.
+  Three traps, all avoided on purpose: prune **before** the append (ArduinoJson's
+  `overflowed()` is sticky, so shrinking back under the limit could never clear
+  it — `measureJson()` decides when enough has gone); remove **by name**, since
+  every removal shifts the indices the drop order was computed against; and hold
+  the generated names across the confirmation, or the course gets renamed to
+  whenever the user answered.
 - **Entry needs a fix and a time lock** (capture + filename), refused at the
   menu rather than at Save.
 - **Sim**: fully exercised — five golden fixtures walk the real menus,
@@ -1268,6 +1291,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | Course creator point hold | 3 s, ≥8 usable fixes else FAILED | `course_creator.h` |
 | Course creator h_acc gate | drop >10 m, warn >5 m | `course_creator.h` |
 | Course creator name format | `N{YYMMDD}_{HHMM}` (+ `MMDDHHMM` short name) | `course_creator.h` |
+| Sprint prune order | renamed-in-app first, then oldest `date_created`; confirm only when a device-named course would go | `course_prune.h` |
 | Track JSON coordinate precision | 8 decimals (~1.1 mm) | `track_json.h` |
 | Tach min pulse gap | 3 ms ÷ pulses-per-rev, floor 750 µs | `tach_filter.h` (`minPulseGapUs`) |
 | Tach pulses per rev | `cylinder_count` × (`wasted` ? 1.0 : 0.5); default 1.0 | `tach_filter.h` (`revsPerPulse`) |
@@ -1429,7 +1453,13 @@ This device operates in ignition-noise environments. Three layers of defense:
 - Cross-module globals (e.g. `dovexReplay*`, `trackManifest[]`, `courseManager`)
   are declared and defined in `BirdsEye.ino`. Module headers may `extern`-declare
   them where the module's own API touches that state.
-- Library includes that define return types used in auto-prototyped functions
-  (`DovesLapTimer.h`, `CourseManager.h`, `SparkFun_u-blox_GNSS_v3.h`) must be
-  in the top include block of `BirdsEye.ino` (before Arduino generates
-  prototypes).
+- Library includes that define **parameter or return types** used in
+  auto-prototyped functions (`DovesLapTimer.h`, `CourseManager.h`,
+  `SparkFun_u-blox_GNSS_v3.h`, `ArduinoJson.h`) must be in the top include
+  block of `BirdsEye.ino` (before Arduino generates prototypes). Included any
+  later, the generated prototype cannot see the type, silently degrades it to
+  `int`, and the function fails with *"redeclared as different kind of
+  entity"*. **The simulator cannot catch this** — it hand-writes its
+  prototypes in `sim/sim_prototypes.h` — so a green sim build says nothing
+  about it; only the Arduino compile does. `ArduinoJson.h` joined this list
+  when `sd_functions.ino` grew helpers taking `JsonArray` (plan 0005).
