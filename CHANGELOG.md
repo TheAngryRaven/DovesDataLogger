@@ -10,7 +10,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - **MINOR** — new features or device behavior that is backwards compatible.
 - **PATCH** — bug fixes and internal changes with no user-visible behavior change.
 
-## [Unreleased]
+## [4.0.0] - 2026-08-10
 
 ### Added
 - **The camera now works without a tachometer.** Auto-record used to be
@@ -72,6 +72,152 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
     they say on every engine, instead of firing at half the real RPM on a twin.
   - The ignition-noise debounce follows the setting too, so the higher spark
     rate of a multi-cylinder engine doesn't run into it and read low.
+
+- **Create a course on the device — walk the cones, no laptop** (plan 0002
+  §5). New **Create** entry on the main menu: pick the track you're at (or
+  start a new one), pick Circuit or Sprint, then capture each timing line by
+  standing at the cone and holding for three seconds. Autocross venues
+  re-lay their course every event, so this is what makes a sprint course
+  authorable at the event instead of the night before on a computer. Circuit
+  courses work the same way, with one fewer line to walk.
+  - **Points are averaged, not snapshotted.** "Save current pos" collects
+    fixes for three seconds — around 75 of them at 25 Hz — and stores the
+    mean. You're standing at the cone anyway, so the accuracy is free. Loose
+    fixes are dropped, and a hold that can't gather enough usable ones says
+    so and asks you to try again rather than quietly writing a bad line.
+  - **No typing on the device.** Names are generated from the GPS clock
+    (`N260803_1432`, unique to the minute) and are meant to be renamed in
+    the web app afterwards — which is also why the whole name fits the
+    track browser instead of being cut off.
+  - **Save is refused, with the reason, until the course is actually
+    usable**: a start line always, a finish line for sprint, and the sector
+    rules the web app's editor enforces — so a course written here can
+    always be opened and edited there later.
+  - **Back is a real undo.** Re-walk one endpoint of a line and change your
+    mind, and the stored line is untouched.
+  - Adding a course to an existing track rewrites the file through a temp
+    copy, so losing power mid-save can't leave a broken track file behind.
+  - Needs a GPS fix and time lock, and says so up front rather than at the
+    end of a walked course.
+- **BLE sprint-track sync — `TSLIST` / `TSGET:` / `TSPUT:` / `TSDEL:`**
+  (plan 0002). The four existing track verbs gained `TS`-prefixed twins that
+  target `/TRACKS/SPRINT` instead of `/TRACKS`, so sprint courses can be
+  pushed and pulled over Bluetooth like circuit tracks — previously the new
+  folder was only reachable by USB mass storage. `TSLIST` answers with its
+  own `TSFILE:` / `TSEND` tokens so a sprint enumeration can never be mistaken
+  for a circuit one; the other three reuse the existing replies. The variants
+  share the circuit implementations via a `kind` parameter rather than
+  duplicating handlers, and the filename validator stays strict — the target
+  folder is chosen by the opcode and never parsed from the wire, so a client
+  still cannot path out of the tracks folders.
+
+- **`FWDFU` BLE command — reboot into UF2 mass-storage DFU** (backwards
+  compatible — MINOR). Sends `FWDFU:OK`, then reboots into the stock
+  Adafruit/Seeed bootloader's UF2 mode: the device shows up as a USB
+  drive and flashing is a drag-and-drop of a `.uf2` file — no web app, no
+  nRF Connect, **no OTA image-size cap** (the bootloader writes the app
+  region directly; no staging). This is the "pre-update" for the planned
+  SD-staged OTA rework (plan 0004): any device updated to a build
+  carrying `FWDFU` has a permanent, size-unlimited update path over a
+  USB cable. The bootloader itself is unchanged.
+- **Sprint mode (plan 0002) — point-to-point run timing for autocross /
+  hillclimb events** (backwards compatible — MINOR). Sprint tracks live in
+  the new `/TRACKS/SPRINT/` SD folder (circuit tracks are untouched); the
+  detected track's folder selects the mode automatically. A sprint course
+  is a start line + a separate `finish_*` line (+ up to two optional
+  sector lines) with a sortable `date_created` stamp — the newest course
+  is always loaded (autocross venues re-lay the course every event; the
+  host-tested `sprint_select` unit owns the ordering + tiebreak rules).
+  Runs are timed by the DovesLapTimer library's new `SprintTimer` (BETA):
+  re-crossing the start cancels + restarts a run, finish crossings with no
+  active run are ignored, DNF records nothing. Between runs the device
+  stays in race mode with every page live — Current Lap and Pace show
+  `*waiting*` — and auto-idle becomes engine-aware in sprint (a running
+  engine at the start line never ends the session; each completed run
+  re-arms the grace period). Run times land in the existing lap history /
+  DOVEX laps line ("laps" verbiage is kept everywhere by design).
+- **New `race_mode` setting** (`circuit` default / `sprint`): ONLY the
+  tiebreak when both a circuit and a sprint track are within detection
+  range — `circuit` yields to a sprint track whose newest course was
+  created today (event day); `sprint` always prefers the sprint track
+  (fixed layouts, e.g. a permanent rally course). Never overrides what is
+  actually detected.
+- **DOVEX `race_mode` trailing header column** (`CIRCUIT`/`SPRINT`, empty
+  = circuit; same backwards-compatible append mechanism as
+  `device_name`): a loading helper so the webapp knows to interpret the
+  laps line as runs. Also fixed the header parser to preserve empty
+  middle fields — the old strtok splitter let a blank column shift every
+  later column left.
+- **SensorEgg PW-ADV v2 support** (backwards compatible — MINOR). The
+  passive observer now accepts the egg's 16-byte v2 payload alongside v1:
+  a new aux intake-air thermistor (`Temp2`) and a real battery percent.
+  v1 eggs keep working (their `Temp2` parses as `nan`); a v2 frame
+  truncated below 16 bytes is rejected as corrupt rather than mis-read
+  as v1. The RX path previously truncated captures at 14 bytes — v2
+  bytes never reached the parser — and now captures up to the largest
+  known layout with per-slot lengths.
+- **`Temp2` race page**: second temperature page after Temp1, same
+  layout and staleness rules ('---' on stale/v1/invalid), with the egg's
+  battery percent as the subtext (`--` when unknown). Beta channel only,
+  like the rest of the SensorEgg POC.
+- **DOVEX `Temp2` trailing column** (backwards compatible append, same
+  mechanism as `device_name` and `Temp1`/`Junction1`): aux intake-air
+  temp in °C, literal `nan` on stale link / v1 egg / invalid divider.
+  Never causes a GPS row to be skipped; written on every build so the
+  format does not fork by channel.
+
+### Changed
+- **OTA image cap raised 320 KiB → 408 KiB by splitting the flash evenly**
+  (plan 0004, low-risk half). The app and the OTA staging region share one
+  820 KiB stretch, and both must be able to hold the image — so the largest
+  installable image is half that span. The split was lopsided: 320 KiB of
+  staging against 500 KiB of app region, which capped OTA at 320 KiB while
+  leaving ~180 KiB of app region that no legal image could ever reach. The
+  staging base moves `0xA4000` → `0x8E000`, making it 408 KiB of staging
+  against 412 KiB of app. Nothing about the apply sequence, the `FW*`
+  protocol, or the CRC changes — only two constants, now backed by
+  `static_assert`s for page alignment and app-region fit. The beta image
+  went from 99.0% of the cap to 77.6%, which is what unblocks further
+  firmware work. **No web-app change is needed**: the client never enforced
+  a cap of its own, it relies on the device's `FWERR:SIZE`.
+  - Migration is one-way-safe: staging is chosen at apply time from the
+    *installed* firmware's constants, so a unit still on 3.0.x stages at the
+    old `0xA4000` and installs this build normally. And because the new app
+    region ends below the old staging base, an image built for this layout
+    can never collide with an old unit's staging region.
+  - Until every field unit has taken a build with the new layout, images
+    must stay under the legacy 320 KiB to remain OTA-installable on the
+    stragglers — CI now warns when a build crosses that line, naming the
+    USB `FWDFU` → UF2 path as the fallback for those units.
+  - The other half of plan 0004 — staging straight from the SD card, which
+    deletes the internal staging region and takes the cap to ~792 KiB —
+    still needs its hardware spikes and is **not** included here.
+- **The crossing animation is generated, not stored — 2,048 B of flash
+  reclaimed.** The two "calculating" frames shown while inside a crossing
+  zone were hand-stored 1 KB PROGMEM bitmaps, but both were pure block
+  patterns: eight 16x16 px cells on the odd row bands, the two frames
+  offset by one cell. They are now emitted by the host-tested
+  `crossing_pattern` unit and drawn with `fillRect()`. The output is
+  proven byte-identical to the bitmaps it replaces —
+  `crossing_pattern_test.cpp` pins the original 2 KB as goldens and
+  rasterizes the generated rectangles against them, so what shows on the
+  device is unchanged. The bird splash stays a real bitmap (it is actual
+  artwork, not a pattern).
+
+- **CI/production builds pass `-DDOVES_DISABLE_DEBUG`** (new DovesLapTimer
+  BETA flag): the library's debug strings + print call-sites are dead
+  weight on hardware builds (no debug Stream is ever attached) and the
+  beta image had crossed 100% of the 320 KB OTA self-flash cap — it was
+  already at 98.2% before sprint mode. Dropping the resident debug pipeline
+  brings the image back under the cap with headroom instead of moving the
+  OTA staging layout. Local IDE debug builds are unaffected (the macro is
+  opt-in per build).
+- The scan-tuning test's pinned egg advertising interval was stale at
+  160 units; the egg de-aliased to 179 units (111.875 ms) — pin updated
+  (anti-phase-lock invariants still hold).
+- Companion web app references updated from HackTheTrack.net to
+  [LapWingData.com](https://LapWingData.com) in the README and project
+  docs (site rename; no firmware behavior change).
 
 ### Fixed
 - **A corrupted settings file now heals itself instead of poisoning the
@@ -158,140 +304,6 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
     the clock is locked, so nothing was lost — the diagnostic only takes the
     space while there is something to diagnose.
 
-### Added
-- **Create a course on the device — walk the cones, no laptop** (plan 0002
-  §5). New **Create** entry on the main menu: pick the track you're at (or
-  start a new one), pick Circuit or Sprint, then capture each timing line by
-  standing at the cone and holding for three seconds. Autocross venues
-  re-lay their course every event, so this is what makes a sprint course
-  authorable at the event instead of the night before on a computer. Circuit
-  courses work the same way, with one fewer line to walk.
-  - **Points are averaged, not snapshotted.** "Save current pos" collects
-    fixes for three seconds — around 75 of them at 25 Hz — and stores the
-    mean. You're standing at the cone anyway, so the accuracy is free. Loose
-    fixes are dropped, and a hold that can't gather enough usable ones says
-    so and asks you to try again rather than quietly writing a bad line.
-  - **No typing on the device.** Names are generated from the GPS clock
-    (`N260803_1432`, unique to the minute) and are meant to be renamed in
-    the web app afterwards — which is also why the whole name fits the
-    track browser instead of being cut off.
-  - **Save is refused, with the reason, until the course is actually
-    usable**: a start line always, a finish line for sprint, and the sector
-    rules the web app's editor enforces — so a course written here can
-    always be opened and edited there later.
-  - **Back is a real undo.** Re-walk one endpoint of a line and change your
-    mind, and the stored line is untouched.
-  - Adding a course to an existing track rewrites the file through a temp
-    copy, so losing power mid-save can't leave a broken track file behind.
-  - Needs a GPS fix and time lock, and says so up front rather than at the
-    end of a walked course.
-- **BLE sprint-track sync — `TSLIST` / `TSGET:` / `TSPUT:` / `TSDEL:`**
-  (plan 0002). The four existing track verbs gained `TS`-prefixed twins that
-  target `/TRACKS/SPRINT` instead of `/TRACKS`, so sprint courses can be
-  pushed and pulled over Bluetooth like circuit tracks — previously the new
-  folder was only reachable by USB mass storage. `TSLIST` answers with its
-  own `TSFILE:` / `TSEND` tokens so a sprint enumeration can never be mistaken
-  for a circuit one; the other three reuse the existing replies. The variants
-  share the circuit implementations via a `kind` parameter rather than
-  duplicating handlers, and the filename validator stays strict — the target
-  folder is chosen by the opcode and never parsed from the wire, so a client
-  still cannot path out of the tracks folders.
-
-### Changed
-- **OTA image cap raised 320 KiB → 408 KiB by splitting the flash evenly**
-  (plan 0004, low-risk half). The app and the OTA staging region share one
-  820 KiB stretch, and both must be able to hold the image — so the largest
-  installable image is half that span. The split was lopsided: 320 KiB of
-  staging against 500 KiB of app region, which capped OTA at 320 KiB while
-  leaving ~180 KiB of app region that no legal image could ever reach. The
-  staging base moves `0xA4000` → `0x8E000`, making it 408 KiB of staging
-  against 412 KiB of app. Nothing about the apply sequence, the `FW*`
-  protocol, or the CRC changes — only two constants, now backed by
-  `static_assert`s for page alignment and app-region fit. The beta image
-  went from 99.0% of the cap to 77.6%, which is what unblocks further
-  firmware work. **No web-app change is needed**: the client never enforced
-  a cap of its own, it relies on the device's `FWERR:SIZE`.
-  - Migration is one-way-safe: staging is chosen at apply time from the
-    *installed* firmware's constants, so a unit still on 3.0.x stages at the
-    old `0xA4000` and installs this build normally. And because the new app
-    region ends below the old staging base, an image built for this layout
-    can never collide with an old unit's staging region.
-  - Until every field unit has taken a build with the new layout, images
-    must stay under the legacy 320 KiB to remain OTA-installable on the
-    stragglers — CI now warns when a build crosses that line, naming the
-    USB `FWDFU` → UF2 path as the fallback for those units.
-  - The other half of plan 0004 — staging straight from the SD card, which
-    deletes the internal staging region and takes the cap to ~792 KiB —
-    still needs its hardware spikes and is **not** included here.
-- **The crossing animation is generated, not stored — 2,048 B of flash
-  reclaimed.** The two "calculating" frames shown while inside a crossing
-  zone were hand-stored 1 KB PROGMEM bitmaps, but both were pure block
-  patterns: eight 16x16 px cells on the odd row bands, the two frames
-  offset by one cell. They are now emitted by the host-tested
-  `crossing_pattern` unit and drawn with `fillRect()`. The output is
-  proven byte-identical to the bitmaps it replaces —
-  `crossing_pattern_test.cpp` pins the original 2 KB as goldens and
-  rasterizes the generated rectangles against them, so what shows on the
-  device is unchanged. The bird splash stays a real bitmap (it is actual
-  artwork, not a pattern).
-
-### Added
-- **`FWDFU` BLE command — reboot into UF2 mass-storage DFU** (backwards
-  compatible — MINOR). Sends `FWDFU:OK`, then reboots into the stock
-  Adafruit/Seeed bootloader's UF2 mode: the device shows up as a USB
-  drive and flashing is a drag-and-drop of a `.uf2` file — no web app, no
-  nRF Connect, **no OTA image-size cap** (the bootloader writes the app
-  region directly; no staging). This is the "pre-update" for the planned
-  SD-staged OTA rework (plan 0004): any device updated to a build
-  carrying `FWDFU` has a permanent, size-unlimited update path over a
-  USB cable. The bootloader itself is unchanged.
-- **Sprint mode (plan 0002) — point-to-point run timing for autocross /
-  hillclimb events** (backwards compatible — MINOR). Sprint tracks live in
-  the new `/TRACKS/SPRINT/` SD folder (circuit tracks are untouched); the
-  detected track's folder selects the mode automatically. A sprint course
-  is a start line + a separate `finish_*` line (+ up to two optional
-  sector lines) with a sortable `date_created` stamp — the newest course
-  is always loaded (autocross venues re-lay the course every event; the
-  host-tested `sprint_select` unit owns the ordering + tiebreak rules).
-  Runs are timed by the DovesLapTimer library's new `SprintTimer` (BETA):
-  re-crossing the start cancels + restarts a run, finish crossings with no
-  active run are ignored, DNF records nothing. Between runs the device
-  stays in race mode with every page live — Current Lap and Pace show
-  `*waiting*` — and auto-idle becomes engine-aware in sprint (a running
-  engine at the start line never ends the session; each completed run
-  re-arms the grace period). Run times land in the existing lap history /
-  DOVEX laps line ("laps" verbiage is kept everywhere by design).
-- **New `race_mode` setting** (`circuit` default / `sprint`): ONLY the
-  tiebreak when both a circuit and a sprint track are within detection
-  range — `circuit` yields to a sprint track whose newest course was
-  created today (event day); `sprint` always prefers the sprint track
-  (fixed layouts, e.g. a permanent rally course). Never overrides what is
-  actually detected.
-- **DOVEX `race_mode` trailing header column** (`CIRCUIT`/`SPRINT`, empty
-  = circuit; same backwards-compatible append mechanism as
-  `device_name`): a loading helper so the webapp knows to interpret the
-  laps line as runs. Also fixed the header parser to preserve empty
-  middle fields — the old strtok splitter let a blank column shift every
-  later column left.
-- **SensorEgg PW-ADV v2 support** (backwards compatible — MINOR). The
-  passive observer now accepts the egg's 16-byte v2 payload alongside v1:
-  a new aux intake-air thermistor (`Temp2`) and a real battery percent.
-  v1 eggs keep working (their `Temp2` parses as `nan`); a v2 frame
-  truncated below 16 bytes is rejected as corrupt rather than mis-read
-  as v1. The RX path previously truncated captures at 14 bytes — v2
-  bytes never reached the parser — and now captures up to the largest
-  known layout with per-slot lengths.
-- **`Temp2` race page**: second temperature page after Temp1, same
-  layout and staleness rules ('---' on stale/v1/invalid), with the egg's
-  battery percent as the subtext (`--` when unknown). Beta channel only,
-  like the rest of the SensorEgg POC.
-- **DOVEX `Temp2` trailing column** (backwards compatible append, same
-  mechanism as `device_name` and `Temp1`/`Junction1`): aux intake-air
-  temp in °C, literal `nan` on stale link / v1 egg / invalid divider.
-  Never causes a GPS row to be skipped; written on every build so the
-  format does not fork by channel.
-
-### Fixed
 - **Battery sleep instantly reboot-looped when the tach line idles low.**
   System OFF entry hardcoded the tach wake as `SENSE-LOW` (assuming an
   idle-high line), but the pickup circuit's Schmitt-inverter +
@@ -311,22 +323,6 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   the numeric guard rejects into the same `nan` fallback. Egg paths now
   use `isNanF()` (bit-pattern check, `nan_bits.h`) which the optimizer
   cannot fold.
-
-### Changed
-- **CI/production builds pass `-DDOVES_DISABLE_DEBUG`** (new DovesLapTimer
-  BETA flag): the library's debug strings + print call-sites are dead
-  weight on hardware builds (no debug Stream is ever attached) and the
-  beta image had crossed 100% of the 320 KB OTA self-flash cap — it was
-  already at 98.2% before sprint mode. Dropping the resident debug pipeline
-  brings the image back under the cap with headroom instead of moving the
-  OTA staging layout. Local IDE debug builds are unaffected (the macro is
-  opt-in per build).
-- The scan-tuning test's pinned egg advertising interval was stale at
-  160 units; the egg de-aliased to 179 units (111.875 ms) — pin updated
-  (anti-phase-lock invariants still hold).
-- Companion web app references updated from HackTheTrack.net to
-  [LapWingData.com](https://LapWingData.com) in the README and project
-  docs (site rename; no firmware behavior change).
 
 ## [3.0.1] - 2026-07-26
 

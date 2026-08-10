@@ -32,7 +32,7 @@ jobs:
       # DovesLapTimer ref: the beta channel tracks the library's own BETA
       # branch so the two move together; everything else pins the known-good
       # release tag.
-      LAPTIMER_REF: ${{ (github.base_ref == 'BETA' || github.head_ref == 'BETA' || github.ref_name == 'BETA') && 'BETA' || 'v4.2.0' }}
+      LAPTIMER_REF: ${{ (github.base_ref == 'BETA' || github.head_ref == 'BETA' || github.ref_name == 'BETA') && 'BETA' || 'v4.3.0' }}
       # Feature flags for this build (see project.h). BETA enables the
       # SensorEgg POC exactly as beta.yml does, so the flag-on build is
       # compile-checked on the PR rather than first failing on the publish
