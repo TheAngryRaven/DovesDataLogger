@@ -34,12 +34,22 @@ void displayPage_replay_file_select();
 void displayPage_replay_results();
 void displayPage_replay_exit();
 
+// On-device course creator (plan 0002 §5) — track prompt, type picker,
+// line menu, per-line points, and the averaging capture screen.
+void displayPage_course_track();
+void displayPage_course_type();
+void displayPage_course_lines();
+void displayPage_course_line();
+void displayPage_course_point();
+void displayPage_course_prune();
+
 // Live racing pages.
 void displayPage_gps_stats();
 void displayPage_gps_speed();
 void displayPage_tachometer();
 #if BIRDSEYE_ENABLE_SENSOREGG
-void displayPage_sensorTemp();  // only built with the SensorEgg POC enabled
+void displayPage_sensorTemp();   // only built with the SensorEgg POC enabled
+void displayPage_sensorTemp2();  // v2 aux intake-air temp (same gating)
 #endif
 void displayPage_gps_lap_time();
 void displayPage_gps_pace();

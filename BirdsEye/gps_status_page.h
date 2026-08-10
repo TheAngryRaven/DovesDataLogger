@@ -52,6 +52,34 @@ struct State {
   bool lockArmed = false;        // countdown running
 };
 
+///////////////////////////////////////////
+// TIME-SYNC PROGRESS (renderer hint)
+//
+// A position fix and a usable clock are separate milestones, and the
+// second is much slower: `fullyResolved` needs the UTC/leap-second
+// parameters, which the receiver decodes from the GPS navigation
+// message — subframe 4 page 18, repeating every ~12.5 minutes. A clean
+// 3D fix in under a minute followed by several more minutes of no
+// timeValid is normal on a cold start, and weak signal makes it worse
+// (tracking a satellite is a far lower bar than decoding its data bits
+// without errors).
+//
+// The page used to collapse all of that into "FIX (time sync)", which
+// reads as a fix *type* rather than "fix acquired, clock pending" — so
+// a perfectly healthy device looked broken and got power-cycled, which
+// restarts the 12.5-minute clock and makes it strictly worse. This
+// classifier exists so the page can say which milestone is outstanding.
+///////////////////////////////////////////
+enum class TimeSync : uint8_t {
+  kNoDateTime,  // module hasn't asserted validDate+validTime yet
+  kResolving,   // date/time present, waiting on fullyResolved (the slow one)
+  kLocked,      // all three — gpsData.timeValid is true
+};
+
+// Which time milestone is outstanding. `dateTimeValid` is validDate AND
+// validTime; `fullyResolved` is the UTC-resolution bit.
+TimeSync timeSyncState(bool dateTimeValid, bool fullyResolved);
+
 // Countdown progress for the renderer: seconds remaining (1..3) while
 // the auto-close countdown is armed, 0 when it is not.
 uint32_t countdownSecondsLeft(const State& s, uint32_t nowMs);

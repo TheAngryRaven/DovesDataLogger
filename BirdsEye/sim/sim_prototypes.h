@@ -25,9 +25,11 @@
 
 #include <CourseManager.h>
 #include <DovesLapTimer.h>
+#include <SprintTimer.h>
 
 #include "SdFat.h"
 
+#include "course_creator.h"
 #include "gps_status_page.h"
 #include "sd_format_page.h"
 #include "wake_cause.h"
@@ -53,13 +55,25 @@ float activeTimerPaceDifference();
 float activeTimerTotalDistance();
 unsigned long activeTimerOptimalLapTime();
 bool activeTimerSectorsConfigured();
+SprintTimer* getActiveTimerSprint();
+bool sprintModeIsActive();
+bool activeTimerRunActive();
+bool createSprintSession();
 void trackDetectionLoop();
+void startRaceSession(RaceEntryCause cause);
 void endRaceSession();
 void createLapAnythingCourseManager();
 void checkAutoIdle();
 void autoRaceModeCheck();
 void gpsStatusPageLoop();
 void sdFormatPageLoop();
+int courseCreatorPage();
+bool courseCreatorActive();
+bool courseCreatorEnter();
+void courseCreatorSave();
+void courseCreatorConfirmPrune(bool accepted);
+void courseCreatorSelect();
+void courseCreatorLoop();
 void updateGpsLockHold();
 void writeDovexHeader();
 bool isUsbConnected();
@@ -78,6 +92,11 @@ void displayPage_transfer_menu();
 void displayPage_usb_storage();
 void displayPage_pair_camera();
 void displayPage_camera_test();
+void displayPage_course_track();
+void displayPage_course_type();
+void displayPage_course_lines();
+void displayPage_course_line();
+void displayPage_course_point();
 void displayPage_camera_serial_entry();
 void displayPage_replay_file_select();
 void displayPage_replay_results();
@@ -89,6 +108,7 @@ void displayPage_gps_pace();
 void displayPage_gps_best_lap();
 void displayPage_tachometer();
 void displayPage_sensorTemp();
+void displayPage_sensorTemp2();
 void displayPage_optimal_lap();
 void displayPage_gps_lap_list();
 void displayPage_stop_logging();
@@ -157,7 +177,8 @@ bool parseDovexHeader(const char* filename);
 bool acquireSDAccess(int mode);
 void releaseSDAccess(int mode);
 void forceReleaseSDAccess();
-void makeFullTrackPath(const char* trackName, char* filepath);
+void makeFullTrackPath(const char* trackName, char* filepath, uint8_t kind);
+bool scanTrackDir(const char* folder, uint8_t kind);
 bool sdSetSpiClock(uint32_t maxSck);
 void sdSetTransferSpeed(bool fast);
 bool SD_SETUP();

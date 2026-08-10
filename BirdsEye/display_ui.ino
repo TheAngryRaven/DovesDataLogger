@@ -19,6 +19,40 @@
 
 static bool i2cRecoveryNeeded = false;
 
+// Whether the panel is showing inverted colours (black-on-lit instead of
+// lit-on-black). Kept here rather than as a cross-module global because the
+// only thing that ever needs it is the panel start-up path below.
+static bool displayInverted = false;
+
+/**
+ * Start the OLED panel.
+ *
+ * The ONLY place `display.begin()` is called, and that is deliberate:
+ * `begin()` re-initialises the controller, which clears the inversion bit.
+ * Routing every start through here means the preference is restored by
+ * construction. The I2C recovery path re-begins mid-session, so a second
+ * hand-written `begin()` would silently un-invert the screen on the first
+ * EMI glitch — exactly the kind of bug nobody reports because it looks like
+ * the setting "just stopped working".
+ */
+static void displayBeginPanel() {
+#ifdef USE_1306_DISPLAY
+  display.begin(SSD1306_SWITCHCAPVCC, I2C_DISPLAY_ADDRESS);
+#else
+  display.begin(I2C_DISPLAY_ADDRESS, true);
+#endif
+  display.invertDisplay(displayInverted);
+}
+
+/**
+ * Apply the user's colour preference. Safe to call any time after the panel
+ * is up; the value is remembered so it survives a later re-begin.
+ */
+void displaySetInverted(bool inverted) {
+  displayInverted = inverted;
+  display.invertDisplay(inverted);
+}
+
 void i2cBusRecover() {
   debugln(F("I2C: Bus recovery - bit-banging 9 SCL clocks"));
 
@@ -57,13 +91,9 @@ void i2cBusRecover() {
   Wire.begin();
   Wire.setClock(400000);  // Must re-set after begin() (resets to 100kHz)
 
-  // Re-init display
+  // Re-init display (restores the colour preference — see displayBeginPanel)
   wdtPet();
-  #ifdef USE_1306_DISPLAY
-    display.begin(SSD1306_SWITCHCAPVCC, I2C_DISPLAY_ADDRESS);
-  #else
-    display.begin(I2C_DISPLAY_ADDRESS, true);
-  #endif
+  displayBeginPanel();
 
   wdtPet();
   debugln(F("I2C: Bus recovery complete"));
@@ -237,6 +267,12 @@ void forceDisplayRefresh() {
 }
 
 void switchToDisplayPage(int newDisplayPage) {
+  // Stamp arrival at the main menu. This is the ONLY path to it (the direct
+  // `currentPage =` assignments elsewhere are all race-page rotation clamps),
+  // so autoRaceModeCheck() can trust it to mean "the user just got here".
+  if (newDisplayPage == PAGE_MAIN_MENU && currentPage != PAGE_MAIN_MENU) {
+    mainMenuEnteredAtMs = millis();
+  }
   currentPage = newDisplayPage;
   forceDisplayRefresh();
 }
@@ -250,11 +286,10 @@ void displaySetup() {
   // Set I2C timeout to prevent infinite hangs from EMI-induced bus faults
   Wire.setTimeout(100);
 
-#ifdef USE_1306_DISPLAY
-  display.begin(SSD1306_SWITCHCAPVCC, I2C_DISPLAY_ADDRESS);
-#else
-  display.begin(I2C_DISPLAY_ADDRESS, true);
-#endif
+  // Starts uninverted: this runs BEFORE the SD card is up, so the stored
+  // preference is not readable yet. setup() applies it as soon as settings
+  // exist — see the displaySetInverted() call after SETTINGS_SETUP().
+  displayBeginPanel();
 
   // 400kHz I2C: reduces display.display() from ~100ms to ~25ms.
   // At 100kHz, the 1024-byte framebuffer transfer blocks long enough
@@ -283,15 +318,17 @@ void displaySetup() {
 }
 
 void handleMenuPageSelection() {
+  if (courseCreatorActive()) {
+    // All five creator screens route through the model, which owns both
+    // the row table and the screen transitions.
+    courseCreatorSelect();
+    return;
+  }
   if (currentPage == PAGE_MAIN_MENU) {
     if (menuSelectionIndex == 0) {
       // Race selected — go directly to race mode, start logging on GPS fix
       debugln(F("Main Menu: Race selected"));
-      raceActive = true;
-      enableLogging = true;
-      raceSessionStartedAt = millis();
-      // Create CourseManager if not already created by track detection
-      createLapAnythingCourseManager();
+      startRaceSession(RACE_ENTRY_MANUAL);
       switchToDisplayPage(GPS_SPEED);
     } else if (menuSelectionIndex == 1) {
       // Replay selected
@@ -308,6 +345,18 @@ void handleMenuPageSelection() {
       // Transfer selected — open the Bluetooth-vs-USB submenu
       debugln(F("Main Menu: Transfer selected"));
       switchToDisplayPage(PAGE_TRANSFER_MENU);
+    } else if (menuSelectionIndex == 3) {
+      // Create Course — walk the cones and capture the timing lines.
+      debugln(F("Main Menu: Create Course selected"));
+      if (!courseCreatorEnter()) {
+        // Every screen past the prompt needs a fix (to capture) and the
+        // clock (to name the file), so refuse up front rather than let the
+        // user walk a whole course and fail at Save.
+        strncpy(internalNotification, "Need GPS lock to\ncreate a course",
+                sizeof(internalNotification) - 1);
+        internalNotification[sizeof(internalNotification) - 1] = '\0';
+        switchToDisplayPage(PAGE_INTERNAL_WARNING);
+      }
     } else {
       // Camera selected — paired shows status/unpair, unpaired starts pairing
       debugln(F("Main Menu: Camera selected"));
@@ -451,6 +500,8 @@ void handleMenuPageSelection() {
     debugln(F("Bluetooth: Exit selected"));
     BLE_STOP();
     switchToDisplayPage(PAGE_MAIN_MENU);
+  } else if (currentPage == PAGE_COURSE_PRUNE) {
+    courseCreatorConfirmPrune(menuSelectionIndex == 1);
   } else if (currentPage == LOGGING_STOP_CONFIRM) {
     if (menuSelectionIndex == 0) {
       switchToDisplayPage(GPS_SPEED);
@@ -541,13 +592,23 @@ void displayLoop() {
 
     bool isCrossing = activeTimerCrossing();
 
+    // The crossing animation is a RACING overlay, so gate it on being ON a
+    // racing page rather than on a list of pages to skip. The blocklist this
+    // replaces never grew as pages were added, so every screen introduced
+    // since — the camera pages, the replay browser, the transfer menus, even
+    // the main menu — got the animation painted straight over it the moment
+    // the vehicle sat inside a crossing zone. Standing still beside a timing
+    // line is exactly when those screens are in use.
+    //
+    // The running rotation is a contiguous block (see BirdsEye.ino): the two
+    // diagnostic pages at the bottom and the stop-logging page at the top stay
+    // excluded as before, and everything outside the block — negative menu
+    // ids, the 90+ confirm/warning/fault pages, the 900+ boot pages — is now
+    // excluded by construction rather than by remembering to list it.
+    const bool onRacingPage = (currentPage > GPS_STATS && currentPage < LOGGING_STOP);
+
     if (
-      currentPage != GPS_STATS &&
-      currentPage != GPS_DEBUG &&
-      currentPage != LOGGING_STOP &&
-      currentPage != LOGGING_STOP_CONFIRM &&
-      currentPage != PAGE_INTERNAL_FAULT &&
-      currentPage != PAGE_INTERNAL_WARNING &&
+      onRacingPage &&
       isCrossing &&
       inEndurance == false
     ) {
@@ -567,6 +628,18 @@ void displayLoop() {
       displayPage_pair_camera();
     } else if (currentPage == PAGE_CAMERA_TEST) {
       displayPage_camera_test();
+    } else if (currentPage == PAGE_COURSE_TRACK) {
+      displayPage_course_track();
+    } else if (currentPage == PAGE_COURSE_TYPE) {
+      displayPage_course_type();
+    } else if (currentPage == PAGE_COURSE_LINES) {
+      displayPage_course_lines();
+    } else if (currentPage == PAGE_COURSE_LINE) {
+      displayPage_course_line();
+    } else if (currentPage == PAGE_COURSE_POINT) {
+      displayPage_course_point();
+    } else if (currentPage == PAGE_COURSE_PRUNE) {
+      displayPage_course_prune();
     } else if (currentPage == PAGE_CAMERA_SERIAL_ENTRY) {
       displayPage_camera_serial_entry();
     } else if (currentPage == PAGE_REPLAY_FILE_SELECT) {
@@ -584,6 +657,8 @@ void displayLoop() {
 #if !defined(ENDURANCE_MODE) && BIRDSEYE_ENABLE_SENSOREGG
     } else if (currentPage == SENSOR_TEMP) {
       displayPage_sensorTemp();
+    } else if (currentPage == SENSOR_TEMP2) {
+      displayPage_sensorTemp2();
 #endif
     } else if (currentPage == GPS_LAP_TIME) {
       displayPage_gps_lap_time();
@@ -645,17 +720,23 @@ void displayLoop() {
     currentPage == PAGE_TRANSFER_MENU ||
     currentPage == PAGE_USB_STORAGE ||
     currentPage == LOGGING_STOP_CONFIRM ||
+    currentPage == PAGE_COURSE_PRUNE ||
     currentPage == PAGE_REPLAY_FILE_SELECT ||
     currentPage == PAGE_REPLAY_EXIT ||
     // Camera page is only a menu while paired; while pairing it uses the
     // custom (non-menu) button handling below. Deriving this per frame
     // flips the page into menu mode the moment a serial is captured.
     (currentPage == PAGE_PAIR_CAMERA && cameraIsPaired()) ||
-    currentPage == PAGE_CAMERA_TEST
+    currentPage == PAGE_CAMERA_TEST ||
+    courseCreatorActive()
   ) {
     insideMenu = true;
     if (currentPage == PAGE_MAIN_MENU) {
-      menuLimit = 4; // Race, Review, Transfer, Camera
+      menuLimit = 5; // Race, Review, Transfer, Create Course, Camera
+    } else if (courseCreatorActive()) {
+      // Row count is the model's to decide — it changes with course type
+      // (sprint grows a finish row) and with which screen is up.
+      menuLimit = course_creator::rowCount(courseCreator);
     } else if (currentPage == PAGE_BLUETOOTH) {
       menuLimit = 1; // Only "Exit" option
     } else if (currentPage == PAGE_TRANSFER_MENU) {
@@ -668,6 +749,7 @@ void displayLoop() {
       menuLimit = 4; // Wake, Record, Power Off, Back
     } else if (
       currentPage == LOGGING_STOP_CONFIRM ||
+      currentPage == PAGE_COURSE_PRUNE ||
       currentPage == PAGE_REPLAY_EXIT
     ) {
       menuLimit = 2;
@@ -696,7 +778,9 @@ void displayLoop() {
     // Power Off) (#7).
     bool reverseDirection = (currentPage == PAGE_MAIN_MENU ||
                              currentPage == PAGE_PAIR_CAMERA ||
-                             currentPage == PAGE_CAMERA_TEST);
+                             currentPage == PAGE_CAMERA_TEST ||
+                             currentPage == PAGE_COURSE_PRUNE ||
+                             courseCreatorActive());
 
     // BUTTON UP (or DOWN for reversed menus)
     if (btn1->pressed) {

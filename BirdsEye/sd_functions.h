@@ -7,6 +7,9 @@
 // access mutex to avoid corrupting SdFat's internal state.
 ///////////////////////////////////////////
 
+#include <stdint.h>
+
+#include "course_creator.h"  // CreatedCourseWrite carries a walked course
 #include "sd_access_policy.h"
 
 // SD access modes — used by acquireSDAccess / releaseSDAccess. Aliases of
@@ -49,9 +52,15 @@ void releaseSDAccess(int mode);
 // error path forgets to release.
 void forceReleaseSDAccess();
 
-// Build "/TRACKS/<trackName>.json" into the caller's filepath buffer.
-// Caller MUST provide at least FILEPATH_MAX bytes.
-void makeFullTrackPath(const char* trackName, char* filepath);
+// Build "/TRACKS/<trackName>.json" (TRACK_KIND_CIRCUIT) or
+// "/TRACKS/SPRINT/<trackName>.json" (TRACK_KIND_SPRINT) into the caller's
+// filepath buffer. Caller MUST provide at least FILEPATH_MAX bytes.
+void makeFullTrackPath(const char* trackName, char* filepath, uint8_t kind);
+
+// Walk one track folder, appending entries to locations[] and
+// trackManifest[] (shared caps) with the given TRACK_KIND_*. Caller must
+// hold the SD mutex. Returns false only if the directory can't be opened.
+bool scanTrackDir(const char* folder, uint8_t kind);
 
 // Initialize the SD card (with EMI-tolerant retries). Returns true
 // on success. Populates the global SD object. On failure, probes the
@@ -87,3 +96,67 @@ bool buildTrackList();
 // trackLayouts[]. Auto-detects new (object) vs legacy (bare array)
 // JSON format. Returns one of the PARSE_STATUS_* codes.
 int parseTrackFile(char* filepath);
+
+///////////////////////////////////////////
+// TRACK WRITING (on-device course creator, plan 0002 §5)
+///////////////////////////////////////////
+
+// Why a course write failed, so the creator can say something more useful
+// than "error" on a 128x64 screen.
+enum SdCourseWriteResult : uint8_t {
+  SD_COURSE_WRITE_OK = 0,
+  SD_COURSE_WRITE_BUSY,        // another subsystem holds the card
+  SD_COURSE_WRITE_NO_TRACK,    // append target missing or unparseable
+  SD_COURSE_WRITE_TOO_BIG,     // the course would not fit JSON_BUFFER_SIZE
+  SD_COURSE_WRITE_IO,          // open/write/rename failed
+  SD_COURSE_WRITE_EXISTS,      // a track file of that name is already there
+};
+
+// One walked course, ready to be written.
+struct CreatedCourseWrite {
+  const course_creator::State* course = nullptr;
+  bool newTrack = false;      // create a track file vs append to an existing one
+  const char* trackName = ""; // file basename, without folder or .json
+  const char* shortName = ""; // new tracks only
+  const char* courseName = "";
+  const char* dateCreated = ""; // sprint only; "" on circuit courses
+};
+
+// Write a freshly-walked course to the card.
+//
+// A NEW track becomes /TRACKS/<name>.json (or /TRACKS/SPRINT/<name>.json)
+// holding exactly this course. An APPEND parses the existing file, adds the
+// course to its "courses" array, and rewrites it — via a temp file and a
+// rename, so a power loss mid-write cannot leave a half-written track file
+// where a working one used to be.
+//
+// `dropOldest` (plan 0005) removes that many existing courses before the
+// append, best candidate first per `course_prune::dropOrder`. 0 keeps every
+// course, which is the behaviour every caller had before pruning existed.
+// Ignored when creating a new track — there is nothing there to drop.
+//
+// Takes the SD mutex itself; the caller must not hold it.
+SdCourseWriteResult sdSaveCreatedCourse(const CreatedCourseWrite& req,
+                                        uint8_t dropOldest = 0);
+
+// What it would take to fit one more course into a full sprint track.
+struct SdSprintPrunePlan {
+  // How many existing courses have to go. 0 when it already fits.
+  uint8_t dropCount = 0;
+  // True when at least one of them still carries the name the DEVICE gave it,
+  // so it has never been through the webapp and this card may be the only
+  // place it exists. That is the difference between doing it quietly and
+  // asking first.
+  bool needsConfirm = false;
+  // False when even dropping everything droppable would not make room — the
+  // one course being saved is simply too big for the buffer.
+  bool possible = false;
+};
+
+// Work out what `sdSaveCreatedCourse` would have to drop, WITHOUT touching the
+// card. Reads the track file and discards its own working copy.
+//
+// Only meaningful for an append to an existing sprint track; a new track has
+// nothing to prune. Takes the SD mutex itself.
+SdCourseWriteResult sdPlanSprintPrune(const CreatedCourseWrite& req,
+                                      SdSprintPrunePlan& out);

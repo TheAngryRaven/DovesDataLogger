@@ -42,6 +42,15 @@
 #include "gps_config.h"
 #include <DovesLapTimer.h>
 #include <CourseManager.h>
+#include <SprintTimer.h>
+// ArduinoJson is here for the same reason, and it is load-bearing: the track
+// helpers in sd_functions.ino take and return JsonArray, and Arduino generates
+// their prototypes ABOVE this point. Included further down (where the JSON
+// globals live) those prototypes see no such type, quietly degrade the
+// parameter to `int`, and every one of them fails to compile with "redeclared
+// as different kind of entity". The simulator cannot catch this — it hand-writes
+// its prototypes — so the only signal is the Arduino build.
+#include <ArduinoJson.h>
 
 // SdFat configuration. SD_FAT_TYPE must be defined BEFORE SdFat.h is
 // processed for the first time, which means before any module header
@@ -81,18 +90,22 @@
 #include "accelerometer.h"
 #include "bluetooth.h"
 #include "camera_ble.h"
+#include "course_creator.h"
 #include "display_pages.h"
 #include "display_ui.h"
 #include "dovex_header.h"
 #include "gps_functions.h"
 #include "gps_status_page.h"
 #include "haversine.h"
+#include "idle_policy.h"
 #include "replay.h"
 #include "sat_bars.h"
 #include "sd_format_page.h"
 #include "sd_functions.h"
 #include "sensoregg.h"
 #include "settings.h"
+#include "sprint_select.h"
+#include "tach_filter.h"
 #include "tachometer.h"
 #include "usb_msc.h"
 #include "wake_cause.h"
@@ -141,10 +154,22 @@ CourseManager* courseManager = nullptr;
 TrackConfig activeTrackConfig;
 bool trackDetected = false;
 int detectedTrackIndex = -1;
+
+// Sprint mode (plan 0002): point-to-point runs instead of laps. The mode
+// follows the detected track's folder — a non-null sprintTimer IS sprint
+// mode (courseManager stays null for the session, and vice versa).
+SprintTimer* sprintTimer = nullptr;
+char sprintCourseName[MAX_LAYOUT_LENGTH] = "";
+int sprintLastRunCount = 0;  // run-complete edge for lap history capture
 unsigned long idleStartTime = 0;
 bool idleTimerRunning = false;
 bool raceActive = false;
 unsigned long raceSessionStartedAt = 0;  // For auto-idle grace period after RPM wake
+// How the active session started (RACE_ENTRY_NONE between sessions). Decides
+// the session-end rule and the camera driver: manual/speed sessions have no
+// engine signal, so they record from session start and end on the 5 min
+// below-5 mph idle rule; tach sessions keep the RPM-driven behaviour.
+RaceEntryCause raceEntryCause = RACE_ENTRY_NONE;
 
 // Runtime settings (loaded from SD in setup)
 float settingLapDetectionDistance = 7.0;
@@ -152,6 +177,10 @@ float settingWaypointDetectionDistance = 30.0;
 float settingWaypointSpeed = 30.0;
 char settingDriverName[32] = "Driver";
 char settingDeviceName[32] = "BirdsEye";
+// race_mode preference — ONLY the tiebreak when both a circuit and a
+// sprint track are within detection range (sprint_select::chooseKind).
+// It never overrides what is actually detected.
+bool settingRaceModePrefSprint = false;
 
 // Track manifest for proximity detection
 TrackManifestEntry trackManifest[MAX_LOCATIONS];
@@ -170,6 +199,12 @@ char dovexReplayOptimal[16];
 unsigned long menuIdleStartTime = 0;
 bool menuIdleTimerRunning = false;
 
+// When the main menu was last ARRIVED at, stamped by switchToDisplayPage().
+// autoRaceModeCheck() uses it (with the button stamps) to tell "the user just
+// landed here" from "the device has been sitting on the menu" — see
+// AUTO_RACE_MENU_GRACE_MS.
+unsigned long mainMenuEnteredAtMs = 0;
+
 // Button hold tracking (for long-press combos)
 unsigned long btn1HoldStart = 0;
 unsigned long btn2HoldStart = 0;
@@ -185,7 +220,7 @@ bool btn3Held = false;
 #define SD_CARD_LOGGING_ENABLED
 // MAX_LOCATIONS, MAX_LOCATION_LENGTH, MAX_LAYOUTS, MAX_LAYOUT_LENGTH
 // are now defined in project.h for use by project-wide structs
-#define FILEPATH_MAX 50        // "/TRACKS/" (8) + name (13) + ".json" (5) + null = 27, using 50 for safety
+#define FILEPATH_MAX 64        // "/TRACKS/SPRINT/" (15) + manifest name (31) + ".json" (5) + null = 52, using 64 for safety
 #include <string.h>
 
 ///////////////////////////////////////////
@@ -268,9 +303,14 @@ const int tachInputPin = D0;
 volatile int tachLastReported = 0;  // Volatile: written by TACH_LOOP, read by display/logging/sleep
 int topTachReported = 0;
 
-// Debounce timing: ignore pulses faster than this (filters ignition ringing)
-// 3000us = 3ms minimum gap, allows up to 20,000 RPM max (333Hz)
-static const uint32_t tachMinPulseGapUs = 3000;
+// Debounce timing: ignore pulses faster than this (filters ignition ringing).
+// Derived at boot from the engine settings by tach_filter::minPulseGapUs() so
+// the true-RPM ceiling is the same on every engine — a fixed 3 ms caps
+// ~20,000 pulses/min, which on a twin firing every rev is only ~10,000 real
+// RPM. Defaults to the historical 3 ms (1 cyl, wasted spark).
+// Volatile: the ISR reads it; setup() writes it once before the interrupt is
+// attached, so there is no race, only a visibility guarantee.
+static volatile uint32_t tachMinPulseGapUs = tach_filter::kBasePulseGapUs;
 volatile uint32_t tachLastPulseUs = 0;
 
 // Ring buffer: ISR writes pulse timestamps, TACH_LOOP reads and computes periods.
@@ -286,8 +326,12 @@ volatile uint8_t  tachRingHead = 0;  // ISR write index (only ISR writes)
 volatile uint8_t  tachRingTail = 0;  // Main-loop read index (only TACH_LOOP writes)
 volatile bool     tachRingOverflow = false;  // ISR sets on drop; TACH_LOOP clears
 
-// Tunable constants
-static const float tachRevsPerPulse = 1.0f;          // Wasted spark = 1 pulse/rev
+// Revolutions per ignition pulse — the single place the engine's geometry
+// enters the RPM path. Set once at boot from spark_mode + cylinder_count;
+// the default (1 cyl, wasted spark) is 1.0, exactly today's behaviour.
+// Applied ONCE, before the Kalman filter, in TACH_LOOP(). No consumer may
+// re-derive or re-apply it — they all read the corrected tachLastReported.
+static float tachRevsPerPulse = 1.0f;
 static const uint32_t tachStopTimeoutUs = 500000;    // 500ms = engine stopped
 
 ///////////////////////////////////////////
@@ -322,6 +366,12 @@ struct GpsData {
   int satellites;
   bool fix;
   bool timeValid;        // true only when the module reports validDate+validTime+fullyResolved
+  // The two halves of timeValid, kept separately so the status page can say
+  // WHICH milestone is outstanding. fullyResolved is the slow one — it needs
+  // the UTC/leap-second parameters decoded off the nav message (~12.5 min
+  // worst case from a cold start), long after a position fix is up.
+  bool timeDateValid;    // validDate && validTime
+  bool timeResolved;     // fullyResolved
   uint16_t year;         // 2-digit (e.g. 25 for 2025) for compat with existing code
   uint8_t month;
   uint8_t day;
@@ -332,6 +382,14 @@ struct GpsData {
 } gpsData = {};
 
 volatile bool gpsDataFresh = false;  // Set by PVT callback, cleared by GPS_LOOP()
+
+// Monotonic count of PVT samples delivered, bumped by the callback and
+// never reset. gpsDataFresh is a one-shot that GPS_LOOP() consumes, so a
+// consumer running LATER in the same iteration can't use it to tell a new
+// sample from a repeat — gpsData holds its last value between updates.
+// Compare this against a remembered value instead. (gpsFrameCounter is no
+// help: it zeroes every second for the frame-rate maths.)
+volatile uint32_t gpsPvtSequence = 0;
 
 // GPS nav-rate target: the rate GPS_RECONFIGURE() (and every wake/recovery
 // path that calls it) re-asserts. Boot starts in status mode (5 Hz +
@@ -387,6 +445,26 @@ unsigned long lapHistory[lapHistoryMaxLaps];
 int lapHistoryCount = 0;
 
 void checkForNewLapData() {
+  // Sprint mode: capture on the RUN-COMPLETE EDGE (run count increment),
+  // not on value change — two identical run times in a row are normal at
+  // autocross and the value-change dedupe below would silently drop the
+  // second. Each completed run also re-arms the auto-idle grace period:
+  // the between-run queue wait always starts fresh (plan 0002).
+  if (sprintTimer != nullptr) {
+    int runs = sprintTimer->getRuns();
+    if (runs > sprintLastRunCount) {
+      sprintLastRunCount = runs;
+      raceSessionStartedAt = millis();
+      if (lapHistoryCount < lapHistoryMaxLaps) {
+        lastLap = sprintTimer->getLastRunTime();
+        lapHistory[lapHistoryCount] = lastLap;
+        lapHistoryCount++;
+        debugln(F("New run added to history..."));
+      }
+    }
+    return;
+  }
+
   // Read from active timer (CourseManager owns either the course timer
   // or the Lap Anything waypoint timer).
   unsigned long activeLapTime = 0;
@@ -464,9 +542,40 @@ bool enableLogging = false;
 sd_format_page::State sdFormatState;
 bool sdFormatLastFailed = false;
 
+///////////////////////////////////////////
+// ON-DEVICE COURSE CREATOR (plan 0002 §5)
+//
+// Walk the cones, capture the lines, write a track file. The model,
+// validation, point averaging and name generation all live in the
+// host-tested course_creator unit; these globals are the live instance
+// plus what the renderer needs to show. Menu input rides the sketch's
+// existing menuSelectionIndex/menuLimit machinery.
+///////////////////////////////////////////
+course_creator::State courseCreator;
+// Track this course attaches to when the user picked "Here" — captured at
+// entry from the proximity scan so the prompt can name it.
+char courseCreatorTrackName[MAX_LOCATION_LENGTH] = "";
+// Result of the last save attempt, for the renderer. SD_COURSE_WRITE_OK
+// doubles as "nothing has failed".
+SdCourseWriteResult courseCreatorLastError = SD_COURSE_WRITE_OK;
+// Last PVT sample folded into an averaging hold — see courseCreatorLoop().
+uint32_t courseCreatorLastPvtSeq = 0;
+
+// A pending "the track is full — drop the oldest runs?" confirmation
+// (plan 0005). The generated names are held rather than regenerated: they
+// carry the GPS clock down to the minute, and re-deriving them after the user
+// reads the prompt would rename the course they just walked.
+char coursePruneName[course_creator::kNameSize] = "";
+char coursePruneShortName[course_creator::kShortNameSize] = "";
+char coursePruneDateCreated[course_creator::kDateCreatedSize] = "";
+uint8_t coursePruneDropCount = 0;
+
 unsigned long lastCardFlush = 0;
 unsigned long lastLogCreateAttempt = 0;  // Throttles log-file open retries (ms)
 const char trackFolder[8] = "/TRACKS";
+// Sprint (point-to-point) tracks live in their own folder so everything
+// existing stays untouched — the folder IS the track kind (plan 0002).
+const char trackFolderSprint[15] = "/TRACKS/SPRINT";
 
 char locations[MAX_LOCATIONS][MAX_LOCATION_LENGTH]; // 13-char FAT16 name limit
 int numOfLocations = 0;
@@ -474,11 +583,35 @@ int numOfLocations = 0;
 ///////////////////////////////////////////
 // JSON PARSING GLOBALS
 ///////////////////////////////////////////
-#include <ArduinoJson.h>
-// 4 KB handles tracks with up to 10 courses with full sector data.
+// (ArduinoJson itself is included in the top block — see the note there.)
+// The maximum size of a track file, in every direction: the raw read buffer
+// and the ArduinoJson document that parses it (sd_functions.ino), and the BLE
+// upload staging buffer (bluetooth.ino). One constant so those cannot drift —
+// a device able to READ a size it cannot RECEIVE is a confusing half-limit.
+//
+// Raised 4 KB -> 8 KB. Measured cost per course, in the shape this firmware's
+// own writer emits (8-decimal coords):
+//
+//   circuit, start line only        148 B      ~26 courses in 4 KB
+//   circuit + 2 sector lines        384 B       ~10 courses in 4 KB
+//   sprint, finish + 2 splits       528 B        ~7 courses in 4 KB
+//
+// That last row was a live bug: MAX_LAYOUTS is 10, but a sprint track hit
+// 4 KB at EIGHT courses. Past that the read truncates mid-JSON, the parse
+// fails, and buildTrackList() adds no manifest entry — so the track silently
+// vanishes from proximity detection rather than merely losing its tail. A
+// sprint venue accrues a dated course per event, so it was a matter of time.
+//
+// 8 KB restores headroom past MAX_LAYOUTS for every shape. It does NOT bound
+// growth — that is what course compaction is for; this only buys room.
+//
+// Affordable: the build reports 70,532 B of RAM in use (29%) with 167,036 B
+// free, so the +12 KB across the three buffers is noise. The tighter budget is
+// FLASH, at 82% of the 408 KiB OTA cap — and buffers cost none of it.
+//
 // The sim uses the same size: a smaller buffer silently truncated real
 // track files (the old Wokwi target's RAM constraint doesn't apply).
-#define JSON_BUFFER_SIZE 4096
+#define JSON_BUFFER_SIZE 8192
 
 // extern matches the forward declaration in sd_functions.h so the
 // constants have external linkage; otherwise their default internal
@@ -560,6 +693,17 @@ const int PAGE_CAMERA_SERIAL_ENTRY = -7; // manual 6-char camera serial entry
 const int PAGE_REPLAY_RESULTS = -8;
 const int PAGE_REPLAY_EXIT = -9;
 const int PAGE_CAMERA_TEST = -10;    // bench test menu (paired camera controls)
+// On-device course creator (plan 0002 §5) — walk the cones, capture the
+// lines. Five screens, all driven by the host-tested course_creator unit.
+const int PAGE_COURSE_TRACK = -11;   // "Are you at X?"  Here / New Track
+const int PAGE_COURSE_TYPE = -12;    // Circuit / Sprint
+const int PAGE_COURSE_LINES = -13;   // one row per timing line + Save/Cancel
+const int PAGE_COURSE_LINE = -14;    // Point A / Point B / Save / Back
+const int PAGE_COURSE_POINT = -15;   // "Save current pos" averaging hold
+// Deliberately OUTSIDE the courseCreatorActive() range below: it is a plain
+// two-row confirm, not one of the model's screens, so it must not be handed
+// to course_creator::rowCount().
+const int PAGE_COURSE_PRUNE = -16;   // "Track full - drop N old runs?"
 
 // running menu (these must be in order)
 const int GPS_DEBUG = 3;
@@ -581,13 +725,14 @@ const int GPS_STATS = 4;
   // block closes up behind the tachometer rather than leaving a dead page
   // in the rotation. Same reshuffle idea as ENDURANCE_MODE above.
   #if BIRDSEYE_ENABLE_SENSOREGG
-    const int SENSOR_TEMP = 7;  // SensorEgg wireless EGT (Temp1)
-    const int GPS_LAP_TIME = 8;
-    const int GPS_LAP_PACE = 9;
-    const int GPS_LAP_BEST = 10;
-    const int OPTIMAL_LAP = 11;
-    const int GPS_LAP_LIST = 12;
-    const int LOGGING_STOP = 13;
+    const int SENSOR_TEMP = 7;   // SensorEgg wireless EGT (Temp1)
+    const int SENSOR_TEMP2 = 8;  // SensorEgg aux intake-air temp (Temp2, v2 eggs)
+    const int GPS_LAP_TIME = 9;
+    const int GPS_LAP_PACE = 10;
+    const int GPS_LAP_BEST = 11;
+    const int OPTIMAL_LAP = 12;
+    const int GPS_LAP_LIST = 13;
+    const int LOGGING_STOP = 14;
   #else
     const int GPS_LAP_TIME = 7;
     const int GPS_LAP_PACE = 8;
@@ -614,7 +759,11 @@ int lastPage = 0;
 #ifdef ENDURANCE_MODE
   const int runningPageStart = GPS_SPEED;
 #else
-  const int runningPageStart = GPS_DEBUG;  // debug page carries the GPS pipeline counters
+  // Runtime, not const: the debug_pages setting decides whether the two
+  // diagnostic pages (GPS_DEBUG, GPS_STATS) are in the rotation. Default is
+  // hidden — the boot settings read raises the start only on an explicit
+  // "show", so a blank or garbled value gives an end user the clean rotation.
+  int runningPageStart = GPS_SPEED;
 #endif
 
 int runningPageEnd = LOGGING_STOP; // only changes if sd:/tracks not found
@@ -738,15 +887,29 @@ void setup() {
   sdTrackSuccess = buildTrackList();
   if(sdSetupSuccess && sdTrackSuccess) {
     debugln(F("Obtained Track List"));
-    for (int i = 0; i < numOfLocations; i++) {
+    for (int i = 0; i < trackManifestCount; i++) {
       char filepath[FILEPATH_MAX];
-      makeFullTrackPath(locations[i], filepath);
+      makeFullTrackPath(trackManifest[i].filename, filepath, trackManifest[i].kind);
       debugln(filepath);
     }
   }
 
   // Load settings from SD (creates defaults on first boot)
   SETTINGS_SETUP();
+
+  // Colour preference is applied HERE, not in the settings block further
+  // down, because displaySetup() runs before the SD card exists — the panel
+  // cannot learn the preference until settings are readable. This is the
+  // earliest moment it can, which keeps the boot splash from visibly
+  // flipping part-way through GPS_SETUP() (over a second on a cold start).
+  // Anything other than an explicit "inverted" means normal, so a blank or
+  // future value leaves the screen as it has always looked.
+  {
+    char displayBuf[16];
+    if (getSetting("display_invert", displayBuf, sizeof(displayBuf))) {
+      displaySetInverted(strcasecmp(displayBuf, "inverted") == 0);
+    }
+  }
 
   // Register the USB mass-storage callbacks (no drive presented until the
   // user enters USB transfer mode). Needs a working SD card for block I/O.
@@ -780,6 +943,42 @@ void setup() {
     if (getSetting("device_name", buf, sizeof(buf))) {
       strncpy(settingDeviceName, buf, sizeof(settingDeviceName) - 1);
       settingDeviceName[sizeof(settingDeviceName) - 1] = '\0';
+    }
+    if (getSetting("race_mode", buf, sizeof(buf))) {
+      settingRaceModePrefSprint = (strcasecmp(buf, "sprint") == 0);
+    }
+#ifndef ENDURANCE_MODE
+    // Debug pages in the race rotation. Only an explicit "show" restores the
+    // GPS/RF DEBUG + GPS STATS pages — anything else (blank, garbled, future
+    // value) keeps the clean end-user rotation starting at the speed page.
+    // ENDURANCE_MODE already starts at GPS_SPEED, so it ignores the setting.
+    if (getSetting("debug_pages", buf, sizeof(buf))) {
+      if (strcasecmp(buf, "show") == 0) runningPageStart = GPS_DEBUG;
+    }
+#endif
+    // Engine geometry. Anything other than an explicit "single" is treated as
+    // wasted spark, so a blank, garbled or future value degrades to today's
+    // behaviour rather than doubling every RPM reading.
+    {
+      bool wastedSpark = true;
+      int cylinders = 1;
+      if (getSetting("spark_mode", buf, sizeof(buf))) {
+        wastedSpark = (strcasecmp(buf, "single") != 0);
+      }
+      if (getSetting("cylinder_count", buf, sizeof(buf))) {
+        const int n = atoi(buf);
+        if (n >= tach_filter::kMinCylinders) cylinders = n;
+      }
+      tachRevsPerPulse = tach_filter::revsPerPulse(cylinders, wastedSpark);
+      tachMinPulseGapUs = tach_filter::minPulseGapUs(cylinders, wastedSpark);
+      debug(F("Engine: cyl="));
+      debug(cylinders);
+      debug(F(" spark="));
+      debug(wastedSpark ? F("wasted") : F("single"));
+      debug(F(" revsPerPulse="));
+      debug(tachRevsPerPulse);
+      debug(F(" minGapUs="));
+      debugln((uint32_t)tachMinPulseGapUs);
     }
     crossingThresholdMeters = settingLapDetectionDistance;
     debug(F("Settings loaded: lap_dist="));
@@ -860,6 +1059,29 @@ void setup() {
 ///////////////////////////////////////////
 
 /**
+ * @brief Sprint timer accessor — non-null exactly while a sprint session's
+ * track has been detected (mode follows the track folder, plan 0002).
+ */
+SprintTimer* getActiveTimerSprint() {
+  return sprintTimer;
+}
+
+bool sprintModeIsActive() {
+  return sprintTimer != nullptr;
+}
+
+/**
+ * @brief True while timing is "live": a sprint run in progress, or (in
+ * circuit mode) the race started. Drives the sprint pages' *waiting*
+ * state — between runs the device stays in race mode with all pages up,
+ * but Current Lap / Pace show *waiting* instead of a dead 0:00.
+ */
+bool activeTimerRunActive() {
+  if (sprintTimer != nullptr) return sprintTimer->isRunActive();
+  return activeTimerRaceStarted();
+}
+
+/**
  * @brief Get the active timer pointer for display/lap-history reads.
  * Returns whichever timer is active: course timer, lap anything, or nullptr.
  */
@@ -877,6 +1099,7 @@ WaypointLapTimer* getActiveTimerWLT() {
 
 // Unified getter helpers for display pages
 bool activeTimerRaceStarted() {
+  if (sprintTimer != nullptr) return sprintTimer->getRaceStarted();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getRaceStarted();
   WaypointLapTimer* wlt = getActiveTimerWLT();
@@ -885,6 +1108,7 @@ bool activeTimerRaceStarted() {
 }
 
 bool activeTimerCrossing() {
+  if (sprintTimer != nullptr) return sprintTimer->getCrossing();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getCrossing();
   WaypointLapTimer* wlt = getActiveTimerWLT();
@@ -893,6 +1117,7 @@ bool activeTimerCrossing() {
 }
 
 int activeTimerLaps() {
+  if (sprintTimer != nullptr) return sprintTimer->getRuns();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getLaps();
   WaypointLapTimer* wlt = getActiveTimerWLT();
@@ -901,6 +1126,7 @@ int activeTimerLaps() {
 }
 
 unsigned long activeTimerCurrentLapTime() {
+  if (sprintTimer != nullptr) return sprintTimer->getCurrentRunTime();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getCurrentLapTime();
   WaypointLapTimer* wlt = getActiveTimerWLT();
@@ -909,6 +1135,7 @@ unsigned long activeTimerCurrentLapTime() {
 }
 
 unsigned long activeTimerLastLapTime() {
+  if (sprintTimer != nullptr) return sprintTimer->getLastRunTime();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getLastLapTime();
   WaypointLapTimer* wlt = getActiveTimerWLT();
@@ -917,6 +1144,7 @@ unsigned long activeTimerLastLapTime() {
 }
 
 unsigned long activeTimerBestLapTime() {
+  if (sprintTimer != nullptr) return sprintTimer->getBestRunTime();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getBestLapTime();
   WaypointLapTimer* wlt = getActiveTimerWLT();
@@ -925,6 +1153,7 @@ unsigned long activeTimerBestLapTime() {
 }
 
 int activeTimerBestLapNumber() {
+  if (sprintTimer != nullptr) return sprintTimer->getBestRunNumber();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getBestLapNumber();
   WaypointLapTimer* wlt = getActiveTimerWLT();
@@ -933,6 +1162,7 @@ int activeTimerBestLapNumber() {
 }
 
 float activeTimerPaceDifference() {
+  if (sprintTimer != nullptr) return sprintTimer->getPaceDifference();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getPaceDifference();
   WaypointLapTimer* wlt = getActiveTimerWLT();
@@ -941,6 +1171,7 @@ float activeTimerPaceDifference() {
 }
 
 float activeTimerTotalDistance() {
+  if (sprintTimer != nullptr) return sprintTimer->getTotalDistanceTraveled();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getTotalDistanceTraveled();
   WaypointLapTimer* wlt = getActiveTimerWLT();
@@ -949,20 +1180,83 @@ float activeTimerTotalDistance() {
 }
 
 unsigned long activeTimerOptimalLapTime() {
+  if (sprintTimer != nullptr) return sprintTimer->getOptimalLapTime();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getOptimalLapTime();
   return 0;
 }
 
 bool activeTimerSectorsConfigured() {
+  if (sprintTimer != nullptr) return sprintTimer->areSectorLinesConfigured();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->areSectorLinesConfigured();
   return false;
 }
 
 /**
+ * @brief Build the sprint session from the just-parsed track file: pick the
+ * newest course by date_created (autocross venues re-lay the course every
+ * event — see the host-tested sprint_select unit) and stand up a SprintTimer
+ * with its start/finish (+ optional split) lines. Returns false when no
+ * usable course exists (no finish line, degenerate lines).
+ */
+bool createSprintSession() {
+  const char* dates[MAX_LAYOUTS];
+  for (int i = 0; i < numOfTracks; i++) dates[i] = trackLayouts[i].date_created;
+  int idx = sprint_select::newestCourseIndex(dates, numOfTracks);
+  if (idx < 0) return false;
+
+  TrackLayout& L = trackLayouts[idx];
+  if (!L.hasFinish) {
+    debugln(F("Sprint course has no finish line — cannot time runs"));
+    return false;
+  }
+
+  // An RPM-wake may have created a Lap Anything CourseManager before
+  // detection ran — sprint replaces it (mirror of the circuit path).
+  if (courseManager != nullptr) {
+    delete courseManager;
+    courseManager = nullptr;
+  }
+  if (sprintTimer != nullptr) {
+    delete sprintTimer;
+    sprintTimer = nullptr;
+  }
+
+  sprintTimer = new SprintTimer(crossingThresholdMeters);
+  sprintTimer->setStartLine(L.start_a_lat, L.start_a_lng, L.start_b_lat, L.start_b_lng);
+  sprintTimer->setFinishLine(L.finish_a_lat, L.finish_a_lng, L.finish_b_lat, L.finish_b_lng);
+  if (L.hasSector2) {
+    sprintTimer->setSector2Line(L.sector_2_a_lat, L.sector_2_a_lng, L.sector_2_b_lat, L.sector_2_b_lng);
+  }
+  if (L.hasSector3) {
+    sprintTimer->setSector3Line(L.sector_3_a_lat, L.sector_3_a_lng, L.sector_3_b_lat, L.sector_3_b_lng);
+  }
+  sprintTimer->forceLinearInterpolation();
+
+  if (!sprintTimer->isStartLineConfigured() || !sprintTimer->isFinishLineConfigured()) {
+    debugln(F("Sprint course lines invalid — cannot time runs"));
+    delete sprintTimer;
+    sprintTimer = nullptr;
+    return false;
+  }
+
+  strncpy(sprintCourseName, tracks[idx], sizeof(sprintCourseName) - 1);
+  sprintCourseName[sizeof(sprintCourseName) - 1] = '\0';
+  sprintLastRunCount = 0;
+
+  debug(F("Sprint session ready — course: "));
+  debug(sprintCourseName);
+  debug(F(" (date_created: "));
+  debug(L.date_created[0] ? L.date_created : "n/a");
+  debugln(F(")"));
+  return true;
+}
+
+/**
  * @brief Scan track manifest for closest match to current GPS position
- * Creates CourseManager when a match is found within 5 miles
+ * Creates CourseManager (circuit) or SprintTimer (sprint) when a match is
+ * found within 5 miles — mode follows the matched track's folder.
  */
 void trackDetectionLoop() {
   if (trackDetected || !gpsData.fix || trackManifestCount == 0) return;
@@ -977,24 +1271,59 @@ void trackDetectionLoop() {
   if (millis() - lastManifestScan < 1000) return;
   lastManifestScan = millis();
 
-  double bestDist = 999999.0;
-  int bestIndex = -1;
+  // Nearest entry PER KIND — mode follows the detected track's folder,
+  // with the race_mode preference as the both-kinds-in-range tiebreak
+  // (host-tested sprint_select unit; plan 0002 §7 Q1).
+  double bestDistCircuit = 999999.0, bestDistSprint = 999999.0;
+  int bestCircuit = -1, bestSprint = -1;
 
   for (int i = 0; i < trackManifestCount; i++) {
     double dist = haversineDistanceMiles(
       gpsData.latitudeDegrees, gpsData.longitudeDegrees,
       trackManifest[i].lat, trackManifest[i].lon
     );
-    if (dist < bestDist) {
-      bestDist = dist;
-      bestIndex = i;
+    if (trackManifest[i].kind == TRACK_KIND_SPRINT) {
+      if (dist < bestDistSprint) { bestDistSprint = dist; bestSprint = i; }
+    } else {
+      if (dist < bestDistCircuit) { bestDistCircuit = dist; bestCircuit = i; }
     }
   }
 
-  if (bestIndex >= 0 && bestDist <= TRACK_DETECT_RADIUS_MILES) {
+  bool circuitInRange = bestCircuit >= 0 && bestDistCircuit <= TRACK_DETECT_RADIUS_MILES;
+  bool sprintInRange  = bestSprint  >= 0 && bestDistSprint  <= TRACK_DETECT_RADIUS_MILES;
+  if (!circuitInRange && !sprintInRange) return;
+
+  // Event-day heuristic: only needed when both kinds are near and the
+  // preference is circuit — the sprint file is parsed once to learn its
+  // newest course's date_created ("laid out today" = event day = sprint).
+  bool sprintCourseToday = false;
+  if (circuitInRange && sprintInRange && !settingRaceModePrefSprint) {
+    char filepath[FILEPATH_MAX];
+    makeFullTrackPath(trackManifest[bestSprint].filename, filepath, TRACK_KIND_SPRINT);
+    if (parseTrackFile(filepath) == PARSE_STATUS_GOOD && numOfTracks > 0) {
+      const char* dates[MAX_LAYOUTS];
+      for (int i = 0; i < numOfTracks; i++) dates[i] = trackLayouts[i].date_created;
+      int newest = sprint_select::newestCourseIndex(dates, numOfTracks);
+      char today[11];
+      snprintf(today, sizeof(today), "20%02d-%02d-%02d",
+               gpsData.year, gpsData.month, gpsData.day);
+      sprintCourseToday = newest >= 0 &&
+          sprint_select::isSameDay(trackLayouts[newest].date_created, today);
+    }
+  }
+
+  sprint_select::Kind useKind = sprint_select::chooseKind(
+      circuitInRange, sprintInRange,
+      settingRaceModePrefSprint ? sprint_select::kPrefSprint : sprint_select::kPrefCircuit,
+      sprintCourseToday);
+
+  int bestIndex = (useKind == sprint_select::kSprint) ? bestSprint : bestCircuit;
+  double bestDist = (useKind == sprint_select::kSprint) ? bestDistSprint : bestDistCircuit;
+
+  {
     debug(F("Track detected: "));
     debug(trackManifest[bestIndex].filename);
-    debug(F(" ("));
+    debug(useKind == sprint_select::kSprint ? F(" [sprint] (") : F(" [circuit] ("));
     debug(bestDist, 2);
     debugln(F(" miles)"));
 
@@ -1005,10 +1334,16 @@ void trackDetectionLoop() {
     // 8.3 limit), causing strcmp mismatches that silently skip real tracks.
     {
       char filepath[FILEPATH_MAX];
-      makeFullTrackPath(trackManifest[bestIndex].filename, filepath);
+      makeFullTrackPath(trackManifest[bestIndex].filename, filepath, trackManifest[bestIndex].kind);
       int parseStatus = parseTrackFile(filepath);
 
-      if (parseStatus == PARSE_STATUS_GOOD && numOfTracks > 0) {
+      if (useKind == sprint_select::kSprint) {
+        // Sprint path: no CourseManager, no CourseDetector — select the
+        // newest course by date_created and time point-to-point runs.
+        if (parseStatus == PARSE_STATUS_GOOD && numOfTracks > 0) {
+          trackDetected = createSprintSession();
+        }
+      } else if (parseStatus == PARSE_STATUS_GOOD && numOfTracks > 0) {
         // Build TrackConfig from parsed data
         activeTrackConfig.longName = activeTrackMetadata.longName[0] ? activeTrackMetadata.longName : trackManifest[bestIndex].filename;
         activeTrackConfig.shortName = activeTrackMetadata.shortName[0] ? activeTrackMetadata.shortName : trackManifest[bestIndex].filename;
@@ -1073,18 +1408,33 @@ void trackDetectionLoop() {
 }
 
 /**
+ * @brief Start a race session. The single entry point — all three triggers
+ * (main-menu Race select, autoRaceModeCheck, tach-wake boot via the GPS
+ * status page) route through here so the entry cause is always recorded.
+ * The caller picks the landing page (speed vs tach) itself.
+ */
+void startRaceSession(RaceEntryCause cause) {
+  raceActive = true;
+  enableLogging = true;
+  raceSessionStartedAt = millis();
+  raceEntryCause = cause;
+  // Create a minimal CourseManager if none exists yet (no track detected)
+  createLapAnythingCourseManager();
+}
+
+/**
  * @brief End the current race session: write DOVEX header, close file,
  * clean up CourseManager, reset state. Used by both checkAutoIdle()
  * and LOGGING_STOP_CONFIRM in display_ui.ino.
  */
 void endRaceSession() {
-  // Deliberately NO camera notification here: checkAutoIdle() ends the
-  // log session on speed alone (engine ignored), but the camera must
-  // keep recording through a stationary grid idle — its own
+  // Deliberately NO camera notification here: for TACH sessions the
+  // camera must keep recording through a stationary grid idle — its own
   // stationary-AND-engine-off rule decides the recording stop. The
-  // camera is stopped explicitly where the user means "I'm done":
-  // the manual stop confirm (display_ui.ino) and shutdown entry
-  // (CAMERA_SLEEP() in enterShutdown()).
+  // camera is stopped explicitly where the ender owns it: the manual
+  // stop confirm (display_ui.ino), the manual/speed-session idle timer
+  // (checkAutoIdle() calls CAMERA_NOTIFY_SESSION_END() itself before
+  // this), and shutdown entry (CAMERA_SLEEP() in enterShutdown()).
 
   // Write DOVEX metadata header into the reserved region
   if (sdDataLogInitComplete && dataFile.isOpen()) {
@@ -1105,9 +1455,17 @@ void endRaceSession() {
     delete courseManager;
     courseManager = nullptr;
   }
+  // Clean up sprint session (mode follows detection; next session re-detects)
+  if (sprintTimer != nullptr) {
+    delete sprintTimer;
+    sprintTimer = nullptr;
+  }
+  sprintCourseName[0] = '\0';
+  sprintLastRunCount = 0;
   trackDetected = false;
   detectedTrackIndex = -1;
   raceActive = false;
+  raceEntryCause = RACE_ENTRY_NONE;
   idleTimerRunning = false;
   idleStartTime = 0;
 
@@ -1126,6 +1484,7 @@ void endRaceSession() {
  */
 void createLapAnythingCourseManager() {
   if (courseManager != nullptr) return;  // Already exists
+  if (sprintTimer != nullptr) return;    // Sprint session owns timing
   activeTrackConfig.longName = "Unknown";
   activeTrackConfig.shortName = "";
   activeTrackConfig.courseCount = 0;
@@ -1136,33 +1495,57 @@ void createLapAnythingCourseManager() {
 }
 
 /**
- * @brief Check for auto-idle: 60s at <2mph ends the session
+ * @brief Check for auto-idle. Cause-aware since the manual/speed camera work:
+ * - Tach sessions: 60 s at <2 mph ends the session (data only — the camera,
+ *   if recording, owns its own 30 s engine-off stop and this yields to it).
+ * - Manual/speed sessions: 5 min at <5 mph ends the session AND stops the
+ *   camera. These sessions have no engine signal, so this idle timer is the
+ *   one and only ender — it must not yield to the camera.
+ * The whole decision table (which rule, when to yield, when to reset) lives
+ * in the host-tested idle_policy unit; this function keeps only the clock
+ * and the side effects.
  */
 void checkAutoIdle() {
   if (!raceActive) return;
 
-  // Yield to an active camera recording: while the camera is recording, IT owns
-  // the end (30 s engine-off -> cameraConsumeAutoStop() above), so the
-  // speed-based idle must not cut the log out from under it during a stationary
-  // but engine-running stint (grid/paddock). No camera, or not recording, keeps
-  // the original speed-only behavior below.
-  //
-  // EXCEPTION — GPS-lock hold: while the session is still waiting for its GPS
-  // time lock, no log file exists and the hold pins the UI with navigation
-  // disabled (displayLoop). If the camera is also recording, this yield was
-  // the ONLY session-ender left, so a lock that never arrives left the device
-  // looking bricked until a power cycle (2026-07-19 pull-start incident).
-  // There is no log to protect yet — let the idle timer end the fileless
-  // session, which releases the UI and stops the camera.
-  if (cameraActivelyRecording() && !gpsLockHoldActive) return;
+  // Promotion to TACH rules: the moment the tach proves itself, ANY session
+  // is tach-ruled — a push/bump-started kart trips the speed gate before the
+  // engine fires, and a manual menu press on a tach kart happens with the
+  // engine off; neither must carry the no-tach rules (camera recording the
+  // paddock, no grid-idle yield, 5 min ender mid-grid) once real ignition is
+  // being counted. Runs before CAMERA_LOOP() in the frame, so the FSM sees
+  // the same cause. No-tach devices never read >500 rpm, so their manual/
+  // speed sessions keep the 5 min/5 mph rules untouched.
+  if ((raceEntryCause == RACE_ENTRY_SPEED || raceEntryCause == RACE_ENTRY_MANUAL) &&
+      idle_policy::tachProven((int32_t)tachLastReported)) {
+    debugln(F("Auto-idle: tach proven — session promoted to tach rules"));
+    raceEntryCause = RACE_ENTRY_TACH;
+  }
+
+  idle_policy::Inputs pin;
+  // Manual/speed-entered sessions have no RPM: the camera records on
+  // sessionDemand and cannot stop itself (its rpm<OFF rule is suppressed),
+  // so THIS timer owns the end of both the log and the recording.
+  pin.speedRuleSession =
+      (raceEntryCause == RACE_ENTRY_MANUAL || raceEntryCause == RACE_ENTRY_SPEED);
+  pin.cameraRecording = cameraActivelyRecording();
+  pin.gpsLockHoldActive = gpsLockHoldActive;
+  pin.sprintEngineRunning = (sprintTimer != nullptr && tachLastReported > 0);
+  pin.speedMph = gps_speed_mph;
+  const idle_policy::Decision d = idle_policy::evaluate(pin);
+
+  // Camera owns the end of a tach session while recording (see idle_policy
+  // for the rule and the GPS-lock-hold exception).
+  if (d.yieldToCamera) return;
 
   // Grace period: don't auto-idle within first 3 minutes of a session.
   // After RPM wake the car is often stationary (warming up, waiting for
   // track session) and GPS needs time to reacquire. Without this, the
-  // 60s idle timer kills the session before the driver even moves.
+  // idle timer kills the session before the driver even moves. (Sprint
+  // runs re-arm it via checkForNewLapData().)
   if (millis() - raceSessionStartedAt < 180000UL) return;
 
-  if (gps_speed_mph >= 2.0) {
+  if (d.resetTimer) {
     idleTimerRunning = false;
     idleStartTime = 0;
     return;
@@ -1174,8 +1557,16 @@ void checkAutoIdle() {
     return;
   }
 
-  if (millis() - idleStartTime >= 60000) {
-    debugln(F("Auto-idle: 60s at <2mph — ending session"));
+  if (millis() - idleStartTime >= d.holdMs) {
+    if (d.stopCameraOnEnd) {
+      debugln(F("Auto-idle: 5min at <5mph — ending session + camera"));
+      // This ender owns the camera for manual/speed sessions: sessionDemand
+      // drops with raceActive, and the notify stops the recording (the FSM's
+      // own rpm stop rule is suppressed for these sessions).
+      CAMERA_NOTIFY_SESSION_END();
+    } else {
+      debugln(F("Auto-idle: 60s at <2mph — ending session"));
+    }
     endRaceSession();
     switchToDisplayPage(PAGE_MAIN_MENU);
   }
@@ -1188,17 +1579,28 @@ void autoRaceModeCheck() {
   if (currentPage != PAGE_MAIN_MENU) return;
   if (currentPage == PAGE_BLUETOOTH || bleConnected) return;
 
+  // Don't hijack a deliberate navigation. Exiting a page — the course creator
+  // especially, since it is used out on the course where you may well be
+  // rolling — lands here, and above the trigger the NEXT loop iteration would
+  // jump straight into race mode, ~4 ms later. The menu is never drawn and the
+  // user has no idea what happened.
+  //
+  // Anchor on the newest of "arrived at the menu" and the button stamps, so
+  // actively navigating at speed defers it too. The debouncer's lastPressed
+  // values persist across iterations (same reason the menu-idle block uses
+  // them), which makes this independent of where in loop() we run.
+  unsigned long settledSince = mainMenuEnteredAtMs;
+  if ((long)(btn1->lastPressed - settledSince) > 0) settledSince = btn1->lastPressed;
+  if ((long)(btn2->lastPressed - settledSince) > 0) settledSince = btn2->lastPressed;
+  if ((long)(btn3->lastPressed - settledSince) > 0) settledSince = btn3->lastPressed;
+  if (millis() - settledSince < AUTO_RACE_MENU_GRACE_MS) return;
+
   bool rpmTriggered = tachLastReported > 500;
   bool speedTriggered = gps_speed_mph >= 10.0;
 
   if (rpmTriggered || speedTriggered) {
     debugln(F("Auto-entering race mode"));
-    raceActive = true;
-    enableLogging = true;
-    raceSessionStartedAt = millis();
-
-    // Create a minimal CourseManager if none exists yet (no track detected)
-    createLapAnythingCourseManager();
+    startRaceSession(rpmTriggered ? RACE_ENTRY_TACH : RACE_ENTRY_SPEED);
 
     // Show tach page if RPM triggered first, otherwise speed page
     switchToDisplayPage(rpmTriggered ? TACHOMETER : GPS_SPEED);
@@ -1240,13 +1642,11 @@ void gpsStatusPageLoop() {
       break;
     case gps_status_page::Exit::kToRace:
       // Engine is (or was, at wake) running — straight into race mode with
-      // logging, mirroring the old RPM-wake path.
+      // logging, mirroring the old RPM-wake path. Always a tach cause: the
+      // page's kToRace verdict only fires on tach wake / engine running.
       gpsEnterRaceMode();
       debugln(F("GPS status page -> race mode"));
-      raceActive = true;
-      enableLogging = true;
-      raceSessionStartedAt = millis();
-      createLapAnythingCourseManager();
+      startRaceSession(RACE_ENTRY_TACH);
       switchToDisplayPage(TACHOMETER);
       break;
     case gps_status_page::Exit::kToShutdown:
@@ -1295,6 +1695,259 @@ void sdFormatPageLoop() {
       break;
     case sd_format_page::Exit::kStay:
       break;
+  }
+}
+
+///////////////////////////////////////////
+// ON-DEVICE COURSE CREATOR — SKETCH GLUE (plan 0002 §5)
+//
+// The model lives in the host-tested course_creator unit. Everything here
+// is the parts that need hardware: which page constant a screen maps to,
+// feeding real GPS fixes into an averaging hold, and writing the result.
+///////////////////////////////////////////
+
+/**
+ * @brief Page constant for the creator's current screen.
+ */
+int courseCreatorPage() {
+  switch (courseCreator.screen) {
+    case course_creator::Screen::kTrackPrompt:  return PAGE_COURSE_TRACK;
+    case course_creator::Screen::kTypeSelect:   return PAGE_COURSE_TYPE;
+    case course_creator::Screen::kLineMenu:     return PAGE_COURSE_LINES;
+    case course_creator::Screen::kLineDetail:   return PAGE_COURSE_LINE;
+    case course_creator::Screen::kPointCapture: return PAGE_COURSE_POINT;
+  }
+  return PAGE_MAIN_MENU;
+}
+
+/** @brief True while any of the creator's screens is up. */
+bool courseCreatorActive() {
+  return currentPage <= PAGE_COURSE_TRACK && currentPage >= PAGE_COURSE_POINT;
+}
+
+/**
+ * @brief Enter the course creator from the main menu.
+ *
+ * Runs the same haversine proximity scan track detection uses, so the
+ * prompt can offer "you're at X" instead of making the user think about
+ * which file a new course belongs in. Without a fix there is no scan and
+ * no capture, so the creator refuses to open at all — every screen past
+ * here needs GPS.
+ */
+bool courseCreatorEnter() {
+  if (!gpsData.fix || !gpsData.timeValid) return false;
+
+  courseCreatorTrackName[0] = '\0';
+  double bestDist = TRACK_DETECT_RADIUS_MILES;
+  int best = -1;
+  for (int i = 0; i < trackManifestCount; i++) {
+    const double dist = haversineDistanceMiles(
+        gpsData.latitudeDegrees, gpsData.longitudeDegrees,
+        trackManifest[i].lat, trackManifest[i].lon);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = i;
+    }
+  }
+  if (best >= 0) {
+    strncpy(courseCreatorTrackName, trackManifest[best].filename,
+            sizeof(courseCreatorTrackName) - 1);
+    courseCreatorTrackName[sizeof(courseCreatorTrackName) - 1] = '\0';
+  }
+
+  courseCreatorLastError = SD_COURSE_WRITE_OK;
+  course_creator::begin(courseCreator, best >= 0);
+  menuSelectionIndex = 0;
+  switchToDisplayPage(courseCreatorPage());
+  return true;
+}
+
+/**
+ * @brief Write the walked course to the card.
+ *
+ * Names are generated from the GPS clock — the creator never takes text
+ * input (plan 0002 §5), so this is the only naming path. A new track keeps
+ * the same stamp for its file, its long name and its first course, which
+ * is what lets the webapp show them as one thing to rename.
+ */
+void courseCreatorSave() {
+  char name[course_creator::kNameSize];
+  char shortName[course_creator::kShortNameSize];
+  char dateCreated[course_creator::kDateCreatedSize] = "";
+
+  course_creator::generatedName(name, sizeof(name), gpsData.year, gpsData.month,
+                                gpsData.day, gpsData.hour, gpsData.minute);
+  course_creator::generatedShortName(shortName, sizeof(shortName), gpsData.month,
+                                     gpsData.day, gpsData.hour, gpsData.minute);
+  if (courseCreator.kind == course_creator::CourseKind::kSprint) {
+    course_creator::generatedDateCreated(dateCreated, sizeof(dateCreated),
+                                         gpsData.year, gpsData.month, gpsData.day,
+                                         gpsData.hour, gpsData.minute);
+  }
+
+  CreatedCourseWrite req;
+  req.course = &courseCreator;
+  req.newTrack = courseCreator.newTrack;
+  req.trackName = courseCreator.newTrack ? name : courseCreatorTrackName;
+  req.shortName = shortName;
+  req.courseName = name;
+  req.dateCreated = dateCreated;
+
+  courseCreatorLastError = sdSaveCreatedCourse(req);
+  if (courseCreatorLastError == SD_COURSE_WRITE_OK) {
+    debug(F("Course saved: "));
+    debugln(name);
+    switchToDisplayPage(PAGE_MAIN_MENU);
+    return;
+  }
+
+  // A full SPRINT track is recoverable (plan 0005): a sprint venue re-lays
+  // its cones every event, so the file fills with runs nobody drives again.
+  // A circuit track is not — its layouts are all still driven, and there is
+  // nothing safe to drop.
+  if (courseCreatorLastError == SD_COURSE_WRITE_TOO_BIG && !courseCreator.newTrack &&
+      courseCreator.kind == course_creator::CourseKind::kSprint) {
+    SdSprintPrunePlan plan;
+    if (sdPlanSprintPrune(req, plan) == SD_COURSE_WRITE_OK && plan.possible &&
+        plan.dropCount > 0) {
+      if (!plan.needsConfirm) {
+        // Every course being dropped was renamed in the webapp, which means
+        // it lives there too and rides cloud sync. Nothing to ask about.
+        courseCreatorLastError = sdSaveCreatedCourse(req, plan.dropCount);
+        if (courseCreatorLastError == SD_COURSE_WRITE_OK) {
+          debug(F("Course saved after pruning: "));
+          debugln(name);
+          switchToDisplayPage(PAGE_MAIN_MENU);
+          return;
+        }
+      } else {
+        // At least one of them still carries the name the device gave it, so
+        // this card may be the only place it exists. Ask.
+        strncpy(coursePruneName, name, sizeof(coursePruneName) - 1);
+        coursePruneName[sizeof(coursePruneName) - 1] = '\0';
+        strncpy(coursePruneShortName, shortName, sizeof(coursePruneShortName) - 1);
+        coursePruneShortName[sizeof(coursePruneShortName) - 1] = '\0';
+        strncpy(coursePruneDateCreated, dateCreated, sizeof(coursePruneDateCreated) - 1);
+        coursePruneDateCreated[sizeof(coursePruneDateCreated) - 1] = '\0';
+        coursePruneDropCount = plan.dropCount;
+        menuSelectionIndex = 0;  // default to "No"
+        switchToDisplayPage(PAGE_COURSE_PRUNE);
+        return;
+      }
+    }
+  }
+
+  // Stay on the line menu with everything still captured — walking the
+  // course again because the card was busy would be unforgivable.
+  debugln(F("Course save FAILED"));
+  switchToDisplayPage(PAGE_COURSE_LINES);
+}
+
+/**
+ * @brief Act on the "drop the oldest runs?" confirmation (plan 0005).
+ *
+ * Reuses the names generated when the save was first attempted, so the course
+ * keeps the minute it was actually walked rather than the minute the user got
+ * round to answering.
+ */
+void courseCreatorConfirmPrune(bool accepted) {
+  if (!accepted) {
+    // Everything is still captured; the user can Save again or Cancel.
+    switchToDisplayPage(PAGE_COURSE_LINES);
+    return;
+  }
+
+  CreatedCourseWrite req;
+  req.course = &courseCreator;
+  req.newTrack = false;
+  req.trackName = courseCreatorTrackName;
+  req.shortName = coursePruneShortName;
+  req.courseName = coursePruneName;
+  req.dateCreated = coursePruneDateCreated;
+
+  courseCreatorLastError = sdSaveCreatedCourse(req, coursePruneDropCount);
+  if (courseCreatorLastError == SD_COURSE_WRITE_OK) {
+    debug(F("Course saved after pruning: "));
+    debugln(coursePruneName);
+    switchToDisplayPage(PAGE_MAIN_MENU);
+  } else {
+    switchToDisplayPage(PAGE_COURSE_LINES);
+  }
+}
+
+/**
+ * @brief Act on a menu selection inside the creator.
+ *
+ * Called from handleMenuPageSelection(); the generic menu machinery has
+ * already tracked the row index.
+ */
+void courseCreatorSelect() {
+  const course_creator::Action action =
+      course_creator::select(courseCreator, (uint8_t)menuSelectionIndex);
+
+  switch (action) {
+    case course_creator::Action::kBeginCapture:
+      course_creator::captureBegin(courseCreator, millis());
+      break;
+    case course_creator::Action::kSaveCourse:
+      courseCreatorSave();
+      return;
+    case course_creator::Action::kExit:
+      switchToDisplayPage(PAGE_MAIN_MENU);
+      return;
+    case course_creator::Action::kNone:
+      break;
+  }
+
+  const int page = courseCreatorPage();
+  if (page != currentPage) {
+    menuSelectionIndex = 0;
+    switchToDisplayPage(page);
+  } else {
+    forceDisplayRefresh();
+  }
+}
+
+/**
+ * @brief Feed GPS into a running capture and finish it when the hold ends.
+ *
+ * Runs every loop iteration while the creator is up. Only NEW PVT samples
+ * count — gpsData holds its last value between updates, so an un-gated
+ * feed would average the same fix 250 times a second and report a
+ * confidence the fix never had. gpsDataFresh can't be that gate: GPS_LOOP()
+ * consumes it earlier in the same iteration, so this runs on the sequence
+ * counter instead.
+ */
+void courseCreatorLoop() {
+  if (!courseCreatorActive()) return;
+  if (course_creator::capturePoll(courseCreator, millis()) ==
+      course_creator::CaptureResult::kIdle) {
+    return;
+  }
+
+  const uint32_t seq = gpsPvtSequence;
+  if (seq != courseCreatorLastPvtSeq && gpsData.fix) {
+    courseCreatorLastPvtSeq = seq;
+    course_creator::captureAddFix(courseCreator, gpsData.latitudeDegrees,
+                                  gpsData.longitudeDegrees,
+                                  gpsData.horizontalAccuracy, millis());
+  }
+
+  const course_creator::CaptureResult result =
+      course_creator::capturePoll(courseCreator, millis());
+  if (result == course_creator::CaptureResult::kRunning) {
+    return;
+  }
+
+  // kDone commits and drops back to the line detail; kFailed clears the
+  // hold and leaves captureFailed set so the page can offer a retry.
+  course_creator::captureCommit(courseCreator, millis());
+  const int page = courseCreatorPage();
+  if (page != currentPage) {
+    menuSelectionIndex = 0;
+    switchToDisplayPage(page);
+  } else {
+    forceDisplayRefresh();
   }
 }
 
@@ -1347,7 +2000,10 @@ void writeDovexHeader() {
 
   const char* courseName = "Lap Anything";
   const char* shortName  = "";
-  if (courseManager != nullptr) {
+  if (sprintTimer != nullptr) {
+    courseName = sprintCourseName[0] ? sprintCourseName : "Sprint";
+    shortName = activeTrackMetadata.shortName;  // from the session's parse
+  } else if (courseManager != nullptr) {
     const char* cn = courseManager->getActiveCourseName();
     if (cn) courseName = cn;
     shortName = courseManager->getShortName();
@@ -1361,6 +2017,8 @@ void writeDovexHeader() {
       activeTimerBestLapTime(),
       activeTimerOptimalLapTime(),
       settingDeviceName,
+      // Webapp loading helper: with SPRINT the laps line is a runs line.
+      sprintTimer != nullptr ? "SPRINT" : "CIRCUIT",
   };
 
   static char headerBuf[dovex_header::kHeaderSize];
@@ -1437,11 +2095,30 @@ static void shutdownSystemOff() {
   delay(50);  // contact settle
   wdtPet();
 
-  // Wake sources: SENSE-LOW with pull-up on the tach (idle-high, pulse =
-  // falling) and all three buttons (active-low). Pull + SENSE config is
-  // retained in System OFF. P-numbers via the board variant's pin map.
-  nrf_gpio_cfg_sense_input(g_ADigitalPinMap[tachInputPin],
-                           NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
+  // The tach line's parked level depends on the pickup circuit's output
+  // stage (Schmitt inverter + optocoupler builds idle either way), and
+  // arming SENSE toward the idle level = DETECT satisfied = instant
+  // wake-reset (the battery-sleep reboot loop). Sample the parked line
+  // and arm the opposite level; the vote lives in the host-tested
+  // wake_cause unit. Engine is off on every shutdown path, so the line
+  // is quiet — the spread-out burst just rides through stray noise.
+  unsigned tachHighSamples = 0;
+  const unsigned kTachIdleSamples = 15;
+  for (unsigned i = 0; i < kTachIdleSamples; i++) {
+    if (digitalRead(tachInputPin) == HIGH) tachHighSamples++;
+    delay(2);
+  }
+  const bool tachIdleHigh =
+      wake_cause::tachIdleIsHigh(tachHighSamples, kTachIdleSamples);
+  wdtPet();
+
+  // Wake sources: the tach (pull-up, SENSE opposite its sampled idle
+  // level — a spark pulse is a transition away from idle) and all three
+  // buttons (active-low, SENSE-LOW). Pull + SENSE config is retained in
+  // System OFF. P-numbers via the board variant's pin map.
+  nrf_gpio_cfg_sense_input(
+      g_ADigitalPinMap[tachInputPin], NRF_GPIO_PIN_PULLUP,
+      tachIdleHigh ? NRF_GPIO_PIN_SENSE_LOW : NRF_GPIO_PIN_SENSE_HIGH);
   nrf_gpio_cfg_sense_input(g_ADigitalPinMap[btn1->pin],
                            NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
   nrf_gpio_cfg_sense_input(g_ADigitalPinMap[btn2->pin],
@@ -1542,6 +2219,10 @@ static void softResumeFromCharging() {
   gpsSatUsedCount = 0;
   GPS_WAKE();
 
+  // Restart the SensorEgg scanner stopped on shutdown entry (no-op when
+  // the POC is compiled out — BLE/camera stay lazy either way).
+  SENSOREGG_WAKE();
+
   DISPLAY_WAKE();
   menuIdleTimerRunning = false;
   if (!sdSetupSuccess && sdCardUnformatted) {
@@ -1572,6 +2253,16 @@ void enterShutdown() {
 
   // Stop BLE if active (advertising/connection teardown)
   if (bleActive) BLE_STOP();
+
+  // Stop the SensorEgg passive scanner (no-op when the POC is compiled
+  // out) and quiesce the radio UNCONDITIONALLY: BLE_STOP() above only
+  // covers the transfer service, so a camera-owned advert/link — or an
+  // async disconnect the Bluefruit task hasn't serviced yet — would sail
+  // into System OFF with the conn LED still driven (GPIO state is
+  // retained there: the "blue light stays on after sleep" field report).
+  SENSOREGG_SLEEP();
+  bleShutdownQuiesce();
+  wdtPet();
 
   // Display off (I2C command, ~10 µA panel sleep)
   DISPLAY_SLEEP();
@@ -1696,9 +2387,16 @@ void loop() {
   // ready to re-record if the engine restarts. endRaceSession() is idempotent
   // and does not switch pages itself, so we do (mirrors checkAutoIdle). A
   // manual logging-stop does not set this — that path already ended the log.
-  if (raceActive && cameraConsumeAutoStop()) {
-    endRaceSession();
-    switchToDisplayPage(PAGE_MAIN_MENU);
+  // Consume UNCONDITIONALLY: the latch can be set with no session active
+  // (e.g. the GPS-lock-hold idle ender leaves the camera recording, then the
+  // engine dies on the menu), and a short-circuited read here let that stale
+  // latch survive to kill the NEXT session on its first frame.
+  {
+    const bool cameraStopped = cameraConsumeAutoStop();
+    if (raceActive && cameraStopped) {
+      endRaceSession();
+      switchToDisplayPage(PAGE_MAIN_MENU);
+    }
   }
 
   // Button hold detection for shutdown/reboot combos
@@ -1756,6 +2454,19 @@ void loop() {
       enterShutdown();
       return;
     }
+  } else if (currentPage == PAGE_INTERNAL_FAULT) {
+    // FAULT is a buttons-disabled dead end (dead SD on a sealed unit). With
+    // no idle timer it burned the battery flat on every charge — the same
+    // rationale as the SD-format page's timeout. Reuse the menu idle pair:
+    // buttons are disabled here, so a plain entry-stamped timeout is enough.
+    if (!menuIdleTimerRunning) {
+      menuIdleTimerRunning = true;
+      menuIdleStartTime = millis();
+    }
+    if (millis() - menuIdleStartTime >= SLEEP_IDLE_TIMEOUT_MS) {
+      enterShutdown();
+      return;
+    }
   } else {
     menuIdleTimerRunning = false;
   }
@@ -1765,6 +2476,7 @@ void loop() {
   readButtons();
   gpsStatusPageLoop();  // boot status page: consume presses, hold/auto-close
   sdFormatPageLoop();   // boot format-confirm page: hold Select 3s to format
+  courseCreatorLoop();  // course creator: feed GPS into an averaging hold
   displayLoop();
   resetButtons();
 

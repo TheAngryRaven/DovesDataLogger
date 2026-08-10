@@ -44,7 +44,7 @@ include(FetchContent)
 # Keep this ref and the library source list below in lockstep: bumping the
 # pin at release time (CLAUDE.md: "bump deliberately") may add or remove
 # library .cpp files, and the list is explicit, not globbed.
-set(DOVESLAPTIMER_REF "v4.2.0" CACHE STRING
+set(DOVESLAPTIMER_REF "v4.3.0" CACHE STRING
     "Git ref of DovesLapTimer to build the sim against")
 message(STATUS "DovesLapTimer ref: ${DOVESLAPTIMER_REF}")
 FetchContent_Declare(doveslaptimer
@@ -137,6 +137,8 @@ set(SIM_CORE_SOURCES
   # Pure-logic units the compiled firmware modules call (same files the
   # host test harness in tests/ builds).
   ${BIRDSEYE_DIR}/camera_fsm.cpp
+  ${BIRDSEYE_DIR}/course_creator.cpp
+  ${BIRDSEYE_DIR}/course_prune.cpp
   ${BIRDSEYE_DIR}/crossing_pattern.cpp
   ${BIRDSEYE_DIR}/dovex_header.cpp
   ${BIRDSEYE_DIR}/gps_stats.cpp
@@ -144,15 +146,20 @@ set(SIM_CORE_SOURCES
   ${BIRDSEYE_DIR}/gps_time.cpp
   ${BIRDSEYE_DIR}/gps_validation.cpp
   ${BIRDSEYE_DIR}/haversine.cpp
+  ${BIRDSEYE_DIR}/idle_policy.cpp
   ${BIRDSEYE_DIR}/lap_format.cpp
   ${BIRDSEYE_DIR}/sat_bars.cpp
   ${BIRDSEYE_DIR}/sd_access_policy.cpp
   ${BIRDSEYE_DIR}/sd_format_page.cpp
   ${BIRDSEYE_DIR}/sensoregg_protocol.cpp
+  ${BIRDSEYE_DIR}/sprint_select.cpp
   ${BIRDSEYE_DIR}/tach_filter.cpp
+  ${BIRDSEYE_DIR}/track_json.cpp
   ${BIRDSEYE_DIR}/wake_cause.cpp
   # Real DovesLapTimer sources — the lap/sector timing IS the demo.
   ${doveslaptimer_SOURCE_DIR}/src/DovesLapTimer.cpp
+  ${doveslaptimer_SOURCE_DIR}/src/CrossingEngine.cpp
+  ${doveslaptimer_SOURCE_DIR}/src/SprintTimer.cpp
   ${doveslaptimer_SOURCE_DIR}/src/WaypointLapTimer.cpp
   ${doveslaptimer_SOURCE_DIR}/src/CourseDetector.cpp
   ${doveslaptimer_SOURCE_DIR}/src/CourseManager.cpp

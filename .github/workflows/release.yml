@@ -72,14 +72,14 @@ jobs:
             "ArxTypeTraits"
           # Release builds pin the lap-timer library to a known-good tag —
           # bump deliberately. (Beta builds track its BETA branch instead.)
-          arduino-cli lib install --git-url https://github.com/TheAngryRaven/DovesLapTimer.git#v4.2.0
+          arduino-cli lib install --git-url https://github.com/TheAngryRaven/DovesLapTimer.git#v4.3.0
           pip install --user adafruit-nrfutil
 
       - name: Compile
         run: |
           arduino-cli compile \
             --fqbn "${{ matrix.board.fqbn }}" \
-            --build-property "compiler.cpp.extra_flags=-D${{ matrix.board.define }} -DSERIAL_BUFFER_SIZE=256" \
+            --build-property "compiler.cpp.extra_flags=-D${{ matrix.board.define }} -DSERIAL_BUFFER_SIZE=256 -DDOVES_DISABLE_DEBUG" \
             --output-dir dist \
             --warnings none \
             BirdsEye

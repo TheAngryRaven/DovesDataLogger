@@ -103,7 +103,7 @@ jobs:
         run: |
           arduino-cli compile \
             --fqbn "${{ matrix.board.fqbn }}" \
-            --build-property "compiler.cpp.extra_flags=-D${{ matrix.board.define }} -DFIRMWARE_VERSION_OVERRIDE=${{ steps.ver.outputs.betaver }} -DSERIAL_BUFFER_SIZE=256 -DBIRDSEYE_ENABLE_SENSOREGG=1" \
+            --build-property "compiler.cpp.extra_flags=-D${{ matrix.board.define }} -DFIRMWARE_VERSION_OVERRIDE=${{ steps.ver.outputs.betaver }} -DSERIAL_BUFFER_SIZE=256 -DDOVES_DISABLE_DEBUG -DBIRDSEYE_ENABLE_SENSOREGG=1" \
             --output-dir dist \
             --warnings none \
             BirdsEye

@@ -9,6 +9,15 @@ void begin(State& s, uint32_t nowMs) {
   s.lockArmed = false;
 }
 
+TimeSync timeSyncState(bool dateTimeValid, bool fullyResolved) {
+  if (!dateTimeValid) return TimeSync::kNoDateTime;
+  // fullyResolved without date/time is not a state the module produces,
+  // but ordering the checks this way means the page reports the EARLIER
+  // outstanding milestone if it ever did.
+  if (!fullyResolved) return TimeSync::kResolving;
+  return TimeSync::kLocked;
+}
+
 uint32_t countdownSecondsLeft(const State& s, uint32_t nowMs) {
   if (!s.lockArmed) return 0;
   const uint32_t elapsed = nowMs - s.lockSinceMs;

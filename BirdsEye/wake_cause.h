@@ -63,4 +63,18 @@ struct PinMasks {
 // VBUS is next, then watchdog, then soft reset, then cold boot.
 Cause decode(const Regs& regs, const PinMasks& pins);
 
+// Shutdown-side companion to the boot decode: decide the tach pin's
+// parked idle level from a burst of samples taken right before System
+// OFF entry, so SENSE can be armed for the OPPOSITE level. The tach
+// pickup's output stage (Schmitt inverter + optocoupler) idles high or
+// low depending on the circuit build, and runtime RPM counting cannot
+// tell the two apart — a spark pulse yields exactly one falling edge
+// either way. But arming SENSE toward the idle level satisfies DETECT
+// immediately and System OFF wake-resets within a second (the
+// battery-sleep instant-reboot bug). Majority vote over the samples;
+// a tie or an empty burst resolves to idle-high — the pull-up's level
+// on a floating/disconnected tach input, and the historical hard-coded
+// assumption.
+bool tachIdleIsHigh(unsigned highSamples, unsigned totalSamples);
+
 }  // namespace wake_cause

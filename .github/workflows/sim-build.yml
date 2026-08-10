@@ -23,7 +23,7 @@ on:
 # Library ref by channel — identical expression to compile-sketch.yml so the
 # sim always validates the same DovesLapTimer the firmware links.
 env:
-  LAPTIMER_REF: ${{ (github.base_ref == 'BETA' || github.ref_name == 'BETA') && 'BETA' || 'v4.2.0' }}
+  LAPTIMER_REF: ${{ (github.base_ref == 'BETA' || github.head_ref == 'BETA' || github.ref_name == 'BETA') && 'BETA' || 'v4.3.0' }}
 
 jobs:
   native:

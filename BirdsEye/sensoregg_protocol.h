@@ -1,27 +1,31 @@
 #pragma once
 
 ///////////////////////////////////////////
-// SENSOREGG PW-ADV-1 PROTOCOL
+// SENSOREGG PW-ADV PROTOCOL (v1 + v2)
 // Parser for the DovesSensorEgg wireless thermocouple pod's BLE
-// advertising payload (spec PW-ADV-1). The egg is a pure BROADCASTER:
-// it packs EGT + cold-junction temperatures into a 14-byte Manufacturer
-// Specific Data AD structure and advertises at ~10 Hz; the logger is a
-// passive OBSERVER that never connects. This unit owns the byte layout
-// and the staleness/validity rules so they are host-testable; the BLE
-// plumbing (Bluefruit.Scanner) stays in sensoregg.ino.
+// advertising payload. The egg is a pure BROADCASTER: it packs its
+// readings into a Manufacturer Specific Data AD structure and
+// advertises at ~10 Hz; the logger is a passive OBSERVER that never
+// connects. This unit owns the byte layout and the staleness/validity
+// rules so they are host-testable; the BLE plumbing (Bluefruit.Scanner)
+// stays in sensoregg.ino.
 //
-// Payload layout (bytes, all multi-byte fields little-endian). NOTE:
-// Bluefruit's addManufacturerData()/parseReportByType() pass the buffer
-// through RAW — the company ID is INSIDE the array, not prepended:
+// v2 (2026-07-27) appends to v1 — bytes 0-13 keep their exact v1
+// offsets, so both versions share one decode path. Layout (little-
+// endian fields). NOTE: Bluefruit's addManufacturerData() /
+// parseReportByType() pass the buffer through RAW — the company ID is
+// INSIDE the array, not prepended:
 //   0-1   company ID 0xFF 0xFF (SIG test/internal ID)
 //   2-3   magic 'P' 'W' (0x50 0x57) — disambiguates other 0xFFFF users
-//   4     pod type / protocol version (0x01)
+//   4     protocol version (0x01 = 14-byte v1, 0x02 = 16-byte v2)
 //   5     flags: bit0 = pairing window active, bit1 = thermocouple fault
 //   6-7   EGT, int16 deci-degC (6500 = 650.0 C); 0x8000 = invalid
 //   8-9   cold junction, int16 deci-degC; 0x8000 = invalid
 //   10    raw MCP9600 STATUS register (0x04)
-//   11    battery percent (stub, always 0xFF)
+//   11    battery percent 0-100 (real on v2 eggs; 0xFF = unknown/stub)
 //   12-13 free-running sequence counter (wraps)
+//   14-15 [v2] aux thermistor (intake air), int16 deci-degC; 0x8000 =
+//         invalid. Absent on v1 — parses as NaN.
 //
 // Pure logic — no Arduino headers — so it is exercised by host tests.
 ///////////////////////////////////////////
@@ -31,9 +35,14 @@
 
 namespace sensoregg_protocol {
 
-// Full payload length. Shorter reports are rejected; longer ones are
-// accepted (forward compatibility — a future egg may append fields).
-constexpr size_t kPayloadLen = 14;
+// Per-version payload lengths. Shorter-than-the-version's reports are
+// rejected; longer ones are accepted (forward compatibility — a future
+// egg may append more fields). kPayloadLen doubles as the minimum
+// acceptable length for the cheap scan-callback gate; kPayloadLenMax
+// sizes RX buffers.
+constexpr size_t kPayloadLen = 14;     // v1 (and the common prefix)
+constexpr size_t kPayloadLenV2 = 16;   // v2 = v1 + aux thermistor
+constexpr size_t kPayloadLenMax = kPayloadLenV2;
 
 // Company ID + magic, exactly as they appear at the start of the payload.
 constexpr uint8_t kMagic[4] = {0xFF, 0xFF, 0x50, 0x57};
@@ -46,8 +55,11 @@ constexpr uint8_t kMagic[4] = {0xFF, 0xFF, 0x50, 0x57};
 // bursts on a BLE-busy bench.
 constexpr uint16_t kCompanyId = 0xFFFF;
 
-// Byte 4 — the only protocol version this parser understands.
-constexpr uint8_t kProtocolVersion = 0x01;
+// Byte 4 — the protocol versions this parser understands. v1 eggs are
+// still accepted (their aux temperature parses as NaN), so a fleet can
+// mix firmware ages without the logger going blind to either.
+constexpr uint8_t kProtocolVersion = 0x01;    // original 14-byte layout
+constexpr uint8_t kProtocolVersionV2 = 0x02;  // + aux thermistor
 
 // int16 sentinel for "no valid reading" (the egg emits this instead of
 // casting NaN/out-of-range floats to int16, which is UB).
@@ -92,12 +104,15 @@ constexpr uint32_t kScannerSelfHealMs = 30000;
 struct Reading {
   float egtC = 0.0f;        // NaN when the egg sent the invalid sentinel
   float junctionC = 0.0f;   // NaN when the egg sent the invalid sentinel
+  float auxC = 0.0f;        // v2 aux thermistor (intake air); NaN on v1
+                            // eggs and on the invalid sentinel
   uint8_t flags = 0;
   bool pairingActive = false;  // flags bit0
   bool tcFault = false;        // flags bit1 (MCP9600 STATUS input-range)
   uint8_t status = 0;          // raw MCP9600 STATUS register
-  uint8_t battery = 0;         // stub, 0xFF on current eggs
+  uint8_t battery = 0;         // percent 0-100 on v2 eggs; 0xFF unknown
   uint16_t sequence = 0;
+  uint8_t protoVersion = 0;    // byte 4 of the accepted payload
 };
 
 // True when data starts with the 4-byte company-ID+magic prefix (cheap

@@ -122,6 +122,9 @@ class SdFat {
   bool exists(const char* path);
   bool mkdir(const char* path);
   bool remove(const char* path);
+  // Used by the on-device course creator's write-to-temp-then-swap, so a
+  // power loss mid-rewrite can't leave a truncated track file behind.
+  bool rename(const char* oldPath, const char* newPath);
   File32 open(const char* path, oflag_t oflag = O_READ);
 
   // On-device format: wipes the VFS clean (no FAT to build).

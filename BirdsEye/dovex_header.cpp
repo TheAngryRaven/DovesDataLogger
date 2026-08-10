@@ -50,8 +50,9 @@ bool format(char* buf, size_t bufSize,
   };
 
   // Line 1: column labels (CRLF — matches Arduino Print::println).
-  // device_name is the trailing column for backwards compatibility.
-  if (!append("datetime,driver,course,short_name,best_lap_ms,optimal_ms,device_name\r\n")) {
+  // device_name and race_mode are trailing columns for backwards
+  // compatibility (added in that order; see header comment).
+  if (!append("datetime,driver,course,short_name,best_lap_ms,optimal_ms,device_name,race_mode\r\n")) {
     return false;
   }
 
@@ -62,13 +63,14 @@ bool format(char* buf, size_t bufSize,
   formatLapField(optStr,  sizeof(optStr),  meta.optimalMs);
 
   const int n = snprintf(p, static_cast<size_t>(end - p),
-                          "%s,%s,%s,%s,%s,%s,%s\r\n",
+                          "%s,%s,%s,%s,%s,%s,%s,%s\r\n",
                           meta.datetime ? meta.datetime : "",
                           meta.driver   ? meta.driver   : "",
                           meta.course   ? meta.course   : "",
                           meta.shortName? meta.shortName: "",
                           bestStr, optStr,
-                          meta.device   ? meta.device   : "");
+                          meta.device   ? meta.device   : "",
+                          meta.raceMode ? meta.raceMode : "");
   if (n < 0 || p + n > end) return false;
   p += n;
 
@@ -119,6 +121,7 @@ bool parse(const char* buf, size_t bufSize,
   outMeta.bestLap[0]   = '\0';
   outMeta.optimal[0]   = '\0';
   outMeta.device[0]    = '\0';
+  outMeta.raceMode[0]  = '\0';
 
   if (buf == nullptr || bufSize < kHeaderSize) return false;
 
@@ -150,25 +153,36 @@ bool parse(const char* buf, size_t bufSize,
   // Line 2 (metadata values).
   if (!nextLine(lineBegin, lineLen)) return false;
 
-  // Split line 2 by commas into a local copy we can NUL-poke.
+  // Split line 2 by commas into a local copy. Fields are POSITIONAL, so
+  // the splitter must preserve empty fields — strtok collapses consecutive
+  // delimiters, which would let an empty middle column (e.g. a blank
+  // device_name) shift every later column left. Absent trailing columns
+  // (older logs) leave their fields "".
   char metaBuf[256];
   boundedCopy(metaBuf, sizeof(metaBuf), lineBegin, lineLen);
 
-  char* tok = strtok(metaBuf, ",");
-  if (tok) boundedCopy(outMeta.datetime,  sizeof(outMeta.datetime),  tok, strlen(tok));
-  tok = strtok(nullptr, ",");
-  if (tok) boundedCopy(outMeta.driver,    sizeof(outMeta.driver),    tok, strlen(tok));
-  tok = strtok(nullptr, ",");
-  if (tok) boundedCopy(outMeta.course,    sizeof(outMeta.course),    tok, strlen(tok));
-  tok = strtok(nullptr, ",");
-  if (tok) boundedCopy(outMeta.shortName, sizeof(outMeta.shortName), tok, strlen(tok));
-  tok = strtok(nullptr, ",");
-  if (tok) boundedCopy(outMeta.bestLap,   sizeof(outMeta.bestLap),   tok, strlen(tok));
-  tok = strtok(nullptr, ",");
-  if (tok) boundedCopy(outMeta.optimal,   sizeof(outMeta.optimal),   tok, strlen(tok));
+  const char* fp = metaBuf;
+  auto nextField = [&](char* dst, size_t dstSize) {
+    if (fp == nullptr) {
+      if (dstSize) dst[0] = '\0';
+      return;
+    }
+    const char* comma = strchr(fp, ',');
+    const size_t len = comma ? static_cast<size_t>(comma - fp) : strlen(fp);
+    boundedCopy(dst, dstSize, fp, len);
+    fp = comma ? comma + 1 : nullptr;
+  };
+
+  nextField(outMeta.datetime,  sizeof(outMeta.datetime));
+  nextField(outMeta.driver,    sizeof(outMeta.driver));
+  nextField(outMeta.course,    sizeof(outMeta.course));
+  nextField(outMeta.shortName, sizeof(outMeta.shortName));
+  nextField(outMeta.bestLap,   sizeof(outMeta.bestLap));
+  nextField(outMeta.optimal,   sizeof(outMeta.optimal));
   // device_name — trailing column; absent in pre-device_name logs (stays "").
-  tok = strtok(nullptr, ",");
-  if (tok) boundedCopy(outMeta.device,    sizeof(outMeta.device),    tok, strlen(tok));
+  nextField(outMeta.device,    sizeof(outMeta.device));
+  // race_mode — trailing column; absent in older logs (stays "" = circuit).
+  nextField(outMeta.raceMode,  sizeof(outMeta.raceMode));
 
   // Line 3 (lap column label) — skip; tolerate missing.
   if (!nextLine(lineBegin, lineLen)) return true;  // no laps recorded
@@ -182,7 +196,7 @@ bool parse(const char* buf, size_t bufSize,
   char lapsBuf[kHeaderSize];
   boundedCopy(lapsBuf, sizeof(lapsBuf), lineBegin, lineLen);
 
-  tok = strtok(lapsBuf, ",");
+  char* tok = strtok(lapsBuf, ",");
   while (tok != nullptr && outLapCount < maxLaps) {
     const unsigned long v = strtoul(tok, nullptr, 10);
     if (v > 0) {

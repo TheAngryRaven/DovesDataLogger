@@ -10,7 +10,269 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - **MINOR** — new features or device behavior that is backwards compatible.
 - **PATCH** — bug fixes and internal changes with no user-visible behavior change.
 
-## [Unreleased]
+## [4.0.0] - 2026-08-10
+
+### Added
+- **The camera now works without a tachometer.** Auto-record used to be
+  driven entirely by engine RPM, so on a device with no tach pickup a paired
+  Insta360 never woke up. Now a race session started from the menu, or by the
+  speed trip, drives the camera itself: it wakes at session start and begins
+  recording a few seconds after it connects. These sessions end — data
+  logging and camera recording together — after **5 minutes below 5 mph**
+  (previously the data log ended alone after 60 seconds below 2 mph).
+  Tach-equipped devices are unchanged: RPM still runs the whole show,
+  including the 30-second engine-off stop — any session on a tach kart
+  (menu press, speed trip, push/bump start) is handed to the RPM rules the
+  moment real ignition is counted.
+- **The diagnostic pages are hidden by default.** The two pages at the front
+  of the race rotation (GPS/RF debug counters, and the battery/sats/SD stats
+  page) are developer tools, and a new **Debug Pages** setting (editable over
+  Bluetooth) now controls them. Out of the box the rotation starts at the
+  speed page — a driver only ever sees speed, RPM, and lap pages. Set
+  `debug_pages` to `show` to put the diagnostics back. **Note this is a
+  behaviour change**: existing devices hide the pages after updating until
+  the setting is flipped.
+- **A full sprint track can now make room for one more run** (plan 0005).
+  A sprint venue re-lays its course every event, so walked courses pile up in
+  one track file — and once that file is bigger than the logger can read, the
+  track stops being detected at the venue altogether. Until now, walking a
+  course onto a full track simply lost it: the screen said `track file full`
+  and there was nothing to do about it without a laptop.
+  The logger now offers to drop the oldest runs and save. It picks what to drop
+  carefully:
+  - **Courses you renamed in the app go first**, even if they're the newest —
+    a renamed course exists in the app too, so dropping it from the card loses
+    nothing. Those are dropped without asking.
+  - **A run still carrying the name the logger gave it** (`N260803_1432`) may
+    exist nowhere else, so you're asked before it goes.
+  - Oldest first within each group.
+  Circuit tracks are unaffected: their layouts are all still driven, so there's
+  nothing safe to drop and a full one still just says so.
+- **The screen can be inverted.** A new **Display Colours** setting, editable
+  over Bluetooth, switches the panel between the white-on-black it has always
+  used and black-on-lit. Useful in direct sun, where a mostly-dark screen is
+  the harder one to read. The default is unchanged, so nothing looks different
+  until you ask for it.
+- **RPM is now correct on engines that aren't single-cylinder karts**
+  (plan 0003). The pickup counts ignition sparks, and the logger treated one
+  spark as one revolution — true only for a 2-stroke, or a 4-stroke with
+  wasted spark, running one cylinder. On anything else RPM was out by a fixed
+  factor: a twin firing every revolution read **double** the real speed.
+  Two new settings fix it, editable over Bluetooth:
+  - **Spark Mode** — `wasted` (one spark per revolution: 2-stroke, or
+    4-stroke wasted spark) or `single` (4-stroke single-fire, one spark per
+    two revolutions).
+  - **Cylinders** — the cylinders the **pickup can see**, which is not always
+    the engine's. A clamp around one plug wire of a twin sees one, so that
+    stays at 1; only a shared coil or all-cylinder harness sees them all.
+  - The defaults reproduce the old behaviour exactly, so a logger you never
+    configure reads identically to before.
+  - Knock-on benefit: the RPM thresholds the device acts on — auto-race entry,
+    and the camera's wake / start-recording / stop triggers — now mean what
+    they say on every engine, instead of firing at half the real RPM on a twin.
+  - The ignition-noise debounce follows the setting too, so the higher spark
+    rate of a multi-cylinder engine doesn't run into it and read low.
+
+- **Create a course on the device — walk the cones, no laptop** (plan 0002
+  §5). New **Create** entry on the main menu: pick the track you're at (or
+  start a new one), pick Circuit or Sprint, then capture each timing line by
+  standing at the cone and holding for three seconds. Autocross venues
+  re-lay their course every event, so this is what makes a sprint course
+  authorable at the event instead of the night before on a computer. Circuit
+  courses work the same way, with one fewer line to walk.
+  - **Points are averaged, not snapshotted.** "Save current pos" collects
+    fixes for three seconds — around 75 of them at 25 Hz — and stores the
+    mean. You're standing at the cone anyway, so the accuracy is free. Loose
+    fixes are dropped, and a hold that can't gather enough usable ones says
+    so and asks you to try again rather than quietly writing a bad line.
+  - **No typing on the device.** Names are generated from the GPS clock
+    (`N260803_1432`, unique to the minute) and are meant to be renamed in
+    the web app afterwards — which is also why the whole name fits the
+    track browser instead of being cut off.
+  - **Save is refused, with the reason, until the course is actually
+    usable**: a start line always, a finish line for sprint, and the sector
+    rules the web app's editor enforces — so a course written here can
+    always be opened and edited there later.
+  - **Back is a real undo.** Re-walk one endpoint of a line and change your
+    mind, and the stored line is untouched.
+  - Adding a course to an existing track rewrites the file through a temp
+    copy, so losing power mid-save can't leave a broken track file behind.
+  - Needs a GPS fix and time lock, and says so up front rather than at the
+    end of a walked course.
+- **BLE sprint-track sync — `TSLIST` / `TSGET:` / `TSPUT:` / `TSDEL:`**
+  (plan 0002). The four existing track verbs gained `TS`-prefixed twins that
+  target `/TRACKS/SPRINT` instead of `/TRACKS`, so sprint courses can be
+  pushed and pulled over Bluetooth like circuit tracks — previously the new
+  folder was only reachable by USB mass storage. `TSLIST` answers with its
+  own `TSFILE:` / `TSEND` tokens so a sprint enumeration can never be mistaken
+  for a circuit one; the other three reuse the existing replies. The variants
+  share the circuit implementations via a `kind` parameter rather than
+  duplicating handlers, and the filename validator stays strict — the target
+  folder is chosen by the opcode and never parsed from the wire, so a client
+  still cannot path out of the tracks folders.
+
+- **Sprint mode (plan 0002) — point-to-point run timing for autocross /
+  hillclimb events** (backwards compatible — MINOR). Sprint tracks live in
+  the new `/TRACKS/SPRINT/` SD folder (circuit tracks are untouched); the
+  detected track's folder selects the mode automatically. A sprint course
+  is a start line + a separate `finish_*` line (+ up to two optional
+  sector lines) with a sortable `date_created` stamp — the newest course
+  is always loaded (autocross venues re-lay the course every event; the
+  host-tested `sprint_select` unit owns the ordering + tiebreak rules).
+  Runs are timed by the DovesLapTimer library's new `SprintTimer` (BETA):
+  re-crossing the start cancels + restarts a run, finish crossings with no
+  active run are ignored, DNF records nothing. Between runs the device
+  stays in race mode with every page live — Current Lap and Pace show
+  `*waiting*` — and auto-idle becomes engine-aware in sprint (a running
+  engine at the start line never ends the session; each completed run
+  re-arms the grace period). Run times land in the existing lap history /
+  DOVEX laps line ("laps" verbiage is kept everywhere by design).
+- **New `race_mode` setting** (`circuit` default / `sprint`): ONLY the
+  tiebreak when both a circuit and a sprint track are within detection
+  range — `circuit` yields to a sprint track whose newest course was
+  created today (event day); `sprint` always prefers the sprint track
+  (fixed layouts, e.g. a permanent rally course). Never overrides what is
+  actually detected.
+- **DOVEX `race_mode` trailing header column** (`CIRCUIT`/`SPRINT`, empty
+  = circuit; same backwards-compatible append mechanism as
+  `device_name`): a loading helper so the webapp knows to interpret the
+  laps line as runs. Also fixed the header parser to preserve empty
+  middle fields — the old strtok splitter let a blank column shift every
+  later column left.
+- **SensorEgg PW-ADV v2 support** (backwards compatible — MINOR). The
+  passive observer now accepts the egg's 16-byte v2 payload alongside v1:
+  a new aux intake-air thermistor (`Temp2`) and a real battery percent.
+  v1 eggs keep working (their `Temp2` parses as `nan`); a v2 frame
+  truncated below 16 bytes is rejected as corrupt rather than mis-read
+  as v1. The RX path previously truncated captures at 14 bytes — v2
+  bytes never reached the parser — and now captures up to the largest
+  known layout with per-slot lengths.
+- **`Temp2` race page**: second temperature page after Temp1, same
+  layout and staleness rules ('---' on stale/v1/invalid), with the egg's
+  battery percent as the subtext (`--` when unknown). Beta channel only,
+  like the rest of the SensorEgg POC.
+- **DOVEX `Temp2` trailing column** (backwards compatible append, same
+  mechanism as `device_name` and `Temp1`/`Junction1`): aux intake-air
+  temp in °C, literal `nan` on stale link / v1 egg / invalid divider.
+  Never causes a GPS row to be skipped; written on every build so the
+  format does not fork by channel.
+
+### Changed
+- **CI/production builds pass `-DDOVES_DISABLE_DEBUG`** (new DovesLapTimer
+  BETA flag): the library's debug strings + print call-sites are dead
+  weight on hardware builds (no debug Stream is ever attached) and the
+  beta image had crossed 100% of the 320 KB OTA self-flash cap — it was
+  already at 98.2% before sprint mode. Dropping the resident debug pipeline
+  brings the image back under the cap with headroom instead of moving the
+  OTA staging layout. Local IDE debug builds are unaffected (the macro is
+  opt-in per build).
+- The scan-tuning test's pinned egg advertising interval was stale at
+  160 units; the egg de-aliased to 179 units (111.875 ms) — pin updated
+  (anti-phase-lock invariants still hold).
+### Fixed
+- **A corrupted settings file now heals itself instead of poisoning the
+  device forever.** A hand-edited `SETTINGS.json` with a typo (or any
+  unparseable content) used to make every setting read and write fail
+  silently for good — camera pairing gone, names lost — with no on-device
+  recovery. The logger now quarantines the bad file to `SETTINGS.json.bad`
+  (kept for inspection; an older `.bad` is overwritten) and regenerates a
+  fresh default file, at boot and on the first write that hits the
+  corruption.
+- **A Bluetooth file download can no longer arrive silently corrupted.** If a
+  notification stalled for more than a moment (phone screen off, radio
+  congestion), the logger dropped that chunk and carried on with the next one
+  — the received file ended shorter than promised with no error. The unsent
+  chunk is now rewound and resent.
+- **Listing a card full of logs no longer crash-reboots the logger
+  mid-transfer.** The file listing walked the whole directory in one go and
+  a season's worth of logs could outlast the hardware watchdog; it is now
+  fed during the walk.
+- **The screen now says so when logging dies mid-session.** An SD write
+  failure stops logging for the session (the race deliberately continues) —
+  but with the diagnostics hidden by default nothing on screen showed it, so
+  a bad card could silently cost a whole day's data. The speed page shows a
+  `NO LOG` corner flag and the tach page a `** NOT LOGGING **` footer.
+- **A dead SD card no longer drains the battery on the fault screen.** The
+  FAULT page (card dead at boot, buttons disabled) had no idle timeout, so a
+  sealed unit sat there flashing until the pack was flat. It now powers down
+  after the same 5-minute idle as the menu.
+- **The blue Bluetooth light no longer stays on after the device sleeps.**
+  Sleep only tore the radio down when the *file-transfer* page had been used;
+  a camera-owned Bluetooth link (or one still mid-disconnect) kept the
+  connection LED driven straight into power-off — and the chip keeps pin
+  states in that mode, so the light burned all night. Shutdown now quiesces
+  the radio unconditionally and forces the LED off as the last step. On beta
+  builds the SensorEgg scanner is also stopped at sleep (it previously ran
+  through the entire charging park) and restarts on charging resume.
+- **A track with many courses no longer disappears from the device.** Track
+  files were read and parsed through a 4 KB budget, and a file past it was cut
+  mid-JSON: the parse failed, no manifest entry was built, and the track
+  silently stopped being detected at the venue — not just losing its extra
+  courses, but vanishing entirely. Sprint tracks hit this first, since a sprint
+  course carries a finish line plus splits (~528 bytes each) and a venue accrues
+  a dated course per event: **eight courses was enough**, below the ten the
+  device claims to support. The budget is now 8 KB, which clears ten courses of
+  every shape with headroom, and the BLE upload buffer is sized from the same
+  constant so the largest track the device can read is also the largest it will
+  accept. Costs RAM only (there was 167 KB free), no flash. This raises the
+  ceiling rather than removing it — a truncated read now also says so on the
+  debug serial instead of failing silently.
+- **The crossing animation no longer paints over menus and setup screens.**
+  The flag animation shown while the vehicle is inside a timing-line zone was
+  gated by a list of pages to *skip*, and that list never grew as pages were
+  added — so every screen introduced since got the animation drawn straight
+  over it whenever the lap timer said "in the zone". Standing still beside a
+  timing line is exactly when you are using those screens, so the camera
+  pages, replay browser, transfer menus, the main menu and the course creator
+  could all be interrupted by it. It is now shown only on the live racing
+  pages, which is the only place it ever meant anything.
+- **Leaving a page while moving no longer throws you straight into race
+  mode.** Auto-race fires from the main menu above 500 RPM or 10 mph — but it
+  was checked the instant the menu appeared, so exiting any page while rolling
+  landed on the menu and entered race mode on the very next loop pass, about
+  four milliseconds later. The menu was never drawn; from the driver's seat
+  the device just did something on its own. Auto-race now waits for the menu
+  to have been **settled for three seconds** — nothing arriving, no buttons
+  pressed — which also stops it firing while you are actively navigating the
+  menu at speed. The ordinary case is untouched: a device parked on the menu
+  has been quiet for minutes before you drive off.
+- **The GPS status page no longer reads as though a good fix is a bad one.**
+  Once a position fix came up, the page said `FIX (time sync)` — which parses
+  as a *kind* of fix (a time-only, position-less one) rather than what it
+  actually meant: position is good, the clock isn't ready yet. A perfectly
+  healthy device looked broken, and the natural response — power-cycling —
+  restarts the very countdown being waited on. It now reads `FIX ok  UTC..`,
+  and a new line says which milestone is outstanding: `UTC: no date/time`
+  while the module has neither, `UTC: resolving <=12m` once it has the date
+  and time but not the fully-resolved UTC. That second one is the slow, normal
+  case — the receiver has to decode the leap-second parameters out of the GPS
+  navigation message, which only repeats every ~12.5 minutes, so a clean fix
+  in under a minute followed by several more minutes of waiting is expected,
+  not a fault. Weak signal makes it worse: tracking a satellite well enough to
+  range off it is a far lower bar than decoding its data bits cleanly.
+  - The constellation readout (`Mode:GPS-only`) still occupies that line once
+    the clock is locked, so nothing was lost — the diagnostic only takes the
+    space while there is something to diagnose.
+
+- **Battery sleep instantly reboot-looped when the tach line idles low.**
+  System OFF entry hardcoded the tach wake as `SENSE-LOW` (assuming an
+  idle-high line), but the pickup circuit's Schmitt-inverter +
+  optocoupler output stage can idle low — DETECT was satisfied the
+  moment System OFF was entered and the device reset within a second
+  (USB-powered sleep was unaffected: a cable parks in the charging loop
+  and never enters System OFF). Runtime RPM counting can't expose the
+  polarity — a spark pulse yields one falling edge either way. Shutdown
+  now samples the parked tach line (15 reads over ~30 ms, majority vote
+  in the host-tested `wake_cause::tachIdleIsHigh()`) and arms SENSE for
+  the opposite level; ties/floating inputs keep the original SENSE-LOW.
+- **`isnan()` was compiled out of egg paths by `-Ofast`** (the platform
+  builds sketches with `-ffinite-math-only`, which constant-folds
+  `isnan()` to false). The Temp1 race page rendered `lroundf(NaN)`
+  garbage (`-214748`) instead of `---` on a stale link; the DOVEX temp
+  columns survived only because `dtostrf(NaN)` happens to emit a string
+  the numeric guard rejects into the same `nan` fallback. Egg paths now
+  use `isNanF()` (bit-pattern check, `nan_bits.h`) which the optimizer
+  cannot fold.
 
 ## [3.1.0] - 2026-08-03
 
@@ -888,7 +1150,7 @@ all breaking under this project's semver policy.
   before the app region is ever erased, and a GPREGRET bootloader-recovery
   flag so an interrupted swap leaves the unit re-flashable over BLE. The
   request characteristic max length was raised to 244 to carry ~240-byte
-  image chunks. See `docs/firmware-ota-phase0.md` for the apply-strategy
+  image chunks. See `docs/plans/0000-firmware-ota-phase0.md` for the apply-strategy
   decision and the hardware spikes that gate it. (The previously added
   `BLEDfu` buttonless Secure DFU service remains registered for the one-time
   fleet-migration push via the nRF Connect mobile app.)

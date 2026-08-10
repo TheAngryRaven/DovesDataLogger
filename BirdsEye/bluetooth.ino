@@ -18,12 +18,27 @@ static volatile bool trackUploadReady = false;      // signals main loop to send
 static volatile bool trackUploadComplete = false;    // signals main loop to write file
 static volatile bool trackUploadError = false;
 static char trackUploadFilename[25];                 // just the filename (e.g. "OKC.json")
-static char trackUploadBuffer[4096];
+// Sized from JSON_BUFFER_SIZE so the largest track the device can PARSE is
+// also the largest it can RECEIVE. When these were separate 4 KB constants,
+// raising one alone would have produced a device that reads an 8 KB track off
+// its own card but answers TERR:TOO_LARGE when the app tries to send one back.
+static char trackUploadBuffer[JSON_BUFFER_SIZE];
 static volatile uint16_t trackUploadOffset = 0;
 
 // Track delete state (BLE callback -> main loop)
 static volatile bool trackDeletePending = false;
 static char trackDeleteFilename[25];
+// Which folder a pending track upload/delete targets (TRACK_KIND_CIRCUIT /
+// TRACK_KIND_SPRINT). Sprint tracks live in /TRACKS/SPRINT — see plan 0002.
+static volatile uint8_t trackUploadKind = TRACK_KIND_CIRCUIT;
+static volatile uint8_t trackDeleteKind = TRACK_KIND_CIRCUIT;
+
+// Folder for a track kind. The BLE filename validator deliberately rejects
+// '/' so a client can never splice a path of its own — the folder is chosen
+// here, by opcode, and never comes off the wire.
+static const char* trackFolderFor(uint8_t kind) {
+  return (kind == TRACK_KIND_SPRINT) ? trackFolderSprint : trackFolder;
+}
 
 // Deferred file command buffer (BLE callback -> main loop). Carries the
 // SD-touching commands (LIST / GET: / DELETE: / TLIST / TGET:) so SdFat is
@@ -297,6 +312,11 @@ void bleSendFileList() {
       }
     }
     entry.close();
+    // The whole walk runs inside one loop() iteration: 10 ms per file
+    // (plus up to ~100 ms per congested notify) exceeds the ~4 s WDT on a
+    // card holding a season of logs — feed it per entry, like the SD
+    // formatter does.
+    wdtPet();
   }
   root.close();
   releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
@@ -307,7 +327,12 @@ void bleSendFileList() {
   debugln(F(" files"));
 }
 
-void bleSendTrackList() {
+void bleSendTrackList(uint8_t kind) {
+  // Sprint listings answer with their own tokens (TSFILE:/TSEND) so a client
+  // can never confuse a sprint enumeration with a circuit one.
+  const bool sprint = (kind == TRACK_KIND_SPRINT);
+  const char* fileTok = sprint ? "TSFILE:%s" : "TFILE:%s";
+  const char* endTok  = sprint ? "TSEND" : "TEND";
   // Same locking discipline as bleSendFileList() — see the comment there.
   if (currentSDAccess != SD_ACCESS_NONE ||
       !acquireSDAccess(SD_ACCESS_BLE_TRANSFER)) {
@@ -316,11 +341,11 @@ void bleSendTrackList() {
     return;
   }
 
-  File32 trackDir2 = SD.open("/TRACKS/");
+  File32 trackDir2 = SD.open(trackFolderFor(kind));
   if (!trackDir2) {
     debugln(F("BLE: Failed to open TRACKS directory"));
     releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
-    fileStatusChar.notify((uint8_t*)"TEND", 4);
+    fileStatusChar.notify((uint8_t*)endTok, strlen(endTok));
     return;
   }
 
@@ -334,7 +359,7 @@ void bleSendTrackList() {
       entry.getName(name, sizeof(name));
 
       char msg[70];
-      int len = snprintf(msg, sizeof(msg), "TFILE:%s", name);
+      int len = snprintf(msg, sizeof(msg), fileTok, name);
       if (len > 0 && len < (int)sizeof(msg)) {
         fileStatusChar.notify((uint8_t*)msg, len);
         delay(10);
@@ -342,11 +367,12 @@ void bleSendTrackList() {
       }
     }
     entry.close();
+    wdtPet();  // same in-one-iteration walk as bleSendFileList
   }
   trackDir2.close();
   releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
 
-  fileStatusChar.notify((uint8_t*)"TEND", 4);
+  fileStatusChar.notify((uint8_t*)endTok, strlen(endTok));
   debug(F("BLE: Track list sent, "));
   debug(fileCount);
   debugln(F(" files"));
@@ -538,14 +564,16 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
     settingsCmdPending = true;
 
   // Track management commands
-  } else if (strcmp(buffer, "TLIST") == 0) {
+  } else if (strcmp(buffer, "TLIST") == 0 || strcmp(buffer, "TSLIST") == 0) {
     if (!deferFileCommand(buffer)) {
       fileStatusChar.notify((uint8_t*)"TERR:BUSY", 9);
     }
-  } else if (strncmp(buffer, "TGET:", 5) == 0) {
-    // The name is spliced into "/TRACKS/%s"; validate it so it can't
-    // climb out of /TRACKS via ../ or carry FAT-unsafe characters.
-    if (!filename_validator::isValidFilename(buffer + 5, filename_validator::kMaxBleFilenameLen)) {
+  } else if (strncmp(buffer, "TGET:", 5) == 0 || strncmp(buffer, "TSGET:", 6) == 0) {
+    // The name is spliced into "<folder>/%s"; validate it so it can't
+    // climb out of the tracks folders via ../ or carry FAT-unsafe bytes.
+    // The folder itself comes from the opcode, never from the wire.
+    if (!filename_validator::isValidFilename(buffer + (buffer[1] == 'S' ? 6 : 5),
+                                             filename_validator::kMaxBleFilenameLen)) {
       debugln(F("BLE: TGET rejected — bad filename"));
       fileStatusChar.notify((uint8_t*)"TERR:BAD_NAME", 13);
       return;
@@ -553,17 +581,20 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
     if (!deferFileCommand(buffer)) {
       fileStatusChar.notify((uint8_t*)"TERR:BUSY", 9);
     }
-  } else if (strncmp(buffer, "TPUT:", 5) == 0) {
+  } else if (strncmp(buffer, "TPUT:", 5) == 0 || strncmp(buffer, "TSPUT:", 6) == 0) {
     if (trackUploadActive || bleTransferInProgress) {
       fileStatusChar.notify((uint8_t*)"TERR:BUSY", 9);
       return;
     }
-    if (!filename_validator::isValidFilename(buffer + 5, filename_validator::kMaxBleFilenameLen)) {
+    const bool putSprint = (buffer[1] == 'S');
+    const char* putName = buffer + (putSprint ? 6 : 5);
+    if (!filename_validator::isValidFilename(putName, filename_validator::kMaxBleFilenameLen)) {
       debugln(F("BLE: TPUT rejected — bad filename"));
       fileStatusChar.notify((uint8_t*)"TERR:BAD_NAME", 13);
       return;
     }
-    strncpy(trackUploadFilename, buffer + 5, sizeof(trackUploadFilename) - 1);
+    trackUploadKind = putSprint ? TRACK_KIND_SPRINT : TRACK_KIND_CIRCUIT;
+    strncpy(trackUploadFilename, putName, sizeof(trackUploadFilename) - 1);
     trackUploadFilename[sizeof(trackUploadFilename) - 1] = '\0';
     trackUploadOffset = 0;
     trackUploadError = false;
@@ -571,17 +602,20 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
     trackUploadReady = true;
     trackUploadActive = true;
     debugln(F("BLE: Track upload started"));
-  } else if (strncmp(buffer, "TDEL:", 5) == 0) {
+  } else if (strncmp(buffer, "TDEL:", 5) == 0 || strncmp(buffer, "TSDEL:", 6) == 0) {
     if (trackDeletePending) {
       fileStatusChar.notify((uint8_t*)"TERR:BUSY", 9);
       return;
     }
-    if (!filename_validator::isValidFilename(buffer + 5, filename_validator::kMaxBleFilenameLen)) {
+    const bool delSprint = (buffer[1] == 'S');
+    const char* delName = buffer + (delSprint ? 6 : 5);
+    if (!filename_validator::isValidFilename(delName, filename_validator::kMaxBleFilenameLen)) {
       debugln(F("BLE: TDEL rejected — bad filename"));
       fileStatusChar.notify((uint8_t*)"TERR:BAD_NAME", 13);
       return;
     }
-    strncpy(trackDeleteFilename, buffer + 5, sizeof(trackDeleteFilename) - 1);
+    trackDeleteKind = delSprint ? TRACK_KIND_SPRINT : TRACK_KIND_CIRCUIT;
+    strncpy(trackDeleteFilename, delName, sizeof(trackDeleteFilename) - 1);
     trackDeleteFilename[sizeof(trackDeleteFilename) - 1] = '\0';
     trackDeletePending = true;
 
@@ -757,9 +791,7 @@ void BLE_STOP() {
   Bluefruit.Advertising.stop();
 
   // Turn off the BLE LED
-  Bluefruit.autoConnLed(false);
-  Bluefruit.setConnLedInterval(0);
-  digitalWrite(LED_BLUE, HIGH);
+  bleConnLedOff();
 
   bleConnected = false;
   // bleActive already set false at top of BLE_STOP()
@@ -772,6 +804,55 @@ void BLE_STOP() {
   sdSetTransferSpeed(false);
 
   debugln(F("BLE: Bluetooth stopped"));
+}
+
+// Force the Bluefruit connection LED off and keep it off. Bluefruit drives
+// LED_CONN (the XIAO's blue LED, active-low) whenever _led_conn is enabled —
+// which is the library DEFAULT, so camera-owned advertising/links blink it
+// even though this module never called autoConnLed(true) for them. Disabling
+// autoConnLed stops the library re-lighting it; the digitalWrite parks the
+// pin high (off) — nRF52 GPIO state is retained in System OFF, so a lit pin
+// would stay lit on a "powered off" device.
+//
+// The Bluefruit calls MUST stay behind bleInitialized: this core's
+// setConnLedInterval() passes _led_blink_th to FreeRTOS with no null guard,
+// and that timer is only created in Bluefruit.begin() — calling it on a
+// never-initialized radio (stock device, BLE fully lazy) hands the timer
+// daemon a NULL handle. The pin park below is the only pre-begin-safe part,
+// and the only part such a device needs.
+void bleConnLedOff() {
+  if (bleInitialized) {
+    Bluefruit.autoConnLed(false);
+    Bluefruit.setConnLedInterval(0);
+  }
+  pinMode(LED_BLUE, OUTPUT);
+  digitalWrite(LED_BLUE, HIGH);
+}
+
+// Shutdown-path radio quiesce, UNCONDITIONAL on owner. BLE_STOP() only runs
+// for the transfer service (bleActive), so a camera-owned radio — or a peer
+// whose async disconnect hasn't been serviced by the Bluefruit task yet —
+// used to sail through enterShutdown() with the conn LED still driven (the
+// "blue light stays on after sleep" field report). Called from
+// enterShutdown() after CAMERA_SLEEP()/BLE_STOP(): stop any advertising,
+// drop any surviving link, give the async disconnect a bounded window to be
+// serviced (WDT-fed), then force the LED off LAST so nothing re-lights it.
+void bleShutdownQuiesce() {
+  if (bleInitialized) {
+    Bluefruit.Advertising.restartOnDisconnect(false);
+    Bluefruit.Advertising.stop();
+    if (Bluefruit.connected()) {
+      Bluefruit.disconnect(Bluefruit.connHandle());
+    }
+    // Bounded settle: the disconnect (and the library's own LED-off) run on
+    // the Bluefruit task; System OFF follows within milliseconds otherwise.
+    for (int i = 0; i < 5; i++) {
+      if (!Bluefruit.connected()) break;
+      wdtPet();
+      delay(50);
+    }
+  }
+  bleConnLedOff();  // pre-begin() it only parks the pin (see its guard)
 }
 
 // Execute a deferred file command (main-loop context — the only place
@@ -793,10 +874,16 @@ static void processFileCommand() {
     while (*filename == ' ') filename++;
     bleDeleteFile(filename);
   } else if (strcmp(fileCmdBuffer, "TLIST") == 0) {
-    bleSendTrackList();
-  } else if (strncmp(fileCmdBuffer, "TGET:", 5) == 0) {
+    bleSendTrackList(TRACK_KIND_CIRCUIT);
+  } else if (strcmp(fileCmdBuffer, "TSLIST") == 0) {
+    bleSendTrackList(TRACK_KIND_SPRINT);
+  } else if (strncmp(fileCmdBuffer, "TGET:", 5) == 0 ||
+             strncmp(fileCmdBuffer, "TSGET:", 6) == 0) {
+    const bool sprint = (fileCmdBuffer[1] == 'S');
     char filepath[FILEPATH_MAX];
-    snprintf(filepath, sizeof(filepath), "/TRACKS/%s", fileCmdBuffer + 5);
+    snprintf(filepath, sizeof(filepath), "%s/%s",
+             trackFolderFor(sprint ? TRACK_KIND_SPRINT : TRACK_KIND_CIRCUIT),
+             fileCmdBuffer + (sprint ? 6 : 5));
     bleStartFileTransfer(filepath);
   }
 }
@@ -851,7 +938,12 @@ void processSettingsCommand() {
     int count = 0;
     for (JsonPair kv : doc.as<JsonObject>()) {
       char entry[64];
-      snprintf(entry, sizeof(entry), "SVAL:%s=%s", kv.key().c_str(), kv.value().as<const char*>());
+      // A hand-edited SETTINGS.json can hold a non-string value, and
+      // as<const char*>() returns NULL for those — %s on NULL streams
+      // garbage from address 0 on this core.
+      const char* val = kv.value().as<const char*>();
+      snprintf(entry, sizeof(entry), "SVAL:%s=%s", kv.key().c_str(),
+               val ? val : "");
       debug(F("BLE: SLIST - sending: "));
       debugln(entry);
       fileStatusChar.notify((uint8_t*)entry, strlen(entry));
@@ -951,7 +1043,8 @@ void processTrackUpload() {
   }
 
   char filepath[FILEPATH_MAX];
-  snprintf(filepath, sizeof(filepath), "/TRACKS/%s", trackUploadFilename);
+  snprintf(filepath, sizeof(filepath), "%s/%s",
+           trackFolderFor(trackUploadKind), trackUploadFilename);
 
   // Belt-and-suspenders: buildTrackList() provisions the folder at boot,
   // but re-ensure it before every upload so a missing folder can never
@@ -1005,7 +1098,8 @@ void processTrackDelete() {
   }
 
   char filepath[FILEPATH_MAX];
-  snprintf(filepath, sizeof(filepath), "/TRACKS/%s", trackDeleteFilename);
+  snprintf(filepath, sizeof(filepath), "%s/%s",
+           trackFolderFor(trackDeleteKind), trackDeleteFilename);
 
   if (!SD.exists(filepath)) {
     debugln(F("BLE: Track file not found"));
@@ -1121,7 +1215,13 @@ void BLUETOOTH_LOOP() {
 
       if (bytesRead > 0) {
         if (!fileDataChar.notify(buffer, bytesRead)) {
-          break;  // Disconnected or error
+          // Failed notify (HVN pool starved >100 ms, or disconnect). The
+          // read already advanced the file position, so REWIND before
+          // bailing — dropping the chunk and reading the next one on the
+          // following iteration silently punched a hole in the delivered
+          // file while the transfer carried on to a clean-looking DONE.
+          bleCurrentFile.seekCur(-(int32_t)bytesRead);
+          break;
         }
         bleBytesTransferred += bytesRead;
       } else {

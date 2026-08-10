@@ -5,6 +5,9 @@
 
 #include "sd_functions.h"
 
+#include "track_json.h"
+#include "course_prune.h"
+
 /**
  * @brief Attempt to acquire SD card access for a subsystem
  * @param mode The access mode being requested (SD_ACCESS_*)
@@ -58,10 +61,11 @@ void forceReleaseSDAccess() {
   taskEXIT_CRITICAL();
 }
 
-void makeFullTrackPath(const char* trackName, char* filepath) {
+void makeFullTrackPath(const char* trackName, char* filepath, uint8_t kind) {
   // Use snprintf for bounds safety - prevents buffer overflow
   // Caller MUST provide buffer of at least FILEPATH_MAX bytes
-  snprintf(filepath, FILEPATH_MAX, "/TRACKS/%s.json", trackName);
+  const char* folder = (kind == TRACK_KIND_SPRINT) ? trackFolderSprint : trackFolder;
+  snprintf(filepath, FILEPATH_MAX, "%s/%s.json", folder, trackName);
 }
 
 // (Re)initialize the SD card at a given SPI clock. Re-calling SD.begin() is
@@ -121,12 +125,19 @@ bool SD_SETUP() {
   return false;
 }
 
-// Make sure /TRACKS exists (blank soldered-in card; SdFat's open() never
-// creates parent directories). Caller must already hold the SD mutex.
-// Returns true when the folder exists or was created.
+// Make sure /TRACKS and /TRACKS/SPRINT exist (blank soldered-in card;
+// SdFat's open() never creates parent directories). Caller must already
+// hold the SD mutex. Returns true when the circuit folder exists or was
+// created — the sprint subfolder is best-effort (a failure there must
+// not take out circuit operation).
 bool sdEnsureTracksFolder() {
-  if (SD.exists(trackFolder)) return true;
-  return SD.mkdir(trackFolder);
+  if (!SD.exists(trackFolder) && !SD.mkdir(trackFolder)) {
+    return false;
+  }
+  if (!SD.exists(trackFolderSprint) && !SD.mkdir(trackFolderSprint)) {
+    debugln(F("WARNING: could not create /TRACKS/SPRINT"));
+  }
+  return true;
 }
 
 ///////////////////////////////////////////
@@ -227,7 +238,8 @@ void sdPerformFormat() {
   NVIC_SystemReset();
 }
 
-// Static buffers for JSON parsing — saves ~4KB of stack per call.
+// Static buffers for JSON parsing — keeps JSON_BUFFER_SIZE off the stack
+// on every call (which is why raising that constant is cheap here).
 // Only one parseTrackFile() call can be active at a time (single-threaded).
 // Also reused by buildTrackList() for manifest extraction.
 static char jsonFileBuffer[JSON_BUFFER_SIZE];
@@ -256,10 +268,30 @@ bool buildTrackList() {
   numOfLocations = 0;
   trackManifestCount = 0;
 
-  // If the TRACKS directory exists, open it
-  if (!trackDir.open(trackFolder)) {
+  // Circuit tracks are mandatory (the original folder); the sprint scan is
+  // best-effort — a missing/unreadable /TRACKS/SPRINT must never take out
+  // circuit operation. Both share the locations[]/manifest arrays and caps.
+  if (!scanTrackDir(trackFolder, TRACK_KIND_CIRCUIT)) {
     debugln(F("Failed to open TRACKS folder."));
     releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+    return false;
+  }
+  scanTrackDir(trackFolderSprint, TRACK_KIND_SPRINT);
+
+  debug(F("Tracks found: "));
+  debugln(numOfLocations);
+  debug(F("Manifest entries: "));
+  debugln(trackManifestCount);
+
+  releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+  return true;
+}
+
+// Walk one track folder, appending to locations[] and trackManifest[]
+// (shared caps). Caller must hold the SD mutex. Returns false only when
+// the directory cannot be opened.
+bool scanTrackDir(const char* folder, uint8_t kind) {
+  if (!trackDir.open(folder)) {
     return false;
   }
 
@@ -271,6 +303,13 @@ bool buildTrackList() {
     if (numOfLocations >= MAX_LOCATIONS) {
       file.close();
       break;
+    }
+
+    // Skip sub-directories (the /TRACKS scan would otherwise list the
+    // SPRINT folder itself as a "track").
+    if (file.isDir()) {
+      file.close();
+      continue;
     }
 
     // Create a buffer to store the filename
@@ -293,6 +332,15 @@ bool buildTrackList() {
     // Reuses the static JSON buffer (safe: single-threaded, one file at a time)
     if (trackManifestCount < MAX_LOCATIONS) {
       int bytesRead = file.read(jsonFileBuffer, sizeof(jsonFileBuffer) - 1);
+      if (bytesRead == (int)sizeof(jsonFileBuffer) - 1) {
+        // Same truncation as parseTrackFile, but the consequence here is
+        // worse: no manifest entry is added below, so the track becomes
+        // invisible to proximity detection entirely rather than merely
+        // failing to open later.
+        debug(F("buildTrackList: "));
+        debug(filename);
+        debugln(F(" >= buffer - TRUNCATED, track will not be detected"));
+      }
       if (bytesRead > 0) {
         jsonFileBuffer[bytesRead] = '\0';
         trackJson.clear();
@@ -319,6 +367,7 @@ bool buildTrackList() {
             trackManifest[trackManifestCount].filename[sizeof(trackManifest[0].filename) - 1] = '\0';
             trackManifest[trackManifestCount].lat = firstLat;
             trackManifest[trackManifestCount].lon = firstLon;
+            trackManifest[trackManifestCount].kind = kind;
             trackManifestCount++;
           }
         }
@@ -334,13 +383,6 @@ bool buildTrackList() {
 
   // Close the directory to free up any memory it's using
   trackDir.close();
-
-  debug(F("Tracks found: "));
-  debugln(numOfLocations);
-  debug(F("Manifest entries: "));
-  debugln(trackManifestCount);
-
-  releaseSDAccess(SD_ACCESS_TRACK_PARSE);
   return true;
 }
 
@@ -386,7 +428,14 @@ int parseTrackFile(char* filepath) {
   if (bytesRead < (int)sizeof(jsonFileBuffer)) {
     jsonFileBuffer[bytesRead] = '\0';
   } else {
+    // Filled the buffer exactly, so the file is at least this big and has
+    // almost certainly been cut mid-JSON. Say so: the parse below fails with
+    // a generic InvalidInput/IncompleteInput that gives no hint the cause was
+    // SIZE, and the track then just stops working with no signal at all.
     jsonFileBuffer[sizeof(jsonFileBuffer) - 1] = '\0';
+    debug(F("ParseTrackFile: file >= buffer ("));
+    debug((int)sizeof(jsonFileBuffer));
+    debugln(F(" B) - TRUNCATED, parse will fail. Too many courses?"));
   }
 
   // Parse JSON (using file-scope static document to save stack)
@@ -422,6 +471,11 @@ int parseTrackFile(char* filepath) {
     const char* longName = trackJson["longName"] | "";
     const char* shortName = trackJson["shortName"] | "";
     const char* defaultCourse = trackJson["defaultCourse"] | "";
+    // Track-level type marker ("sprint"). Redundant with the folder the
+    // file lives in — the folder is authoritative — but parsed as cheap
+    // validation / future-proofing (plan 0002 keeps modes an open enum).
+    const char* trackType = trackJson["type"] | "";
+    activeTrackMetadata.isSprint = (strcasecmp(trackType, "sprint") == 0);
 
     strncpy(activeTrackMetadata.longName, longName, sizeof(activeTrackMetadata.longName) - 1);
     activeTrackMetadata.longName[sizeof(activeTrackMetadata.longName) - 1] = '\0';
@@ -445,6 +499,7 @@ int parseTrackFile(char* filepath) {
     activeTrackMetadata.longName[0] = '\0';
     activeTrackMetadata.shortName[0] = '\0';
     activeTrackMetadata.defaultCourse[0] = '\0';
+    activeTrackMetadata.isSprint = false;
   } else {
     debugln(F("ParseTrackFile: Unknown JSON format"));
     trackFile.close();
@@ -505,6 +560,27 @@ int parseTrackFile(char* filepath) {
         trackLayouts[numOfTracks].hasSector3 = false;
       }
 
+      // Sprint-only: separate finish line (optional — same idiom as sectors)
+      if (layout.containsKey("finish_a_lat") && layout.containsKey("finish_a_lng") &&
+          layout.containsKey("finish_b_lat") && layout.containsKey("finish_b_lng")) {
+        trackLayouts[numOfTracks].finish_a_lat = layout["finish_a_lat"];
+        trackLayouts[numOfTracks].finish_a_lng = layout["finish_a_lng"];
+        trackLayouts[numOfTracks].finish_b_lat = layout["finish_b_lat"];
+        trackLayouts[numOfTracks].finish_b_lng = layout["finish_b_lng"];
+        trackLayouts[numOfTracks].hasFinish = true;
+        #ifdef HAS_DEBUG
+        debugln(F("  Finish line data loaded (sprint)"));
+        #endif
+      } else {
+        trackLayouts[numOfTracks].hasFinish = false;
+      }
+
+      // Sprint-only: sortable ISO date_created (drives newest-course pick)
+      const char* dateCreated = layout["date_created"] | "";
+      strncpy(trackLayouts[numOfTracks].date_created, dateCreated,
+              sizeof(trackLayouts[numOfTracks].date_created) - 1);
+      trackLayouts[numOfTracks].date_created[sizeof(trackLayouts[numOfTracks].date_created) - 1] = '\0';
+
       numOfTracks++;
     }
   }
@@ -514,4 +590,296 @@ int parseTrackFile(char* filepath) {
   trackFile.close();
   releaseSDAccess(SD_ACCESS_TRACK_PARSE);
   return PARSE_STATUS_GOOD;
+}
+
+///////////////////////////////////////////
+// TRACK WRITING (on-device course creator, plan 0002 §5)
+//
+// This is the firmware's first track-file WRITER — until the course
+// creator it only ever read them. The JSON text itself is built by the
+// host-tested track_json unit; everything here is file plumbing.
+///////////////////////////////////////////
+
+// Scratch for one serialized course. A course is four coordinate lines at
+// ~28 bytes a field plus keys — comfortably under 700 bytes even with all
+// four lines and a date stamp. Static, not stack: the sketch keeps big
+// buffers out of the main loop's stack (same reason jsonFileBuffer is).
+static char courseJsonBuffer[768];
+// A course parsed back into its own document so it can be grafted into the
+// existing track. Sized to hold that same one course.
+static StaticJsonDocument<768> courseJson;
+
+/**
+ * @brief Append a course to an existing track file.
+ *
+ * Read-modify-write, the same shape settings.ino uses, with one addition:
+ * the rewrite goes to a temp file that REPLACES the original only once it
+ * is safely closed. Writing in place would mean a power loss (or a card
+ * yank) mid-serialize leaves a truncated file where a working track used
+ * to be — and this runs in a field, on a battery, at an event.
+ *
+ * Caller must hold the SD mutex.
+ */
+// Read `filepath` into trackJson and hand back its course array.
+//
+// Both on-disk shapes are appendable: the object format's "courses" array,
+// and the legacy bare array which IS the course list.
+//
+// Strings are zero-copy — they point into jsonFileBuffer, which stays put for
+// the lifetime of the document, so the name pointers the pruner holds survive
+// elements being removed around them.
+static SdCourseWriteResult openTrackForEdit(const char* filepath, JsonArray& courses) {
+  trackFile.open(filepath, O_READ);
+  if (!trackFile) {
+    debugln(F("SaveCourse: append target missing"));
+    return SD_COURSE_WRITE_NO_TRACK;
+  }
+  const int bytesRead = trackFile.read(jsonFileBuffer, sizeof(jsonFileBuffer) - 1);
+  trackFile.close();
+  if (bytesRead <= 0) return SD_COURSE_WRITE_NO_TRACK;
+  jsonFileBuffer[bytesRead] = '\0';
+
+  trackJson.clear();
+  if (deserializeJson(trackJson, jsonFileBuffer) != DeserializationError::Ok) {
+    debugln(F("SaveCourse: existing track will not parse"));
+    return SD_COURSE_WRITE_NO_TRACK;
+  }
+
+  if (trackJson.is<JsonObject>()) {
+    courses = trackJson["courses"];
+    if (courses.isNull()) courses = trackJson.createNestedArray("courses");
+  } else if (trackJson.is<JsonArray>()) {
+    courses = trackJson.as<JsonArray>();
+  } else {
+    return SD_COURSE_WRITE_NO_TRACK;
+  }
+  if (courses.isNull()) return SD_COURSE_WRITE_NO_TRACK;
+  return SD_COURSE_WRITE_OK;
+}
+
+// The parsed track's courses, in the order they should be dropped. Static for
+// the same reason the buffers above are: off the main loop's stack.
+static course_prune::CourseSummary pruneSummaries[MAX_LAYOUTS];
+static uint8_t pruneOrder[MAX_LAYOUTS];
+
+// Snapshot the course names/stamps and compute the drop order. Returns how
+// many courses were seen.
+static uint8_t snapshotCoursesForPrune(JsonArray courses) {
+  uint8_t n = 0;
+  for (JsonObject course : courses) {
+    if (n >= MAX_LAYOUTS) break;
+    pruneSummaries[n].name = course["name"] | "";
+    pruneSummaries[n].dateCreated = course["date_created"] | "";
+    n++;
+  }
+  course_prune::dropOrder(pruneSummaries, n, pruneOrder);
+  return n;
+}
+
+// Remove the first course called `name`. By NAME, not index: indices shift
+// under every removal, and the drop order was computed against the original
+// positions.
+static bool removeCourseNamed(JsonArray courses, const char* name) {
+  for (size_t i = 0; i < courses.size(); i++) {
+    const char* n = courses[i]["name"] | "";
+    if (strcmp(n, name) == 0) {
+      courses.remove(i);
+      return true;
+    }
+  }
+  return false;
+}
+
+// True when one more course of `addLen` bytes would still leave a file the
+// next boot can read.
+//
+// Measured, not estimated: `measureJson` is the exact serialized length, and
+// the +1 is the comma the new element brings with it. Both limits matter — the
+// firmware only ever loads MAX_LAYOUTS courses, so an appended one past the cap
+// would be written and then silently ignored.
+static bool trackWouldFit(JsonArray courses, size_t addLen) {
+  if ((int)courses.size() >= MAX_LAYOUTS) return false;
+  return measureJson(trackJson) + addLen + 1 < (size_t)JSON_BUFFER_SIZE;
+}
+
+// Drop courses, best candidate first, until one more of `addLen` bytes fits.
+// Returns how many went; `outPossible` is false when even dropping everything
+// would not make room.
+static uint8_t dropUntilItFits(JsonArray courses, uint8_t count, size_t addLen,
+                               bool& outPossible) {
+  uint8_t dropped = 0;
+  while (dropped < count && !trackWouldFit(courses, addLen)) {
+    if (!removeCourseNamed(courses, pruneSummaries[pruneOrder[dropped]].name)) break;
+    dropped++;
+  }
+  outPossible = trackWouldFit(courses, addLen);
+  return dropped;
+}
+
+static SdCourseWriteResult appendCourseToTrackFile(const char* filepath,
+                                                   const char* courseText,
+                                                   uint8_t dropOldest) {
+  JsonArray courses;
+  const SdCourseWriteResult opened = openTrackForEdit(filepath, courses);
+  if (opened != SD_COURSE_WRITE_OK) return opened;
+
+  // Make room first (plan 0005). Before the append, deliberately: the
+  // document's overflowed() flag is sticky, so grafting the course in and
+  // then trying to shrink back under the limit could never clear it.
+  if (dropOldest > 0) {
+    const uint8_t have = snapshotCoursesForPrune(courses);
+    const uint8_t drop = dropOldest > have ? have : dropOldest;
+    for (uint8_t i = 0; i < drop; i++) {
+      removeCourseNamed(courses, pruneSummaries[pruneOrder[i]].name);
+    }
+  }
+
+  if ((int)courses.size() >= MAX_LAYOUTS) {
+    // The device only ever loads MAX_LAYOUTS courses, so an appended one
+    // past the cap would be written and then silently ignored.
+    debugln(F("SaveCourse: track already holds MAX_LAYOUTS courses"));
+    return SD_COURSE_WRITE_TOO_BIG;
+  }
+
+  courseJson.clear();
+  if (deserializeJson(courseJson, courseText) != DeserializationError::Ok) {
+    return SD_COURSE_WRITE_TOO_BIG;
+  }
+  const size_t before = courses.size();
+  courses.add(courseJson);
+  // The whole file has to fit JSON_BUFFER_SIZE on the next boot, so a
+  // grafted course that overflowed the document must not reach the card.
+  if (courses.size() != before + 1 || trackJson.overflowed() ||
+      measureJson(trackJson) >= (size_t)JSON_BUFFER_SIZE) {
+    debugln(F("SaveCourse: track file is full"));
+    return SD_COURSE_WRITE_TOO_BIG;
+  }
+
+  char tempPath[FILEPATH_MAX];
+  snprintf(tempPath, sizeof(tempPath), "%s.tmp", filepath);
+  SD.remove(tempPath);  // a temp left by an interrupted earlier attempt
+
+  File32 outFile;
+  outFile.open(tempPath, O_CREAT | O_WRITE | O_TRUNC);
+  if (!outFile) return SD_COURSE_WRITE_IO;
+  const size_t written = serializeJson(trackJson, outFile);
+  outFile.sync();
+  outFile.close();
+
+  if (written == 0) {
+    SD.remove(tempPath);
+    return SD_COURSE_WRITE_IO;
+  }
+
+  // Swap only now that the replacement is complete on the card.
+  if (!SD.remove(filepath)) {
+    SD.remove(tempPath);
+    return SD_COURSE_WRITE_IO;
+  }
+  if (!SD.rename(tempPath, filepath)) {
+    debugln(F("SaveCourse: rename failed"));
+    return SD_COURSE_WRITE_IO;
+  }
+  return SD_COURSE_WRITE_OK;
+}
+
+SdCourseWriteResult sdPlanSprintPrune(const CreatedCourseWrite& req,
+                                      SdSprintPrunePlan& out) {
+  out = SdSprintPrunePlan();
+  if (req.course == nullptr || req.newTrack) return SD_COURSE_WRITE_IO;
+
+  const int courseLen = track_json::formatCourse(
+      courseJsonBuffer, sizeof(courseJsonBuffer),
+      *req.course, req.courseName, req.dateCreated);
+  if (courseLen < 0) return SD_COURSE_WRITE_TOO_BIG;
+
+  if (!acquireSDAccess(SD_ACCESS_TRACK_PARSE)) return SD_COURSE_WRITE_BUSY;
+
+  const uint8_t kind = (req.course->kind == course_creator::CourseKind::kSprint)
+                           ? TRACK_KIND_SPRINT
+                           : TRACK_KIND_CIRCUIT;
+  char filepath[FILEPATH_MAX];
+  makeFullTrackPath(req.trackName, filepath, kind);
+
+  JsonArray courses;
+  const SdCourseWriteResult opened = openTrackForEdit(filepath, courses);
+  if (opened == SD_COURSE_WRITE_OK) {
+    // Works on this in-RAM copy and throws it away — nothing is written here.
+    const uint8_t have = snapshotCoursesForPrune(courses);
+    out.dropCount = dropUntilItFits(courses, have, (size_t)courseLen, out.possible);
+    out.needsConfirm =
+        course_prune::needsConfirm(pruneSummaries, have, pruneOrder, out.dropCount);
+  }
+
+  releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+  return opened;
+}
+
+SdCourseWriteResult sdSaveCreatedCourse(const CreatedCourseWrite& req,
+                                        uint8_t dropOldest) {
+  if (req.course == nullptr) return SD_COURSE_WRITE_IO;
+
+  const uint8_t kind = (req.course->kind == course_creator::CourseKind::kSprint)
+                           ? TRACK_KIND_SPRINT
+                           : TRACK_KIND_CIRCUIT;
+
+  const int courseLen = track_json::formatCourse(
+      courseJsonBuffer, sizeof(courseJsonBuffer),
+      *req.course, req.courseName, req.dateCreated);
+  if (courseLen < 0) return SD_COURSE_WRITE_TOO_BIG;
+
+  if (!acquireSDAccess(SD_ACCESS_TRACK_PARSE)) {
+    debugln(F("SaveCourse: SD busy"));
+    return SD_COURSE_WRITE_BUSY;
+  }
+
+  // Both folders, since SdFat's open() never creates parents and a course
+  // can be the very first thing ever written to a blank soldered-in card.
+  if (!sdEnsureTracksFolder() ||
+      (kind == TRACK_KIND_SPRINT && !SD.exists(trackFolderSprint))) {
+    releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+    return SD_COURSE_WRITE_IO;
+  }
+
+  char filepath[FILEPATH_MAX];
+  makeFullTrackPath(req.trackName, filepath, kind);
+
+  SdCourseWriteResult result;
+  if (req.newTrack) {
+    if (SD.exists(filepath)) {
+      // Names carry the GPS clock down to the minute, so this means the
+      // same minute twice — refuse rather than overwrite someone's course.
+      debugln(F("SaveCourse: track file already exists"));
+      result = SD_COURSE_WRITE_EXISTS;
+    } else {
+      const int fileLen = track_json::formatTrackFile(
+          jsonFileBuffer, sizeof(jsonFileBuffer),
+          req.trackName, req.shortName,
+          *req.course, req.courseName, req.dateCreated);
+      if (fileLen < 0) {
+        result = SD_COURSE_WRITE_TOO_BIG;
+      } else {
+        File32 outFile;
+        outFile.open(filepath, O_CREAT | O_WRITE | O_TRUNC);
+        if (!outFile) {
+          result = SD_COURSE_WRITE_IO;
+        } else {
+          const size_t written = outFile.write(jsonFileBuffer, (size_t)fileLen);
+          outFile.sync();
+          outFile.close();
+          result = (written == (size_t)fileLen) ? SD_COURSE_WRITE_OK : SD_COURSE_WRITE_IO;
+          if (result != SD_COURSE_WRITE_OK) SD.remove(filepath);
+        }
+      }
+    }
+  } else {
+    result = appendCourseToTrackFile(filepath, courseJsonBuffer, dropOldest);
+  }
+
+  releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+
+  // The manifest drives proximity detection, so a course that isn't in it
+  // doesn't exist as far as the next session is concerned.
+  if (result == SD_COURSE_WRITE_OK) buildTrackList();
+  return result;
 }

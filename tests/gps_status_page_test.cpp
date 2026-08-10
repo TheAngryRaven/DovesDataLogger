@@ -174,3 +174,42 @@ TEST_CASE("step - an armed lock countdown is never interrupted by idle") {
     CHECK(step(s, locked(kIdleTimeoutMs + 100)) == Exit::kStay); // past idle, still counting
     CHECK(step(s, locked(kIdleTimeoutMs - 5 + kAutoCloseMs)) == Exit::kToMenu);
 }
+
+// ─── timeSyncState ──────────────────────────────────────────────────────────
+//
+// A position fix and a usable clock are separate milestones. The page needs to
+// name the outstanding one, because "no lock" on its own gave the user nothing
+// to wait for — and the instinctive response (power-cycle) restarts the
+// ~12.5-minute UTC decode being waited on.
+
+TEST_CASE("timeSyncState - no date/time yet is the earliest milestone") {
+    CHECK(timeSyncState(false, false) == TimeSync::kNoDateTime);
+}
+
+TEST_CASE("timeSyncState - date/time present but UTC not resolved") {
+    // The common, slow case: a clean 3D fix minutes before fullyResolved.
+    CHECK(timeSyncState(true, false) == TimeSync::kResolving);
+}
+
+TEST_CASE("timeSyncState - all three bits is locked") {
+    CHECK(timeSyncState(true, true) == TimeSync::kLocked);
+}
+
+TEST_CASE("timeSyncState - resolved without date/time reports the earlier gap") {
+    // Not a state the module is expected to produce, but if it ever did, the
+    // page must not claim a lock it doesn't have.
+    CHECK(timeSyncState(false, true) == TimeSync::kNoDateTime);
+}
+
+TEST_CASE("timeSyncState - kLocked matches exactly what gates timeValid") {
+    // gpsData.timeValid is validDate && validTime && fullyResolved, so the
+    // page's "locked" and the firmware's "safe to name a log file" must agree
+    // on every input — a page that says locked while logging still waits is
+    // the same confusion in a new place.
+    for (int i = 0; i < 4; i++) {
+        const bool dateTime = (i & 1) != 0;
+        const bool resolved = (i & 2) != 0;
+        const bool timeValid = dateTime && resolved;
+        CHECK((timeSyncState(dateTime, resolved) == TimeSync::kLocked) == timeValid);
+    }
+}

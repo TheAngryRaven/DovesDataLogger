@@ -222,6 +222,7 @@ void fwReset() {
   fwDonePending = false;
   fwApplyPending = false;
   fwAbortPending = false;
+  fwDfuPending = false;  // a stale UF2-DFU request must not fire later
   fwError = false;
   fwErrorReason = nullptr;
   fwBytesReceived = 0;

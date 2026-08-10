@@ -20,4 +20,10 @@ Cause decode(const Regs& regs, const PinMasks& pins) {
   return Cause::kColdBoot;  // reset pin or power-on (RESETREAS empty)
 }
 
+bool tachIdleIsHigh(unsigned highSamples, unsigned totalSamples) {
+  // Majority vote; ties (including 0 samples) fall to idle-high so a
+  // floating input under the pull-up keeps the original SENSE-LOW arm.
+  return highSamples * 2 >= totalSamples;
+}
+
 }  // namespace wake_cause

@@ -38,7 +38,13 @@ bool parsePayload(const uint8_t* data, size_t len, Reading& out) {
   if (!matchesMagic(data, len)) {
     return false;
   }
-  if (data[4] != kProtocolVersion) {
+  const uint8_t ver = data[4];
+  if (ver != kProtocolVersion && ver != kProtocolVersionV2) {
+    return false;
+  }
+  // A version's own length gate: a v2 frame truncated to 14-15 bytes is
+  // corrupt, not a v1 frame — reject rather than mis-parse.
+  if (ver == kProtocolVersionV2 && len < kPayloadLenV2) {
     return false;
   }
 
@@ -50,6 +56,9 @@ bool parsePayload(const uint8_t* data, size_t len, Reading& out) {
   out.status = data[10];
   out.battery = data[11];
   out.sequence = (uint16_t)((uint16_t)data[12] | ((uint16_t)data[13] << 8));
+  out.auxC = (ver >= kProtocolVersionV2) ? decodeDeciC(data[14], data[15])
+                                         : NAN;
+  out.protoVersion = ver;
   return true;
 }
 

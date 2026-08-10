@@ -36,7 +36,8 @@ own header first so declaration/definition drift is caught at compile
 time.
 
 The **pure units** (`haversine`, `gps_time`, `gps_validation`,
-`dovex_header`, `filename_validator`) deliberately avoid Arduino headers.
+`dovex_header`, `filename_validator`, `course_creator`, `track_json`, …)
+deliberately avoid Arduino headers.
 The *same* `.cpp` is compiled into both the firmware (Arduino picks up
 `.cpp` files in the sketch folder) and the host test binary (CMake). There
 is no copy-paste — the tests exercise the exact code that ships.
@@ -97,16 +98,25 @@ to the matching `*_LOOP()`.
   remote-button notifications.
 - **SensorEgg** (`sensoregg` + the `sensoregg_protocol` pure unit) —
   wireless EGT proof of concept: a passive BLE observer receives the
-  DovesSensorEgg pod's `PW-ADV-1` advertising broadcasts (14-byte
-  manufacturer data: EGT + cold junction as int16 deci-degC, fault flags,
-  sequence counter) and feeds the `Temp1`/`Junction1` DOVEX columns and
-  the Temp1 race page. Observer + peripheral coexist natively on S140;
-  passive scanning never transmits, so the camera link is untouched.
-  Readings older than 1 s go NaN — never held across a dropout. Gated on
-  the `BIRDSEYE_ENABLE_SENSOREGG` build flag: on in the beta channel, off
-  in master/release, where the scanner and Temp1 page are compiled out,
-  BLE returns to lazy init, and the DOVEX `Temp1`/`Junction1` columns are
-  written as `nan` so the log format stays identical across channels.
+  DovesSensorEgg pod's `PW-ADV` advertising broadcasts, v1 (14-byte:
+  EGT + cold junction as int16 deci-degC, fault flags, sequence counter)
+  and v2 (16-byte: + aux intake-air thermistor, real battery percent),
+  and feeds the `Temp1`/`Junction1`/`Temp2` DOVEX columns and the
+  Temp1/Temp2 race pages. Observer + peripheral coexist natively on
+  S140; passive scanning never transmits, so the camera link is
+  untouched. Readings older than 1 s go NaN — never held across a
+  dropout. Gated on the `BIRDSEYE_ENABLE_SENSOREGG` build flag: on in
+  the beta channel, off in master/release, where the scanner and temp
+  pages are compiled out, BLE returns to lazy init, and the DOVEX
+  `Temp1`/`Junction1`/`Temp2` columns are written as `nan` so the log
+  format stays identical across channels.
+- **Course creator** (`course_creator` + `track_json` pure units, glued
+  into the menu/pages/SD modules) — authors a track course on the device
+  by walking to each cone and holding for a 3 s GPS average. Autocross
+  venues re-lay their course every event, so the alternative was a laptop
+  in a paddock. No text is ever entered on-device: names come from the GPS
+  clock and are renamed later in the web app. This is also the firmware's
+  only track-JSON *writer* — everywhere else the format is read-only.
 - **Replay** (`replay`) — instant DOVEX header replay.
 - **Settings** (`settings`) — JSON key/value store on the SD card.
 - **CourseManager** (external library) — owns course detection, sector
@@ -181,7 +191,12 @@ the last resort.
 ### Shutdown is System OFF, wake is a reboot
 There is no power switch (deliberately — the next hardware revision drops
 it), so "off" is nRF52 **System OFF** at ~µA with GPIO SENSE armed on the
-tach pin and the three buttons, plus VBUS. Waking is a full chip reset:
+tach pin and the three buttons, plus VBUS. The tach's SENSE polarity is
+not hardcoded: the pickup circuit's output stage idles high or low
+depending on the build, so shutdown samples the parked line and arms
+SENSE for the opposite level (majority vote in the host-tested
+`wake_cause` unit) — arming toward the idle level satisfied DETECT
+immediately and battery sleep reboot-looped. Waking is a full chip reset:
 `setup()` runs fresh, and the very first thing it does is read (then
 clear) the sticky `RESETREAS` + GPIO `LATCH` registers to decode *why* it
 booted (the host-tested `wake_cause` unit). An engine-start (tach) wake

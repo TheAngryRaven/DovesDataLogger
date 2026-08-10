@@ -31,7 +31,10 @@
 #ifdef FIRMWARE_VERSION_OVERRIDE
   #define FIRMWARE_VERSION _BE_TOSTRING(FIRMWARE_VERSION_OVERRIDE)
 #else
-  #define FIRMWARE_VERSION "3.1.0"
+  // The 4.0.0 release cut (matches the v4.0.0 tag). The webapp still keys
+  // the track JSON budget off this — 8 KB at or above 3.2.0 — so never
+  // stamp a build below that line again.
+  #define FIRMWARE_VERSION "4.0.0"
 #endif
 
 ///////////////////////////////////////////
@@ -170,6 +173,13 @@ inline void dummy_debug(...) {
 #define SLEEP_LONG_PRESS_MS       5000     // 5s hold for shutdown/reboot combos
 #define CHARGE_DISPLAY_TIMEOUT_MS 10000    // Show charging screen for 10s then display off
 #define USB_MENU_CHARGE_IDLE_MS   60000    // USB on menu: charging loop after 60s of no buttons
+// Auto-race must not hijack a deliberate navigation. Leaving a page drops the
+// user on the main menu, and above the speed/RPM trigger the very next loop
+// iteration would convert that into "start racing" — the menu never even gets
+// drawn. Require the menu to have been settled (no arrival, no button) this
+// long first. Only bites right after an interaction: the normal auto-race case
+// (parked on the menu, then drive off) has been quiet for minutes.
+#define AUTO_RACE_MENU_GRACE_MS   3000
 
 ///////////////////////////////////////////
 // BLE RADIO OWNERSHIP
@@ -184,6 +194,21 @@ enum BleOwner : uint8_t {
   BLE_OWNER_NONE = 0,      // radio idle — nobody advertising
   BLE_OWNER_TRANSFER = 1,  // file-transfer page (BLE_SETUP/BLE_STOP)
   BLE_OWNER_CAMERA = 2,    // camera remote (camera_ble)
+};
+
+///////////////////////////////////////////
+// RACE SESSION ENTRY CAUSE
+// How the current race session was started (set by startRaceSession in
+// BirdsEye.ino, RACE_ENTRY_NONE outside a session). Manual/speed sessions
+// have no engine signal, so the camera lifecycle and the auto-idle rule
+// key off this instead of RPM: they record from session start and end
+// after 5 min below 5 mph, where tach sessions keep the RPM-driven rules.
+///////////////////////////////////////////
+enum RaceEntryCause : uint8_t {
+  RACE_ENTRY_NONE = 0,    // no session active
+  RACE_ENTRY_MANUAL = 1,  // main-menu Race select
+  RACE_ENTRY_SPEED = 2,   // auto-race speed trip (>= 10 mph on the menu)
+  RACE_ENTRY_TACH = 3,    // auto-race RPM trip, or tach-wake boot
 };
 
 ///////////////////////////////////////////
@@ -218,17 +243,38 @@ struct TrackLayout {
   double sector_3_b_lat = 0.00;
   double sector_3_b_lng = 0.00;
   bool hasSector3 = false;
+
+  // Sprint-only: the separate finish line (a run is start -> finish).
+  double finish_a_lat = 0.00;
+  double finish_a_lng = 0.00;
+  double finish_b_lat = 0.00;
+  double finish_b_lng = 0.00;
+  bool hasFinish = false;
+
+  // Sprint-only: sortable ISO-8601 creation stamp ("YYYY-MM-DDTHH:MM",
+  // any prefix). Drives newest-course selection (sprint_select unit) —
+  // autocross venues re-lay the course every event. Empty on circuit
+  // courses and legacy files.
+  char date_created[20] = "";
 };
 
 ///////////////////////////////////////////
 // TRACK MANIFEST (in-RAM index for proximity detection)
 // Built during buildTrackList() at boot. Each entry stores
-// the filename and a representative lat/lon from the first course.
+// the filename, a representative lat/lon from the first course, and
+// which folder (= track kind) the file came from.
 ///////////////////////////////////////////
+
+// Track kinds: which SD folder a manifest entry came from. Values mirror
+// the host-tested sprint_select::Kind enum.
+#define TRACK_KIND_CIRCUIT 0  // /TRACKS
+#define TRACK_KIND_SPRINT  1  // /TRACKS/SPRINT
+
 struct TrackManifestEntry {
   char filename[32];   // track filename without extension (matches locations[])
   double lat;          // first course's start_a_lat
   double lon;          // first course's start_a_lng
+  uint8_t kind;        // TRACK_KIND_CIRCUIT / TRACK_KIND_SPRINT
 };
 
 ///////////////////////////////////////////
@@ -239,6 +285,8 @@ struct TrackMetadata {
   char shortName[16];
   char defaultCourse[MAX_LAYOUT_LENGTH];
   float courseLengthFt[MAX_LAYOUTS];  // per-course lengthFt
+  bool isSprint;  // track-level "type": "sprint" (redundant with the folder,
+                  // cheap validation that a file landed where it claims)
 };
 
 #endif

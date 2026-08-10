@@ -81,3 +81,23 @@ TEST_CASE("decode - stale latch without the OFF bit is ignored") {
     CHECK(decode({0, 1u << 2, 0}, kPins) == Cause::kColdBoot);
     CHECK(decode({kReasSreq, (1u << 2) | (1u << 3), 0}, kPins) == Cause::kSoftReset);
 }
+
+// ---------------------------------------------------------------------------
+// Shutdown-side tach SENSE polarity vote
+// ---------------------------------------------------------------------------
+
+TEST_CASE("tachIdleIsHigh - clear majorities decide the idle level") {
+    CHECK(tachIdleIsHigh(15, 15));        // idle-high circuit -> SENSE-LOW
+    CHECK(tachIdleIsHigh(14, 15));
+    CHECK_FALSE(tachIdleIsHigh(0, 15));   // idle-low circuit -> SENSE-HIGH
+    CHECK_FALSE(tachIdleIsHigh(1, 15));   // one noise blip doesn't flip it
+    CHECK_FALSE(tachIdleIsHigh(7, 15));   // strict minority stays low
+    CHECK(tachIdleIsHigh(8, 15));
+}
+
+TEST_CASE("tachIdleIsHigh - ties and empty bursts default to idle-high") {
+    // The pull-up reads a floating/disconnected tach input as high, and
+    // idle-high preserves the historical SENSE-LOW arm.
+    CHECK(tachIdleIsHigh(5, 10));
+    CHECK(tachIdleIsHigh(0, 0));
+}

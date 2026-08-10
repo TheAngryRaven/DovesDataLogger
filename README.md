@@ -204,7 +204,10 @@ Settings are stored in `/SETTINGS.json` on the SD card. The file is created auto
   "driver_name": "Driver",
   "lap_detection_distance": "7",
   "waypoint_detection_distance": "30",
-  "waypoint_speed": "30"
+  "waypoint_speed": "30",
+  "spark_mode": "wasted",
+  "cylinder_count": "1",
+  "display_invert": "normal"
 }
 ```
 
@@ -212,10 +215,14 @@ Settings are stored in `/SETTINGS.json` on the SD card. The file is created auto
 |---|---|---|
 | `bluetooth_name` | BLE device name visible during pairing | Random (e.g. `DovesDataLogger-042`) |
 | `bluetooth_pin` | PIN displayed on device for webapp pairing | Random 4-digit |
+| `race_mode` | Circuit-vs-sprint tiebreak when both track kinds are within detection range (`sprint` always prefers the sprint track; `circuit` yields only on an event day) | `circuit` |
 | `driver_name` | Driver name logged in DOVEX session header | `Driver` |
 | `lap_detection_distance` | Crossing detection threshold in meters | `7` |
 | `waypoint_detection_distance` | Waypoint proximity zone in meters (Lap Anything) | `30` |
 | `waypoint_speed` | Minimum speed in mph to activate lap timing | `30` |
+| `spark_mode` | How often the ignition fires: `wasted` = once per revolution (2-stroke, or 4-stroke wasted spark), `single` = once per two revolutions (4-stroke single-fire) | `wasted` |
+| `display_invert` | Screen colours: `normal` is the white-on-black it has always been, `inverted` swaps them (black text on a lit screen) for glare | `normal` |
+| `cylinder_count` | Cylinders the **pickup sees** — a clamp on one plug wire of a twin sees ONE; only a shared coil or all-cylinder harness sees them all | `1` |
 
 ## Data Format
 
@@ -224,15 +231,15 @@ DOVEX files (`.dovex`) use a reserved **1 KB** header for session metadata, with
 **Structure:**
 ```
 Bytes 0-1023:    Session header (written when session ends)
-  Line 1:        datetime,driver,course,short_name,best_lap_ms,optimal_ms,device_name (column labels)
-  Line 2:        2025-03-11 14:30:00,Driver,Normal,OKC,62345,61890,ApexTurbo (session metadata)
+  Line 1:        datetime,driver,course,short_name,best_lap_ms,optimal_ms,device_name,race_mode
+  Line 2:        2025-03-11 14:30:00,Driver,Normal,OKC,62345,61890,ApexTurbo,CIRCUIT
   Line 3:        laps_ms                                                     (column label)
   Line 4:        65432,63210,62345,64567,...                                 (all lap times in ms)
   Remaining:     \n padding to byte 1024
 
 Bytes 1024+:     GPS data
-  Header row:    timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z
-  Data rows:     1741128001234,12,0.8,28.41270817,-81.37973266,87.32,125.45,182.34,1.25,8450,0.123,-0.945,0.032
+  Header row:    timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z,Temp1,Junction1,Temp2
+  Data rows:     1741128001234,12,0.8,28.41270817,-81.37973266,87.32,125.45,182.34,1.25,8450,0.123,-0.945,0.032,650.0,33.3,23.4
 ```
 
 The 1 KB header fits about 100 lap times at ~8 characters per entry. If the device loses power mid-session the header is left blank but all GPS data after byte 1024 is still valid and recoverable — the metadata write is the LAST thing a clean session does, so file integrity is independent of it.
@@ -251,6 +258,8 @@ The 1 KB header fits about 100 lap times at ~8 characters per entry. If the devi
 - **h_acc_m**: Horizontal accuracy estimate in meters (2 decimal places, from UBX hAcc)
 - **rpm**: Engine RPM from tachometer input
 - **accel_x/y/z**: Accelerometer g-force from onboard LSM6DS3 IMU (3 decimal places, logs `0.000` if IMU not available)
+- **Temp1/Junction1**: SensorEgg wireless EGT + cold junction in °C (1 decimal place; literal `nan` when the egg link is stale, invalid, or the POC is compiled out)
+- **Temp2**: SensorEgg aux intake-air thermistor in °C (v2 eggs; `nan` on v1 eggs and everything above)
 
 ## File Structure
 

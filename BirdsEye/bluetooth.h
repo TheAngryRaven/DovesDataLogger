@@ -61,6 +61,17 @@ void BLE_SETUP();
 // transfer file, release SD access, and drop bleOwner back to NONE.
 void BLE_STOP();
 
+// Force the Bluefruit connection LED off (autoConnLed disarm + park the
+// pin high). Shared by BLE_STOP() and the shutdown quiesce.
+void bleConnLedOff();
+
+// Shutdown-path radio quiesce, unconditional on owner: stop advertising,
+// drop any surviving link with a bounded WDT-fed settle for the async
+// disconnect, then force the conn LED off. Safe when BLE was never
+// initialized. Called from enterShutdown() — BLE_STOP() only covers the
+// transfer service, so camera-owned radio state needs this.
+void bleShutdownQuiesce();
+
 // Service deferred commands from the BLE callback task: settings
 // commands, track upload/delete, MTU negotiation tail-read, and the
 // burst-send chunk pipeline for any active file transfer.

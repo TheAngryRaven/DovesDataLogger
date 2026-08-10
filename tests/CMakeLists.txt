@@ -22,13 +22,18 @@ add_executable(birdseye_tests
   lap_format_test.cpp
   tach_filter_test.cpp
   camera_fsm_test.cpp
+  idle_policy_test.cpp
   insta360_protocol_test.cpp
   wake_cause_test.cpp
   gps_status_page_test.cpp
   sd_format_page_test.cpp
   sat_bars_test.cpp
   sensoregg_protocol_test.cpp
+  sprint_select_test.cpp
   crossing_pattern_test.cpp
+  course_creator_test.cpp
+  track_json_test.cpp
+  course_prune_test.cpp
   ${BIRDSEYE_DIR}/haversine.cpp
   ${BIRDSEYE_DIR}/gps_stats.cpp
   ${BIRDSEYE_DIR}/gps_time.cpp
@@ -40,13 +45,18 @@ add_executable(birdseye_tests
   ${BIRDSEYE_DIR}/lap_format.cpp
   ${BIRDSEYE_DIR}/tach_filter.cpp
   ${BIRDSEYE_DIR}/camera_fsm.cpp
+  ${BIRDSEYE_DIR}/idle_policy.cpp
   ${BIRDSEYE_DIR}/insta360_protocol.cpp
   ${BIRDSEYE_DIR}/wake_cause.cpp
   ${BIRDSEYE_DIR}/gps_status_page.cpp
   ${BIRDSEYE_DIR}/sd_format_page.cpp
   ${BIRDSEYE_DIR}/sat_bars.cpp
   ${BIRDSEYE_DIR}/sensoregg_protocol.cpp
+  ${BIRDSEYE_DIR}/sprint_select.cpp
+  ${BIRDSEYE_DIR}/course_prune.cpp
   ${BIRDSEYE_DIR}/crossing_pattern.cpp
+  ${BIRDSEYE_DIR}/course_creator.cpp
+  ${BIRDSEYE_DIR}/track_json.cpp
 )
 
 target_include_directories(birdseye_tests PRIVATE
