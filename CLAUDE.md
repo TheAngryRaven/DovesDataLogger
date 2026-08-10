@@ -165,7 +165,7 @@ handoff spec.
 
 | Path | Contents |
 |---|---|
-| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, sim-build (native sim TU + 60 s boot soak + determinism + goldens + lap oracles + two-session carryover, plus a wasm job: emsdk 3.1.61 build + node smoke + `birdseye-sim-wasm` artifact), release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). Per-channel build config: `BETA` builds track DovesLapTimer's `BETA` branch and pass `-DBIRDSEYE_ENABLE_SENSOREGG=1`; master/release pin `v4.2.0` and build the all-flags-off defaults |
+| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, sim-build (native sim TU + 60 s boot soak + determinism + goldens + lap oracles + two-session carryover, plus a wasm job: emsdk 3.1.61 build + node smoke + `birdseye-sim-wasm` artifact), release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). Per-channel build config: `BETA` builds track DovesLapTimer's `BETA` branch and pass `-DBIRDSEYE_ENABLE_SENSOREGG=1`; master/release pin `v4.3.0` and build the all-flags-off defaults |
 | `tests/` | Host doctest harness (CMake) for the pure-logic units |
 | `docs/plans/` | Numbered design records (`NNNN-slug.md`, see its README) — the rationale behind each chunk of work; plan-executing commits cite the number. Same convention as DovesDataViewer |
 | `CHANGELOG.md` | Keep-a-Changelog history; release workflow ties to version tags |
@@ -1402,7 +1402,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | SparkFun u-blox GNSS v3 | UBX binary PVT GPS interface |
 | ArduinoJson 6.x | Track file JSON parsing |
 | SdFat | SD card (FAT16/32) |
-| DovesLapTimer | Lap/sector timing (external: TheAngryRaven/DovesLapTimer). CI refs: `BETA`-targeted builds track the library's `BETA` branch; master/release builds pin `v4.2.0` (bump deliberately) |
+| DovesLapTimer | Lap/sector timing (external: TheAngryRaven/DovesLapTimer). CI refs: `BETA`-targeted builds track the library's `BETA` branch; master/release builds pin `v4.3.0` (bump deliberately) |
 | Seeed Arduino LSM6DS3 | Onboard IMU accelerometer/gyro (Sense variant, ±16g) |
 | Bluefruit nRF52 | BLE (built into board package) |
 | Adafruit TinyUSB | USB Mass Storage (`Adafruit_USBD_MSC`); built into board package |
