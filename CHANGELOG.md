@@ -56,6 +56,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
     rate of a multi-cylinder engine doesn't run into it and read low.
 
 ### Fixed
+- **The blue Bluetooth light no longer stays on after the device sleeps.**
+  Sleep only tore the radio down when the *file-transfer* page had been used;
+  a camera-owned Bluetooth link (or one still mid-disconnect) kept the
+  connection LED driven straight into power-off — and the chip keeps pin
+  states in that mode, so the light burned all night. Shutdown now quiesces
+  the radio unconditionally and forces the LED off as the last step. On beta
+  builds the SensorEgg scanner is also stopped at sleep (it previously ran
+  through the entire charging park) and restarts on charging resume.
 - **A track with many courses no longer disappears from the device.** Track
   files were read and parsed through a 4 KB budget, and a file past it was cut
   mid-JSON: the parse failed, no manifest entry was built, and the track

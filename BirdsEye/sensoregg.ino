@@ -151,6 +151,24 @@ void SENSOREGG_SETUP() {
   }
 }
 
+void SENSOREGG_SLEEP() {
+  // Shutdown path: stop the forever-scan so the SoftDevice radio is quiet
+  // before System OFF / the charging loop. Without this the scanner ran
+  // through the entire "powered off while charging" park. Idempotent.
+  if (eggScannerRunning) {
+    Bluefruit.Scanner.stop();
+    eggScannerRunning = false;
+  }
+}
+
+void SENSOREGG_WAKE() {
+  // Charging-loop soft resume: the scanner config (callback, interval,
+  // filters) survives a stop, so a bare start() restores reception.
+  if (!eggScannerRunning) {
+    eggScannerRunning = Bluefruit.Scanner.start(0);  // 0 = forever
+  }
+}
+
 void SENSOREGG_LOOP() {
   // Drain everything queued (usually 0 or 1 slots); the newest parse wins.
   while (eggReady[eggReadIdx]) {
@@ -256,6 +274,8 @@ uint16_t sensoreggSequence() {
 
 void SENSOREGG_SETUP() {}
 void SENSOREGG_LOOP() {}
+void SENSOREGG_SLEEP() {}
+void SENSOREGG_WAKE() {}
 
 bool sensoreggLinkUp() { return false; }
 bool sensoreggAppHung() { return false; }

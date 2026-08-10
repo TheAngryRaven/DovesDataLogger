@@ -68,6 +68,15 @@ void SENSOREGG_SETUP();
 // parking branches — a stale reading correctly goes NaN there.
 void SENSOREGG_LOOP();
 
+// Stop the passive scanner (shutdown path — the forever-scan must not run
+// into System OFF / the charging park). Idempotent; no-op when the POC is
+// compiled out.
+void SENSOREGG_SLEEP();
+
+// Restart the scanner after a charging-loop soft resume
+// (softResumeFromCharging). The scanner config survives a stop.
+void SENSOREGG_WAKE();
+
 // ---- data surface (display_pages.ino / gps_functions.ino) ----
 
 // True while a reading is fresh (received < 1 s ago).

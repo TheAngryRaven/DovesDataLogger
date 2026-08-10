@@ -2128,6 +2128,10 @@ static void softResumeFromCharging() {
   gpsSatUsedCount = 0;
   GPS_WAKE();
 
+  // Restart the SensorEgg scanner stopped on shutdown entry (no-op when
+  // the POC is compiled out — BLE/camera stay lazy either way).
+  SENSOREGG_WAKE();
+
   DISPLAY_WAKE();
   menuIdleTimerRunning = false;
   if (!sdSetupSuccess && sdCardUnformatted) {
@@ -2158,6 +2162,16 @@ void enterShutdown() {
 
   // Stop BLE if active (advertising/connection teardown)
   if (bleActive) BLE_STOP();
+
+  // Stop the SensorEgg passive scanner (no-op when the POC is compiled
+  // out) and quiesce the radio UNCONDITIONALLY: BLE_STOP() above only
+  // covers the transfer service, so a camera-owned advert/link — or an
+  // async disconnect the Bluefruit task hasn't serviced yet — would sail
+  // into System OFF with the conn LED still driven (GPIO state is
+  // retained there: the "blue light stays on after sleep" field report).
+  SENSOREGG_SLEEP();
+  bleShutdownQuiesce();
+  wdtPet();
 
   // Display off (I2C command, ~10 µA panel sleep)
   DISPLAY_SLEEP();

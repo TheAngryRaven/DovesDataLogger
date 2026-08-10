@@ -785,9 +785,7 @@ void BLE_STOP() {
   Bluefruit.Advertising.stop();
 
   // Turn off the BLE LED
-  Bluefruit.autoConnLed(false);
-  Bluefruit.setConnLedInterval(0);
-  digitalWrite(LED_BLUE, HIGH);
+  bleConnLedOff();
 
   bleConnected = false;
   // bleActive already set false at top of BLE_STOP()
@@ -800,6 +798,46 @@ void BLE_STOP() {
   sdSetTransferSpeed(false);
 
   debugln(F("BLE: Bluetooth stopped"));
+}
+
+// Force the Bluefruit connection LED off and keep it off. Bluefruit drives
+// LED_CONN (the XIAO's blue LED, active-low) whenever _led_conn is enabled —
+// which is the library DEFAULT, so camera-owned advertising/links blink it
+// even though this module never called autoConnLed(true) for them. Disabling
+// autoConnLed stops the library re-lighting it; the digitalWrite parks the
+// pin high (off) — nRF52 GPIO state is retained in System OFF, so a lit pin
+// would stay lit on a "powered off" device.
+void bleConnLedOff() {
+  Bluefruit.autoConnLed(false);
+  Bluefruit.setConnLedInterval(0);
+  pinMode(LED_BLUE, OUTPUT);
+  digitalWrite(LED_BLUE, HIGH);
+}
+
+// Shutdown-path radio quiesce, UNCONDITIONAL on owner. BLE_STOP() only runs
+// for the transfer service (bleActive), so a camera-owned radio — or a peer
+// whose async disconnect hasn't been serviced by the Bluefruit task yet —
+// used to sail through enterShutdown() with the conn LED still driven (the
+// "blue light stays on after sleep" field report). Called from
+// enterShutdown() after CAMERA_SLEEP()/BLE_STOP(): stop any advertising,
+// drop any surviving link, give the async disconnect a bounded window to be
+// serviced (WDT-fed), then force the LED off LAST so nothing re-lights it.
+void bleShutdownQuiesce() {
+  if (bleInitialized) {
+    Bluefruit.Advertising.restartOnDisconnect(false);
+    Bluefruit.Advertising.stop();
+    if (Bluefruit.connected()) {
+      Bluefruit.disconnect(Bluefruit.connHandle());
+    }
+    // Bounded settle: the disconnect (and the library's own LED-off) run on
+    // the Bluefruit task; System OFF follows within milliseconds otherwise.
+    for (int i = 0; i < 5; i++) {
+      if (!Bluefruit.connected()) break;
+      wdtPet();
+      delay(50);
+    }
+  }
+  bleConnLedOff();  // safe even before begin(): parks the pin, disarms the flag
 }
 
 // Execute a deferred file command (main-loop context — the only place

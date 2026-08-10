@@ -688,9 +688,17 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   short — the plain 5-min idle still fires and still parks on VBUS.
 - **Teardown order** (wdtPet-bracketed — `CAMERA_SLEEP()`'s 3 s ce82
   power-off hold is the longest step under the armed ~4 s WDT): end race
-  session → `CAMERA_SLEEP()` → `BLE_STOP()` if active → `DISPLAY_SLEEP()`
-  → `GPS_SLEEP()` (u-blox software backup, µA, config retained while
-  powered; TIMER3 stopped) → IMU power rail off.
+  session → `CAMERA_SLEEP()` → `BLE_STOP()` if active →
+  `SENSOREGG_SLEEP()` + `bleShutdownQuiesce()` (**unconditional** radio
+  quiesce: stop the egg scanner and any advertising, drop a surviving
+  link with a bounded WDT-fed settle, then `bleConnLedOff()` LAST —
+  `BLE_STOP()` is transfer-only, so a camera-owned radio used to reach
+  System OFF with the conn LED still driven; GPIO state is retained
+  there, hence the "blue light stays on after sleep" field report) →
+  `DISPLAY_SLEEP()` → `GPS_SLEEP()` (u-blox software backup, µA, config
+  retained while powered; TIMER3 stopped) → IMU power rail off. The
+  charging-loop soft resume (`softResumeFromCharging()`) restarts the
+  egg scanner via `SENSOREGG_WAKE()`; BLE/camera stay lazy.
 - **System OFF entry** (`shutdownSystemOff()`, no return): wait for the
   entry combo's buttons to release (a held button = SENSE satisfied =
   instant wake-reset), **sample the tach line's parked idle level**
