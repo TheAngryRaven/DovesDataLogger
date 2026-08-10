@@ -644,6 +644,15 @@ void displayPage_gps_speed() {
   resetDisplay();
 
   display.println(F("SPEED"));
+  // Logging died mid-session (an SD write failure stops logging for the
+  // session while the race deliberately continues). With the stats page
+  // hidden by default (debug_pages), this corner flag is the rotation's
+  // only signal that laps are no longer reaching the card.
+  if (raceActive && !enableLogging) {
+    display.setCursor(92, 0);
+    display.print(F("NO LOG"));
+    display.setCursor(0, 8);
+  }
 
   {
     int currentLap = activeTimerLaps() + (activeTimerRaceStarted() ? 1 : 0);
@@ -829,6 +838,10 @@ void displayPage_tachometer() {
     // The GPS-lock hold pins the user here with navigation disabled (see
     // displayLoop). Say so — a silent pin reads as a crash in the field.
     display.print(F("  WAITING GPS LOCK.."));
+  } else if (raceActive && !enableLogging) {
+    // Same "logging died" flag as the speed page — this is the tach
+    // session's landing page, so the signal has to exist here too.
+    display.print(F("  ** NOT LOGGING **"));
   } else {
     display.print(F("     max: "));
     display.print(topTachReported);

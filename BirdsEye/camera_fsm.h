@@ -68,6 +68,15 @@ constexpr uint8_t  kConnectRetries     = 3;      // wake attempts before giving 
 // looping connect->timeout->re-advertise forever.
 constexpr uint32_t kSubscribeTimeoutMs = 10000;
 constexpr uint8_t  kSubscribeRetries   = 3;      // connect-but-never-subscribe cycles before IDLE
+// After a full wake cycle (or the subscribe bound) gives up, IDLE must not
+// re-wake immediately: the wake trigger (RPM, or a manual/speed session's
+// sessionDemand) persists, so an instant re-entry erased both retry bounds
+// and turned "camera left at home" into continuous advertising for the whole
+// session (blinking conn LED, radio never resting). One cooldown between
+// cycles caps the duty while still retrying — a camera brought into range
+// mid-session connects on the next cycle (or is adopted instantly if it
+// connects to a stale advert during the cooldown).
+constexpr uint32_t kWakeRetryCooldownMs = 60000;
 constexpr uint32_t kPairingTimeoutMs   = 120000; // pairing screen gives up after 2 min
 // RECORDING: if the camera's observed state (0x10 timer) reports IDLE this
 // long while we believe we're recording, the start shutter never landed — so
@@ -147,6 +156,7 @@ struct Fsm {
   uint32_t stopCondSince = 0;       // RECORDING: engine-off hold start
   uint32_t recordIdleSince = 0;     // RECORDING: camera-reports-idle-while-believed-recording since
   bool     recordRetryUsed = false; // RECORDING: single re-assert-shutter latch (re-armed on confirmed recording)
+  uint32_t wakeCooldownSince = 0;   // IDLE: wake give-up cooldown start (0 = not cooling down)
   uint32_t pairingSince = 0;
   State    pairingReturnState = State::kUnpaired;  // where pairing cancel/timeout goes back to
   bool     entryPending = false;    // current state's entry action not yet emitted

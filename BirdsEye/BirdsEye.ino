@@ -2384,9 +2384,16 @@ void loop() {
   // ready to re-record if the engine restarts. endRaceSession() is idempotent
   // and does not switch pages itself, so we do (mirrors checkAutoIdle). A
   // manual logging-stop does not set this — that path already ended the log.
-  if (raceActive && cameraConsumeAutoStop()) {
-    endRaceSession();
-    switchToDisplayPage(PAGE_MAIN_MENU);
+  // Consume UNCONDITIONALLY: the latch can be set with no session active
+  // (e.g. the GPS-lock-hold idle ender leaves the camera recording, then the
+  // engine dies on the menu), and a short-circuited read here let that stale
+  // latch survive to kill the NEXT session on its first frame.
+  {
+    const bool cameraStopped = cameraConsumeAutoStop();
+    if (raceActive && cameraStopped) {
+      endRaceSession();
+      switchToDisplayPage(PAGE_MAIN_MENU);
+    }
   }
 
   // Button hold detection for shutdown/reboot combos
@@ -2441,6 +2448,19 @@ void loop() {
 #else
     if (idleFor >= SLEEP_IDLE_TIMEOUT_MS) {
 #endif
+      enterShutdown();
+      return;
+    }
+  } else if (currentPage == PAGE_INTERNAL_FAULT) {
+    // FAULT is a buttons-disabled dead end (dead SD on a sealed unit). With
+    // no idle timer it burned the battery flat on every charge — the same
+    // rationale as the SD-format page's timeout. Reuse the menu idle pair:
+    // buttons are disabled here, so a plain entry-stamped timeout is enough.
+    if (!menuIdleTimerRunning) {
+      menuIdleTimerRunning = true;
+      menuIdleStartTime = millis();
+    }
+    if (millis() - menuIdleStartTime >= SLEEP_IDLE_TIMEOUT_MS) {
       enterShutdown();
       return;
     }

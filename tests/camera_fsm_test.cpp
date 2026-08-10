@@ -860,3 +860,51 @@ TEST_CASE("camera_fsm - rpm rules unchanged when sessionDemand is false") {
     CHECK(s.f.state == State::kWatching);
     CHECK(s.f.recordingActive == false);
 }
+
+// ---------------------------------------------------------------------------
+// Wake-retry cooldown — absent camera must not mean continuous advertising
+// ---------------------------------------------------------------------------
+
+TEST_CASE("camera_fsm - wake give-up cools down instead of instantly re-waking") {
+    Sim s;
+    s.in.rpm = 3000;  // persistent trigger (same shape as sessionDemand)
+    REQUIRE(s.tick(0) == Action::kNone);
+    REQUIRE(s.tick(kRpmOnDebounceMs) == Action::kStartWakeBurst);
+    // Burn through the full wake cycle with no camera.
+    int bursts = 1;
+    for (int i = 0; i < 200 && s.f.state == State::kWaking; i++) {
+        if (s.tick(1000) == Action::kStartWakeBurst) bursts++;
+    }
+    CHECK(bursts == (int)kConnectRetries);
+    REQUIRE(s.f.state == State::kIdle);
+    // The cooldown must hold: no advertising for kWakeRetryCooldownMs.
+    const auto acts = s.run(kWakeRetryCooldownMs - 5000, 1000);
+    CHECK(countOf(acts, Action::kStartWakeBurst) == 0);
+    CHECK(s.f.state == State::kIdle);
+    // ...and then a fresh cycle begins.
+    const auto after = s.run(10000 + kRpmOnDebounceMs, 1000);
+    CHECK(countOf(after, Action::kStartWakeBurst) >= 1);
+}
+
+TEST_CASE("camera_fsm - sessionDemand wake give-up cools down too") {
+    Sim s;
+    s.in.rpm = 0;
+    s.in.sessionDemand = true;
+    REQUIRE(s.tick(0) == Action::kStartWakeBurst);
+    for (int i = 0; i < 200 && s.f.state == State::kWaking; i++) s.tick(1000);
+    REQUIRE(s.f.state == State::kIdle);
+    const auto acts = s.run(kWakeRetryCooldownMs / 2, 1000);
+    CHECK(countOf(acts, Action::kStartWakeBurst) == 0);
+}
+
+TEST_CASE("camera_fsm - a camera connecting during the cooldown is adopted") {
+    Sim s;
+    s.in.rpm = 0;
+    s.in.sessionDemand = true;
+    REQUIRE(s.tick(0) == Action::kStartWakeBurst);
+    for (int i = 0; i < 200 && s.f.state == State::kWaking; i++) s.tick(1000);
+    REQUIRE(s.f.state == State::kIdle);
+    s.in.remoteConnected = true;  // late connect to the last advert
+    CHECK(s.tick(1000) == Action::kNone);
+    CHECK(s.f.state == State::kAwaitReady);
+}

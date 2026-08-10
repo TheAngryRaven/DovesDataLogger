@@ -58,6 +58,13 @@ static sensoregg_protocol::SeqMonitor eggSeqMon;  // zombie-egg detection
 
 static bool eggScannerRunning = false;
 static bool eggSetupDone = false;   // scanner configured — self-heal may (re)start it
+// Sleep gate, read by the scan callback (BLE task): a report accepted just
+// before SENSOREGG_SLEEP() has its rx callback deferred, and the callback's
+// mandatory Scanner.resume() would restart the scan AFTER the stop (the
+// core's resume() never checks the running flag) — the scanner then runs
+// through the entire charging park. volatile: written on the main loop,
+// read in BLE task context.
+static volatile bool eggSleeping = false;
 static uint32_t eggLastKickMs = 0;  // last scanner self-heal kick (main loop)
 
 ///////////////////////////////////////////
@@ -109,8 +116,13 @@ static void sensoreggScanCallback(ble_gap_evt_adv_report_t* report) {
 
   // MANDATORY: without resume() the scanner halts after the first report
   // — symptom is exactly one reading then permanent silence,
-  // indistinguishable from a dead egg.
-  Bluefruit.Scanner.resume();
+  // indistinguishable from a dead egg. Skipped while sleeping: this
+  // deferred callback may run AFTER SENSOREGG_SLEEP()'s stop, and resume()
+  // restarts the scan unconditionally — resurrecting the scanner the sleep
+  // just killed.
+  if (!eggSleeping) {
+    Bluefruit.Scanner.resume();
+  }
 }
 
 ///////////////////////////////////////////
@@ -157,16 +169,23 @@ void SENSOREGG_SLEEP() {
   // Shutdown path: stop the forever-scan so the SoftDevice radio is quiet
   // before System OFF / the charging loop. Without this the scanner ran
   // through the entire "powered off while charging" park. Idempotent.
-  if (eggScannerRunning) {
+  // Gate FIRST: a scan report accepted just before this stop has a deferred
+  // rx callback whose resume() would otherwise restart the scan afterwards
+  // (see eggSleeping). The stop itself can also no-op while the scanner is
+  // paused on an accepted report — the gate covers that hole too, since the
+  // paused scanner only resumes through the callback we just muted.
+  eggSleeping = true;
+  if (eggSetupDone) {
     Bluefruit.Scanner.stop();
-    eggScannerRunning = false;
   }
+  eggScannerRunning = false;
 }
 
 void SENSOREGG_WAKE() {
   // Charging-loop soft resume: the scanner config (callback, interval,
   // filters) survives a stop, so a bare start() restores reception.
-  if (!eggScannerRunning) {
+  eggSleeping = false;
+  if (eggSetupDone && !eggScannerRunning) {
     eggScannerRunning = Bluefruit.Scanner.start(0);  // 0 = forever
   }
 }

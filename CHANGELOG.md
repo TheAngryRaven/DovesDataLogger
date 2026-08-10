@@ -74,6 +74,24 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
     rate of a multi-cylinder engine doesn't run into it and read low.
 
 ### Fixed
+- **A Bluetooth file download can no longer arrive silently corrupted.** If a
+  notification stalled for more than a moment (phone screen off, radio
+  congestion), the logger dropped that chunk and carried on with the next one
+  — the received file ended shorter than promised with no error. The unsent
+  chunk is now rewound and resent.
+- **Listing a card full of logs no longer crash-reboots the logger
+  mid-transfer.** The file listing walked the whole directory in one go and
+  a season's worth of logs could outlast the hardware watchdog; it is now
+  fed during the walk.
+- **The screen now says so when logging dies mid-session.** An SD write
+  failure stops logging for the session (the race deliberately continues) —
+  but with the diagnostics hidden by default nothing on screen showed it, so
+  a bad card could silently cost a whole day's data. The speed page shows a
+  `NO LOG` corner flag and the tach page a `** NOT LOGGING **` footer.
+- **A dead SD card no longer drains the battery on the fault screen.** The
+  FAULT page (card dead at boot, buttons disabled) had no idle timeout, so a
+  sealed unit sat there flashing until the pack was flat. It now powers down
+  after the same 5-minute idle as the menu.
 - **The blue Bluetooth light no longer stays on after the device sleeps.**
   Sleep only tore the radio down when the *file-transfer* page had been used;
   a camera-owned Bluetooth link (or one still mid-disconnect) kept the

@@ -26,6 +26,7 @@ void clearTimers(Fsm& f) {
   f.stopCondSince = 0;
   f.recordIdleSince = 0;
   f.recordRetryUsed = false;
+  f.wakeCooldownSince = 0;
   f.pairingSince = 0;
   f.entryPending = false;
 }
@@ -103,6 +104,20 @@ Action enterWakingFresh(Fsm& f, uint32_t nowMs) {
 // ---- Per-state step logic ------------------------------------------------
 
 Action stepIdle(Fsm& f, const Inputs& in) {
+  // Wake-retry cooldown (set by the give-up paths): the trigger persists, so
+  // without this IDLE re-entered WAKING on the very next step and the retry
+  // bounds never held (see kWakeRetryCooldownMs). A camera that connects to
+  // a stale advert during the cooldown is still adopted immediately.
+  if (f.wakeCooldownSince != 0) {
+    if (!elapsed(in.nowMs, f.wakeCooldownSince, kWakeRetryCooldownMs)) {
+      if (in.remoteConnected) {
+        f.wakeCooldownSince = 0;
+        enterAwaitReady(f, in.nowMs);
+      }
+      return Action::kNone;
+    }
+    f.wakeCooldownSince = 0;
+  }
   // Session-driven wake: a manual/speed race session is a deliberate act, so
   // no debounce — wake the camera now. The record-start clock is armed by
   // maintainRecordArm() in the states that follow.
@@ -171,6 +186,7 @@ Action stepWaking(Fsm& f, const Inputs& in) {
       return Action::kStartWakeBurst;
     }
     enterIdlePreserveRecording(f);  // never reached the camera — keep the belief
+    f.wakeCooldownSince = seedNow(in.nowMs);  // full cycle failed — cool down
     return Action::kStopAdvertising;
   }
   if (in.sessionEndRequested) {
@@ -219,6 +235,7 @@ Action stepAwaitReady(Fsm& f, const Inputs& in) {
       // Give up: the camera connects but won't take our buttons. Preserve the
       // recording belief (we never reached it to stop it).
       enterIdlePreserveRecording(f);
+      f.wakeCooldownSince = seedNow(in.nowMs);  // bound held — cool down
       return Action::kDisconnect;
     }
     enterWakingFresh(f, in.nowMs);  // re-wake; its kStartWakeBurst is intentionally
