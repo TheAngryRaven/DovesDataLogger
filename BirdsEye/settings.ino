@@ -114,6 +114,10 @@ static void ensureDefaultSettings() {
     // Panel colours. "normal" is lit-on-black, exactly as shipped; "inverted"
     // swaps lit and unlit pixels for glare/daylight readability.
     { "display_invert", "normal" },
+    // Race-rotation debug pages (GPS/RF DEBUG + GPS STATS). "hide" (default)
+    // starts the rotation at the speed page — end users never see the
+    // diagnostic counters; "show" restores them for development/tuning.
+    { "debug_pages", "hide" },
   };
 
   char buf[48];

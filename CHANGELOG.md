@@ -13,6 +13,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **The diagnostic pages are hidden by default.** The two pages at the front
+  of the race rotation (GPS/RF debug counters, and the battery/sats/SD stats
+  page) are developer tools, and a new **Debug Pages** setting (editable over
+  Bluetooth) now controls them. Out of the box the rotation starts at the
+  speed page — a driver only ever sees speed, RPM, and lap pages. Set
+  `debug_pages` to `show` to put the diagnostics back. **Note this is a
+  behaviour change**: existing devices hide the pages after updating until
+  the setting is flipped.
 - **The screen can be inverted.** A new **Display Colours** setting, editable
   over Bluetooth, switches the panel between the white-on-black it has always
   used and black-on-lit. Useful in direct sun, where a mostly-dark screen is

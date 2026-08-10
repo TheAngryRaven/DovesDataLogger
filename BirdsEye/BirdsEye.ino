@@ -732,7 +732,11 @@ int lastPage = 0;
 #ifdef ENDURANCE_MODE
   const int runningPageStart = GPS_SPEED;
 #else
-  const int runningPageStart = GPS_DEBUG;  // debug page carries the GPS pipeline counters
+  // Runtime, not const: the debug_pages setting decides whether the two
+  // diagnostic pages (GPS_DEBUG, GPS_STATS) are in the rotation. Default is
+  // hidden — the boot settings read raises the start only on an explicit
+  // "show", so a blank or garbled value gives an end user the clean rotation.
+  int runningPageStart = GPS_SPEED;
 #endif
 
 int runningPageEnd = LOGGING_STOP; // only changes if sd:/tracks not found
@@ -916,6 +920,15 @@ void setup() {
     if (getSetting("race_mode", buf, sizeof(buf))) {
       settingRaceModePrefSprint = (strcasecmp(buf, "sprint") == 0);
     }
+#ifndef ENDURANCE_MODE
+    // Debug pages in the race rotation. Only an explicit "show" restores the
+    // GPS/RF DEBUG + GPS STATS pages — anything else (blank, garbled, future
+    // value) keeps the clean end-user rotation starting at the speed page.
+    // ENDURANCE_MODE already starts at GPS_SPEED, so it ignores the setting.
+    if (getSetting("debug_pages", buf, sizeof(buf))) {
+      if (strcasecmp(buf, "show") == 0) runningPageStart = GPS_DEBUG;
+    }
+#endif
     // Engine geometry. Anything other than an explicit "single" is treated as
     // wasted spark, so a blank, garbled or future value degrades to today's
     // behaviour rather than doubling every RPM reading.

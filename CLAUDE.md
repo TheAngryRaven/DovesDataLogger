@@ -436,12 +436,18 @@ loop()  ~250 Hz
   - Boot/menu: `PAGE_BOOT` (999), `PAGE_GPS_STATUS` (900, satellite status
     page every boot lands on — driven by `gpsStatusPageLoop()`, buttons
     deliberately no-op'd in `displayLoop()`), `PAGE_MAIN_MENU` (-1).
-  - Racing: `GPS_DEBUG` (3, GPS pipeline counters + lap debug — first in
-    the rotation) through `LOGGING_STOP`; `SENSOR_TEMP` (7, SensorEgg
-    Temp1) sits after `TACHOMETER` (6) — non-endurance only, and only
-    when `BIRDSEYE_ENABLE_SENSOREGG` is set (beta). With the POC off (the
+  - Racing: `GPS_DEBUG` (3, GPS pipeline counters + lap debug) and
+    `GPS_STATS` (4, battery/sats/SD/track status) through `LOGGING_STOP`.
+    The two diagnostic pages are **hidden by default at runtime**: the
+    `debug_pages` setting (default `hide`) leaves `runningPageStart` at
+    `GPS_SPEED`; an explicit `show` lowers it to `GPS_DEBUG`. The constants
+    always exist — hiding is purely the rotation's start bound, so the
+    contiguous-block navigation needs no holes. `SENSOR_TEMP` (7, SensorEgg
+    Temp1) and `SENSOR_TEMP2` (8, v2 aux intake-air temp) sit after
+    `TACHOMETER` (6) — non-endurance only, and only when
+    `BIRDSEYE_ENABLE_SENSOREGG` is set (beta). With the POC off (the
     master/release default) the block closes up behind the tach page and
-    `LOGGING_STOP` is 12 instead of 13, same reshuffle idea as
+    `LOGGING_STOP` is 12 instead of 14, same reshuffle idea as
     `ENDURANCE_MODE`. Page ids are internal — nothing external sees them.
   - Replay: `PAGE_REPLAY_FILE_SELECT` (-3), `PAGE_REPLAY_RESULTS` (-8),
     `PAGE_REPLAY_EXIT` (-9).
@@ -998,7 +1004,7 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
 - **BUILD FLAG — `BIRDSEYE_ENABLE_SENSOREGG` (`project.h`)**: this whole
   subsystem is a beta-channel feature. `0` (master/release default)
   compiles `sensoregg.ino` down to no-op `SENSOREGG_SETUP/LOOP` and NaN
-  accessors, drops the Temp1 race page from the rotation
+  accessors, drops the Temp1 and Temp2 race pages from the rotation
   (`display_pages.ino` + the page-constant block in `BirdsEye.ino`), and
   returns BLE to lazy init. `1` (passed by `beta.yml`, and by
   `compile-sketch.yml` for PRs targeting `BETA`) is everything described
@@ -1205,6 +1211,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
   "device_name": "ApexTurbo",
   "race_mode": "circuit",
   "display_invert": "normal",
+  "debug_pages": "hide",
   "spark_mode": "wasted",
   "cylinder_count": "1",
   "driver_name": "Driver",
@@ -1227,6 +1234,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | `waypoint_speed` | int | `30` | Speed threshold (mph) for waypoint/detection |
 | `spark_mode` | string | `"wasted"` | Ignition rate: `wasted` = 1 spark/rev (2T, or 4T wasted spark); `single` = 1 spark per 2 revs (4T single-fire). Anything other than an explicit `single` is treated as `wasted` |
 | `display_invert` | string | `"normal"` | Panel colours: `normal` = lit-on-black as shipped, `inverted` = black-on-lit. Anything other than an explicit `inverted` means normal |
+| `debug_pages` | string | `"hide"` | Race-rotation diagnostic pages (`GPS_DEBUG` + `GPS_STATS`): `hide` = rotation starts at the speed page (end-user default), `show` = diagnostics restored at the front. Anything other than an explicit `show` means hide. No-op under `ENDURANCE_MODE` (already starts at speed) |
 | `cylinder_count` | int | `1` | Cylinders the **pickup sees** — a clamp on one plug wire of a twin sees ONE. Only a shared coil / all-cylinder harness sees them all |
 
 - Created automatically on first boot with random BLE values.
