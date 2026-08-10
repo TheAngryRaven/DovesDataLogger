@@ -664,11 +664,15 @@ void CAMERA_LOOP() {
     return;
   }
 
-  // 2. Fresh Inputs snapshot. Recording is now driven purely by RPM — GPS fix
-  //    and ground speed no longer gate it (GPS still streams to the camera).
+  // 2. Fresh Inputs snapshot. Recording is driven by RPM for tach sessions;
+  //    manual/speed-entered sessions (no engine signal) drive the same
+  //    lifecycle through sessionDemand — GPS fix and ground speed still never
+  //    gate it (GPS streams to the camera regardless).
   camera_fsm::Inputs in;
   in.nowMs = millis();
   in.rpm = tachLastReported;
+  in.sessionDemand = raceActive && (raceEntryCause == RACE_ENTRY_MANUAL ||
+                                    raceEntryCause == RACE_ENTRY_SPEED);
   in.remoteConnected = remoteLinkUp;
   in.ce82Subscribed = remoteLinkUp && ce82NotifyOn;
   in.recordObserved = cameraObservedRecordForFsm();

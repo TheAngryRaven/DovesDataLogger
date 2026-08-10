@@ -13,6 +13,15 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **The camera now works without a tachometer.** Auto-record used to be
+  driven entirely by engine RPM, so on a device with no tach pickup a paired
+  Insta360 never woke up. Now a race session started from the menu, or by the
+  speed trip, drives the camera itself: it wakes at session start and begins
+  recording a few seconds after it connects. These sessions end — data
+  logging and camera recording together — after **5 minutes below 5 mph**
+  (previously the data log ended alone after 60 seconds below 2 mph).
+  Tach-equipped devices are unchanged: RPM still runs the whole show,
+  including the 30-second engine-off stop.
 - **The diagnostic pages are hidden by default.** The two pages at the front
   of the race rotation (GPS/RF debug counters, and the battery/sats/SD stats
   page) are developer tools, and a new **Debug Pages** setting (editable over

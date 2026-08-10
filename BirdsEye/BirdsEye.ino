@@ -156,6 +156,11 @@ unsigned long idleStartTime = 0;
 bool idleTimerRunning = false;
 bool raceActive = false;
 unsigned long raceSessionStartedAt = 0;  // For auto-idle grace period after RPM wake
+// How the active session started (RACE_ENTRY_NONE between sessions). Decides
+// the session-end rule and the camera driver: manual/speed sessions have no
+// engine signal, so they record from session start and end on the 5 min
+// below-5 mph idle rule; tach sessions keep the RPM-driven behaviour.
+RaceEntryCause raceEntryCause = RACE_ENTRY_NONE;
 
 // Runtime settings (loaded from SD in setup)
 float settingLapDetectionDistance = 7.0;
@@ -1381,18 +1386,33 @@ void trackDetectionLoop() {
 }
 
 /**
+ * @brief Start a race session. The single entry point — all three triggers
+ * (main-menu Race select, autoRaceModeCheck, tach-wake boot via the GPS
+ * status page) route through here so the entry cause is always recorded.
+ * The caller picks the landing page (speed vs tach) itself.
+ */
+void startRaceSession(RaceEntryCause cause) {
+  raceActive = true;
+  enableLogging = true;
+  raceSessionStartedAt = millis();
+  raceEntryCause = cause;
+  // Create a minimal CourseManager if none exists yet (no track detected)
+  createLapAnythingCourseManager();
+}
+
+/**
  * @brief End the current race session: write DOVEX header, close file,
  * clean up CourseManager, reset state. Used by both checkAutoIdle()
  * and LOGGING_STOP_CONFIRM in display_ui.ino.
  */
 void endRaceSession() {
-  // Deliberately NO camera notification here: checkAutoIdle() ends the
-  // log session on speed alone (engine ignored), but the camera must
-  // keep recording through a stationary grid idle — its own
+  // Deliberately NO camera notification here: for TACH sessions the
+  // camera must keep recording through a stationary grid idle — its own
   // stationary-AND-engine-off rule decides the recording stop. The
-  // camera is stopped explicitly where the user means "I'm done":
-  // the manual stop confirm (display_ui.ino) and shutdown entry
-  // (CAMERA_SLEEP() in enterShutdown()).
+  // camera is stopped explicitly where the ender owns it: the manual
+  // stop confirm (display_ui.ino), the manual/speed-session idle timer
+  // (checkAutoIdle() calls CAMERA_NOTIFY_SESSION_END() itself before
+  // this), and shutdown entry (CAMERA_SLEEP() in enterShutdown()).
 
   // Write DOVEX metadata header into the reserved region
   if (sdDataLogInitComplete && dataFile.isOpen()) {
@@ -1423,6 +1443,7 @@ void endRaceSession() {
   trackDetected = false;
   detectedTrackIndex = -1;
   raceActive = false;
+  raceEntryCause = RACE_ENTRY_NONE;
   idleTimerRunning = false;
   idleStartTime = 0;
 
@@ -1452,16 +1473,29 @@ void createLapAnythingCourseManager() {
 }
 
 /**
- * @brief Check for auto-idle: 60s at <2mph ends the session
+ * @brief Check for auto-idle. Cause-aware since the manual/speed camera work:
+ * - Tach sessions: 60 s at <2 mph ends the session (data only — the camera,
+ *   if recording, owns its own 30 s engine-off stop and this yields to it).
+ * - Manual/speed sessions: 5 min at <5 mph ends the session AND stops the
+ *   camera. These sessions have no engine signal, so this idle timer is the
+ *   one and only ender — it must not yield to the camera.
  */
 void checkAutoIdle() {
   if (!raceActive) return;
 
-  // Yield to an active camera recording: while the camera is recording, IT owns
-  // the end (30 s engine-off -> cameraConsumeAutoStop() above), so the
-  // speed-based idle must not cut the log out from under it during a stationary
-  // but engine-running stint (grid/paddock). No camera, or not recording, keeps
-  // the original speed-only behavior below.
+  // Manual/speed-entered sessions have no RPM: the camera records on
+  // sessionDemand and cannot stop itself (its rpm<OFF rule is suppressed),
+  // so THIS timer owns the end of both the log and the recording.
+  const bool speedRuleSession =
+      (raceEntryCause == RACE_ENTRY_MANUAL || raceEntryCause == RACE_ENTRY_SPEED);
+  const float idleSpeedMph = speedRuleSession ? 5.0f : 2.0f;
+  const unsigned long idleHoldMs = speedRuleSession ? 300000UL : 60000UL;
+
+  // Yield to an active camera recording (TACH SESSIONS ONLY): while the camera
+  // is recording, IT owns the end (30 s engine-off -> cameraConsumeAutoStop()
+  // above), so the speed-based idle must not cut the log out from under it
+  // during a stationary but engine-running stint (grid/paddock). No camera, or
+  // not recording, keeps the original speed-only behavior below.
   //
   // EXCEPTION — GPS-lock hold: while the session is still waiting for its GPS
   // time lock, no log file exists and the hold pins the UI with navigation
@@ -1470,12 +1504,12 @@ void checkAutoIdle() {
   // looking bricked until a power cycle (2026-07-19 pull-start incident).
   // There is no log to protect yet — let the idle timer end the fileless
   // session, which releases the UI and stops the camera.
-  if (cameraActivelyRecording() && !gpsLockHoldActive) return;
+  if (!speedRuleSession && cameraActivelyRecording() && !gpsLockHoldActive) return;
 
   // Grace period: don't auto-idle within first 3 minutes of a session.
   // After RPM wake the car is often stationary (warming up, waiting for
   // track session) and GPS needs time to reacquire. Without this, the
-  // 60s idle timer kills the session before the driver even moves.
+  // idle timer kills the session before the driver even moves.
   if (millis() - raceSessionStartedAt < 180000UL) return;
 
   // Sprint mode: between-run queue waits are normal (engine running,
@@ -1489,7 +1523,7 @@ void checkAutoIdle() {
     return;
   }
 
-  if (gps_speed_mph >= 2.0) {
+  if (gps_speed_mph >= idleSpeedMph) {
     idleTimerRunning = false;
     idleStartTime = 0;
     return;
@@ -1501,8 +1535,16 @@ void checkAutoIdle() {
     return;
   }
 
-  if (millis() - idleStartTime >= 60000) {
-    debugln(F("Auto-idle: 60s at <2mph — ending session"));
+  if (millis() - idleStartTime >= idleHoldMs) {
+    if (speedRuleSession) {
+      debugln(F("Auto-idle: 5min at <5mph — ending session + camera"));
+      // This ender owns the camera for manual/speed sessions: sessionDemand
+      // drops with raceActive, and the notify stops the recording (the FSM's
+      // own rpm stop rule is suppressed for these sessions).
+      CAMERA_NOTIFY_SESSION_END();
+    } else {
+      debugln(F("Auto-idle: 60s at <2mph — ending session"));
+    }
     endRaceSession();
     switchToDisplayPage(PAGE_MAIN_MENU);
   }
@@ -1536,12 +1578,7 @@ void autoRaceModeCheck() {
 
   if (rpmTriggered || speedTriggered) {
     debugln(F("Auto-entering race mode"));
-    raceActive = true;
-    enableLogging = true;
-    raceSessionStartedAt = millis();
-
-    // Create a minimal CourseManager if none exists yet (no track detected)
-    createLapAnythingCourseManager();
+    startRaceSession(rpmTriggered ? RACE_ENTRY_TACH : RACE_ENTRY_SPEED);
 
     // Show tach page if RPM triggered first, otherwise speed page
     switchToDisplayPage(rpmTriggered ? TACHOMETER : GPS_SPEED);
@@ -1583,13 +1620,11 @@ void gpsStatusPageLoop() {
       break;
     case gps_status_page::Exit::kToRace:
       // Engine is (or was, at wake) running — straight into race mode with
-      // logging, mirroring the old RPM-wake path.
+      // logging, mirroring the old RPM-wake path. Always a tach cause: the
+      // page's kToRace verdict only fires on tach wake / engine running.
       gpsEnterRaceMode();
       debugln(F("GPS status page -> race mode"));
-      raceActive = true;
-      enableLogging = true;
-      raceSessionStartedAt = millis();
-      createLapAnythingCourseManager();
+      startRaceSession(RACE_ENTRY_TACH);
       switchToDisplayPage(TACHOMETER);
       break;
     case gps_status_page::Exit::kToShutdown:

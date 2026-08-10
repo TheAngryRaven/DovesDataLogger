@@ -37,7 +37,10 @@ void clearTimers(Fsm& f) {
 // can wake the camera without also starting a recording. The record-start
 // clock (kRecordStartDelayMs) runs from recordArmSince.
 void maintainRecordArm(Fsm& f, const Inputs& in) {
-  if (in.rpm >= kRecordRpmThreshold) {
+  // sessionDemand arms too: a manual/speed session has no RPM to clear the
+  // record band, and the session start itself is the deliberate signal. The
+  // kRecordStartDelayMs clock still applies from the arm.
+  if (in.rpm >= kRecordRpmThreshold || in.sessionDemand) {
     if (f.recordArmSince == 0) f.recordArmSince = seedNow(in.nowMs);
   } else {
     f.recordArmSince = 0;  // below the record band — restart the clock
@@ -100,6 +103,17 @@ Action enterWakingFresh(Fsm& f, uint32_t nowMs) {
 // ---- Per-state step logic ------------------------------------------------
 
 Action stepIdle(Fsm& f, const Inputs& in) {
+  // Session-driven wake: a manual/speed race session is a deliberate act, so
+  // no debounce — wake the camera now. The record-start clock is armed by
+  // maintainRecordArm() in the states that follow.
+  if (in.sessionDemand) {
+    f.rpmOnSince = 0;
+    if (in.remoteConnected) {
+      enterAwaitReady(f, in.nowMs);
+      return Action::kNone;
+    }
+    return enterWakingFresh(f, in.nowMs);
+  }
   // RPM-on debounce: any sample at/below the ON threshold resets the hold.
   if (in.rpm <= kRpmOnThreshold) {
     f.rpmOnSince = 0;
@@ -136,8 +150,9 @@ Action stepWaking(Fsm& f, const Inputs& in) {
   maintainRecordArm(f, in);  // keep the 5 s record-start clock accurate
   // Engine gone again before the camera showed up: abort the wake. Preserve
   // the recording belief — the camera is unreachable, so we can't have
-  // stopped it (see enterIdlePreserveRecording).
-  if (in.rpm < kRpmOffThreshold) {
+  // stopped it (see enterIdlePreserveRecording). Never fires while a
+  // manual/speed session drives the wake — rpm is legitimately 0 there.
+  if (!in.sessionDemand && in.rpm < kRpmOffThreshold) {
     if (f.rpmGoneSince == 0) {
       f.rpmGoneSince = seedNow(in.nowMs);
     } else if (elapsed(in.nowMs, f.rpmGoneSince, kRpmGoneAbortMs)) {
@@ -281,8 +296,12 @@ Action stepRecording(Fsm& f, const Inputs& in) {
   // 4. Engine-off stop: RPM below OFF for kStopRecordDelayMs (30 s) — RPM only,
   //    no speed, so a stationary-but-running grid idle keeps recording. On stop
   //    the glue sees kRecording -> kWatching (no manual sessionEnd this step) and
-  //    ends the log session.
-  if (in.rpm < kRpmOffThreshold) {
+  //    ends the log session. SUPPRESSED while sessionDemand: a manual/speed
+  //    session has rpm pinned at 0, and its stop comes from the sketch's
+  //    speed-idle timer via sessionEndRequested (case 1 above).
+  if (in.sessionDemand) {
+    f.stopCondSince = 0;
+  } else if (in.rpm < kRpmOffThreshold) {
     if (f.stopCondSince == 0) {
       f.stopCondSince = seedNow(in.nowMs);
     } else if (elapsed(in.nowMs, f.stopCondSince, kStopRecordDelayMs)) {

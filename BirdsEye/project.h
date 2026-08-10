@@ -194,6 +194,21 @@ enum BleOwner : uint8_t {
 };
 
 ///////////////////////////////////////////
+// RACE SESSION ENTRY CAUSE
+// How the current race session was started (set by startRaceSession in
+// BirdsEye.ino, RACE_ENTRY_NONE outside a session). Manual/speed sessions
+// have no engine signal, so the camera lifecycle and the auto-idle rule
+// key off this instead of RPM: they record from session start and end
+// after 5 min below 5 mph, where tach sessions keep the RPM-driven rules.
+///////////////////////////////////////////
+enum RaceEntryCause : uint8_t {
+  RACE_ENTRY_NONE = 0,    // no session active
+  RACE_ENTRY_MANUAL = 1,  // main-menu Race select
+  RACE_ENTRY_SPEED = 2,   // auto-race speed trip (>= 10 mph on the menu)
+  RACE_ENTRY_TACH = 3,    // auto-race RPM trip, or tach-wake boot
+};
+
+///////////////////////////////////////////
 // STRUCT DEFINITIONS
 // Must be in a header so Arduino's auto-prototype generation
 // can resolve these types in function signatures.

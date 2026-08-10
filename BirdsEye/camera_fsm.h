@@ -35,6 +35,9 @@ namespace camera_fsm {
 // engine has been off a while (which also ends the log session), then WATCH —
 // stay connected, ready to re-record if the engine restarts (stall recovery).
 // The camera powers off ONLY on device sleep.
+// Sessions without a tachometer (manual menu entry / speed-trip auto-race)
+// drive the same lifecycle through Inputs::sessionDemand instead of RPM —
+// see its comment for exactly which gates it replaces.
 constexpr uint32_t kRecordStartDelayMs  = 5000;    // RPM held at/above the record threshold this long -> start recording
 constexpr uint32_t kStopRecordDelayMs   = 30000;   // RPM below OFF this long -> stop recording + end session
 
@@ -106,7 +109,16 @@ enum class Action : uint8_t {
 // The one-shot event flags must be true for exactly one step() call.
 struct Inputs {
   uint32_t nowMs = 0;             // millis()
-  int32_t  rpm = 0;               // tachLastReported — the ONLY driver of record/stop now
+  int32_t  rpm = 0;               // tachLastReported — drives record/stop for tach sessions
+  // A manual/speed-entered race session is active and wants the camera. With
+  // no tachometer rpm is stuck at 0, so this substitutes for the RPM gates:
+  // wake immediately (session start is deliberate — no debounce), arm the
+  // record-start clock, and SUPPRESS the rpm<OFF auto-stop (rpm=0 would stop
+  // every session-driven recording in 30 s). While true, the recording ends
+  // only via sessionEndRequested — the sketch's speed-idle timer or the
+  // manual stop confirm. False for tach-entered sessions: RPM rules apply
+  // unchanged.
+  bool     sessionDemand = false;
   bool     remoteConnected = false;   // camera connected to our ce80 remote service (THE link)
   bool     ce82Subscribed = false;    // camera wrote our ce82 CCCD — button frames now deliverable
   RecordObs recordObserved = RecordObs::kUnknown;  // camera-reported record state (0x10 timer)

@@ -328,11 +328,7 @@ void handleMenuPageSelection() {
     if (menuSelectionIndex == 0) {
       // Race selected — go directly to race mode, start logging on GPS fix
       debugln(F("Main Menu: Race selected"));
-      raceActive = true;
-      enableLogging = true;
-      raceSessionStartedAt = millis();
-      // Create CourseManager if not already created by track detection
-      createLapAnythingCourseManager();
+      startRaceSession(RACE_ENTRY_MANUAL);
       switchToDisplayPage(GPS_SPEED);
     } else if (menuSelectionIndex == 1) {
       // Replay selected
