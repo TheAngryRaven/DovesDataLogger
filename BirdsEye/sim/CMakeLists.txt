@@ -130,6 +130,7 @@ set(SIM_CORE_SOURCES
   ${BIRDSEYE_DIR}/gps_time.cpp
   ${BIRDSEYE_DIR}/gps_validation.cpp
   ${BIRDSEYE_DIR}/haversine.cpp
+  ${BIRDSEYE_DIR}/idle_policy.cpp
   ${BIRDSEYE_DIR}/lap_format.cpp
   ${BIRDSEYE_DIR}/sat_bars.cpp
   ${BIRDSEYE_DIR}/sd_access_policy.cpp

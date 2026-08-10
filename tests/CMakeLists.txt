@@ -22,6 +22,7 @@ add_executable(birdseye_tests
   lap_format_test.cpp
   tach_filter_test.cpp
   camera_fsm_test.cpp
+  idle_policy_test.cpp
   insta360_protocol_test.cpp
   wake_cause_test.cpp
   gps_status_page_test.cpp
@@ -44,6 +45,7 @@ add_executable(birdseye_tests
   ${BIRDSEYE_DIR}/lap_format.cpp
   ${BIRDSEYE_DIR}/tach_filter.cpp
   ${BIRDSEYE_DIR}/camera_fsm.cpp
+  ${BIRDSEYE_DIR}/idle_policy.cpp
   ${BIRDSEYE_DIR}/insta360_protocol.cpp
   ${BIRDSEYE_DIR}/wake_cause.cpp
   ${BIRDSEYE_DIR}/gps_status_page.cpp

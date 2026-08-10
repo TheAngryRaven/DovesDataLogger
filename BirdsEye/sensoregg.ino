@@ -57,6 +57,7 @@ static bool     eggHaveReading = false;
 static sensoregg_protocol::SeqMonitor eggSeqMon;  // zombie-egg detection
 
 static bool eggScannerRunning = false;
+static bool eggSetupDone = false;   // scanner configured — self-heal may (re)start it
 static uint32_t eggLastKickMs = 0;  // last scanner self-heal kick (main loop)
 
 ///////////////////////////////////////////
@@ -138,6 +139,7 @@ void SENSOREGG_SETUP() {
   // RSSI floor (phones, PCs, the X4) took that slow accepted path just to
   // be magic-rejected in our callback, collapsing scan duty in bursts.
   Bluefruit.Scanner.filterMSD(sensoregg_protocol::kCompanyId);
+  eggSetupDone = true;
   eggScannerRunning = Bluefruit.Scanner.start(0);  // 0 = forever
 
   if (eggScannerRunning) {
@@ -194,14 +196,20 @@ void SENSOREGG_LOOP() {
   // kScannerSelfHealMs, kick stop+start — harmless when the egg is just
   // off, curative when the scanner wedged. Throttled by its own stamp so
   // an absent egg costs one kick per interval, not one per loop.
-  if (eggScannerRunning) {
+  // Gated on eggSetupDone, NOT eggScannerRunning: a start() the SoftDevice
+  // rejected (boot race, charging-loop resume) leaves the scanner down, and
+  // this kick is the only retry path — gating on "running" made that state
+  // permanent until reboot. (SENSOREGG_LOOP never runs after
+  // SENSOREGG_SLEEP — shutdown parks or powers off — so the kick cannot
+  // resurrect a deliberately stopped scanner.)
+  if (eggSetupDone) {
     const uint32_t now = millis();
     const uint32_t lastAlive = eggHaveReading ? eggRxMs : 0;
     if ((uint32_t)(now - lastAlive) >= sensoregg_protocol::kScannerSelfHealMs &&
         (uint32_t)(now - eggLastKickMs) >= sensoregg_protocol::kScannerSelfHealMs) {
       eggLastKickMs = now;
       Bluefruit.Scanner.stop();
-      Bluefruit.Scanner.start(0);
+      eggScannerRunning = Bluefruit.Scanner.start(0);
     }
   }
 }

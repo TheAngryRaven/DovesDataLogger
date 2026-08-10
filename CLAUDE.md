@@ -108,6 +108,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | File | Purpose |
 |---|---|
 | `haversine.{h,cpp}` | Great-circle distance in miles (track proximity) |
+| `idle_policy.{h,cpp}` | Auto-idle session-end decision table (tach 60 s/2 mph vs manual/speed 5 min/5 mph, camera-yield + GPS-lock-hold exception, sprint engine-aware reset) + the SPEED→TACH cause promotion |
 | `gps_stats.{h,cpp}` | GPS pipeline drop accounting: expected-vs-received PVT window math (exact fractional carry, 1-frame jitter slack, capped credit, rate-switch suppression) feeding the debug-page `Drops` counter |
 | `gps_time.{h,cpp}` | Leap-year/Unix-epoch math, `u64ToDecimalString` |
 | `gps_validation.{h,cpp}` | PVT sample sanity gate + dtostrf-output check |
@@ -641,8 +642,16 @@ loop()  ~250 Hz
   `RACE_ENTRY_MANUAL` (menu Race select), `RACE_ENTRY_SPEED` (auto-race
   speed trip), `RACE_ENTRY_TACH` (auto-race RPM trip / tach-wake boot).
   The cause picks the session-end rule and the camera driver below;
-  `endRaceSession()` resets it to `RACE_ENTRY_NONE`.
-- **Auto-idle** (`checkAutoIdle()`, cause-aware): **tach sessions** — if
+  `endRaceSession()` resets it to `RACE_ENTRY_NONE`. **SPEED promotes to
+  TACH** the moment the tach proves itself (>500 rpm,
+  `idle_policy::tachProven`) — a push/bump-started tach kart trips the
+  speed gate before the engine fires and must not carry no-tach rules
+  all session. MANUAL never promotes (a deliberate menu entry keeps the
+  5 min rule the user asked for).
+- **Auto-idle** (`checkAutoIdle()`, cause-aware; the decision table —
+  rule selection, camera yield, resets — is the host-tested `idle_policy`
+  unit, the sketch keeps only the clock and side effects): **tach
+  sessions** — if
   speed < 2 mph for 60 seconds continuously, writes DOVEX header, closes
   file, cleans up CourseManager, and returns to main menu (yields to an
   active camera recording, which owns its own 30 s engine-off end).

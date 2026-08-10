@@ -807,9 +807,18 @@ void BLE_STOP() {
 // autoConnLed stops the library re-lighting it; the digitalWrite parks the
 // pin high (off) — nRF52 GPIO state is retained in System OFF, so a lit pin
 // would stay lit on a "powered off" device.
+//
+// The Bluefruit calls MUST stay behind bleInitialized: this core's
+// setConnLedInterval() passes _led_blink_th to FreeRTOS with no null guard,
+// and that timer is only created in Bluefruit.begin() — calling it on a
+// never-initialized radio (stock device, BLE fully lazy) hands the timer
+// daemon a NULL handle. The pin park below is the only pre-begin-safe part,
+// and the only part such a device needs.
 void bleConnLedOff() {
-  Bluefruit.autoConnLed(false);
-  Bluefruit.setConnLedInterval(0);
+  if (bleInitialized) {
+    Bluefruit.autoConnLed(false);
+    Bluefruit.setConnLedInterval(0);
+  }
   pinMode(LED_BLUE, OUTPUT);
   digitalWrite(LED_BLUE, HIGH);
 }
@@ -837,7 +846,7 @@ void bleShutdownQuiesce() {
       delay(50);
     }
   }
-  bleConnLedOff();  // safe even before begin(): parks the pin, disarms the flag
+  bleConnLedOff();  // pre-begin() it only parks the pin (see its guard)
 }
 
 // Execute a deferred file command (main-loop context — the only place

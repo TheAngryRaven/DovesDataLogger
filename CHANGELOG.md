@@ -21,7 +21,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   logging and camera recording together — after **5 minutes below 5 mph**
   (previously the data log ended alone after 60 seconds below 2 mph).
   Tach-equipped devices are unchanged: RPM still runs the whole show,
-  including the 30-second engine-off stop.
+  including the 30-second engine-off stop — and a push/bump-started kart
+  that trips the speed gate before its engine fires is handed back to the
+  RPM rules the moment real ignition is counted.
 - **The diagnostic pages are hidden by default.** The two pages at the front
   of the race rotation (GPS/RF debug counters, and the battery/sats/SD stats
   page) are developer tools, and a new **Debug Pages** setting (editable over
