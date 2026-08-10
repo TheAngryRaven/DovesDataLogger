@@ -12,10 +12,12 @@
  * live here where tests/idle_policy_test.cpp can hold them down. The
  * sketch keeps only the clock (millis) and the side effects.
  *
- * Also here: the SPEED->TACH cause promotion. A speed-trip entry on a
+ * Also here: the promotion to TACH cause. A speed-trip entry on a
  * tach-equipped kart (push/bump start: rolling above the trip speed
- * before the engine has fired) must not carry the no-tach rules for the
- * whole session — once the tach proves itself, the session is tach-ruled.
+ * before the engine has fired) or a manual menu press (engine off at the
+ * time) must not carry the no-tach rules for the whole session — once the
+ * tach proves itself, the session is tach-ruled. Devices with no tach
+ * never read above the threshold, so their sessions are unaffected.
  *
  * Pure logic — no Arduino headers.
  */

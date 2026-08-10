@@ -108,7 +108,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | File | Purpose |
 |---|---|
 | `haversine.{h,cpp}` | Great-circle distance in miles (track proximity) |
-| `idle_policy.{h,cpp}` | Auto-idle session-end decision table (tach 60 s/2 mph vs manual/speed 5 min/5 mph, camera-yield + GPS-lock-hold exception, sprint engine-aware reset) + the SPEED→TACH cause promotion |
+| `idle_policy.{h,cpp}` | Auto-idle session-end decision table (tach 60 s/2 mph vs manual/speed 5 min/5 mph, camera-yield + GPS-lock-hold exception, sprint engine-aware reset) + the promotion of SPEED/MANUAL sessions to TACH rules once the engine fires |
 | `gps_stats.{h,cpp}` | GPS pipeline drop accounting: expected-vs-received PVT window math (exact fractional carry, 1-frame jitter slack, capped credit, rate-switch suppression) feeding the debug-page `Drops` counter |
 | `gps_time.{h,cpp}` | Leap-year/Unix-epoch math, `u64ToDecimalString` |
 | `gps_validation.{h,cpp}` | PVT sample sanity gate + dtostrf-output check |
@@ -642,12 +642,12 @@ loop()  ~250 Hz
   `RACE_ENTRY_MANUAL` (menu Race select), `RACE_ENTRY_SPEED` (auto-race
   speed trip), `RACE_ENTRY_TACH` (auto-race RPM trip / tach-wake boot).
   The cause picks the session-end rule and the camera driver below;
-  `endRaceSession()` resets it to `RACE_ENTRY_NONE`. **SPEED promotes to
-  TACH** the moment the tach proves itself (>500 rpm,
+  `endRaceSession()` resets it to `RACE_ENTRY_NONE`. **SPEED and MANUAL
+  both promote to TACH** the moment the tach proves itself (>500 rpm,
   `idle_policy::tachProven`) — a push/bump-started tach kart trips the
-  speed gate before the engine fires and must not carry no-tach rules
-  all session. MANUAL never promotes (a deliberate menu entry keeps the
-  5 min rule the user asked for).
+  speed gate before the engine fires, and a menu press happens engine-off;
+  neither must carry no-tach rules all session. No-tach devices never
+  read >500 rpm, so their sessions keep the 5 min/5 mph rules.
 - **Auto-idle** (`checkAutoIdle()`, cause-aware; the decision table —
   rule selection, camera yield, resets — is the host-tested `idle_policy`
   unit, the sketch keeps only the clock and side effects): **tach
@@ -1302,6 +1302,12 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 
 - Created automatically on first boot with random BLE values.
 - Missing keys auto-populated on boot via `ensureDefaultSettings()`.
+- **Corrupt-file self-heal**: a non-empty file that fails to parse is
+  quarantined to `/SETTINGS.json.bad` (kept for inspection, previous `.bad`
+  overwritten) and a fresh default file is generated — checked at
+  `SETTINGS_SETUP()` and again on any `setSetting()` that hits a parse
+  error (single retry against the regenerated file). An *empty* file is
+  not corrupt — the default-population paths rebuild it in place.
 - Editable on a computer or via BLE `SSET` command — changes take effect
   on next reboot (BLE disconnect triggers auto-reboot).
 - Read on-demand via `getSetting()`, written via `setSetting()`.

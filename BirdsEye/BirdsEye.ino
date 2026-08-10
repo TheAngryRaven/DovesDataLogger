@@ -1508,14 +1508,17 @@ void createLapAnythingCourseManager() {
 void checkAutoIdle() {
   if (!raceActive) return;
 
-  // SPEED->TACH promotion: a push/bump-started tach kart trips the speed
-  // gate before the engine fires, and must not carry the no-tach rules all
-  // session — once real ignition is counted, the session is tach-ruled
-  // (camera 30 s engine-off stop, 60 s/2 mph idle, grid-idle yield). Runs
-  // before CAMERA_LOOP() in the frame, so the FSM sees the same cause.
-  if (raceEntryCause == RACE_ENTRY_SPEED &&
+  // Promotion to TACH rules: the moment the tach proves itself, ANY session
+  // is tach-ruled — a push/bump-started kart trips the speed gate before the
+  // engine fires, and a manual menu press on a tach kart happens with the
+  // engine off; neither must carry the no-tach rules (camera recording the
+  // paddock, no grid-idle yield, 5 min ender mid-grid) once real ignition is
+  // being counted. Runs before CAMERA_LOOP() in the frame, so the FSM sees
+  // the same cause. No-tach devices never read >500 rpm, so their manual/
+  // speed sessions keep the 5 min/5 mph rules untouched.
+  if ((raceEntryCause == RACE_ENTRY_SPEED || raceEntryCause == RACE_ENTRY_MANUAL) &&
       idle_policy::tachProven((int32_t)tachLastReported)) {
-    debugln(F("Auto-idle: tach proven — speed session promoted to tach rules"));
+    debugln(F("Auto-idle: tach proven — session promoted to tach rules"));
     raceEntryCause = RACE_ENTRY_TACH;
   }
 

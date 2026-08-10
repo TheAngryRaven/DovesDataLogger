@@ -21,9 +21,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   logging and camera recording together — after **5 minutes below 5 mph**
   (previously the data log ended alone after 60 seconds below 2 mph).
   Tach-equipped devices are unchanged: RPM still runs the whole show,
-  including the 30-second engine-off stop — and a push/bump-started kart
-  that trips the speed gate before its engine fires is handed back to the
-  RPM rules the moment real ignition is counted.
+  including the 30-second engine-off stop — any session on a tach kart
+  (menu press, speed trip, push/bump start) is handed to the RPM rules the
+  moment real ignition is counted.
 - **The diagnostic pages are hidden by default.** The two pages at the front
   of the race rotation (GPS/RF debug counters, and the battery/sats/SD stats
   page) are developer tools, and a new **Debug Pages** setting (editable over
@@ -74,6 +74,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
     rate of a multi-cylinder engine doesn't run into it and read low.
 
 ### Fixed
+- **A corrupted settings file now heals itself instead of poisoning the
+  device forever.** A hand-edited `SETTINGS.json` with a typo (or any
+  unparseable content) used to make every setting read and write fail
+  silently for good — camera pairing gone, names lost — with no on-device
+  recovery. The logger now quarantines the bad file to `SETTINGS.json.bad`
+  (kept for inspection; an older `.bad` is overwritten) and regenerates a
+  fresh default file, at boot and on the first write that hits the
+  corruption.
 - **A Bluetooth file download can no longer arrive silently corrupted.** If a
   notification stalled for more than a moment (phone screen off, radio
   congestion), the logger dropped that chunk and carried on with the next one
