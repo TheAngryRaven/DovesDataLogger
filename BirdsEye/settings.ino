@@ -7,6 +7,11 @@
 #include "settings.h"
 
 static const char SETTINGS_FILE_PATH[] = "/SETTINGS.json";
+// Quarantine target for a corrupt (non-empty, unparseable) settings file —
+// typically a hand-edit gone wrong. The bad file is KEPT (renamed, not
+// deleted) so its contents can be inspected/salvaged on a computer; a
+// pre-existing .bad from an earlier quarantine is overwritten.
+static const char SETTINGS_BAD_PATH[] = "/SETTINGS.json.bad";
 static char settingsFileBuffer[512];
 static StaticJsonDocument<512> settingsJson;
 
@@ -148,6 +153,56 @@ static void ensureDefaultSettings() {
 }
 
 /**
+ * @brief Quarantine a corrupt settings file and regenerate defaults.
+ * The unparseable file is renamed to /SETTINGS.json.bad (overwriting any
+ * earlier quarantine) so it can be inspected on a computer, then a fresh
+ * default file is created. Before this, a corrupt file was a dead end:
+ * setSetting() aborted on the parse error and createDefaultSettings() only
+ * ran when the file didn't exist, so every setting silently failed forever
+ * with no on-device recovery.
+ * @return true when a fresh default file is in place
+ */
+static bool settingsQuarantineCorrupt() {
+  debugln(F("Settings: corrupt file — quarantining to /SETTINGS.json.bad"));
+  if (!acquireSDAccess(SD_ACCESS_TRACK_PARSE)) {
+    debugln(F("Settings: Cannot acquire SD for quarantine"));
+    return false;
+  }
+  if (SD.exists(SETTINGS_BAD_PATH)) {
+    SD.remove(SETTINGS_BAD_PATH);  // one quarantine slot — overwrite the old one
+  }
+  if (!SD.rename(SETTINGS_FILE_PATH, SETTINGS_BAD_PATH)) {
+    // Rename failing (odd FAT state) must not leave the corrupt file in
+    // place — a fresh default file matters more than preserving the bad one.
+    SD.remove(SETTINGS_FILE_PATH);
+  }
+  releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+  return createDefaultSettings();
+}
+
+/**
+ * @brief True when /SETTINGS.json is readable and parses as JSON. An empty
+ * or missing file counts as fine — those self-heal through the existing
+ * default-population paths; only a non-empty unparseable file is corrupt.
+ */
+static bool settingsFileParses() {
+  if (!acquireSDAccess(SD_ACCESS_TRACK_PARSE)) return true;  // can't check now
+  File settingsFile;
+  settingsFile.open(SETTINGS_FILE_PATH, O_READ);
+  if (!settingsFile) {
+    releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+    return true;
+  }
+  int bytesRead = settingsFile.read(settingsFileBuffer, sizeof(settingsFileBuffer) - 1);
+  settingsFile.close();
+  releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+  if (bytesRead <= 0) return true;  // empty: ensureDefaultSettings rebuilds it
+  settingsFileBuffer[bytesRead] = '\0';
+  settingsJson.clear();
+  return deserializeJson(settingsJson, settingsFileBuffer) == DeserializationError::Ok;
+}
+
+/**
  * @brief Initialize settings subsystem. Creates default file on first boot.
  * Call once from setup() after SD is initialized.
  * @return true if settings file exists (or was created)
@@ -168,6 +223,12 @@ bool SETTINGS_SETUP() {
   if (!SD.exists(SETTINGS_FILE_PATH)) {
     debugln(F("Settings: First boot, creating defaults"));
     return createDefaultSettings();
+  }
+
+  // A corrupt (hand-edited) file used to poison every get/set forever —
+  // quarantine it and start fresh before the missing-key pass.
+  if (!settingsFileParses()) {
+    return settingsQuarantineCorrupt();
   }
 
   debugln(F("Settings: File exists, checking for missing keys"));
@@ -259,7 +320,7 @@ bool resetSettings() {
   return createDefaultSettings();
 }
 
-bool setSetting(const char* key, const char* value) {
+static bool setSettingInner(const char* key, const char* value, bool healCorrupt) {
   if (!sdSetupSuccess) return false;
 
   if (!acquireSDAccess(SD_ACCESS_TRACK_PARSE)) {
@@ -279,9 +340,15 @@ bool setSetting(const char* key, const char* value) {
       settingsFileBuffer[bytesRead] = '\0';
       DeserializationError err = deserializeJson(settingsJson, settingsFileBuffer);
       if (err != DeserializationError::Ok) {
-        debug(F("Settings: Parse error on read-modify-write, aborting: "));
+        debug(F("Settings: Parse error on read-modify-write: "));
         debugln(err.c_str());
         releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+        // Corrupt mid-session (boot already healed once): quarantine +
+        // regenerate, then apply this write to the fresh file. Single
+        // retry — the regenerated file always parses, so no recursion.
+        if (healCorrupt && settingsQuarantineCorrupt()) {
+          return setSettingInner(key, value, false);
+        }
         return false;
       }
     }
@@ -308,4 +375,8 @@ bool setSetting(const char* key, const char* value) {
   debugln(value);
 
   return true;
+}
+
+bool setSetting(const char* key, const char* value) {
+  return setSettingInner(key, value, /*healCorrupt=*/true);
 }
