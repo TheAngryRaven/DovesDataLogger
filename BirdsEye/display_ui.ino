@@ -500,6 +500,8 @@ void handleMenuPageSelection() {
     debugln(F("Bluetooth: Exit selected"));
     BLE_STOP();
     switchToDisplayPage(PAGE_MAIN_MENU);
+  } else if (currentPage == PAGE_COURSE_PRUNE) {
+    courseCreatorConfirmPrune(menuSelectionIndex == 1);
   } else if (currentPage == LOGGING_STOP_CONFIRM) {
     if (menuSelectionIndex == 0) {
       switchToDisplayPage(GPS_SPEED);
@@ -636,6 +638,8 @@ void displayLoop() {
       displayPage_course_line();
     } else if (currentPage == PAGE_COURSE_POINT) {
       displayPage_course_point();
+    } else if (currentPage == PAGE_COURSE_PRUNE) {
+      displayPage_course_prune();
     } else if (currentPage == PAGE_CAMERA_SERIAL_ENTRY) {
       displayPage_camera_serial_entry();
     } else if (currentPage == PAGE_REPLAY_FILE_SELECT) {
@@ -716,6 +720,7 @@ void displayLoop() {
     currentPage == PAGE_TRANSFER_MENU ||
     currentPage == PAGE_USB_STORAGE ||
     currentPage == LOGGING_STOP_CONFIRM ||
+    currentPage == PAGE_COURSE_PRUNE ||
     currentPage == PAGE_REPLAY_FILE_SELECT ||
     currentPage == PAGE_REPLAY_EXIT ||
     // Camera page is only a menu while paired; while pairing it uses the
@@ -744,6 +749,7 @@ void displayLoop() {
       menuLimit = 4; // Wake, Record, Power Off, Back
     } else if (
       currentPage == LOGGING_STOP_CONFIRM ||
+      currentPage == PAGE_COURSE_PRUNE ||
       currentPage == PAGE_REPLAY_EXIT
     ) {
       menuLimit = 2;
@@ -773,6 +779,7 @@ void displayLoop() {
     bool reverseDirection = (currentPage == PAGE_MAIN_MENU ||
                              currentPage == PAGE_PAIR_CAMERA ||
                              currentPage == PAGE_CAMERA_TEST ||
+                             currentPage == PAGE_COURSE_PRUNE ||
                              courseCreatorActive());
 
     // BUTTON UP (or DOWN for reversed menus)

@@ -6,6 +6,7 @@
 #include "sd_functions.h"
 
 #include "track_json.h"
+#include "course_prune.h"
 
 /**
  * @brief Attempt to acquire SD card access for a subsystem
@@ -619,8 +620,15 @@ static StaticJsonDocument<768> courseJson;
  *
  * Caller must hold the SD mutex.
  */
-static SdCourseWriteResult appendCourseToTrackFile(const char* filepath,
-                                                   const char* courseText) {
+// Read `filepath` into trackJson and hand back its course array.
+//
+// Both on-disk shapes are appendable: the object format's "courses" array,
+// and the legacy bare array which IS the course list.
+//
+// Strings are zero-copy — they point into jsonFileBuffer, which stays put for
+// the lifetime of the document, so the name pointers the pruner holds survive
+// elements being removed around them.
+static SdCourseWriteResult openTrackForEdit(const char* filepath, JsonArray& courses) {
   trackFile.open(filepath, O_READ);
   if (!trackFile) {
     debugln(F("SaveCourse: append target missing"));
@@ -637,9 +645,6 @@ static SdCourseWriteResult appendCourseToTrackFile(const char* filepath,
     return SD_COURSE_WRITE_NO_TRACK;
   }
 
-  // Both on-disk shapes are appendable: the object format's "courses"
-  // array, and the legacy bare array which IS the course list.
-  JsonArray courses;
   if (trackJson.is<JsonObject>()) {
     courses = trackJson["courses"];
     if (courses.isNull()) courses = trackJson.createNestedArray("courses");
@@ -649,6 +654,85 @@ static SdCourseWriteResult appendCourseToTrackFile(const char* filepath,
     return SD_COURSE_WRITE_NO_TRACK;
   }
   if (courses.isNull()) return SD_COURSE_WRITE_NO_TRACK;
+  return SD_COURSE_WRITE_OK;
+}
+
+// The parsed track's courses, in the order they should be dropped. Static for
+// the same reason the buffers above are: off the main loop's stack.
+static course_prune::CourseSummary pruneSummaries[MAX_LAYOUTS];
+static uint8_t pruneOrder[MAX_LAYOUTS];
+
+// Snapshot the course names/stamps and compute the drop order. Returns how
+// many courses were seen.
+static uint8_t snapshotCoursesForPrune(JsonArray courses) {
+  uint8_t n = 0;
+  for (JsonObject course : courses) {
+    if (n >= MAX_LAYOUTS) break;
+    pruneSummaries[n].name = course["name"] | "";
+    pruneSummaries[n].dateCreated = course["date_created"] | "";
+    n++;
+  }
+  course_prune::dropOrder(pruneSummaries, n, pruneOrder);
+  return n;
+}
+
+// Remove the first course called `name`. By NAME, not index: indices shift
+// under every removal, and the drop order was computed against the original
+// positions.
+static bool removeCourseNamed(JsonArray courses, const char* name) {
+  for (size_t i = 0; i < courses.size(); i++) {
+    const char* n = courses[i]["name"] | "";
+    if (strcmp(n, name) == 0) {
+      courses.remove(i);
+      return true;
+    }
+  }
+  return false;
+}
+
+// True when one more course of `addLen` bytes would still leave a file the
+// next boot can read.
+//
+// Measured, not estimated: `measureJson` is the exact serialized length, and
+// the +1 is the comma the new element brings with it. Both limits matter — the
+// firmware only ever loads MAX_LAYOUTS courses, so an appended one past the cap
+// would be written and then silently ignored.
+static bool trackWouldFit(JsonArray courses, size_t addLen) {
+  if ((int)courses.size() >= MAX_LAYOUTS) return false;
+  return measureJson(trackJson) + addLen + 1 < (size_t)JSON_BUFFER_SIZE;
+}
+
+// Drop courses, best candidate first, until one more of `addLen` bytes fits.
+// Returns how many went; `outPossible` is false when even dropping everything
+// would not make room.
+static uint8_t dropUntilItFits(JsonArray courses, uint8_t count, size_t addLen,
+                               bool& outPossible) {
+  uint8_t dropped = 0;
+  while (dropped < count && !trackWouldFit(courses, addLen)) {
+    if (!removeCourseNamed(courses, pruneSummaries[pruneOrder[dropped]].name)) break;
+    dropped++;
+  }
+  outPossible = trackWouldFit(courses, addLen);
+  return dropped;
+}
+
+static SdCourseWriteResult appendCourseToTrackFile(const char* filepath,
+                                                   const char* courseText,
+                                                   uint8_t dropOldest) {
+  JsonArray courses;
+  const SdCourseWriteResult opened = openTrackForEdit(filepath, courses);
+  if (opened != SD_COURSE_WRITE_OK) return opened;
+
+  // Make room first (plan 0005). Before the append, deliberately: the
+  // document's overflowed() flag is sticky, so grafting the course in and
+  // then trying to shrink back under the limit could never clear it.
+  if (dropOldest > 0) {
+    const uint8_t have = snapshotCoursesForPrune(courses);
+    const uint8_t drop = dropOldest > have ? have : dropOldest;
+    for (uint8_t i = 0; i < drop; i++) {
+      removeCourseNamed(courses, pruneSummaries[pruneOrder[i]].name);
+    }
+  }
 
   if ((int)courses.size() >= MAX_LAYOUTS) {
     // The device only ever loads MAX_LAYOUTS courses, so an appended one
@@ -665,7 +749,8 @@ static SdCourseWriteResult appendCourseToTrackFile(const char* filepath,
   courses.add(courseJson);
   // The whole file has to fit JSON_BUFFER_SIZE on the next boot, so a
   // grafted course that overflowed the document must not reach the card.
-  if (courses.size() != before + 1 || trackJson.overflowed()) {
+  if (courses.size() != before + 1 || trackJson.overflowed() ||
+      measureJson(trackJson) >= (size_t)JSON_BUFFER_SIZE) {
     debugln(F("SaveCourse: track file is full"));
     return SD_COURSE_WRITE_TOO_BIG;
   }
@@ -698,7 +783,40 @@ static SdCourseWriteResult appendCourseToTrackFile(const char* filepath,
   return SD_COURSE_WRITE_OK;
 }
 
-SdCourseWriteResult sdSaveCreatedCourse(const CreatedCourseWrite& req) {
+SdCourseWriteResult sdPlanSprintPrune(const CreatedCourseWrite& req,
+                                      SdSprintPrunePlan& out) {
+  out = SdSprintPrunePlan();
+  if (req.course == nullptr || req.newTrack) return SD_COURSE_WRITE_IO;
+
+  const int courseLen = track_json::formatCourse(
+      courseJsonBuffer, sizeof(courseJsonBuffer),
+      *req.course, req.courseName, req.dateCreated);
+  if (courseLen < 0) return SD_COURSE_WRITE_TOO_BIG;
+
+  if (!acquireSDAccess(SD_ACCESS_TRACK_PARSE)) return SD_COURSE_WRITE_BUSY;
+
+  const uint8_t kind = (req.course->kind == course_creator::CourseKind::kSprint)
+                           ? TRACK_KIND_SPRINT
+                           : TRACK_KIND_CIRCUIT;
+  char filepath[FILEPATH_MAX];
+  makeFullTrackPath(req.trackName, filepath, kind);
+
+  JsonArray courses;
+  const SdCourseWriteResult opened = openTrackForEdit(filepath, courses);
+  if (opened == SD_COURSE_WRITE_OK) {
+    // Works on this in-RAM copy and throws it away — nothing is written here.
+    const uint8_t have = snapshotCoursesForPrune(courses);
+    out.dropCount = dropUntilItFits(courses, have, (size_t)courseLen, out.possible);
+    out.needsConfirm =
+        course_prune::needsConfirm(pruneSummaries, have, pruneOrder, out.dropCount);
+  }
+
+  releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+  return opened;
+}
+
+SdCourseWriteResult sdSaveCreatedCourse(const CreatedCourseWrite& req,
+                                        uint8_t dropOldest) {
   if (req.course == nullptr) return SD_COURSE_WRITE_IO;
 
   const uint8_t kind = (req.course->kind == course_creator::CourseKind::kSprint)
@@ -755,7 +873,7 @@ SdCourseWriteResult sdSaveCreatedCourse(const CreatedCourseWrite& req) {
       }
     }
   } else {
-    result = appendCourseToTrackFile(filepath, courseJsonBuffer);
+    result = appendCourseToTrackFile(filepath, courseJsonBuffer, dropOldest);
   }
 
   releaseSDAccess(SD_ACCESS_TRACK_PARSE);

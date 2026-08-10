@@ -130,5 +130,33 @@ struct CreatedCourseWrite {
 // rename, so a power loss mid-write cannot leave a half-written track file
 // where a working one used to be.
 //
+// `dropOldest` (plan 0005) removes that many existing courses before the
+// append, best candidate first per `course_prune::dropOrder`. 0 keeps every
+// course, which is the behaviour every caller had before pruning existed.
+// Ignored when creating a new track — there is nothing there to drop.
+//
 // Takes the SD mutex itself; the caller must not hold it.
-SdCourseWriteResult sdSaveCreatedCourse(const CreatedCourseWrite& req);
+SdCourseWriteResult sdSaveCreatedCourse(const CreatedCourseWrite& req,
+                                        uint8_t dropOldest = 0);
+
+// What it would take to fit one more course into a full sprint track.
+struct SdSprintPrunePlan {
+  // How many existing courses have to go. 0 when it already fits.
+  uint8_t dropCount = 0;
+  // True when at least one of them still carries the name the DEVICE gave it,
+  // so it has never been through the webapp and this card may be the only
+  // place it exists. That is the difference between doing it quietly and
+  // asking first.
+  bool needsConfirm = false;
+  // False when even dropping everything droppable would not make room — the
+  // one course being saved is simply too big for the buffer.
+  bool possible = false;
+};
+
+// Work out what `sdSaveCreatedCourse` would have to drop, WITHOUT touching the
+// card. Reads the track file and discards its own working copy.
+//
+// Only meaningful for an append to an existing sprint track; a new track has
+// nothing to prune. Takes the SD mutex itself.
+SdCourseWriteResult sdPlanSprintPrune(const CreatedCourseWrite& req,
+                                      SdSprintPrunePlan& out);

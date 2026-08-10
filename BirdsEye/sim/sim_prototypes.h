@@ -71,6 +71,7 @@ int courseCreatorPage();
 bool courseCreatorActive();
 bool courseCreatorEnter();
 void courseCreatorSave();
+void courseCreatorConfirmPrune(bool accepted);
 void courseCreatorSelect();
 void courseCreatorLoop();
 void updateGpsLockHold();

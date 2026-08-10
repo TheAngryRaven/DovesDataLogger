@@ -30,6 +30,22 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   `debug_pages` to `show` to put the diagnostics back. **Note this is a
   behaviour change**: existing devices hide the pages after updating until
   the setting is flipped.
+- **A full sprint track can now make room for one more run** (plan 0005).
+  A sprint venue re-lays its course every event, so walked courses pile up in
+  one track file — and once that file is bigger than the logger can read, the
+  track stops being detected at the venue altogether. Until now, walking a
+  course onto a full track simply lost it: the screen said `track file full`
+  and there was nothing to do about it without a laptop.
+  The logger now offers to drop the oldest runs and save. It picks what to drop
+  carefully:
+  - **Courses you renamed in the app go first**, even if they're the newest —
+    a renamed course exists in the app too, so dropping it from the card loses
+    nothing. Those are dropped without asking.
+  - **A run still carrying the name the logger gave it** (`N260803_1432`) may
+    exist nowhere else, so you're asked before it goes.
+  - Oldest first within each group.
+  Circuit tracks are unaffected: their layouts are all still driven, so there's
+  nothing safe to drop and a full one still just says so.
 - **The screen can be inverted.** A new **Display Colours** setting, editable
   over Bluetooth, switches the panel between the white-on-black it has always
   used and black-on-lit. Useful in direct sun, where a mostly-dark screen is

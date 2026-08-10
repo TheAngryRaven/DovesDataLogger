@@ -43,6 +43,14 @@
 #include <DovesLapTimer.h>
 #include <CourseManager.h>
 #include <SprintTimer.h>
+// ArduinoJson is here for the same reason, and it is load-bearing: the track
+// helpers in sd_functions.ino take and return JsonArray, and Arduino generates
+// their prototypes ABOVE this point. Included further down (where the JSON
+// globals live) those prototypes see no such type, quietly degrade the
+// parameter to `int`, and every one of them fails to compile with "redeclared
+// as different kind of entity". The simulator cannot catch this — it hand-writes
+// its prototypes — so the only signal is the Arduino build.
+#include <ArduinoJson.h>
 
 // SdFat configuration. SD_FAT_TYPE must be defined BEFORE SdFat.h is
 // processed for the first time, which means before any module header
@@ -552,6 +560,15 @@ SdCourseWriteResult courseCreatorLastError = SD_COURSE_WRITE_OK;
 // Last PVT sample folded into an averaging hold — see courseCreatorLoop().
 uint32_t courseCreatorLastPvtSeq = 0;
 
+// A pending "the track is full — drop the oldest runs?" confirmation
+// (plan 0005). The generated names are held rather than regenerated: they
+// carry the GPS clock down to the minute, and re-deriving them after the user
+// reads the prompt would rename the course they just walked.
+char coursePruneName[course_creator::kNameSize] = "";
+char coursePruneShortName[course_creator::kShortNameSize] = "";
+char coursePruneDateCreated[course_creator::kDateCreatedSize] = "";
+uint8_t coursePruneDropCount = 0;
+
 unsigned long lastCardFlush = 0;
 unsigned long lastLogCreateAttempt = 0;  // Throttles log-file open retries (ms)
 const char trackFolder[8] = "/TRACKS";
@@ -565,7 +582,7 @@ int numOfLocations = 0;
 ///////////////////////////////////////////
 // JSON PARSING GLOBALS
 ///////////////////////////////////////////
-#include <ArduinoJson.h>
+// (ArduinoJson itself is included in the top block — see the note there.)
 // The maximum size of a track file, in every direction: the raw read buffer
 // and the ArduinoJson document that parses it (sd_functions.ino), and the BLE
 // upload staging buffer (bluetooth.ino). One constant so those cannot drift —
@@ -682,6 +699,10 @@ const int PAGE_COURSE_TYPE = -12;    // Circuit / Sprint
 const int PAGE_COURSE_LINES = -13;   // one row per timing line + Save/Cancel
 const int PAGE_COURSE_LINE = -14;    // Point A / Point B / Save / Back
 const int PAGE_COURSE_POINT = -15;   // "Save current pos" averaging hold
+// Deliberately OUTSIDE the courseCreatorActive() range below: it is a plain
+// two-row confirm, not one of the model's screens, so it must not be handed
+// to course_creator::rowCount().
+const int PAGE_COURSE_PRUNE = -16;   // "Track full - drop N old runs?"
 
 // running menu (these must be in order)
 const int GPS_DEBUG = 3;
@@ -1776,10 +1797,79 @@ void courseCreatorSave() {
     debug(F("Course saved: "));
     debugln(name);
     switchToDisplayPage(PAGE_MAIN_MENU);
+    return;
+  }
+
+  // A full SPRINT track is recoverable (plan 0005): a sprint venue re-lays
+  // its cones every event, so the file fills with runs nobody drives again.
+  // A circuit track is not — its layouts are all still driven, and there is
+  // nothing safe to drop.
+  if (courseCreatorLastError == SD_COURSE_WRITE_TOO_BIG && !courseCreator.newTrack &&
+      courseCreator.kind == course_creator::CourseKind::kSprint) {
+    SdSprintPrunePlan plan;
+    if (sdPlanSprintPrune(req, plan) == SD_COURSE_WRITE_OK && plan.possible &&
+        plan.dropCount > 0) {
+      if (!plan.needsConfirm) {
+        // Every course being dropped was renamed in the webapp, which means
+        // it lives there too and rides cloud sync. Nothing to ask about.
+        courseCreatorLastError = sdSaveCreatedCourse(req, plan.dropCount);
+        if (courseCreatorLastError == SD_COURSE_WRITE_OK) {
+          debug(F("Course saved after pruning: "));
+          debugln(name);
+          switchToDisplayPage(PAGE_MAIN_MENU);
+          return;
+        }
+      } else {
+        // At least one of them still carries the name the device gave it, so
+        // this card may be the only place it exists. Ask.
+        strncpy(coursePruneName, name, sizeof(coursePruneName) - 1);
+        coursePruneName[sizeof(coursePruneName) - 1] = '\0';
+        strncpy(coursePruneShortName, shortName, sizeof(coursePruneShortName) - 1);
+        coursePruneShortName[sizeof(coursePruneShortName) - 1] = '\0';
+        strncpy(coursePruneDateCreated, dateCreated, sizeof(coursePruneDateCreated) - 1);
+        coursePruneDateCreated[sizeof(coursePruneDateCreated) - 1] = '\0';
+        coursePruneDropCount = plan.dropCount;
+        menuSelectionIndex = 0;  // default to "No"
+        switchToDisplayPage(PAGE_COURSE_PRUNE);
+        return;
+      }
+    }
+  }
+
+  // Stay on the line menu with everything still captured — walking the
+  // course again because the card was busy would be unforgivable.
+  debugln(F("Course save FAILED"));
+  switchToDisplayPage(PAGE_COURSE_LINES);
+}
+
+/**
+ * @brief Act on the "drop the oldest runs?" confirmation (plan 0005).
+ *
+ * Reuses the names generated when the save was first attempted, so the course
+ * keeps the minute it was actually walked rather than the minute the user got
+ * round to answering.
+ */
+void courseCreatorConfirmPrune(bool accepted) {
+  if (!accepted) {
+    // Everything is still captured; the user can Save again or Cancel.
+    switchToDisplayPage(PAGE_COURSE_LINES);
+    return;
+  }
+
+  CreatedCourseWrite req;
+  req.course = &courseCreator;
+  req.newTrack = false;
+  req.trackName = courseCreatorTrackName;
+  req.shortName = coursePruneShortName;
+  req.courseName = coursePruneName;
+  req.dateCreated = coursePruneDateCreated;
+
+  courseCreatorLastError = sdSaveCreatedCourse(req, coursePruneDropCount);
+  if (courseCreatorLastError == SD_COURSE_WRITE_OK) {
+    debug(F("Course saved after pruning: "));
+    debugln(coursePruneName);
+    switchToDisplayPage(PAGE_MAIN_MENU);
   } else {
-    // Stay on the line menu with everything still captured — walking the
-    // course again because the card was busy would be unforgivable.
-    debugln(F("Course save FAILED"));
     switchToDisplayPage(PAGE_COURSE_LINES);
   }
 }
