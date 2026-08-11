@@ -2321,11 +2321,12 @@ void loop() {
       lastBatteryVoltage = getBatteryVoltage();
     }
 
-    // Minimal button check for exit
+    // Minimal button check for exit. Leaving transfer mode reboots (same
+    // as the phone-disconnect auto-reboot and the USB exit) so changed
+    // settings take effect and no session state leaks.
     readButtons();
     if (btn2->pressed) {
-      BLE_STOP();
-      switchToDisplayPage(PAGE_MAIN_MENU);
+      bleExitTransferMode();  // does not return (NVIC_SystemReset)
     }
     resetButtons();
 

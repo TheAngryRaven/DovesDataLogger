@@ -496,9 +496,15 @@ void handleMenuPageSelection() {
       switchToDisplayPage(PAGE_MAIN_MENU);
     }
   } else if (currentPage == PAGE_BLUETOOTH) {
-    // Exit button pressed - go back to main menu and disable bluetooth
+    // Exit button pressed — leaving transfer mode reboots the device (same
+    // as the phone-disconnect auto-reboot and the USB exit). On hardware
+    // this handler is normally unreachable anyway: bleActive parks loop()
+    // in its own branch, whose Exit check calls the same function. In the
+    // SIM the stub radio never sets bleActive, so THIS is the live path —
+    // the stub bleExitTransferMode() returns after stopping, and the page
+    // switch below keeps the sim's menu walk (golden fixtures) working.
     debugln(F("Bluetooth: Exit selected"));
-    BLE_STOP();
+    bleExitTransferMode();  // hardware: does not return (NVIC_SystemReset)
     switchToDisplayPage(PAGE_MAIN_MENU);
   } else if (currentPage == PAGE_COURSE_PRUNE) {
     courseCreatorConfirmPrune(menuSelectionIndex == 1);

@@ -806,6 +806,23 @@ void BLE_STOP() {
   debugln(F("BLE: Bluetooth stopped"));
 }
 
+// Manual exit from the Bluetooth transfer page (the on-device Exit button).
+// Leaving transfer mode ALWAYS reboots, matching the phone-disconnect
+// auto-reboot and the USB mass-storage exit: a reboot is what guarantees
+// settings changed over BLE take effect and that no radio/advert/SD state
+// leaks from the transfer session into the next driving session. Before
+// this, only a peer disconnect rebooted — a manual exit dropped back to the
+// menu on the old settings. BLE_STOP() first so the teardown (file close,
+// SD release, OTA abort, advert stop) runs cleanly on the main loop before
+// the reset. Does not return on hardware; the SIM stub stops the radio and
+// returns so the sim's menu walk can continue.
+void bleExitTransferMode() {
+  BLE_STOP();
+  debugln(F("BLE: Transfer mode exited — rebooting..."));
+  delay(100);  // let debug output flush (mirrors the disconnect auto-reboot)
+  NVIC_SystemReset();
+}
+
 // Force the Bluefruit connection LED off and keep it off. Bluefruit drives
 // LED_CONN (the XIAO's blue LED, active-low) whenever _led_conn is enabled —
 // which is the library DEFAULT, so camera-owned advertising/links blink it

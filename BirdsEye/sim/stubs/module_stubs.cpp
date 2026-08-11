@@ -41,6 +41,13 @@ void BLE_STOP() {
   bleConnected = false;
 }
 
+// On hardware this reboots and never returns; the sim just stops the stub
+// radio and returns so the Bluetooth page's Exit continues to the menu
+// (the golden walk exits this page mid-script).
+void bleExitTransferMode() {
+  BLE_STOP();
+}
+
 void bleConnLedOff() {}
 void bleShutdownQuiesce() {}
 

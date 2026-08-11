@@ -10,6 +10,30 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - **MINOR** — new features or device behavior that is backwards compatible.
 - **PATCH** — bug fixes and internal changes with no user-visible behavior change.
 
+## [Unreleased]
+
+Slated to release as **4.0.1** (patch — bug fixes only) unless the scope
+changes before the cut.
+
+### Fixed
+- **Exiting USB transfer mode no longer risks a hang + watchdog reset.**
+  Leaving the USB drive page (Exit button or cable pull) could wedge the
+  device for ~4 seconds and come back via the watchdog instead of the clean
+  reboot: the exit path stopped accepting *new* host commands but a
+  read/write already in flight kept driving the SD card from the USB task
+  while the exit synced the card from the main loop — two tasks on the SPI
+  bus at once. The exit now detaches USB first (so host traffic actually
+  stops), waits out any callback still running — reads included, which were
+  never tracked before — and only then syncs and reboots. The wait is
+  watchdog-fed and sized to survive the SD card's own garbage-collection
+  stalls.
+- **Exiting Bluetooth transfer mode with the button now reboots the device.**
+  Only a phone disconnect triggered the auto-reboot; pressing Exit on the
+  device dropped back to the menu with any settings changed over Bluetooth
+  not yet applied (they only take effect on boot). Both ways out of transfer
+  mode — manual exit and peer disconnect — now reboot, matching how USB
+  transfer mode has always exited.
+
 ## [4.0.0] - 2026-08-10
 
 ### Added

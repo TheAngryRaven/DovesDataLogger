@@ -86,7 +86,7 @@ All sketch sources live in `BirdsEye/` so the folder name matches the
 | `gps_config.h` | GPS configuration constants (baud rate, nav rate, serial port) |
 | `images.h` | PROGMEM bitmap data — the bird splash only; the crossing animation is generated (`crossing_pattern`) |
 | `accelerometer.{h,ino}` | LSM6DS3 IMU init and g-force reads (onboard XIAO Sense) |
-| `bluetooth.{h,ino}` | BLE service (file listing, transfer, settings, track sync), auto-reboot on disconnect; shared peripheral BLE core init (+ Just-Works bonding) + `bleOwner` radio-ownership routing |
+| `bluetooth.{h,ino}` | BLE service (file listing, transfer, settings, track sync), reboot on leaving transfer mode (peer disconnect or manual Exit); shared peripheral BLE core init (+ Just-Works bonding) + `bleOwner` radio-ownership routing |
 | `camera_ble.{h,ino}` | Insta360 X4 auto-record BLE glue: peripheral remote GATT (0xCE80), all control via ce82 button notifies, executes `camera_fsm` actions, deferred callback→loop pattern (see subsystem 13) |
 | `firmware_ota.{h,ino}` | SD-staged firmware OTA: `FW*` BLE protocol, SD staging, CRC verify, self-flash apply (see subsystem 11) |
 | `display_pages.{h,ino}` | All page rendering functions (`displayPage_*()`) |
@@ -574,11 +574,20 @@ loop()  ~250 Hz
   raw image chunks to `fwReceiveChunk()` while `fwReceiving()`. The request
   characteristic max length was raised from 64 to **244** so ~240-byte image
   chunks fit. `BLUETOOTH_LOOP()` calls `FW_OTA_LOOP()` each iteration.
-- **Auto-reboot on BLE disconnect**: `bleDisconnectCallback()` flags a
-  deferred teardown that `BLUETOOTH_LOOP()` runs on the main loop —
-  `NVIC_SystemReset()` after a 100 ms delay so new settings take effect
-  without a manual power cycle, plus `fwReset()` to abort any in-flight OTA
-  and free the staging file + SD access. **Exception — OTA apply**: if an
+- **Leaving transfer mode always reboots** — both ways out:
+  - *Peer disconnect*: `bleDisconnectCallback()` flags a deferred teardown
+    that `BLUETOOTH_LOOP()` runs on the main loop — `NVIC_SystemReset()`
+    after a 100 ms delay so new settings take effect without a manual power
+    cycle, plus `fwReset()` to abort any in-flight OTA and free the staging
+    file + SD access.
+  - *Manual Exit* (`bleExitTransferMode()`): the parked-loop Exit button
+    runs `BLE_STOP()` then the same 100 ms-delay reboot. Before 4.0.1 a
+    manual exit dropped back to the menu without rebooting, so settings
+    written over BLE silently didn't apply until the next power cycle. The
+    SIM stub returns after stopping (no reboot) so the golden menu walk can
+    exit the Bluetooth page; `display_ui.ino`'s `PAGE_BLUETOOTH` handler is
+    that sim-only path (on hardware the `bleActive` parked branch owns the
+    button). **Exception — OTA apply**: if an
   apply has been requested (`fwApplyRequested()`), the teardown skips *both*
   the abort and the reboot. After `FWAPPLY` the web app disconnects on purpose
   to let the device self-flash; rebooting here would discard the staged image
@@ -861,13 +870,18 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   page, and watches VBUS: if the cable is unplugged it calls
   `USB_MSC_DISABLE()` so the SD lock and fast SPI clock can't leak past the
   session.
-- **Exit = reboot**: `USB_MSC_DISABLE()` drops media-ready, **quiesces** (waits
-  up to 1 s for the write block callback to go quiet — `setUnitReady(false)`
-  only blocks *new* SCSI commands, so an in-flight `WRITE10` keeps calling
-  `msc_write_cb` on the USBD task, and resetting mid-write would truncate a
-  file / corrupt the FAT), `syncDevice()`s
-  the card, then calls `NVIC_SystemReset()` (mirrors the BLE auto-reboot on
-  disconnect). The reboot drops the MSC interface and remounts a clean
+- **Exit = reboot**: `USB_MSC_DISABLE()` drops media-ready, **detaches USB**
+  (`TinyUSBDevice.detach()` — `setUnitReady(false)` only blocks *new* SCSI
+  commands, so without the detach the host keeps issuing traffic and an
+  in-flight `READ10`/`WRITE10` keeps calling the block callbacks on the USBD
+  task), then **drains**: waits (WDT-fed, up to 4 s — SD garbage collection
+  can stall one `writeSectors()` 100 ms–2 s) until no block callback is
+  executing and none has finished for 100 ms, tracked by
+  `mscIoInFlight`/`mscLastIoMs` around all three callbacks — reads and flush
+  included. Only then `syncDevice()` + `NVIC_SystemReset()` (mirrors the BLE
+  transfer-mode exit reboot). The 4.0.0 exit tracked only write *entry*
+  times, so a callback still on the SPI bus raced the main-loop sync and the
+  wedge came back via the watchdog instead of the clean reset. The reboot drops the MSC interface and remounts a clean
   filesystem, so host edits are picked up without any SdFat cache-coherency
   dance. Triggered by the on-device Exit button or a cable unplug.
 - **Mutex**: the whole session holds `SD_ACCESS_USB_MSC`, so logging,
