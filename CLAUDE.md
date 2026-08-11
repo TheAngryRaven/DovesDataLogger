@@ -157,7 +157,7 @@ handoff spec.
 | `API.md` | Canonical WASM API contract (v1): artifact set, method surface, injectPvt schema, deltas from the handoff-spec draft (async `reset()` via module re-instantiation) |
 | `wasm/bindings.cpp` | EMSCRIPTEN_KEEPALIVE exports over sim_host.h + getStateJson/getVersion/readFile/listFiles |
 | `wasm/birdseye-sim.mjs` | Hand-written public ESM wrapper (stable import; async `reset()` re-instantiates the core module) |
-| `wasm/test.html` | Standalone browser harness: canvas blit (hash dirty-check), buttons, dovex file playback |
+| `wasm/test.html` | Standalone browser harness: canvas blit (hash dirty-check), buttons, dovex file playback (≥13 columns — 4.0.0 logs carry 16), synthetic GPS-fix toggle + mph field (parked on the OKC asset track, 40 ms inject/step interleave) so fix-gated flows like the course creator are reachable |
 | `wasm/smoke.mjs` | Node smoke test the wasm CI job runs (boot→menu, state/version/VFS, determinism across instances, reset) |
 | `CMakeLists.txt` | Native build; FetchContent pins: DovesLapTimer `BETA` (matches CI channel), SparkFun GNSS v3.1.9 (header-only use), ArduinoJson v6.21.5, ArxTypeTraits v0.3.2, Adafruit GFX 1.12.6 + SH110X 2.1.14 (real display stack) |
 

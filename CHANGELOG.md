@@ -33,6 +33,17 @@ changes before the cut.
   not yet applied (they only take effect on boot). Both ways out of transfer
   mode — manual exit and peer disconnect — now reboot, matching how USB
   transfer mode has always exited.
+- **Browser-sim harness plays 4.0.0 logs again.** The wasm test harness
+  filtered DOVEX rows to exactly 13 columns, so logs from 4.0.0 firmware
+  (16 columns after the `Temp1`/`Junction1`/`Temp2` additions) injected
+  nothing. It now accepts 13+ and reads the stable first 13.
+
+### Added
+- **The browser-sim harness can fake a GPS fix.** A "GPS fix" toggle (plus
+  an mph field) streams a deterministic synthetic 25 Hz fix parked on the
+  bundled OKC track's start line, so fix-gated flows — most usefully the
+  on-device course creator, including its 3 s point-averaging hold — can be
+  exercised in the simulator without loading a log file.
 
 ## [4.0.0] - 2026-08-10
 
