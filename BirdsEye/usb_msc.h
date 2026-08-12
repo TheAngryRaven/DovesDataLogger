@@ -32,6 +32,8 @@ void USB_MSC_SETUP();
 // the SD card is busy with another subsystem.
 bool USB_MSC_ENABLE();
 
-// Leave USB mass-storage mode. Reboots the device (NVIC_SystemReset) so
-// the host drive drops and the firmware remounts a fresh filesystem.
+// Leave USB mass-storage mode. Detaches USB (stopping all further SCSI
+// traffic), drains any block callback still executing on the USBD task
+// (WDT-fed), syncs the card, then reboots (NVIC_SystemReset) so the host
+// drive drops and the firmware remounts a fresh filesystem.
 void USB_MSC_DISABLE();

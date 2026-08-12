@@ -11,11 +11,16 @@ static Adafruit_USBD_MSC usb_msc;
 
 bool usbMscActive = false;
 
-// millis() of the last host WRITE10 data phase serviced on the USBD task.
-// USB_MSC_DISABLE() waits for this to go quiet before it syncs + resets, so
-// a reset can't cut an in-flight writeSectors() and truncate a file / leave
-// the FAT inconsistent.
-static volatile uint32_t mscLastWriteMs = 0;
+// Block-callback activity tracking for the exit drain in USB_MSC_DISABLE().
+// mscIoInFlight is true while ANY block callback (read, write, or flush) is
+// executing on the USBD task; mscLastIoMs is stamped when one finishes. The
+// exit must wait for BOTH: a callback mid-writeSectors() can stall 100 ms–2 s
+// on SD garbage collection, so a time-window check alone (the old
+// mscLastWriteMs, stamped at write ENTRY and ignoring reads entirely) declared
+// the bus quiet while a callback was still on it — and the main loop's
+// syncDevice() + reset then raced the USBD task inside SdFat.
+static volatile bool mscIoInFlight = false;
+static volatile uint32_t mscLastIoMs = 0;
 
 // --- TinyUSB block callbacks -------------------------------------------
 // These run from the USBD task, NOT the main loop. The SD mutex
@@ -32,25 +37,34 @@ static volatile uint32_t mscLastWriteMs = 0;
 // 3x like the rest of the SD code (ignition EMI can glitch a single op).
 int32_t msc_read_cb(uint32_t lba, void* buffer, uint32_t bufsize) {
   if (bufsize == 0 || (bufsize % 512) != 0) return -1;
+  mscIoInFlight = true;
+  int32_t result = -1;
   uint32_t sectors = bufsize / 512;
   for (uint8_t attempt = 0; attempt < 3; attempt++) {
     if (SD.card()->readSectors(lba, (uint8_t*) buffer, sectors)) {
-      return (int32_t) bufsize;
+      result = (int32_t) bufsize;
+      break;
     }
   }
-  return -1;
+  mscLastIoMs = millis();
+  mscIoInFlight = false;
+  return result;
 }
 
 int32_t msc_write_cb(uint32_t lba, uint8_t* buffer, uint32_t bufsize) {
   if (bufsize == 0 || (bufsize % 512) != 0) return -1;
-  mscLastWriteMs = millis();  // mark the write window for the exit quiesce
+  mscIoInFlight = true;
+  int32_t result = -1;
   uint32_t sectors = bufsize / 512;
   for (uint8_t attempt = 0; attempt < 3; attempt++) {
     if (SD.card()->writeSectors(lba, buffer, sectors)) {
-      return (int32_t) bufsize;
+      result = (int32_t) bufsize;
+      break;
     }
   }
-  return -1;
+  mscLastIoMs = millis();
+  mscIoInFlight = false;
+  return result;
 }
 
 // Host signalled it is done writing — flush the card and drop SdFat's
@@ -58,8 +72,11 @@ int32_t msc_write_cb(uint32_t lba, uint8_t* buffer, uint32_t bufsize) {
 // mode the firmware doesn't touch the filesystem anyway; this is belt
 // and suspenders, and matches the canonical Adafruit msc_sdfat example.)
 void msc_flush_cb(void) {
+  mscIoInFlight = true;
   SD.card()->syncDevice();
   SD.cacheClear();
+  mscLastIoMs = millis();
+  mscIoInFlight = false;
 }
 
 // --- Public API --------------------------------------------------------
@@ -139,22 +156,31 @@ void USB_MSC_DISABLE() {
   // files the host added/removed are picked up. Mirrors the BLE
   // auto-reboot on disconnect.
   debugln(F("USB MSC: exiting — rebooting to remount filesystem"));
-  // Drop media-ready so the host sees the drive go away, and flush any
-  // buffered writes to the card before we reset — the reboot is otherwise
-  // a hard cut that would lose a not-yet-synced sector and risk leaving the
-  // FAT inconsistent if the host hadn't already ejected.
+  // Drop media-ready so a still-attached host stops queueing new work, then
+  // cut the USB connection entirely. setUnitReady(false) alone only refuses
+  // NEW SCSI commands — an already-dispatched READ10/WRITE10 keeps calling
+  // the block callbacks on the USBD task, and the host keeps issuing more.
+  // Detaching is what actually stops the traffic, so the drain below only
+  // has to outlast the ONE callback that may still be executing. (Harmless
+  // on the cable-pulled path — the bus is already dead.)
   usb_msc.setUnitReady(false);
+  TinyUSBDevice.detach();
 
-  // Quiesce before we sync + reset. setUnitReady(false) only stops NEW SCSI
-  // commands; a WRITE10 already dispatched keeps calling msc_write_cb on the
-  // USBD task. Wait until no write has landed for a short window so the reset
-  // can't cut an in-flight writeSectors() (truncated file / inconsistent
-  // FAT). Bounded so a wedged host can't hang the exit.
+  // Drain before we sync + reset: wait until no block callback is executing
+  // AND none has finished for a short quiet window. Reads count too — a
+  // concurrent readSectors() wedges the shared SPI bus exactly like a write.
+  // Without this the main-loop syncDevice() raced a callback still inside
+  // SdFat, the exit hung on the wedged bus, and the ~4 s watchdog reset the
+  // device instead of the clean reboot (the "crash on USB exit" field bug).
+  // Bounded generously — SD garbage collection can stall a single
+  // writeSectors() for 100 ms–2 s — and WDT-fed so the wait itself can
+  // never trip the watchdog.
   const uint32_t quietMs = 100;
-  const uint32_t maxWaitMs = 1000;
+  const uint32_t maxWaitMs = 4000;
   const uint32_t waitStart = millis();
   while (millis() - waitStart < maxWaitMs) {
-    if (millis() - mscLastWriteMs >= quietMs) break;  // writes have gone quiet
+    wdtPet();
+    if (!mscIoInFlight && (millis() - mscLastIoMs >= quietMs)) break;
     delay(5);
   }
 

@@ -61,6 +61,13 @@ void BLE_SETUP();
 // transfer file, release SD access, and drop bleOwner back to NONE.
 void BLE_STOP();
 
+// Manual exit from the Bluetooth transfer page: BLE_STOP() then reboot
+// (NVIC_SystemReset), so a manual exit applies changed settings and clears
+// session state exactly like the phone-disconnect auto-reboot and the USB
+// mass-storage exit. Does not return on hardware; the SIM stub returns
+// after stopping the radio.
+void bleExitTransferMode();
+
 // Force the Bluefruit connection LED off (autoConnLed disarm + park the
 // pin high). Shared by BLE_STOP() and the shutdown quiesce.
 void bleConnLedOff();

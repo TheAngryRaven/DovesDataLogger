@@ -10,6 +10,41 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - **MINOR** — new features or device behavior that is backwards compatible.
 - **PATCH** — bug fixes and internal changes with no user-visible behavior change.
 
+## [Unreleased]
+
+Slated to release as **4.0.1** (patch — bug fixes only) unless the scope
+changes before the cut.
+
+### Fixed
+- **Exiting USB transfer mode no longer risks a hang + watchdog reset.**
+  Leaving the USB drive page (Exit button or cable pull) could wedge the
+  device for ~4 seconds and come back via the watchdog instead of the clean
+  reboot: the exit path stopped accepting *new* host commands but a
+  read/write already in flight kept driving the SD card from the USB task
+  while the exit synced the card from the main loop — two tasks on the SPI
+  bus at once. The exit now detaches USB first (so host traffic actually
+  stops), waits out any callback still running — reads included, which were
+  never tracked before — and only then syncs and reboots. The wait is
+  watchdog-fed and sized to survive the SD card's own garbage-collection
+  stalls.
+- **Exiting Bluetooth transfer mode with the button now reboots the device.**
+  Only a phone disconnect triggered the auto-reboot; pressing Exit on the
+  device dropped back to the menu with any settings changed over Bluetooth
+  not yet applied (they only take effect on boot). Both ways out of transfer
+  mode — manual exit and peer disconnect — now reboot, matching how USB
+  transfer mode has always exited.
+- **Browser-sim harness plays 4.0.0 logs again.** The wasm test harness
+  filtered DOVEX rows to exactly 13 columns, so logs from 4.0.0 firmware
+  (16 columns after the `Temp1`/`Junction1`/`Temp2` additions) injected
+  nothing. It now accepts 13+ and reads the stable first 13.
+
+### Added
+- **The browser-sim harness can fake a GPS fix.** A "GPS fix" toggle (plus
+  an mph field) streams a deterministic synthetic 25 Hz fix parked on the
+  bundled OKC track's start line, so fix-gated flows — most usefully the
+  on-device course creator, including its 3 s point-averaging hold — can be
+  exercised in the simulator without loading a log file.
+
 ## [4.0.0] - 2026-08-10
 
 ### Added
