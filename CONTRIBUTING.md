@@ -80,6 +80,7 @@ so an explicit `-DFLAG=0` still turns the feature off.
 |---|---|---|---|
 | `BIRDSEYE_ENABLE_ONBOARD_CHARGING` | `0` | nothing — off in every channel | Holds the BQ25100 HICHG pin high for ~100 mA fast charge and runs the USB charging UX (VBUS wake shortcuts to the charge screen; the main menu drops into the charging loop after `USB_MENU_CHARGE_IDLE_MS`). Off, the firmware leaves HICHG alone and an external charging circuit owns the battery. The VBUS park at shutdown happens either way — see ARCHITECTURE.md. |
 | `BIRDSEYE_ENABLE_SENSOREGG` | `0` | `beta.yml`, and `compile-sketch.yml` for PRs targeting `BETA` | Compiles in the wireless-EGT POC: passive BLE scanner, Temp1 race page, and BLE core up at boot. Off, the accessors return NaN, so `Temp1`/`Junction1` still log as `nan` and the log format is unchanged. |
+| `BIRDSEYE_ENABLE_NEOPIXEL` | `0` | `beta.yml`, and `compile-sketch.yml` for PRs targeting `BETA` | Compiles in the NeoPixel strip subsystem (plan 0006): on first boot it programs `UICR->NFCPINS` to convert the NFC pads to GPIO (**one-way** — undoing it needs a full chip erase) and self-resets once, then drives pin 30 as the 5 V boost EN and pin 31 as WS2812 data. Off, the firmware never touches UICR or those pins. Needs the `Adafruit NeoPixel` library. |
 
 ### arduino-cli
 The exact invocation CI uses is in

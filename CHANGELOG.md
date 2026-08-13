@@ -12,8 +12,24 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
-Slated to release as **4.0.1** (patch — bug fixes only) unless the scope
-changes before the cut.
+Slated to release as **4.1.0** (minor — new NeoPixel subsystem on the
+beta channel, plus the fixes below).
+
+### Added
+- **NeoPixel LED strip subsystem** (beta channel only,
+  `BIRDSEYE_ENABLE_NEOPIXEL`, plan 0006): 11 WS2812 pixels on the NFC
+  pads converted to GPIO — 2 status indicators + a 9-px strip with a
+  centerline. A global brightness cap (`led_brightness` setting, 0
+  disables the LEDs entirely) that no LED can ever exceed; a pace pip
+  strip mode (left of center red = slower than best, right green =
+  faster) with an RPM scale (green filling to red past halfway toward
+  the new `rev_limit` setting) until pace is meaningful; assignable
+  status-LED alert actions (rev-limit flasher + EGT flasher for now); a
+  boot animation; and a purple celebration when a session-best sector is
+  set. The strip's 5 V boost converter is enabled by its own pin, so
+  sleep truly powers the LEDs off. **First boot of a flag-on build
+  performs a one-way NFC-pads-to-GPIO conversion (UICR write) and
+  resets once.**
 
 ### Fixed
 - **Exiting USB transfer mode no longer risks a hang + watchdog reset.**
