@@ -25,7 +25,7 @@ void applyCap(Frame& f, uint8_t cap) {
 }
 
 static uint8_t addChannel(uint8_t a, uint8_t b) {
-  uint16_t s = (uint16_t)a + b;
+  uint16_t const s = (uint16_t)a + b;
   return s > 255 ? 255 : (uint8_t)s;
 }
 

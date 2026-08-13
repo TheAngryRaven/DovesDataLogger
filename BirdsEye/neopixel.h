@@ -2,6 +2,15 @@
 
 #include <stdint.h>
 
+// Arduino's auto-generated prototypes land near the top of the
+// concatenated TU, and this module's internal npxPushFrame() takes a
+// led_frame::Frame& — the type must therefore be visible from
+// BirdsEye.ino's include block (which pulls this header), or the
+// generated prototype fails to parse. Pure stdint header, safe
+// everywhere. (See CLAUDE.md "Development Conventions" on the
+// auto-prototype include-order trap.)
+#include "led_frame.h"
+
 ///////////////////////////////////////////
 // NEOPIXEL STRIP MODULE (plan 0006)
 // 11 WS2812 pixels on the NFC pads (converted to GPIO): pixel 0 and

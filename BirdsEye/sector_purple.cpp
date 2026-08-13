@@ -40,7 +40,7 @@ int update(State& s, const Sample& in) {
   // compared against the snapshot taken when S3 opened.
   if (in.laps > s.lastLaps) {
     if (s.s1 > 0 && s.s2 > 0 && in.lastLapTime > s.s1 + s.s2) {
-      uint32_t s3 = in.lastLapTime - s.s1 - s.s2;
+      uint32_t const s3 = in.lastLapTime - s.s1 - s.s2;
       if (s.bestAtOpen[2] != 0 && s3 < s.bestAtOpen[2]) {
         fired = 3;
       }

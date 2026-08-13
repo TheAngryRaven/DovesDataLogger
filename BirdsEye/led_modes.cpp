@@ -1,5 +1,7 @@
 #include "led_modes.h"
 
+#include <cmath>
+
 namespace led_modes {
 
 using led_frame::kStripCenter;
@@ -7,7 +9,7 @@ using led_frame::kStripCount;
 using led_frame::Rgb;
 
 PacePip pacePip(float paceMsPerM) {
-  float mag = paceMsPerM < 0 ? -paceMsPerM : paceMsPerM;
+  float const mag = paceMsPerM < 0 ? -paceMsPerM : paceMsPerM;
   if (mag <= kPaceDeadbandMsPerM) {
     return PacePip{kStripCenter, led_frame::kWhite};
   }
@@ -37,12 +39,12 @@ void renderPace(float paceMsPerM, Rgb out[kStripCount]) {
     out[i] = led_frame::kOff;
   }
   out[kStripCenter] = led_frame::scale(led_frame::kWhite, kPaceCenterLevel);
-  PacePip pip = pacePip(paceMsPerM);
+  PacePip const pip = pacePip(paceMsPerM);
   out[pip.stripIndex] = pip.color;
 }
 
 void renderScale(float value, const ScaleSpec& spec, Rgb out[kStripCount]) {
-  float span = spec.max - spec.min;
+  float const span = spec.max - spec.min;
   float frac = span > 0 ? (value - spec.min) / span : 0.0f;
   if (frac < 0) {
     frac = 0;
@@ -50,11 +52,11 @@ void renderScale(float value, const ScaleSpec& spec, Rgb out[kStripCount]) {
   if (frac > 1) {
     frac = 1;
   }
-  int lit = (int)(frac * (float)kStripCount + 0.5f);
+  int const lit = (int)lroundf(frac * (float)kStripCount);
   // A pixel is "past" the red fraction when its fill position crosses
   // it: with redFrac 0.5 on 9 px that is indices 5..8 — red past the
   // halfway mark, the center pixel itself still low-color.
-  int redFrom = (int)(spec.redFrac * (float)kStripCount + 0.5f);
+  int const redFrom = (int)lroundf(spec.redFrac * (float)kStripCount);
   for (int i = 0; i < kStripCount; i++) {
     if (i >= lit) {
       out[i] = led_frame::kOff;
@@ -78,7 +80,7 @@ led_frame::Rgb evalStatus(const StatusAction& a, StatusState& s, float value,
   if (!s.active) {
     return led_frame::kOff;
   }
-  uint16_t half = a.flashHalfPeriodMs;
+  uint16_t const half = a.flashHalfPeriodMs;
   if (half == 0) {
     return a.color;  // no flash configured: solid
   }
