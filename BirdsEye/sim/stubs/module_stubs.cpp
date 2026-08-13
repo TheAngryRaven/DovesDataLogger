@@ -1,10 +1,10 @@
 ///////////////////////////////////////////
 // Stubs for the firmware modules deliberately excluded from the sim TU:
 // bluetooth.ino, camera_ble.ino, usb_msc.ino, firmware_ota.ino,
-// sensoregg.ino.
+// sensoregg.ino, neopixel.ino.
 //
-// The sim has no BLE, no camera, no USB host (demo scope — see the
-// handoff spec). These implement the excluded modules' public headers
+// The sim has no BLE, no camera, no USB host, no LED strip (demo scope
+// — see the handoff spec). These implement the excluded modules' public headers
 // so the compiled modules (menus, main loop) link and behave sanely:
 // every query reports "not present / not active", every action succeeds
 // silently, and nothing prints warnings into the UX.
@@ -16,6 +16,7 @@
 
 #include "bluetooth.h"
 #include "camera_ble.h"
+#include "neopixel.h"
 #include "sensoregg.h"
 #include "usb_msc.h"
 
@@ -111,6 +112,18 @@ float sensoreggAuxC() { return NAN; }
 uint8_t sensoreggBatteryPct() { return 0xFF; }
 bool sensoreggTcFault() { return false; }
 uint16_t sensoreggSequence() { return 0; }
+
+// ---- neopixel.ino surface ----
+
+// No LED strip in the sim (and no UICR to program). The pure units
+// (led_frame/led_modes/led_animations/sector_purple) still build into
+// the sim via SIM_CORE_SOURCES for any future host harness use.
+
+void NEOPIXEL_SETUP() {}
+void NEOPIXEL_LOOP() {}
+void NEOPIXEL_SLEEP() {}
+void NEOPIXEL_WAKE() {}
+void neopixelNotifyPurpleSector() {}
 
 // ---- usb_msc.ino surface ----
 

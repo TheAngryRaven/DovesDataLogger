@@ -98,6 +98,7 @@
 #include "gps_status_page.h"
 #include "haversine.h"
 #include "idle_policy.h"
+#include "neopixel.h"
 #include "replay.h"
 #include "sat_bars.h"
 #include "sd_format_page.h"
@@ -2291,6 +2292,10 @@ static void softResumeFromCharging() {
   // the POC is compiled out — BLE/camera stay lazy either way).
   SENSOREGG_WAKE();
 
+  // Boost rail back up + strip re-init (no-op when compiled out or
+  // brightness 0).
+  NEOPIXEL_WAKE();
+
   DISPLAY_WAKE();
   menuIdleTimerRunning = false;
   if (!sdSetupSuccess && sdCardUnformatted) {
@@ -2344,6 +2349,11 @@ void enterShutdown() {
     pinMode(PIN_LSM6DS3TR_C_POWER, OUTPUT);
     digitalWrite(PIN_LSM6DS3TR_C_POWER, HIGH);
   }
+
+  // LED strip blanked, then its 5 V boost rail off (EN driven LOW —
+  // retained through System OFF, and the charging loop below never
+  // re-enables it, so the strip is dark while charging too).
+  NEOPIXEL_SLEEP();
   wdtPet();
 
   // VBUS exception: never System OFF while a cable is present. Powering
@@ -2405,6 +2415,10 @@ void loop() {
       displayPage_bluetooth();
     }
 
+    // Keep the LED frame ticking so the strip blanks (composition sees
+    // the parked state) instead of freezing mid-pattern.
+    NEOPIXEL_LOOP();
+
     return; // Skip GPS, tach, lap checks while BLE is active
   }
 
@@ -2435,6 +2449,9 @@ void loop() {
       displayPage_usb_storage();
     }
 
+    // Same as the BLE branch: blank the strip rather than freeze it.
+    NEOPIXEL_LOOP();
+
     return;  // host owns the card — skip GPS/tach/lap/SD entirely
   }
 
@@ -2450,6 +2467,7 @@ void loop() {
   autoRaceModeCheck();
   updateGpsLockHold();
   CAMERA_LOOP();  // step the Insta360 auto-record FSM (GPS/tach fresh above)
+  NEOPIXEL_LOOP();  // LED strip frame (RPM/pace/purple fresh above)
 
   // Camera auto-stopped recording (30 s engine-off): end + save the race
   // session and return to the menu — the camera stays connected in WATCHING,
