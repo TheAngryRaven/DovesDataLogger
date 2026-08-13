@@ -181,6 +181,11 @@ char settingDeviceName[32] = "BirdsEye";
 // sprint track are within detection range (sprint_select::chooseKind).
 // It never overrides what is actually detected.
 bool settingRaceModePrefSprint = false;
+// NeoPixel strip (plan 0006): global brightness cap (0-255, 0 = LEDs
+// disabled entirely) and the rev limit (true RPM) the LED scale/flasher
+// are anchored to. Read at boot only, like every other setting.
+uint8_t settingLedBrightness = 64;
+int settingRevLimit = 15000;
 
 // Track manifest for proximity detection
 TrackManifestEntry trackManifest[MAX_LOCATIONS];
@@ -980,6 +985,18 @@ void setup() {
       debug(F(" minGapUs="));
       debugln((uint32_t)tachMinPulseGapUs);
     }
+    // NeoPixel strip (plan 0006). Both clamp back to the compiled-in
+    // default on a missing or nonsense value, per the house idiom.
+    if (getSetting("led_brightness", buf, sizeof(buf))) {
+      const int b = atoi(buf);
+      if (b >= 0 && b <= 255) settingLedBrightness = (uint8_t)b;
+    }
+    if (getSetting("rev_limit", buf, sizeof(buf))) {
+      const int r = atoi(buf);
+      // Floor keeps a garbled value from parking the scale at zero;
+      // ceiling matches the tach filter's ~20k true-RPM limit.
+      if (r >= 1000 && r <= 20000) settingRevLimit = r;
+    }
     crossingThresholdMeters = settingLapDetectionDistance;
     debug(F("Settings loaded: lap_dist="));
     debug(settingLapDetectionDistance);
@@ -992,6 +1009,15 @@ void setup() {
     debug(F(" device="));
     debugln(settingDeviceName);
   }
+
+  // NeoPixel strip (plan 0006). MUST run before anything that can enable
+  // the SoftDevice (SENSOREGG_SETUP below calls bleCoreEnsureInit on the
+  // beta channel): the one-time UICR NFC->GPIO write needs direct NVMC
+  // access, which is illegal once the SoftDevice is up. Also before
+  // wdtSetup() so the one-time self-reset can't race the watchdog. Needs
+  // SETTINGS_SETUP (led_brightness) — a no-op unless
+  // BIRDSEYE_ENABLE_NEOPIXEL is set (beta channel only).
+  NEOPIXEL_SETUP();
 
   // Camera auto-record: load the persisted Insta360 serial + init the FSM
   CAMERA_SETUP();
@@ -1191,6 +1217,48 @@ bool activeTimerSectorsConfigured() {
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->areSectorLinesConfigured();
   return false;
+}
+
+// Sector accessors for the LED purple-sector monitor (plan 0006).
+// Sprint-first like every sibling; WaypointLapTimer (Lap Anything) has
+// no sectors, so those sessions return 0 and the monitor stays reset.
+int activeTimerCurrentSector() {
+  if (sprintTimer != nullptr) return sprintTimer->getCurrentSector();
+  DovesLapTimer* dlt = getActiveTimerDLT();
+  if (dlt) return dlt->getCurrentSector();
+  return 0;
+}
+
+unsigned long activeTimerLapSectorTime(int sector) {
+  if (sprintTimer != nullptr) {
+    if (sector == 1) return sprintTimer->getCurrentLapSector1Time();
+    if (sector == 2) return sprintTimer->getCurrentLapSector2Time();
+    if (sector == 3) return sprintTimer->getCurrentLapSector3Time();
+    return 0;
+  }
+  DovesLapTimer* dlt = getActiveTimerDLT();
+  if (dlt) {
+    if (sector == 1) return dlt->getCurrentLapSector1Time();
+    if (sector == 2) return dlt->getCurrentLapSector2Time();
+    if (sector == 3) return dlt->getCurrentLapSector3Time();
+  }
+  return 0;
+}
+
+unsigned long activeTimerBestSectorTime(int sector) {
+  if (sprintTimer != nullptr) {
+    if (sector == 1) return sprintTimer->getBestSector1Time();
+    if (sector == 2) return sprintTimer->getBestSector2Time();
+    if (sector == 3) return sprintTimer->getBestSector3Time();
+    return 0;
+  }
+  DovesLapTimer* dlt = getActiveTimerDLT();
+  if (dlt) {
+    if (sector == 1) return dlt->getBestSector1Time();
+    if (sector == 2) return dlt->getBestSector2Time();
+    if (sector == 3) return dlt->getBestSector3Time();
+  }
+  return 0;
 }
 
 /**
