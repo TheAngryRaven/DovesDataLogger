@@ -69,7 +69,8 @@ jobs:
             "Adafruit SSD1306" \
             "SparkFun u-blox GNSS v3" \
             "Seeed Arduino LSM6DS3" \
-            "ArxTypeTraits"
+            "ArxTypeTraits" \
+            "Adafruit NeoPixel"
           # Release builds pin the lap-timer library to a known-good tag —
           # bump deliberately. (Beta builds track its BETA branch instead.)
           arduino-cli lib install --git-url https://github.com/TheAngryRaven/DovesLapTimer.git#v4.3.0

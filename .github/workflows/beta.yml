@@ -93,7 +93,8 @@ jobs:
             "Adafruit SSD1306" \
             "SparkFun u-blox GNSS v3" \
             "Seeed Arduino LSM6DS3" \
-            "ArxTypeTraits"
+            "ArxTypeTraits" \
+            "Adafruit NeoPixel"
           # Beta builds track the lap-timer library's own BETA branch so the
           # two beta channels move together (master/release pin a tag).
           arduino-cli lib install --git-url https://github.com/TheAngryRaven/DovesLapTimer.git#BETA
@@ -103,7 +104,7 @@ jobs:
         run: |
           arduino-cli compile \
             --fqbn "${{ matrix.board.fqbn }}" \
-            --build-property "compiler.cpp.extra_flags=-D${{ matrix.board.define }} -DFIRMWARE_VERSION_OVERRIDE=${{ steps.ver.outputs.betaver }} -DSERIAL_BUFFER_SIZE=256 -DDOVES_DISABLE_DEBUG -DBIRDSEYE_ENABLE_SENSOREGG=1" \
+            --build-property "compiler.cpp.extra_flags=-D${{ matrix.board.define }} -DFIRMWARE_VERSION_OVERRIDE=${{ steps.ver.outputs.betaver }} -DSERIAL_BUFFER_SIZE=256 -DDOVES_DISABLE_DEBUG -DBIRDSEYE_ENABLE_SENSOREGG=1 -DBIRDSEYE_ENABLE_NEOPIXEL=1" \
             --output-dir dist \
             --warnings none \
             BirdsEye

@@ -34,10 +34,11 @@ jobs:
       # release tag.
       LAPTIMER_REF: ${{ (github.base_ref == 'BETA' || github.head_ref == 'BETA' || github.ref_name == 'BETA') && 'BETA' || 'v4.3.0' }}
       # Feature flags for this build (see project.h). BETA enables the
-      # SensorEgg POC exactly as beta.yml does, so the flag-on build is
-      # compile-checked on the PR rather than first failing on the publish
-      # workflow. Everything else builds the master/release defaults (off).
-      FEATURE_FLAGS: ${{ (github.base_ref == 'BETA' || github.head_ref == 'BETA' || github.ref_name == 'BETA') && '-DBIRDSEYE_ENABLE_SENSOREGG=1' || '' }}
+      # SensorEgg POC and the NeoPixel strip exactly as beta.yml does, so
+      # the flag-on build is compile-checked on the PR rather than first
+      # failing on the publish workflow. Everything else builds the
+      # master/release defaults (off).
+      FEATURE_FLAGS: ${{ (github.base_ref == 'BETA' || github.head_ref == 'BETA' || github.ref_name == 'BETA') && '-DBIRDSEYE_ENABLE_SENSOREGG=1 -DBIRDSEYE_ENABLE_NEOPIXEL=1' || '' }}
     # Build both XIAO nRF52840 variants. The Sense board has the onboard
     # LSM6DS3 IMU; the plain board does not (accelerometer logging degrades
     # gracefully). Same MCU/BLE/bootloader otherwise.
@@ -77,6 +78,7 @@ jobs:
             - name: SparkFun u-blox GNSS v3
             - name: Seeed Arduino LSM6DS3
             - name: ArxTypeTraits
+            - name: Adafruit NeoPixel
             - source-url: https://github.com/TheAngryRaven/DovesLapTimer.git
               version: ${{ env.LAPTIMER_REF }}
           sketch-paths: |
