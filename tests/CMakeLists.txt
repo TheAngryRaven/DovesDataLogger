@@ -34,6 +34,10 @@ add_executable(birdseye_tests
   course_creator_test.cpp
   track_json_test.cpp
   course_prune_test.cpp
+  led_frame_test.cpp
+  led_modes_test.cpp
+  led_animations_test.cpp
+  sector_purple_test.cpp
   ${BIRDSEYE_DIR}/haversine.cpp
   ${BIRDSEYE_DIR}/gps_stats.cpp
   ${BIRDSEYE_DIR}/gps_time.cpp
@@ -57,6 +61,10 @@ add_executable(birdseye_tests
   ${BIRDSEYE_DIR}/crossing_pattern.cpp
   ${BIRDSEYE_DIR}/course_creator.cpp
   ${BIRDSEYE_DIR}/track_json.cpp
+  ${BIRDSEYE_DIR}/led_frame.cpp
+  ${BIRDSEYE_DIR}/led_modes.cpp
+  ${BIRDSEYE_DIR}/led_animations.cpp
+  ${BIRDSEYE_DIR}/sector_purple.cpp
 )
 
 target_include_directories(birdseye_tests PRIVATE
