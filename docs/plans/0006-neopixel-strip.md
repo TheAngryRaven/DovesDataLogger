@@ -18,7 +18,12 @@ arbitrary — `neopixel.h` holds both as single-point `#define`s so they can be
 swapped to match the actual wiring.
 
 Pixel layout: **pixel 0 and pixel 10 are status indicators**; **pixels 1–9
-are the strip**, with pixel 5 the centerline.
+are the strip**, with pixel 5 the centerline. The chain is wired with
+data-in on the physical RIGHT end (chain pixel 0 = rightmost LED), so
+the whole chain is mirrored relative to how the driver reads it:
+renderers author in logical left-to-right space and
+`led_frame::physicalIndex()` (`kChainReversed = true`) maps
+logical→wire once, at push time.
 
 ## NFC → GPIO: runtime UICR write, not a core build flag
 
@@ -255,7 +260,7 @@ surface no-op'd in `module_stubs.cpp`. The four pure units join
 
 - One-time UICR write + single self-reset on first flag-on boot.
 - Boost EN polarity (assumed HIGH = on, Adafruit precedent) + settle time.
-- GRB color order and strip orientation (`kStripReversed` if mounted
+- GRB color order and strip orientation (`kChainReversed` if mounted
   data-end-right).
 - Real current draw at cap 64; sleep current with EN low.
 - 3.3 V data into 5 V pixels — user bench-proven on another nRF board.

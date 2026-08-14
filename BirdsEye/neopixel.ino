@@ -119,18 +119,13 @@ void neopixelNotifyPurpleSector() {
 /**
  * @brief Push a composed frame: apply THE brightness cap (the single
  * choke point — after this no channel exceeds settingLedBrightness),
- * map strip orientation, and show.
+ * map logical left-to-right onto the physical wire (the chain is wired
+ * data-in on the RIGHT — led_frame::kChainReversed), and show.
  */
 static void npxPushFrame(led_frame::Frame& frame) {
   led_frame::applyCap(frame, settingLedBrightness);
   for (int i = 0; i < led_frame::kPixelCount; i++) {
-    int phys = i;
-    if (led_frame::kStripReversed && i >= led_frame::kStripFirst &&
-        i < led_frame::kStripFirst + led_frame::kStripCount) {
-      // Mirror the strip pixels only; status pixels never move.
-      phys = led_frame::kStripFirst +
-             (led_frame::kStripCount - 1 - (i - led_frame::kStripFirst));
-    }
+    int const phys = led_frame::physicalIndex(i);
     npxStrip.setPixelColor((uint16_t)phys, frame.px[i].r, frame.px[i].g,
                            frame.px[i].b);
   }

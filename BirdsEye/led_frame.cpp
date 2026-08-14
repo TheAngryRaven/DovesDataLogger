@@ -2,6 +2,10 @@
 
 namespace led_frame {
 
+int physicalIndex(int logical) {
+  return kChainReversed ? (kPixelCount - 1 - logical) : logical;
+}
+
 void clear(Frame& f) {
   for (int i = 0; i < kPixelCount; i++) {
     f.px[i] = kOff;

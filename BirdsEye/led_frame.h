@@ -19,19 +19,27 @@
 
 namespace led_frame {
 
-// Physical chain layout. The strip (px 1..9) is addressed strip-relative
-// 0..8 by the mode renderers; kStripCenter is strip-relative.
+// LOGICAL chain layout, always left-to-right as the driver sees it:
+// logical px 0 is the LEFT status LED, 10 the RIGHT one, 1..9 the strip
+// (addressed strip-relative 0..8 by the mode renderers; kStripCenter is
+// strip-relative). Every renderer and animation authors in this space.
 constexpr int kPixelCount = 11;
-constexpr int kStatusLeft = 0;    // status LED A (chain start)
-constexpr int kStatusRight = 10;  // status LED B (chain end)
-constexpr int kStripFirst = 1;    // strip = chain px 1..9
+constexpr int kStatusLeft = 0;    // logical left status LED
+constexpr int kStatusRight = 10;  // logical right status LED
+constexpr int kStripFirst = 1;    // strip = logical px 1..9
 constexpr int kStripCount = 9;
-constexpr int kStripCenter = 4;  // strip-relative centerline (chain px 5)
+constexpr int kStripCenter = 4;  // strip-relative centerline (logical px 5)
 
-// Set true if the strip is physically mounted data-end-right: flips the
-// strip pixels (1..9) only, never the status pixels. Applied at push
-// time in the sketch glue, not by the renderers.
-constexpr bool kStripReversed = false;
+// The hardware is wired data-in at the PHYSICAL RIGHT end: chain pixel
+// 0 (first on the wire) is the rightmost LED, so the whole chain —
+// status LEDs included — is mirrored relative to logical space.
+// physicalIndex() does that mapping once, at push time; nothing that
+// renders ever thinks about it. Set false if a future build wires
+// data-in on the left.
+constexpr bool kChainReversed = true;
+
+// Logical (left-to-right) index -> position on the physical wire.
+int physicalIndex(int logical);
 
 struct Rgb {
   uint8_t r;

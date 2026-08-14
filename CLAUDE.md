@@ -1224,8 +1224,11 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   Pixels 0 and 10 are status indicators; pixels 1–9 are the strip with
   pixel 5 the centerline. Pin 30 (P0.09/NFC1) drives the boost EN
   (HIGH = 5 V rail on), pin 31 (P0.10/NFC2) is the data line — both
-  `#define`s in `neopixel.h`, swap to match wiring; set
-  `led_frame::kStripReversed` if the strip is mounted data-end-right.
+  `#define`s in `neopixel.h`, swap to match wiring. **The chain is
+  wired data-in on the physical RIGHT** (chain px 0 = rightmost LED):
+  everything renders in logical left-to-right space and
+  `led_frame::physicalIndex()` mirrors the whole chain — status LEDs
+  included — once at push time (`kChainReversed`, true for this build).
 - **NFC→GPIO is a one-time runtime UICR write** (`NEOPIXEL_SETUP()`):
   if `UICR->NFCPINS` still has the PROTECT bit, unlock NVMC, program
   `0xFFFFFFFE`, relock, `NVIC_SystemReset()` — NFCPINS latches only at

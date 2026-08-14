@@ -101,6 +101,22 @@ TEST_CASE("applyCap: full-white maps to exactly the cap") {
   }
 }
 
+TEST_CASE("physicalIndex mirrors the whole chain (data-in wired right)") {
+  // kChainReversed is true for the current hardware: logical left
+  // status (0) sits at the far end of the wire (10), the centerline
+  // stays centered, and the map is an involution (its own inverse).
+  static_assert(led_frame::kChainReversed, "test written for reversed wiring");
+  CHECK(led_frame::physicalIndex(led_frame::kStatusLeft) == 10);
+  CHECK(led_frame::physicalIndex(led_frame::kStatusRight) == 0);
+  CHECK(led_frame::physicalIndex(led_frame::kStripFirst + led_frame::kStripCenter) ==
+        led_frame::kStripFirst + led_frame::kStripCenter);
+  for (int i = 0; i < led_frame::kPixelCount; i++) {
+    CHECK(led_frame::physicalIndex(led_frame::physicalIndex(i)) == i);
+  }
+  // Logical leftmost strip pixel lands one in from the wire's far end.
+  CHECK(led_frame::physicalIndex(led_frame::kStripFirst) == 9);
+}
+
 TEST_CASE("add saturates at 255") {
   Rgb s = led_frame::add(Rgb{200, 100, 0}, Rgb{100, 100, 5});
   CHECK(s.r == 255);
