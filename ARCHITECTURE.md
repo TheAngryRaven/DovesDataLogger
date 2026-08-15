@@ -110,6 +110,20 @@ to the matching `*_LOOP()`.
   pages are compiled out, BLE returns to lazy init, and the DOVEX
   `Temp1`/`Junction1`/`Temp2` columns are written as `nan` so the log
   format stays identical across channels.
+- **NeoPixel strip** (`neopixel` + the `led_frame` / `led_modes` /
+  `led_animations` / `sector_purple` pure units) — 11 WS2812 pixels on
+  the NFC pads (converted to GPIO by a one-time, one-way UICR write on
+  first flag-on boot): two status alert LEDs flanking a 9-px strip that
+  shows an RPM scale until pace is meaningful and then a pace pip
+  (slower = left of center in red, faster = right in green), plus a
+  boot animation and a purple celebration when a session-best sector is
+  set (detected race-free against the lap timer's lap-line best-update
+  by snapshotting bests at sector open). One rule everything obeys: a
+  global brightness cap (`led_brightness`) applied at a single choke
+  point — no LED channel ever exceeds it. The strip's 5 V boost
+  converter has its EN pin driven low in sleep, so System OFF really
+  powers the LEDs down. Gated on `BIRDSEYE_ENABLE_NEOPIXEL`: on in
+  beta, off (fully compiled out, no UICR write) in master/release.
 - **Course creator** (`course_creator` + `track_json` pure units, glued
   into the menu/pages/SD modules) — authors a track course on the device
   by walking to each cone and holding for a 3 s GPS average. Autocross

@@ -67,6 +67,10 @@ Core capabilities:
   DovesSensorEgg thermocouple pod's advertising broadcasts (`PW-ADV` v1
   and v2), logs `Temp1`/`Junction1`/`Temp2` DOVEX columns + Temp1/Temp2
   race pages (subsystem 14)
+- **NeoPixel strip (beta)**: 11 WS2812 pixels on the NFC pads converted
+  to GPIO — 2 status alert LEDs + a 9-px pace-pip / RPM-scale strip with
+  a global brightness cap, boot animation, and a purple session-best
+  sector celebration (subsystem 16)
 
 ---
 
@@ -92,6 +96,7 @@ All sketch sources live in `BirdsEye/` so the folder name matches the
 | `display_pages.{h,ino}` | All page rendering functions (`displayPage_*()`) |
 | `display_ui.{h,ino}` | Display init, button reading (multi-sample debounce), menu navigation, I2C bus recovery |
 | `gps_functions.{h,ino}` | GPS init (SparkFun UBX PVT), time conversion, DOVEX logging pipeline, TIMER3 serial buffer ISR, V_BCKP recovery |
+| `neopixel.{h,ino}` | NeoPixel strip glue (subsystem 16): one-time UICR NFC→GPIO ensure, boost-EN power control, 30 Hz compose→cap→show frame loop, sleep/wake hooks; all decision math in the led_* / sector_purple pure units |
 | `replay.{h,ino}` | Instant DOVEX header replay |
 | `sd_functions.{h,ino}` | SD init, track list/JSON parsing (dual format), track manifest, SD access arbitration |
 | `sensoregg.{h,ino}` | SensorEgg wireless EGT: passive BLE scan (observer), scan-callback→loop double buffer, `SENSOREGG_MAC` pairing, Temp1/Junction1 data surface (see subsystem 14) |
@@ -117,6 +122,10 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `crc32.{h,cpp}` | CRC-32/IEEE-802.3 (zlib) incremental + hex; pins firmware-OTA CRC to the web client |
 | `sd_access_policy.{h,cpp}` | SD access arbitration decision table (mode values + grant/deny rules) |
 | `lap_format.{h,cpp}` | ms → `M:SS.mmm` lap-time rendering (three zero-minutes styles), used by all display pages |
+| `led_frame.{h,cpp}` | NeoPixel pixel layout (11 px: 2 status + 9-px strip), `Rgb`/`Frame` PODs, and **`applyCap()` — the single global-brightness choke point** (post-condition: no channel exceeds the cap) |
+| `led_modes.{h,cpp}` | Strip modes + status actions: pace pip math (ms/m, slower = left/red), generic `ScaleSpec` left-fill (RPM red past halfway; temps later), and the `StatusAction` threshold/hysteresis/flash table — the phase-2 assignability hook |
+| `led_animations.{h,cpp}` | Boot + purple-sector animations as pure functions of `(tMs, seed)` — hash-based sparkles, no rand()/millis(), golden-testable |
+| `sector_purple.{h,cpp}` | Session-best ("purple") sector detection: open-time best snapshots + a derived S3 defeat the library's lap-line `updateBestSectors()` race; no purple on lap 1 |
 | `tach_filter.{h,cpp}` | Tachometer 1-D Kalman filter (predict/update math + Q/R tuning constants) **and the engine geometry** — `revsPerPulse` / `minPulseGapUs` from `spark_mode` + `cylinder_count` |
 | `camera_fsm.{h,cpp}` | Insta360 auto-record lifecycle FSM (8 states, all debounce/retry/timeout timing + tunables); board-portable core shared with the nRF54 "Falcon" target |
 | `insta360_protocol.{h,cpp}` | Insta360 X4 BLE frame builders/parsers (wake advert, remote scan response, ce82 buttons, ce82 GPS/RMC frame, ce81 serial parsing, ce81 `0x10` record-timer state parse) with golden-byte tests |
@@ -195,6 +204,8 @@ handoff spec.
 | D3 | Button 3 (Right) | INPUT_PULLUP, RC filter recommended |
 | D0 | Tachometer input | INPUT_PULLUP, falling-edge ISR |
 | PIN_VBAT / VBAT_ENABLE | Battery ADC | 1510/510 ohm divider, 3.6 V ref |
+| Pin 30 (P0.09, NFC1 pad) | 5 V boost converter EN | HIGH = rail on; LOW retained through System OFF. Beta only — needs the one-way UICR NFC→GPIO conversion (subsystem 16) |
+| Pin 31 (P0.10, NFC2 pad) | NeoPixel data | 11 px WS2812, GRB, 800 kHz. Same UICR requirement; swap with pin 30 in `neopixel.h` if wired the other way |
 
 ---
 
@@ -214,6 +225,7 @@ loop()  ~250 Hz
  ├─ checkAutoIdle()         tach: 60s <2mph; manual/speed: 5min <5mph (+ camera stop)
  ├─ updateGpsLockHold()     pin user to tach page until GPS time lock
  ├─ CAMERA_LOOP()           step Insta360 auto-record FSM (GPS/tach fresh)
+ ├─ NEOPIXEL_LOOP()         LED strip frame at 30 Hz (also called in parked branches)
  ├─ cameraConsumeAutoStop() camera 30s-engine-off stop → endRaceSession + menu
  ├─ calculateGPSFrameRate() 1-second PVT counter
  ├─ readButtons()           multi-sample debounce + edge detection
@@ -1200,6 +1212,102 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
 - **Sim**: fully exercised — five golden fixtures walk the real menus,
   inject real PVT, run a real averaging hold, and lock the rendered pixels.
 
+### 16. NeoPixel Strip (`neopixel.{h,ino}`, `led_frame/led_modes/led_animations/sector_purple.{h,cpp}`)
+
+- **BUILD FLAG — `BIRDSEYE_ENABLE_NEOPIXEL` (`project.h`)**: `0`
+  (master/release default) compiles the whole subsystem down to no-op
+  `NEOPIXEL_*` entry points — no UICR write, no pin driving, no
+  Adafruit NeoPixel dependency in the image. `1` (beta channel, passed
+  by `beta.yml` + BETA-targeted `compile-sketch.yml` runs) is
+  everything below.
+- **Hardware**: 11 WS2812 pixels fed by an Adafruit 5 V boost converter.
+  Pixels 0 and 10 are status indicators; pixels 1–9 are the strip with
+  pixel 5 the centerline. Pin 30 (P0.09/NFC1) drives the boost EN
+  (HIGH = 5 V rail on), pin 31 (P0.10/NFC2) is the data line — both
+  `#define`s in `neopixel.h`, swap to match wiring. **The chain is
+  wired data-in on the physical RIGHT** (chain px 0 = rightmost LED):
+  everything renders in logical left-to-right space and
+  `led_frame::physicalIndex()` mirrors the whole chain — status LEDs
+  included — once at push time (`kChainReversed`, true for this build).
+- **NFC→GPIO is a one-time runtime UICR write** (`NEOPIXEL_SETUP()`):
+  if `UICR->NFCPINS` still has the PROTECT bit, unlock NVMC, program
+  `0xFFFFFFFE`, relock, `NVIC_SystemReset()` — NFCPINS latches only at
+  reset. **ONE-WAY** (undo = full chip erase / bootloader reflash;
+  accepted, NFC is never used). Deliberately NOT the
+  `-DCONFIG_NFCT_PINS_AS_GPIOS` core flag: that's consumed by the
+  core's `system_nrf52840.c` (a `.c` file `compiler.cpp.extra_flags`
+  can't reach) and would silently not apply to IDE builds. Direct NVMC
+  access is illegal under the SoftDevice, so `NEOPIXEL_SETUP()` runs
+  **before `CAMERA_SETUP()`/`SENSOREGG_SETUP()`** (which
+  `bleCoreEnsureInit()` on beta) and before `wdtSetup()` arms the
+  watchdog. Every later boot skips the branch.
+- **The global brightness cap is THE invariant**: modes and animations
+  author colors in full 0–255; `led_frame::applyCap()` scales every
+  channel by `led_brightness`/255 exactly once, at push time, in
+  `npxPushFrame()`. After it, no channel exceeds the cap — host-tested
+  as a post-condition. Never use `strip.setBrightness()` (lossy buffer
+  rewrite, spreads the invariant). `led_brightness` 0 = LEDs disabled:
+  the boost rail is never even enabled.
+- **Frame loop** (`NEOPIXEL_LOOP()`, self-throttled 30 Hz, called after
+  `CAMERA_LOOP()` AND inside both parked branches so the strip blanks
+  rather than freezes): snapshot inputs → step the `sector_purple`
+  monitor → compose by priority — **boot animation > purple animation >
+  (parked ‖ !raceActive ‖ brightness 0 → off) > race rendering** — →
+  `applyCap` → show.
+- **Strip policy**: off outside a race session (driving aid, not menu
+  bling). In race: **RPM scale** (green filling left→right, red past
+  halfway, ceiling = `rev_limit`) until pace is valid — `paceValid =
+  activeTimerRaceStarted() && laps >= 1 && !(sprint && between-runs)`,
+  mirroring the OLED pace page — then the **pace pip**:
+  `activeTimerPaceDifference()` is **ms per meter**, positive = slower;
+  full deflection ±1.0 ms/m (`kPaceFullScaleMsPerM`, 0.25/pixel),
+  ±0.125 deadband = dim-white centerline only. Slower = LEFT of center
+  in red, faster = RIGHT in green.
+- **Status actions** (`led_modes::StatusAction` PODs — the phase-2
+  assignability hook; settings will parse into the same structs):
+  pixel 0 = rev-limit flasher (red, ≥ `rev_limit`, clears at 97%,
+  100 ms half-period), pixel 10 = EGT flasher (orange, ≥ 650 °C
+  `kEgtAlertC`, clears 630 °C, 250 ms). Validity gates the latch: a
+  NaN/stale EGT (checked with `isNanF()`, NEVER `isnan()` — `-Ofast`)
+  turns the LED off AND releases the latch. Latches also release when
+  leaving race mode.
+- **Purple sector** (`sector_purple`, host-tested): the library updates
+  best-sector times **at the start/finish crossing**, not at sector
+  lines, so the monitor snapshots each sector's best when the sector
+  OPENS, closes S1/S2 on `getCurrentSector()` transitions, and derives
+  S3 on the lap edge as `lastLapTime − s1 − s2` — immune to the
+  lap-line race. Fires only against a nonzero prior best (no purple on
+  lap 1). Feeds `neopixelNotifyPurpleSector()` → 1.6 s purple
+  wave/hold/fade over ALL 11 px. New sprint-first wrappers:
+  `activeTimerCurrentSector()`, `activeTimerLapSectorTime(n)`,
+  `activeTimerBestSectorTime(n)` (WaypointLapTimer → 0, monitor stays
+  reset).
+- **Animations** (`led_animations`): pure functions of `(tMs, seed)` —
+  sparkles hash `(seed, timeSlot, pixel)`, no `rand()`/`millis()`
+  inside, so frames are golden-testable. Boot: 2.6 s hue comet circling
+  the 11 px + fade-out + white sparkles, plays over the GPS status
+  page. Seeds come from `micros()` (house entropy rule).
+- **Sleep/wake**: `NEOPIXEL_SLEEP()` (in `enterShutdown()` with the IMU
+  rail-off, before the charging branch — so the strip is dark while
+  charging too) blanks the strip while 5 V is up, then data LOW, then
+  boost EN LOW — driven-LOW is retained through System OFF (the "blue
+  LED stays on" precedent). `NEOPIXEL_WAKE()` (charging soft-resume)
+  re-raises EN, waits the 5 ms settle, re-inits the strip.
+- **Radio/timing safety**: Adafruit_NeoPixel's nRF52 `show()` grabs a
+  FREE PWM instance (EasyDMA, interrupts ON, ~0.4 ms for 11 px ≈ 1%
+  CPU at 30 Hz). This sketch uses no `tone()`/`analogWrite()`, so
+  PWM0–2 are always free; TIMER3's GPS drain and the tach ISR are
+  unaffected. If all PWMs were ever occupied the library bit-bangs
+  **with interrupts off** — never create that path. `show()` also
+  mallocs/frees a ~560 B pattern buffer per call: same-size alloc/free
+  is fragmentation-benign, it is NOT a leak.
+- **Sim**: `neopixel.ino` excluded from the sim TU (BLE-module
+  precedent), surface no-op'd in `module_stubs.cpp`; the four pure
+  units build into the sim via `SIM_CORE_SOURCES`.
+- **Phase 2 (planned, not built)**: settings-driven mode selection and
+  per-status-LED action assignment (source/threshold/color), temp
+  scales through the same `ScaleSpec`, C/F preference, brightness UI.
+
 ---
 
 ## Data Formats
@@ -1294,7 +1402,9 @@ the one loaded). Sector lines stay optional — zero, one, or two.
   "driver_name": "Driver",
   "lap_detection_distance": "7",
   "waypoint_detection_distance": "30",
-  "waypoint_speed": "30"
+  "waypoint_speed": "30",
+  "led_brightness": "64",
+  "rev_limit": "15000"
 }
 ```
 
@@ -1313,6 +1423,8 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | `display_invert` | string | `"normal"` | Panel colours: `normal` = lit-on-black as shipped, `inverted` = black-on-lit. Anything other than an explicit `inverted` means normal |
 | `debug_pages` | string | `"hide"` | Race-rotation diagnostic pages (`GPS_DEBUG` + `GPS_STATS`): `hide` = rotation starts at the speed page (end-user default), `show` = diagnostics restored at the front. Anything other than an explicit `show` means hide. No-op under `ENDURANCE_MODE` (already starts at speed) |
 | `cylinder_count` | int | `1` | Cylinders the **pickup sees** — a clamp on one plug wire of a twin sees ONE. Only a shared coil / all-cylinder harness sees them all |
+| `led_brightness` | int | `64` | NeoPixel global brightness cap 0–255 — no LED channel ever exceeds it (`led_frame::applyCap`). `0` disables the LEDs entirely (boost rail never enabled). Read only by `BIRDSEYE_ENABLE_NEOPIXEL` builds; clamp back to 64 on nonsense |
+| `rev_limit` | int | `15000` | True RPM anchoring the LED subsystem: RPM-scale ceiling + the rev-limit status flasher threshold. Clamp 1000–20000 (tach filter's ceiling). LED-only for now — nothing else reads it |
 
 - Created automatically on first boot with random BLE values.
 - Missing keys auto-populated on boot via `ensureDefaultSettings()`.
@@ -1403,6 +1515,15 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | SensorEgg scanner self-heal | 30 s no packet → stop+start kick | `sensoregg_protocol.h` |
 | SensorEgg RSSI floor | −90 dBm | `sensoregg_protocol.h` |
 | SensorEgg pairing MAC | `SENSOREGG_MAC` (all-zeros = any egg) | `sensoregg.h` |
+| NeoPixel strip flag | `BIRDSEYE_ENABLE_NEOPIXEL`, default 0; 1 on the beta channel | `project.h` |
+| NeoPixel pins | 30 = boost EN, 31 = data (NFC pads, post-UICR) | `neopixel.h` |
+| NeoPixel layout | 11 px: status 0 + strip 1–9 (center px 5) + status 10 | `led_frame.h` |
+| LED frame rate | 30 Hz (`NPX_FRAME_INTERVAL_MS` 33) | `neopixel.ino` |
+| LED brightness default | 64 / 255 (`led_brightness`; 0 = disabled) | `settings.ino` |
+| Pace pip full scale / deadband | ±1.0 ms/m (0.25 per pixel) / ±0.125 | `led_modes.h` |
+| RPM scale red fraction | 0.5 (red past halfway) | `led_modes.h` |
+| Rev flasher clear / EGT alert-clear | 97% of `rev_limit` / 650→630 °C | `led_modes.h` |
+| Boot / purple animation | 2600 ms / 1600 ms | `led_animations.h` |
 
 ---
 
@@ -1418,6 +1539,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | SdFat | SD card (FAT16/32) |
 | DovesLapTimer | Lap/sector timing (external: TheAngryRaven/DovesLapTimer). CI refs: `BETA`-targeted builds track the library's `BETA` branch; master/release builds pin `v4.3.0` (bump deliberately) |
 | Seeed Arduino LSM6DS3 | Onboard IMU accelerometer/gyro (Sense variant, ±16g) |
+| Adafruit NeoPixel | WS2812 strip driver (subsystem 16; linked in but inert unless `BIRDSEYE_ENABLE_NEOPIXEL`) |
 | Bluefruit nRF52 | BLE (built into board package) |
 | Adafruit TinyUSB | USB Mass Storage (`Adafruit_USBD_MSC`); built into board package |
 
@@ -1470,7 +1592,7 @@ This device operates in ignition-noise environments. Three layers of defense:
   `compiler.cpp.extra_flags` property — a second `--build-property` for
   one key replaces the first). Local setup: CONTRIBUTING.md "Local build
   flags".
-- **Feature flags** (`project.h`, both default `0`, both tested with `#if`
+- **Feature flags** (`project.h`, all default `0`, all tested with `#if`
   so an explicit `-DFLAG=0` wins):
   - `BIRDSEYE_ENABLE_ONBOARD_CHARGING` — off in **every** channel. See
     subsystem 10: HICHG hold + the USB charging UX. The hardware now has
@@ -1479,6 +1601,10 @@ This device operates in ignition-noise environments. Three layers of defense:
     (`beta.yml`, plus `compile-sketch.yml` for PRs targeting `BETA` so the
     flag-on build is compile-checked before it reaches the publish
     workflow). See subsystem 14.
+  - `BIRDSEYE_ENABLE_NEOPIXEL` — off in master/release, **on in beta**
+    (same two workflows as SENSOREGG). First flag-on boot performs the
+    ONE-WAY UICR NFC→GPIO conversion and self-resets once. See
+    subsystem 16.
   When adding a flag: give it a `#ifndef` default in `project.h`, decide
   its per-channel value in the workflows, and document it here + in
   CONTRIBUTING.md's flag table.

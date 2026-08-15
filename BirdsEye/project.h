@@ -82,6 +82,25 @@
   #define BIRDSEYE_ENABLE_SENSOREGG 0
 #endif
 
+// ---- NeoPixel strip (11 px: 2 status + 9-px pace/RPM strip) ----
+//
+// 0 (default — master and release): the whole subsystem is compiled out.
+// The module's entry points become no-ops and, critically, the firmware
+// NEVER writes UICR->NFCPINS and never drives pins 30/31 (P0.09/P0.10,
+// the NFC pads) — a flag-off build leaves the pads exactly as it found
+// them.
+//
+// 1 (the beta channel passes -DBIRDSEYE_ENABLE_NEOPIXEL=1): on first
+// boot NEOPIXEL_SETUP() converts the NFC pads to GPIO by programming
+// UICR->NFCPINS (a ONE-WAY change — undoing it needs a full chip erase,
+// i.e. a bootloader reflash; accepted, NFC is never used on this
+// hardware) and self-resets once so the pin latch takes effect. After
+// that: pin 30 = boost converter EN, pin 31 = WS2812 data. See plan
+// 0006 and neopixel.h.
+#ifndef BIRDSEYE_ENABLE_NEOPIXEL
+  #define BIRDSEYE_ENABLE_NEOPIXEL 0
+#endif
+
 ///////////////////////////////////////////
 // BOARD VARIANT
 //
