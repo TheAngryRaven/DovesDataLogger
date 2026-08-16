@@ -80,6 +80,22 @@ void bleConnLedOff();
 void bleShutdownQuiesce();
 
 // Service deferred commands from the BLE callback task: settings
-// commands, track upload/delete, MTU negotiation tail-read, and the
+// commands, track upload/delete, post-connect link tuning, and the
 // burst-send chunk pipeline for any active file transfer.
 void BLUETOOTH_LOOP();
+
+// --- Transfer diagnostics (read by the Bluetooth page) ---------------------
+// These exist so a download-speed regression is visible on the device instead
+// of being inferred from a progress bar. See
+// docs/plans/0008-ble-download-throughput.md.
+
+// Live transfer rate in bytes/sec, 0 when nothing is streaming.
+uint32_t bleTransferRateBps();
+
+// Negotiated link-layer PDU in bytes. 27 means Data Length Extension never
+// happened, which fragments every notification into ten packets — by far the
+// largest throughput tax on this link.
+uint16_t bleLinkDataLength();
+
+// Payload carried by one notification at the negotiated ATT MTU.
+uint16_t bleLinkChunkSize();

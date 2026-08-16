@@ -282,9 +282,6 @@ bool bleTransferInProgress = false;
 uint32_t bleFileSize = 0;
 uint32_t bleBytesTransferred = 0;
 uint16_t bleNegotiatedMtu = 23;
-bool bleWaitingForMTU = false;         // Deferred MTU negotiation (avoids delay in callback)
-unsigned long bleMTURequestTime = 0;   // Timestamp when MTU was requested
-uint16_t bleMTUConnHandle = 0;        // Connection handle for deferred MTU read
 // Note: bleCurrentFile is declared after SdFat include
 
 ///////////////////////////////////////////

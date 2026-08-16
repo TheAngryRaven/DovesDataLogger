@@ -82,6 +82,13 @@ bool sdSetSpiClock(uint32_t maxSck);
 // to the normal clock if the fast re-init fails.
 void sdSetTransferSpeed(bool fast);
 
+// The SPI clock the card is actually running at (Hz), i.e. the last one
+// SD.begin() accepted — 0 before the first successful init. Not the same as
+// the clock that was requested: sdSetTransferSpeed(true) silently falls back
+// to the normal clock when the fast re-init fails, and a transfer session
+// running at 2 MHz instead of 8 MHz is worth being able to see.
+uint32_t sdActiveSpiHz();
+
 // Make sure /TRACKS exists, creating it when missing (blank soldered-in
 // card). Caller must already hold the SD mutex. Returns true when the
 // folder exists or was created.

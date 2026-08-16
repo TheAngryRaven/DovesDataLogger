@@ -54,6 +54,13 @@ void bleShutdownQuiesce() {}
 
 void BLUETOOTH_LOOP() {}
 
+// Transfer diagnostics the Bluetooth page prints. No radio in the sim, so
+// the page renders its idle "waiting" state and these are never meaningful —
+// they exist so display_pages.ino compiles unchanged.
+uint32_t bleTransferRateBps() { return 0; }
+uint16_t bleLinkDataLength() { return 27; }
+uint16_t bleLinkChunkSize() { return 20; }
+
 // ---- camera_ble.ino surface ----
 
 void CAMERA_SETUP() {}

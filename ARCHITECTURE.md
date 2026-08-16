@@ -87,10 +87,19 @@ to the matching `*_LOOP()`.
   (`sd_format_page` pure unit) rather than a dead-end fault screen.
 - **Display/UI** (`display_ui`, `display_pages`) — OLED driver abstraction,
   multi-sample debounced buttons, page routing.
-- **Bluetooth** (`bluetooth`) — BLE service for file transfer, settings,
-  and track sync, plus buttonless Secure DFU (`BLEDfu`) for OTA firmware
-  updates and a Device Information Service (`BLEDis`) that reports
-  `FIRMWARE_VERSION` for the update check.
+- **Bluetooth** (`bluetooth` + the `ble_stream` pure unit) — BLE service for
+  file transfer, settings, and track sync, plus buttonless Secure DFU
+  (`BLEDfu`) for OTA firmware updates and a Device Information Service
+  (`BLEDis`) that reports `FIRMWARE_VERSION` for the update check.
+  Download throughput is treated as something to *verify*, not request:
+  the connect callback asks for MTU 247, 2M PHY and Data Length Extension,
+  and `bleTuneLink()` then reads back what actually negotiated and corrects
+  it — re-asking for DLE if the request was lost to a busy link-layer, and
+  making a second Apple-compliant connection-interval request only when the
+  link is slower than 15 ms. Chunks stream from a compacting 4 KB read-ahead
+  so an SD read never sits in the radio's critical path. Plan 0008 has the
+  reasoning; the transfer page reports live KB/s so the next regression is
+  visible on the device.
 - **Camera** (`camera_ble` + the `camera_fsm` / `insta360_protocol` pure
   units) — hands-free Insta360 X4 auto-record: the device emulates the
   Insta360 GPS Remote as a pure BLE peripheral, wakes the paired camera on
