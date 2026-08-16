@@ -1442,8 +1442,8 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | `debug_pages` | string | `"hide"` | Race-rotation diagnostic pages (`GPS_DEBUG` + `GPS_STATS`): `hide` = rotation starts at the speed page (end-user default), `show` = diagnostics restored at the front. Anything other than an explicit `show` means hide. No-op under `ENDURANCE_MODE` (already starts at speed) |
 | `cylinder_count` | int | `1` | Cylinders the **pickup sees** — a clamp on one plug wire of a twin sees ONE. Only a shared coil / all-cylinder harness sees them all |
 | `led_brightness` | int | `64` | NeoPixel global brightness cap 0–255 — no LED channel ever exceeds it (`led_frame::applyCap`). `0` disables the LEDs entirely (boost rail never enabled). Read only by `BIRDSEYE_ENABLE_NEOPIXEL` builds; clamp back to 64 on nonsense |
-| `rev_limit` | int | `15000` | True RPM WARNING limit: RPM-scale ceiling, left status LED flasher threshold, and the tach page's `*OVER REV*` header. Clamp 1000–20000 (tach filter's ceiling) |
-| `overrev_limit` | int | `0` (disabled) | True RPM PROBLEM limit (plan 0007): past it the whole 11-px chain flashes red (outranks the purple celebration); latch clears below `rev_limit × 0.97`. 0 = off; else clamp 1000–20000 |
+| `rev_limit` | int | `15000` | True RPM WARNING limit: RPM-scale ceiling and the left status LED flasher threshold. Clamp 1000–20000 (tach filter's ceiling) |
+| `overrev_limit` | int | `0` (disabled) | True RPM PROBLEM limit (plan 0007): past it the whole 11-px chain flashes red (outranks the purple celebration) and the tach page shows `*OVER REV*`; latch clears below `rev_limit × 0.97`. 0 = off (no chain flash, no header); else clamp 1000–20000 |
 | `temp1_alert_c` | int | `650` | Temp1 (EGT) alert threshold in **Celsius** for the right status LED: red flash at/above, clears 20 °C below, solid blue when the probe signal is NaN/stale. Clamp 50–1200 |
 
 - Created automatically on first boot with random BLE values.

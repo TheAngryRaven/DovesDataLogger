@@ -45,8 +45,9 @@ beta channel, plus the fixes below).
 - **Engine dies mid-session** (tach-proven sessions): the LED bar goes
   dark and the pace page shows `STOPPED` instead of a still-counting
   pace — status LEDs (temp alert) stay live. Clears on restart.
-- **Tach page `*OVER REV*` header** now trips at the configured
-  `rev_limit` instead of a hardcoded 9999 RPM.
+- **Tach page `*OVER REV*` header** now means actual overrev: it shows
+  only when `overrev_limit` is enabled and RPM reaches it (was a
+  hardcoded 9999 RPM). The `rev_limit` warning stays on the LED only.
 - **Temp status LED flashes red** (was orange), matching the rev
   flasher's alert language.
 

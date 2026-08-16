@@ -9,14 +9,16 @@ changes, all driven by real use on a kart with a 7600 RPM hard limiter.
   limit — where the driver wants to know the engine is at the ceiling
   (7550 on the reference engine, just under its 7600 limiter — a carb
   tuning indicator). Drives the left status LED's red flasher and the
-  RPM-scale ceiling, exactly as before. Also now drives the OLED tach
-  page's `*OVER REV*` header, which had been hardcoded at a meaningless
-  `> 9999`.
+  RPM-scale ceiling, exactly as before — and nothing else: the warning
+  deliberately does NOT touch the OLED.
 - **`overrev_limit`** (new, default `0` = disabled): the PROBLEM limit —
   if the engine ever spins here (8500 reference), something is
   mechanically wrong. While latched, the **whole 11-px chain flashes
   red**, overriding everything except the boot animation (an engine
-  problem outranks the purple celebration). The latch releases below
+  problem outranks the purple celebration), and the OLED tach page
+  shows `*OVER REV*` — that header is tied to this SAME limit, only
+  when enabled (>0) and tripped, never at the warning limit (it had
+  been hardcoded at a meaningless `> 9999`). The latch releases below
   `rev_limit × 0.97` — the same clear fraction the warning flasher uses,
   so a brief spike leaves an unambiguous flash rather than a flicker.
   Implemented with the existing `StatusAction`/`evalStatus` machinery
@@ -90,6 +92,6 @@ boot animation
 
 | Key | Default | Notes |
 |---|---|---|
-| `rev_limit` | `15000` | unchanged; now also the tach-page OVER REV header threshold |
+| `rev_limit` | `15000` | unchanged — LED warning flasher + scale ceiling only |
 | `overrev_limit` | `0` | 0 = disabled; clamp 1000–20000; whole-chain red flash |
 | `temp1_alert_c` | `650` | °C; clamp 50–1200; clear = alert − 20 °C |

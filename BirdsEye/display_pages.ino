@@ -817,10 +817,11 @@ void displayPage_gps_best_lap() {
 void displayPage_tachometer() {
   resetDisplay();
 
-  // OVER REV header trips at the configured warning limit (plan 0007) —
-  // the same first flag as the LED rev flasher. Was hardcoded >9999,
-  // which a 7600-limiter engine could never reach.
-  if (tachLastReported >= settingRevLimit) {
+  // OVER REV header means ACTUAL overrev (plan 0007): it trips only at
+  // the PROBLEM limit, and only when that limit is enabled — the
+  // rev_limit warning flag is the left LED's job, not the header's.
+  // (Was hardcoded >9999, which a 7600-limiter engine could never reach.)
+  if (settingOverrevLimit > 0 && tachLastReported >= settingOverrevLimit) {
     display.println(F("Engine RPM *OVER REV*"));
   } else {
     display.println(F("     Engine RPM"));
