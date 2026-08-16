@@ -58,6 +58,7 @@ bool activeTimerSectorsConfigured();
 int activeTimerCurrentSector();
 unsigned long activeTimerLapSectorTime(int sector);
 unsigned long activeTimerBestSectorTime(int sector);
+bool raceEngineStopped();
 SprintTimer* getActiveTimerSprint();
 bool sprintModeIsActive();
 bool activeTimerRunActive();

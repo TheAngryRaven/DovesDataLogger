@@ -714,9 +714,13 @@ void displayPage_gps_pace() {
   int paceLaps = activeTimerLaps();
   float paceDiff = activeTimerPaceDifference();
   bool paceRaceStarted = activeTimerRaceStarted();
+  // Engine died mid-session (plan 0007): the timer keeps running, but a
+  // live-counting pace next to a dead engine is a lie — say STOPPED.
+  // Also gates the notably-faster flash animation below.
+  bool engineStopped = raceEngineStopped();
 
   // animation
-  if (paceLaps >= 1 && paceDiff < (-1)) {
+  if (!engineStopped && paceLaps >= 1 && paceDiff < (-1)) {
     if (paceFlashStatus) {
       paceFlashStatus = false;
       display.setTextColor(DISPLAY_TEXT_BLACK, DISPLAY_TEXT_WHITE);
@@ -735,7 +739,11 @@ void displayPage_gps_pace() {
   // main page into
   display.setTextColor(DISPLAY_TEXT_WHITE);
   const int lineHeight = 21;
-  if (sprintModeIsActive() && !activeTimerRunActive()) {
+  if (engineStopped) {
+    display.setCursor(0, lineHeight);
+    display.setTextSize(3);
+    display.print(F(" STOPPED"));
+  } else if (sprintModeIsActive() && !activeTimerRunActive()) {
     // Sprint mode, between runs — no live pace to compare (see lap page).
     display.setCursor(0, lineHeight);
     display.setTextSize(2);
@@ -758,7 +766,7 @@ void displayPage_gps_pace() {
   display.println();
   display.setTextSize(1);
 
-  if (paceLaps >= 1 && paceDiff < (-1)) {
+  if (!engineStopped && paceLaps >= 1 && paceDiff < (-1)) {
     if (paceFlashStatus) {
       display.setTextColor(DISPLAY_TEXT_BLACK, DISPLAY_TEXT_WHITE);
       display.print(F("           "));
@@ -809,7 +817,10 @@ void displayPage_gps_best_lap() {
 void displayPage_tachometer() {
   resetDisplay();
 
-  if (tachLastReported > 9999) {
+  // OVER REV header trips at the configured warning limit (plan 0007) —
+  // the same first flag as the LED rev flasher. Was hardcoded >9999,
+  // which a 7600-limiter engine could never reach.
+  if (tachLastReported >= settingRevLimit) {
     display.println(F("Engine RPM *OVER REV*"));
   } else {
     display.println(F("     Engine RPM"));

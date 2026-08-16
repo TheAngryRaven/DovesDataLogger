@@ -187,6 +187,11 @@ bool settingRaceModePrefSprint = false;
 // are anchored to. Read at boot only, like every other setting.
 uint8_t settingLedBrightness = 64;
 int settingRevLimit = 15000;
+// Plan 0007: the PROBLEM limit — an engine at overrev_limit is broken,
+// not just at its ceiling. 0 = disabled. And the Temp1 (EGT) alert
+// threshold in Celsius for the right status LED.
+int settingOverrevLimit = 0;
+int settingTemp1AlertC = 650;
 
 // Track manifest for proximity detection
 TrackManifestEntry trackManifest[MAX_LOCATIONS];
@@ -998,6 +1003,19 @@ void setup() {
       // ceiling matches the tach filter's ~20k true-RPM limit.
       if (r >= 1000 && r <= 20000) settingRevLimit = r;
     }
+    if (getSetting("overrev_limit", buf, sizeof(buf))) {
+      const int r = atoi(buf);
+      // 0 (the default) disables the whole-chain overrev flash; any
+      // other value clamps to the same band as rev_limit.
+      if (r == 0) settingOverrevLimit = 0;
+      else if (r >= 1000 && r <= 20000) settingOverrevLimit = r;
+    }
+    if (getSetting("temp1_alert_c", buf, sizeof(buf))) {
+      const int t = atoi(buf);
+      // Celsius. Floor above any plausible ambient so a garbled value
+      // can't latch the alert at power-on; ceiling past any real EGT.
+      if (t >= 50 && t <= 1200) settingTemp1AlertC = t;
+    }
     crossingThresholdMeters = settingLapDetectionDistance;
     debug(F("Settings loaded: lap_dist="));
     debug(settingLapDetectionDistance);
@@ -1260,6 +1278,20 @@ unsigned long activeTimerBestSectorTime(int sector) {
     if (sector == 3) return dlt->getBestSector3Time();
   }
   return 0;
+}
+
+/**
+ * @brief The session's engine has proven itself and then died (plan
+ * 0007): a stall/DNF posture, not a lap in progress. RACE_ENTRY_TACH is
+ * exactly "the tach proved itself this session" — manual/speed sessions
+ * promote to it at >500 RPM (idle_policy) — so no-tach devices (RPM
+ * always 0, cause never TACH) can never trip this. Clears by itself the
+ * moment the engine restarts (tach reports nonzero within one loop).
+ * Read by the LED strip (bar off) and the pace page (STOPPED).
+ */
+bool raceEngineStopped() {
+  return raceActive && raceEntryCause == RACE_ENTRY_TACH &&
+         tachLastReported == 0;
 }
 
 /**

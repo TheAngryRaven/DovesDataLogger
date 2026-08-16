@@ -38,16 +38,29 @@ static uint32_t npxPurpleSeed = 0;
 static sector_purple::State npxPurpleMon;
 static led_modes::StatusState npxRevState;
 static led_modes::StatusState npxEgtState;
+static led_modes::StatusState npxOverrevState;
 
 // Status LED assignments. Hardcoded defaults for now — phase 2 parses
 // user settings into these same PODs (led_modes.h). Thresholds that
 // depend on settings are filled in at NEOPIXEL_SETUP().
 static led_modes::StatusAction npxRevAction = {
     led_modes::Source::kRpm, 15000.0f, 14550.0f, led_frame::kRed,
-    led_modes::kRevFlashHalfPeriodMs};
+    led_modes::kRevFlashHalfPeriodMs, led_frame::kOff};
+// Temp1 tri-state (plan 0007): red flash when hot, OFF when good, solid
+// BLUE when there is no probe signal (NaN/stale — a dropout is
+// information, not silence).
 static led_modes::StatusAction npxEgtAction = {
-    led_modes::Source::kEgtC, led_modes::kEgtAlertC, led_modes::kEgtClearC,
-    led_frame::kOrange, led_modes::kEgtFlashHalfPeriodMs};
+    led_modes::Source::kEgtC, led_modes::kEgtAlertC,
+    led_modes::kEgtAlertC - led_modes::kEgtClearDeltaC, led_frame::kRed,
+    led_modes::kEgtFlashHalfPeriodMs, led_frame::kBlue};
+// Overrev (plan 0007): past this the engine is BROKEN, not just at its
+// ceiling — the whole 11-px chain flashes red. Latch clears down at the
+// normal rev limit's clear point so a spike leaves a visible flash.
+// threshold/clearBelow filled from settings at NEOPIXEL_SETUP();
+// disabled (source kNone) while overrev_limit is 0.
+static led_modes::StatusAction npxOverrevAction = {
+    led_modes::Source::kNone, 0.0f, 0.0f, led_frame::kRed,
+    led_modes::kRevFlashHalfPeriodMs, led_frame::kOff};
 
 /**
  * @brief One-time NFC->GPIO conversion. UICR->NFCPINS bit 0 set means
@@ -93,6 +106,18 @@ void NEOPIXEL_SETUP() {
   // Kalman jitter at the limiter can't strobe the latch.
   npxRevAction.threshold = (float)settingRevLimit;
   npxRevAction.clearBelow = (float)settingRevLimit * led_modes::kRevClearFrac;
+  // Overrev: fire at the problem limit, release only once back under
+  // the NORMAL limit's clear point — the whole band stays latched.
+  if (settingOverrevLimit > 0) {
+    npxOverrevAction.source = led_modes::Source::kRpm;
+    npxOverrevAction.threshold = (float)settingOverrevLimit;
+    npxOverrevAction.clearBelow =
+        (float)settingRevLimit * led_modes::kRevClearFrac;
+  }
+  // Temp1 alert threshold from the setting (Celsius), fixed clear delta.
+  npxEgtAction.threshold = (float)settingTemp1AlertC;
+  npxEgtAction.clearBelow =
+      (float)settingTemp1AlertC - led_modes::kEgtClearDeltaC;
 
   digitalWrite(NEOPIXEL_PIN_BOOST_EN, HIGH);
   delay(NPX_BOOST_SETTLE_MS);
@@ -168,38 +193,67 @@ void NEOPIXEL_LOOP() {
                                           npxBootAnimSeed, frame);
     npxBootAnimActive = rendered;
   }
-  // Priority 2: purple celebration.
+  // Priority 2: overrev — the engine is BROKEN. Whole chain flashes
+  // red; outranks the purple celebration, evaluated only in race.
+  if (raceActive) {
+    const led_frame::Rgb overrevColor =
+        led_modes::evalStatus(npxOverrevAction, npxOverrevState,
+                              (float)tachLastReported, true, now);
+    if (!rendered && npxOverrevState.active) {
+      for (int i = 0; i < led_frame::kPixelCount; i++) {
+        frame.px[i] = overrevColor;  // flash off-phase = whole chain dark
+      }
+      rendered = true;
+    }
+  } else {
+    npxOverrevState.active = false;
+  }
+  // Priority 3: purple celebration.
   if (!rendered && npxPurpleActive) {
     rendered = led_animations::renderPurple(now - npxPurpleStartMs,
                                             npxPurpleSeed, frame);
     npxPurpleActive = rendered;
   }
-  // Priority 3/4: parked or menu -> off; racing -> mode + status.
+  // Priority 4/5: parked or menu -> off; racing -> mode + status.
   if (!rendered) {
     led_frame::clear(frame);
     const bool parked = bleActive || usbMscActive;
     if (!parked && raceActive) {
-      // Strip: pace pip once pace means something, RPM scale until then
-      // (and between sprint runs, where pace shows *waiting* on the
-      // OLED too).
-      const bool paceValid =
-          activeTimerRaceStarted() && activeTimerLaps() >= 1 &&
-          !(sprintModeIsActive() && !activeTimerRunActive());
+      // Strip selection (plan 0007 order):
+      //   engine died (proven tach session, RPM 0) -> bar OFF — a pace
+      //     pip counting next to a dead engine reads as a glitch;
+      //   no GPS lock -> green search pip (same fix+timeValid gate that
+      //     allows log-file creation);
+      //   pace valid -> pace pip;
+      //   else -> RPM scale.
       led_frame::Rgb stripPx[led_frame::kStripCount];
-      if (paceValid) {
-        led_modes::renderPace(activeTimerPaceDifference(), stripPx);
-      } else {
-        const led_modes::ScaleSpec rpmSpec = {
-            0.0f, (float)settingRevLimit, led_modes::kRpmRedFrac,
-            led_frame::kGreen, led_frame::kRed};
-        led_modes::renderScale((float)tachLastReported, rpmSpec, stripPx);
+      bool stripOff = raceEngineStopped();
+      if (!stripOff) {
+        if (!gpsData.fix || !gpsData.timeValid) {
+          led_modes::renderSearchPip(now, stripPx);
+        } else {
+          const bool paceValid =
+              activeTimerRaceStarted() && activeTimerLaps() >= 1 &&
+              !(sprintModeIsActive() && !activeTimerRunActive());
+          if (paceValid) {
+            led_modes::renderPace(activeTimerPaceDifference(), stripPx);
+          } else {
+            const led_modes::ScaleSpec rpmSpec = {
+                0.0f, (float)settingRevLimit, led_modes::kRpmRedFrac,
+                led_frame::kGreen, led_frame::kRed};
+            led_modes::renderScale((float)tachLastReported, rpmSpec, stripPx);
+          }
+        }
+        for (int i = 0; i < led_frame::kStripCount; i++) {
+          frame.px[led_frame::kStripFirst + i] = stripPx[i];
+        }
       }
-      for (int i = 0; i < led_frame::kStripCount; i++) {
-        frame.px[led_frame::kStripFirst + i] = stripPx[i];
-      }
-      // Status LEDs: RPM is always a live value (0 when stopped); EGT
-      // validity is the NaN gate — isNanF, never isnan (-Ofast folds
-      // isnan to false, see nan_bits.h).
+      // Status LEDs stay live even with the bar off — a hot engine
+      // cooling after a stall is exactly when the temp alert matters.
+      // RPM is always a live value (0 when stopped); EGT validity is
+      // the NaN gate — isNanF, never isnan (-Ofast folds isnan to
+      // false, see nan_bits.h). NaN -> the action's invalidColor
+      // (solid blue = no probe signal).
       frame.px[led_frame::kStatusLeft] = led_modes::evalStatus(
           npxRevAction, npxRevState, (float)tachLastReported, true, now);
       const float egtC = sensoreggEgtC();
