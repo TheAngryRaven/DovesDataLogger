@@ -68,9 +68,15 @@ void renderScale(float value, const ScaleSpec& spec, Rgb out[kStripCount]) {
 
 led_frame::Rgb evalStatus(const StatusAction& a, StatusState& s, float value,
                           bool valid, uint32_t nowMs) {
-  if (a.source == Source::kNone || !valid) {
+  if (a.source == Source::kNone) {
     s.active = false;
     return led_frame::kOff;
+  }
+  if (!valid) {
+    // Release the latch (never latch stale data) and show the action's
+    // no-signal color — solid, so it can't be misread as an alert flash.
+    s.active = false;
+    return a.invalidColor;
   }
   if (!s.active && value >= a.threshold) {
     s.active = true;
@@ -85,6 +91,27 @@ led_frame::Rgb evalStatus(const StatusAction& a, StatusState& s, float value,
     return a.color;  // no flash configured: solid
   }
   return ((nowMs / half) & 1U) == 0 ? a.color : led_frame::kOff;
+}
+
+void renderSearchPip(uint32_t tMs, Rgb out[kStripCount]) {
+  for (int i = 0; i < kStripCount; i++) {
+    out[i] = led_frame::kOff;
+  }
+  // Triangle wave over the round trip: 0..8..0 across
+  // kSearchBouncePeriodMs. The sweep spans (kStripCount - 1) steps each
+  // way so both end pixels are reached (and briefly held, since the
+  // integer position dwells one slot at each extreme).
+  uint32_t const phase = tMs % kSearchBouncePeriodMs;
+  uint32_t const halfPeriod = kSearchBouncePeriodMs / 2;
+  uint32_t const span = (uint32_t)(kStripCount - 1);
+  uint32_t pos;
+  if (phase < halfPeriod) {
+    pos = (phase * span + halfPeriod / 2) / halfPeriod;
+  } else {
+    uint32_t const back = phase - halfPeriod;
+    pos = span - (back * span + halfPeriod / 2) / halfPeriod;
+  }
+  out[pos] = led_frame::kGreen;
 }
 
 }  // namespace led_modes

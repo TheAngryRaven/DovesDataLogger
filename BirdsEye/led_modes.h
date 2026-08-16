@@ -94,6 +94,10 @@ struct StatusAction {
   float clearBelow;  // releases below (hysteresis; must be < threshold)
   led_frame::Rgb color;
   uint16_t flashHalfPeriodMs;  // half-period of the on/off flash
+  // Shown (solid) while the source is invalid/NaN — kOff for a source
+  // whose absence means nothing (RPM reads 0, never NaN), a color for
+  // one whose absence IS information (temp probe dropout -> blue).
+  led_frame::Rgb invalidColor;
 };
 
 // Per-LED latch state, owned by the caller.
@@ -101,11 +105,12 @@ struct StatusState {
   bool active = false;
 };
 
-// EGT alert defaults: ~1200 F, a typical 2T kart EGT ceiling. Becomes a
-// setting in phase 2; hysteresis keeps the flasher from chattering on
-// sensor noise around the threshold.
+// EGT alert default: ~1200 F, a typical 2T kart EGT ceiling — the
+// compiled-in default behind the `temp1_alert_c` setting. The clear
+// point sits kEgtClearDeltaC below whatever threshold is configured;
+// hysteresis keeps the flasher from chattering on sensor noise.
 constexpr float kEgtAlertC = 650.0f;
-constexpr float kEgtClearC = 630.0f;
+constexpr float kEgtClearDeltaC = 20.0f;
 
 // Rev flasher clears at this fraction of the threshold — deep enough
 // that filter jitter at the limiter doesn't strobe the latch.
@@ -115,11 +120,21 @@ constexpr uint16_t kRevFlashHalfPeriodMs = 100;  // urgent
 constexpr uint16_t kEgtFlashHalfPeriodMs = 250;  // noticeable, calmer
 
 // Evaluate one action. valid=false (stale/NaN input — the glue decides,
-// isNanF-guarded) forces the LED off AND releases the latch: a stale
-// source must never keep an alert flashing (house rule: never latch
-// stale data). Flash phase derives from nowMs so all timing is
+// isNanF-guarded) releases the latch and shows the action's
+// invalidColor (solid): a stale source must never keep an alert
+// flashing (house rule: never latch stale data), but its absence can
+// still be shown. Flash phase derives from nowMs so all timing is
 // host-testable.
 led_frame::Rgb evalStatus(const StatusAction& a, StatusState& s, float value,
                           bool valid, uint32_t nowMs);
+
+// ---- GPS-search pip ------------------------------------------------------
+
+// Full round-trip time of the bouncing pip (end -> end -> back).
+constexpr uint32_t kSearchBouncePeriodMs = 1600;
+
+// One green pixel bouncing 0<->8 as a triangle wave of elapsed time —
+// the race strip's "GPS not locked yet" state. Pure function of tMs.
+void renderSearchPip(uint32_t tMs, led_frame::Rgb out[led_frame::kStripCount]);
 
 }  // namespace led_modes

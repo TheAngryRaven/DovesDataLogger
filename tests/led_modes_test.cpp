@@ -122,7 +122,8 @@ TEST_CASE("renderScale: degenerate span never divides by zero") {
 
 static const StatusAction kRevAction{Source::kRpm, 10000.0f, 9700.0f,
                                      led_frame::kRed,
-                                     led_modes::kRevFlashHalfPeriodMs};
+                                     led_modes::kRevFlashHalfPeriodMs,
+                                     led_frame::kOff};
 
 TEST_CASE("evalStatus: threshold fires, hysteresis holds, clear releases") {
   StatusState st;
@@ -164,16 +165,110 @@ TEST_CASE("evalStatus: invalid input forces off AND releases the latch") {
 
 TEST_CASE("evalStatus: kNone source is always off") {
   StatusState st;
-  StatusAction none{Source::kNone, 0.0f, 0.0f, led_frame::kRed, 100};
+  StatusAction none{Source::kNone, 0.0f, 0.0f, led_frame::kRed, 100,
+                    led_frame::kBlue};  // invalidColor must NOT leak through
   CHECK(isOff(led_modes::evalStatus(none, st, 99999.0f, true, 0)));
+  CHECK(isOff(led_modes::evalStatus(none, st, 99999.0f, false, 0)));
   CHECK(!st.active);
 }
 
 TEST_CASE("evalStatus: zero half-period means solid, not divide-by-zero") {
   StatusState st;
-  StatusAction solid{Source::kRpm, 100.0f, 90.0f, led_frame::kOrange, 0};
+  StatusAction solid{Source::kRpm, 100.0f, 90.0f, led_frame::kOrange, 0,
+                     led_frame::kOff};
   Rgb c = led_modes::evalStatus(solid, st, 200.0f, true, 12345);
   CHECK(c.r == led_frame::kOrange.r);
   CHECK(c.g == led_frame::kOrange.g);
   CHECK(c.b == led_frame::kOrange.b);
+}
+
+static bool isBlue(Rgb c) { return c.b > 0 && c.r == 0 && c.g == 0; }
+
+TEST_CASE("temp tri-state: blue when invalid, off when good, red flash hot") {
+  // The temp action as the glue builds it: threshold from the setting,
+  // clear 20 C below, blue as the no-signal color.
+  StatusAction temp{Source::kEgtC, 650.0f, 630.0f, led_frame::kRed,
+                    led_modes::kEgtFlashHalfPeriodMs, led_frame::kBlue};
+  StatusState st;
+
+  // No probe signal: solid blue, latch released.
+  CHECK(isBlue(led_modes::evalStatus(temp, st, 0.0f, false, 0)));
+  CHECK(!st.active);
+
+  // Good reading below limit: off.
+  CHECK(isOff(led_modes::evalStatus(temp, st, 500.0f, true, 0)));
+
+  // Hot: red flash (nowMs=0 is the ON phase).
+  CHECK(isRed(led_modes::evalStatus(temp, st, 660.0f, true, 0)));
+  CHECK(st.active);
+
+  // Probe drops out mid-alert: blue AND the latch releases — a stale
+  // value must never keep the alert flashing.
+  CHECK(isBlue(led_modes::evalStatus(temp, st, 660.0f, false, 0)));
+  CHECK(!st.active);
+
+  // Signal returns in the hysteresis band (640): stays off — the latch
+  // was released, and 640 is below the 650 fire threshold.
+  CHECK(isOff(led_modes::evalStatus(temp, st, 640.0f, true, 0)));
+  CHECK(!st.active);
+}
+
+TEST_CASE("overrev-style action: wide hysteresis holds the latch down to clear") {
+  // Overrev fires at 8500 but clears at the NORMAL rev limit's clear
+  // point (7550 * 0.97 ~ 7323) — the whole band between must stay latched.
+  StatusAction over{Source::kRpm, 8500.0f, 7323.0f, led_frame::kRed,
+                    led_modes::kRevFlashHalfPeriodMs, led_frame::kOff};
+  StatusState st;
+  CHECK(isOff(led_modes::evalStatus(over, st, 8000.0f, true, 0)));
+  CHECK(!st.active);
+  led_modes::evalStatus(over, st, 8600.0f, true, 0);
+  CHECK(st.active);
+  // Back under the trip point but above clear: still latched.
+  led_modes::evalStatus(over, st, 8000.0f, true, 0);
+  CHECK(st.active);
+  led_modes::evalStatus(over, st, 7400.0f, true, 0);
+  CHECK(st.active);
+  // Below clear: releases.
+  led_modes::evalStatus(over, st, 7300.0f, true, 0);
+  CHECK(!st.active);
+}
+
+TEST_CASE("search pip: one green pixel, bounces to both ends, deterministic") {
+  Rgb out[kStripCount];
+  auto litIndex = [&](uint32_t t) {
+    led_modes::renderSearchPip(t, out);
+    int idx = -1;
+    int lit = 0;
+    for (int i = 0; i < kStripCount; i++) {
+      if (!isOff(out[i])) {
+        lit++;
+        idx = i;
+        CHECK(isGreen(out[i]));
+      }
+    }
+    CHECK(lit == 1);  // exactly one pixel, always
+    return idx;
+  };
+
+  // Endpoints: start of the period at px 0, half-period at px 8.
+  CHECK(litIndex(0) == 0);
+  CHECK(litIndex(led_modes::kSearchBouncePeriodMs / 2) == kStripCount - 1);
+  // Periodic: one full period later, same position.
+  for (uint32_t t = 0; t < led_modes::kSearchBouncePeriodMs; t += 37) {
+    CHECK(litIndex(t) == litIndex(t + led_modes::kSearchBouncePeriodMs));
+  }
+  // Deterministic: same t, same frame.
+  CHECK(litIndex(12345) == litIndex(12345));
+  // Sweeps: every pixel is visited somewhere in one period.
+  bool seen[kStripCount] = {};
+  for (uint32_t t = 0; t < led_modes::kSearchBouncePeriodMs; t += 10) {
+    seen[litIndex(t)] = true;
+  }
+  for (int i = 0; i < kStripCount; i++) {
+    CAPTURE(i);
+    CHECK(seen[i]);
+  }
+  // Triangle symmetry: out and back visit mirrored positions.
+  uint32_t const q = led_modes::kSearchBouncePeriodMs / 4;
+  CHECK(litIndex(q) == litIndex(led_modes::kSearchBouncePeriodMs - q));
 }
