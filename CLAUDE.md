@@ -1251,26 +1251,42 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
 - **Frame loop** (`NEOPIXEL_LOOP()`, self-throttled 30 Hz, called after
   `CAMERA_LOOP()` AND inside both parked branches so the strip blanks
   rather than freezes): snapshot inputs → step the `sector_purple`
-  monitor → compose by priority — **boot animation > purple animation >
-  (parked ‖ !raceActive ‖ brightness 0 → off) > race rendering** — →
-  `applyCap` → show.
-- **Strip policy**: off outside a race session (driving aid, not menu
-  bling). In race: **RPM scale** (green filling left→right, red past
-  halfway, ceiling = `rev_limit`) until pace is valid — `paceValid =
-  activeTimerRaceStarted() && laps >= 1 && !(sprint && between-runs)`,
-  mirroring the OLED pace page — then the **pace pip**:
-  `activeTimerPaceDifference()` is **ms per meter**, positive = slower;
-  full deflection ±1.0 ms/m (`kPaceFullScaleMsPerM`, 0.25/pixel),
-  ±0.125 deadband = dim-white centerline only. Slower = LEFT of center
-  in red, faster = RIGHT in green.
+  monitor → compose by priority — **boot animation > overrev
+  whole-chain red flash > purple animation > (parked ‖ !raceActive ‖
+  brightness 0 → off) > race rendering** — → `applyCap` → show.
+- **Strip policy** (plan 0007 order): off outside a race session
+  (driving aid, not menu bling). In race, first match wins:
+  1. **Engine stopped** (`raceEngineStopped()`: tach-proven session —
+     `raceEntryCause == RACE_ENTRY_TACH`, which manual/speed promote
+     to — at 0 RPM) → bar OFF; status LEDs stay live (a hot engine
+     cooling after a stall is when the temp alert matters). The OLED
+     pace page shows `STOPPED` on the same condition. Self-clears on
+     restart; no-tach devices can never trip it.
+  2. **No GPS lock** (`!(gpsData.fix && gpsData.timeValid)` — the
+     log-file-creation gate) → green **search pip** bouncing end-to-end
+     (`renderSearchPip`, 1.6 s round-trip triangle wave).
+  3. **Pace valid** (`activeTimerRaceStarted() && laps >= 1 && !(sprint
+     && between-runs)`, mirroring the OLED pace page) → the **pace
+     pip**: `activeTimerPaceDifference()` is **ms per meter**, positive
+     = slower; full deflection ±1.0 ms/m (`kPaceFullScaleMsPerM`,
+     0.25/pixel), ±0.125 deadband = dim-white centerline only. Slower =
+     LEFT of center in red, faster = RIGHT in green.
+  4. Else → **RPM scale** (green filling left→right, red past halfway,
+     ceiling = `rev_limit`).
 - **Status actions** (`led_modes::StatusAction` PODs — the phase-2
   assignability hook; settings will parse into the same structs):
   pixel 0 = rev-limit flasher (red, ≥ `rev_limit`, clears at 97%,
-  100 ms half-period), pixel 10 = EGT flasher (orange, ≥ 650 °C
-  `kEgtAlertC`, clears 630 °C, 250 ms). Validity gates the latch: a
-  NaN/stale EGT (checked with `isNanF()`, NEVER `isnan()` — `-Ofast`)
-  turns the LED off AND releases the latch. Latches also release when
-  leaving race mode.
+  100 ms half-period); pixel 10 = Temp1 **tri-state** (red flash ≥
+  `temp1_alert_c`, clears 20 °C below; OFF when good; **solid blue**
+  when the probe signal is NaN/stale — `invalidColor`, a dropout is
+  information). A NaN/stale source (checked with `isNanF()`, NEVER
+  `isnan()` — `-Ofast`) always releases the latch. Latches also release
+  when leaving race mode. **Overrev** reuses the same machinery as a
+  whole-chain action: ≥ `overrev_limit` (setting, 0 = disabled) flashes
+  ALL 11 px red at 100 ms until RPM falls below `rev_limit × 0.97` —
+  the engine-is-broken signal, ranked above the purple celebration.
+  A logger with no SensorEgg shows the blue no-signal LED all race —
+  known, accepted until phase-2 assignability.
 - **Purple sector** (`sector_purple`, host-tested): the library updates
   best-sector times **at the start/finish crossing**, not at sector
   lines, so the monitor snapshots each sector's best when the sector
@@ -1404,7 +1420,9 @@ the one loaded). Sector lines stay optional — zero, one, or two.
   "waypoint_detection_distance": "30",
   "waypoint_speed": "30",
   "led_brightness": "64",
-  "rev_limit": "15000"
+  "rev_limit": "15000",
+  "overrev_limit": "0",
+  "temp1_alert_c": "650"
 }
 ```
 
@@ -1424,7 +1442,9 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | `debug_pages` | string | `"hide"` | Race-rotation diagnostic pages (`GPS_DEBUG` + `GPS_STATS`): `hide` = rotation starts at the speed page (end-user default), `show` = diagnostics restored at the front. Anything other than an explicit `show` means hide. No-op under `ENDURANCE_MODE` (already starts at speed) |
 | `cylinder_count` | int | `1` | Cylinders the **pickup sees** — a clamp on one plug wire of a twin sees ONE. Only a shared coil / all-cylinder harness sees them all |
 | `led_brightness` | int | `64` | NeoPixel global brightness cap 0–255 — no LED channel ever exceeds it (`led_frame::applyCap`). `0` disables the LEDs entirely (boost rail never enabled). Read only by `BIRDSEYE_ENABLE_NEOPIXEL` builds; clamp back to 64 on nonsense |
-| `rev_limit` | int | `15000` | True RPM anchoring the LED subsystem: RPM-scale ceiling + the rev-limit status flasher threshold. Clamp 1000–20000 (tach filter's ceiling). LED-only for now — nothing else reads it |
+| `rev_limit` | int | `15000` | True RPM WARNING limit: RPM-scale ceiling and the left status LED flasher threshold. Clamp 1000–20000 (tach filter's ceiling) |
+| `overrev_limit` | int | `0` (disabled) | True RPM PROBLEM limit (plan 0007): past it the whole 11-px chain flashes red (outranks the purple celebration) and the tach page shows `*OVER REV*`; latch clears below `rev_limit × 0.97`. 0 = off (no chain flash, no header); else clamp 1000–20000 |
+| `temp1_alert_c` | int | `650` | Temp1 (EGT) alert threshold in **Celsius** for the right status LED: red flash at/above, clears 20 °C below, solid blue when the probe signal is NaN/stale. Clamp 50–1200 |
 
 - Created automatically on first boot with random BLE values.
 - Missing keys auto-populated on boot via `ensureDefaultSettings()`.
@@ -1522,7 +1542,9 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | LED brightness default | 64 / 255 (`led_brightness`; 0 = disabled) | `settings.ino` |
 | Pace pip full scale / deadband | ±1.0 ms/m (0.25 per pixel) / ±0.125 | `led_modes.h` |
 | RPM scale red fraction | 0.5 (red past halfway) | `led_modes.h` |
-| Rev flasher clear / EGT alert-clear | 97% of `rev_limit` / 650→630 °C | `led_modes.h` |
+| Rev flasher clear / EGT clear delta | 97% of `rev_limit` / alert − 20 °C | `led_modes.h` |
+| GPS-search pip bounce period | 1600 ms round trip (`kSearchBouncePeriodMs`) | `led_modes.h` |
+| Overrev latch clear | `rev_limit × 0.97` (same point as the warning flasher) | `neopixel.ino` |
 | Boot / purple animation | 2600 ms / 1600 ms | `led_animations.h` |
 
 ---

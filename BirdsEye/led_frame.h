@@ -58,6 +58,7 @@ constexpr Rgb kGreen{0, 255, 0};
 constexpr Rgb kWhite{255, 255, 255};
 // Purple with a blue lean — pure 50/50 red+blue reads pink on WS2812.
 constexpr Rgb kPurple{160, 0, 255};
+constexpr Rgb kBlue{0, 0, 255};
 // Orange needs the green held well down or it reads yellow.
 constexpr Rgb kOrange{255, 64, 0};
 

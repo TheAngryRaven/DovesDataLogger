@@ -127,7 +127,11 @@ static void ensureDefaultSettings() {
     // SETTINGS.json has a uniform shape (SensorEgg DOVEX-column
     // precedent); only a BIRDSEYE_ENABLE_NEOPIXEL build reads them.
     { "led_brightness", "64" },  // global cap 0-255; 0 = LEDs disabled
-    { "rev_limit", "15000" },    // true RPM: LED scale ceiling + rev flasher
+    { "rev_limit", "15000" },    // true RPM: LED scale ceiling + rev flasher + OVER REV header
+    // Plan 0007: the PROBLEM limit (0 = disabled) — whole LED chain
+    // flashes red past it; and the Temp1 alert threshold in Celsius.
+    { "overrev_limit", "0" },
+    { "temp1_alert_c", "650" },
   };
 
   char buf[48];

@@ -30,6 +30,26 @@ beta channel, plus the fixes below).
   sleep truly powers the LEDs off. **First boot of a flag-on build
   performs a one-way NFC-pads-to-GPIO conversion (UICR write) and
   resets once.**
+- **Overrev alert** (plan 0007): new `overrev_limit` setting (default 0
+  = disabled) — past it the whole LED chain flashes red until RPM falls
+  back below the normal `rev_limit`. The rev limit warns the engine is
+  at its ceiling; the overrev limit says it's broken.
+- **Temp1 alert threshold setting** (`temp1_alert_c`, default 650 °C):
+  the right status LED is now a tri-state — flashing red at/above the
+  limit, off when good, solid blue when there is no probe signal.
+- **GPS-search pip**: in race mode without a full GPS lock the strip
+  shows a green pixel bouncing end-to-end instead of the RPM scale, so
+  a not-yet-timing session is visibly "searching".
+
+### Changed
+- **Engine dies mid-session** (tach-proven sessions): the LED bar goes
+  dark and the pace page shows `STOPPED` instead of a still-counting
+  pace — status LEDs (temp alert) stay live. Clears on restart.
+- **Tach page `*OVER REV*` header** now means actual overrev: it shows
+  only when `overrev_limit` is enabled and RPM reaches it (was a
+  hardcoded 9999 RPM). The `rev_limit` warning stays on the LED only.
+- **Temp status LED flashes red** (was orange), matching the rev
+  flasher's alert language.
 
 ### Fixed
 - **Exiting USB transfer mode no longer risks a hang + watchdog reset.**
