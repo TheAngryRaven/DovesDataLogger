@@ -51,6 +51,35 @@ beta channel, plus the fixes below).
 - **Temp status LED flashes red** (was orange), matching the rev
   flasher's alert language.
 
+### Changed
+- **Bluetooth downloads are faster, and now say why when they are not**
+  (plan 0008). A 3.3 MB session downloading at 28.8 KB/s on an iPad
+  prompted a look at the whole transfer path. Three things were capping
+  it, all fixed:
+  - The link asks for a bigger link-layer packet (Data Length Extension)
+    on connect, but that request can be rejected outright if it collides
+    with the 2M PHY request fired a line earlier — and nothing checked or
+    retried. An un-extended link splits every notification into ten
+    packets. The device now reads back what actually negotiated half a
+    second after connecting and re-asks if it did not take.
+  - The device asked for a 7.5 ms connection interval, which **iOS is
+    required to reject** (Apple's accessory rules set a 15 ms floor),
+    leaving the connection on whatever iOS picked — commonly 30 ms, so
+    half the transfer opportunities. The device now notices it is slower
+    than 15 ms and makes a second request iOS is allowed to accept.
+    Centrals already running faster than 15 ms are left alone.
+  - Each chunk was read off the SD card immediately before being sent, so
+    every packet waited on a disk read and the card was driven in
+    244-byte pieces rather than whole sectors. Transfers now read 4 KB
+    ahead and send out of memory.
+- **The Bluetooth page shows live transfer speed** in KB/s alongside the
+  percentage, plus the SD clock, link packet size and payload size in
+  force. The old display was a percentage and nothing else, which is why
+  a 4x slowdown took a full session to spot. The SD figure is the clock
+  actually running, not the one requested — the 8 MHz transfer speed-up
+  falls back to 2 MHz if the card refuses it, and that fallback used to
+  be silent.
+
 ### Fixed
 - **Exiting USB transfer mode no longer risks a hang + watchdog reset.**
   Leaving the USB drive page (Exit button or cable pull) could wedge the

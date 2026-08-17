@@ -120,6 +120,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `dovex_header.{h,cpp}` | DOVEX 1 KB header `format()` / `parse()` |
 | `filename_validator.{h,cpp}` | FAT-safe / traversal-proof check for BLE filenames |
 | `crc32.{h,cpp}` | CRC-32/IEEE-802.3 (zlib) incremental + hex; pins firmware-OTA CRC to the web client |
+| `ble_stream.{h,cpp}` | BLE file-transfer read-ahead bookkeeping: chunk size from the negotiated MTU, the compacting refill (`Move`), slice/consume, transfer rate. An off-by-one here corrupts a downloaded session, so the index math is host-tested away from the radio |
 | `sd_access_policy.{h,cpp}` | SD access arbitration decision table (mode values + grant/deny rules) |
 | `lap_format.{h,cpp}` | ms → `M:SS.mmm` lap-time rendering (three zero-minutes styles), used by all display pages |
 | `led_frame.{h,cpp}` | NeoPixel pixel layout (11 px: 2 status + 9-px strip), `Rgb`/`Frame` PODs, and **`applyCap()` — the single global-brightness choke point** (post-condition: no channel exceeds the cap) |
@@ -534,7 +535,42 @@ loop()  ~250 Hz
     download directly. `FIRMWARE_VARIANT` is set by the per-FQBN build flag
     `-DBIRDSEYE_BOARD_SENSE` / `-DBIRDSEYE_BOARD_NONSENSE` (defaults to
     `sense`).
-- MTU negotiation (requests 247, default 23).
+- **Download throughput — three levers, all verified after the fact**
+  (plan 0008). The connect callback fires the three asks (MTU 247, 2M PHY,
+  Data Length Extension) and then **checks them**, because firing is not
+  the same as landing: the SoftDevice runs one link-layer control procedure
+  at a time, so the DLE ask queued right behind the PHY ask can come back
+  `NRF_ERROR_BUSY` into a return value nobody reads. `bleTuneLink()` runs on
+  the main loop at +500 ms (read + correct) and +1500 ms (final readback):
+  - **DLE.** `getDataLength()` still at the 27-byte default means every
+    244-byte notify fragments into ten link-layer packets — the single
+    biggest tax on a download. Re-request it with nothing else in flight.
+  - **Connection interval.** The advertised preference stays
+    `setConnInterval(6, 12)` (7.5–15 ms) because desktop/Android honour it
+    and must not be slowed. **iOS is required to reject anything under
+    15 ms** (Apple accessory rules), so it silently keeps its own choice —
+    commonly 30 ms, i.e. half the connection events. Only when the measured
+    interval is slower than the target does the device make a second,
+    Apple-compliant `requestConnectionParameter(12)` ask. Never lower an
+    already-fast interval.
+  - **SD off the radio's critical path.** Chunks stream from a 4 KB
+    read-ahead (`ble_stream::ReadAhead` + `bleStreamBuf`), refilled with one
+    aligned multi-sector read, instead of a `FatFile::read()` between every
+    notify. Refills are **compacting** so every notify but the file's last
+    carries a full chunk. A failed notify simply does not `consume()` — with
+    the bytes in RAM there is no file position to rewind, so the old
+    `seekCur()` hole-punching hazard is structurally gone.
+  Burst sending is bounded by **wall clock** (`kBurstBudgetMs`, 20 ms), not
+  a packet count: the bound exists to keep the exit button and WDT serviced,
+  and a fixed count is a wildly different amount of time on a fast link vs a
+  slow one. A blocked `notify()` is the flow control and is *desirable* — it
+  means the radio is saturated.
+- **The transfer page reports what it got**: live KB/s, the SD clock actually
+  in force (`sdActiveSpiHz()` — the 8 MHz parked bump falls back to 2 MHz
+  silently), the negotiated link-layer PDU, and the ATT payload. Accessors
+  `bleTransferRateBps()` / `bleLinkDataLength()` / `bleLinkChunkSize()`. This
+  exists because a 4x download regression was only noticeable as "the
+  percentage is creeping".
 - **No SdFat in the callback task — ever.** Every SD-touching command
   (`LIST`, `GET:`, `DELETE:`, `TLIST`, `TGET:` via the deferred
   `fileCmdBuffer`; settings, `TPUT:`/`TDEL:`, and `FW*` via their own
@@ -1507,6 +1543,11 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | SD SPI clock (transfer) | 8 MHz (`SD_SPI_SPEED_FAST`) | `BirdsEye.ino` |
 | Battery check interval | 5 s | `BirdsEye.ino` |
 | BLE default MTU | 23 | `bluetooth.ino` |
+| BLE target conn interval (adaptive 2nd ask) | 12 units = 15 ms, Apple's floor | `bluetooth.ino` |
+| BLE link-layer PDU "extended" floor | 100 B (27 = DLE never happened) | `bluetooth.ino` |
+| BLE transfer read-ahead | 4096 B (`kReadAheadSize`) | `ble_stream.h` |
+| BLE burst budget | 20 ms wall clock (`kBurstBudgetMs`) | `ble_stream.h` |
+| BLE max notify payload | 244 B (`kMaxNotifyLen`) | `ble_stream.h` |
 | JSON buffer (`JSON_BUFFER_SIZE`) | 8192 (SIM builds too) — read buffer + `trackJson` doc | `BirdsEye.ino` |
 | Settings JSON buffer | 512 | `settings.ino` |
 | Settings file path | `/SETTINGS.json` | `settings.ino` |

@@ -184,13 +184,29 @@ void displayPage_bluetooth() {
 
   if (bleTransferInProgress) {
     display.print(F("Transfer: "));
-    display.print((bleBytesTransferred * 100) / bleFileSize);
+    // bleFileSize is 0 for a zero-byte file — print 100% rather than divide
+    // by zero.
+    display.print(bleFileSize ? ((bleBytesTransferred * 100) / bleFileSize) : 100);
     display.println(F("%"));
+
+    // The diagnostic line. A download that has gone slow used to show only a
+    // creeping percentage, which says nothing about WHY — so this names the
+    // three things that decide the rate: the SD clock actually in force (the
+    // 8 MHz transfer bump falls back to 2 MHz silently), the negotiated
+    // link-layer PDU (27 = Data Length Extension never happened, the biggest
+    // tax there is), and the ATT payload per notification.
+    display.print(bleTransferRateBps() / 1024);
+    display.print(F("KB/s "));
+    display.print(sdActiveSpiHz() / 1000000UL);
+    display.print(F("M "));
+    display.print(bleLinkDataLength());
+    display.print(F(" "));
+    display.println(bleLinkChunkSize());
   } else {
+    display.println();
     display.println();
   }
 
-  display.println();
   display.setTextSize(1);
   display.println(F("->Exit"));
 

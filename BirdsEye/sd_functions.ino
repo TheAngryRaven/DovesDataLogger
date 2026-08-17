@@ -8,6 +8,10 @@
 #include "track_json.h"
 #include "course_prune.h"
 
+// The SPI clock the last successful SD.begin() ran at. Module-local state
+// behind sdActiveSpiHz(); 0 until the card has come up once.
+static uint32_t sdActiveSpiClock = 0;
+
 /**
  * @brief Attempt to acquire SD card access for a subsystem
  * @param mode The access mode being requested (SD_ACCESS_*)
@@ -75,12 +79,22 @@ void makeFullTrackPath(const char* trackName, char* filepath, uint8_t kind) {
 bool sdSetSpiClock(uint32_t maxSck) {
   for (int attempt = 0; attempt < 3; attempt++) {
     if (SD.begin(PIN_SPI_CS, maxSck)) {
+      sdActiveSpiClock = maxSck;
       return true;
     }
     debugln(F("SD init attempt failed, retrying..."));
     delay(100);  // Brief delay between attempts
   }
   return false;
+}
+
+// The clock the card is ACTUALLY running at — the last one SD.begin()
+// accepted, not the one that was asked for. sdSetTransferSpeed(true) falls
+// back to the normal clock when the fast re-init fails, and that fallback
+// used to be invisible: a transfer session could quietly run at 2 MHz with
+// nothing anywhere saying so. The Bluetooth page reads this.
+uint32_t sdActiveSpiHz() {
+  return sdActiveSpiClock;
 }
 
 // Switch the SD SPI clock between the parked-transfer fast clock and the
