@@ -58,8 +58,13 @@ void begin(State& s, bool trackDetected) {
 
 uint8_t rowCount(const State& s) {
   switch (s.screen) {
-    case Screen::kTrackPrompt:  return 2;                       // Here, New Track
-    case Screen::kTypeSelect:   return 2;                       // Circuit, Sprint
+    // Both entry screens are two choices plus a Cancel (Here/New Track,
+    // Circuit/Sprint). Every screen deeper in the flow already had one, and
+    // without it these two steps between the main menu and the line menu
+    // were a one-way door — a mis-pressed "Create" could only be escaped by
+    // walking forward into a screen that had one.
+    case Screen::kTrackPrompt:
+    case Screen::kTypeSelect:   return 3;
     case Screen::kLineMenu:     return lineRowsFor(s.kind) + 2; // + Save, Cancel
     case Screen::kLineDetail:   return 4;                       // A, B, Save, Back
     case Screen::kPointCapture: return 2;                       // Capture, Back
@@ -76,11 +81,15 @@ RowRef rowAt(const State& s, uint8_t index) {
   RowRef ref;
   switch (s.screen) {
     case Screen::kTrackPrompt:
-      ref.row = (index == 0) ? Row::kTrackHere : Row::kTrackNew;
+      if (index == 0)      ref.row = Row::kTrackHere;
+      else if (index == 1) ref.row = Row::kTrackNew;
+      else                 ref.row = Row::kCancel;
       return ref;
 
     case Screen::kTypeSelect:
-      ref.row = (index == 0) ? Row::kTypeCircuit : Row::kTypeSprint;
+      if (index == 0)      ref.row = Row::kTypeCircuit;
+      else if (index == 1) ref.row = Row::kTypeSprint;
+      else                 ref.row = Row::kCancel;
       return ref;
 
     case Screen::kLineMenu: {

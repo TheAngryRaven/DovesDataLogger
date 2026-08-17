@@ -18,6 +18,19 @@ void resetReplayState();
 // Returns true if any were found.
 bool buildReplayFileList();
 
+extern int numReplayFiles;
+
+// Rows on the session browser: one per file plus a trailing Back row.
+//
+// The single source of truth for that layout — the renderer, the menu's
+// row limit and the selection handler all derive from it, so the Back row
+// cannot end up drawn in one place and unreachable in another. An empty
+// list keeps its one-row "no files" screen (unreachable in practice: the
+// page is only opened when buildReplayFileList() found something).
+inline int replayItemCount() {
+  return numReplayFiles > 0 ? numReplayFiles + 1 : 1;
+}
+
 // Read one line from `file` into `buffer` (drops \r, stops at \n /
 // EOF). Returns false on EOF when nothing was buffered.
 bool readReplayLine(File& file, char* buffer, int bufferSize);

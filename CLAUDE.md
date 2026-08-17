@@ -463,10 +463,20 @@ loop()  ~250 Hz
     master/release default) the block closes up behind the tach page and
     `LOGGING_STOP` is 12 instead of 14, same reshuffle idea as
     `ENDURANCE_MODE`. Page ids are internal — nothing external sees them.
-  - Replay: `PAGE_REPLAY_FILE_SELECT` (-3), `PAGE_REPLAY_RESULTS` (-8),
-    `PAGE_REPLAY_EXIT` (-9).
-  - Transfer: `PAGE_TRANSFER_MENU` (-4) Bluetooth/USB submenu,
+  - Replay: `PAGE_REPLAY_FILE_SELECT` (-3, sessions + a trailing `Back`
+    row — see `replayItemCount()` in `replay.h`, the single source of that
+    layout for the renderer, the menu limit and the select handler),
+    `PAGE_REPLAY_RESULTS` (-8), `PAGE_REPLAY_EXIT` (-9).
+  - Transfer: `PAGE_TRANSFER_MENU` (-4) Bluetooth/USB/Back submenu,
     `PAGE_USB_STORAGE` (-5) USB drive active.
+  - **Every menu page carries a Back/Cancel row.** Both transfer modes and
+    the replay browser leave by rebooting or by walking forward, and the
+    idle-shutdown timer only runs on the main menu (and the fault page), so
+    a menu without one is a hard trap: the only escape is the unlabelled
+    Select+side 5 s reboot combo. The deliberate exceptions are
+    `PAGE_INTERNAL_FAULT` (buttons disabled, own idle shutdown),
+    `PAGE_SD_FORMAT` (nothing to go back to) and the race rotation (leaves
+    via `LOGGING_STOP`, speed-gated).
   - BLE: `PAGE_BLUETOOTH` (-2).
   - Camera: `PAGE_PAIR_CAMERA` (-6) pairing / paired-status management,
     `PAGE_CAMERA_SERIAL_ENTRY` (-7) manual 6-char serial entry fallback,
@@ -860,8 +870,11 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   `msc_flush_cb` → `syncDevice()` + `SD.cacheClear()`. These run on the
   USBD task, not the main loop.
 - **UI flow**: main-menu **Transfer** → `PAGE_TRANSFER_MENU` (Bluetooth /
-  USB). **Bluetooth** keeps the existing `BLE_SETUP()` + `PAGE_BLUETOOTH`
-  path untouched. **USB** → `PAGE_USB_STORAGE` + `USB_MSC_ENABLE()`.
+  USB / Back). **Bluetooth** keeps the existing `BLE_SETUP()` +
+  `PAGE_BLUETOOTH` path untouched. **USB** → `PAGE_USB_STORAGE` +
+  `USB_MSC_ENABLE()`. **Back** returns to the main menu — both transfer
+  modes exit by rebooting, so without it this page could only be left by
+  starting a transfer.
 - **Opt-in enumeration**: `USB_MSC_SETUP()` (called from `setup()` after a
   successful `SD_SETUP()`) only registers the callbacks — no drive is
   presented at boot, so charging/plug-in behaves as before.
@@ -1161,7 +1174,10 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   range) → type picker → line menu → per-line Point A/B → the capture hold.
   Input rides the sketch's existing `menuSelectionIndex`/`menuLimit`
   machinery; `rowCount()` supplies the limit, which changes with course
-  type (sprint grows a Finish row).
+  type (sprint grows a Finish row). **Every screen ends in a Cancel/Back
+  row**, the two entry screens included — the type picker's is the only way
+  out of the creator for a user with no track in range, since that entry
+  path skips the prompt.
 - **Point capture averages, it does not snapshot**: a 3 s hold folds every
   fresh PVT into a mean. Under `kCaptureMinFixes` (8) usable fixes the hold
   **fails** rather than averaging noise into a timing line; fixes worse
