@@ -855,6 +855,19 @@ void displayPage_tachometer() {
     // Same "logging died" flag as the speed page — this is the tach
     // session's landing page, so the signal has to exist here too.
     display.print(F("  ** NOT LOGGING **"));
+  } else if (runningPageStart == GPS_DEBUG) {
+    // Debug pages on: spend the subtext line on the tach diagnostic
+    // instead of centring the max. Which estimator is running (S/L/R —
+    // the `tach_filter` setting) and how many inter-pulse periods the
+    // outlier gate has thrown away. A reject count that climbs with RPM
+    // is the pickup, not the filter, and that distinction is the whole
+    // reason this line exists. 19 of the 21 columns at text size 1.
+    display.print(F("max:"));
+    display.print(topTachReported);
+    display.print(F(" "));
+    display.print(tach_filter::modeTag(tachFilterMode));
+    display.print(F(" rj:"));
+    display.print(tachRejectedPeriods());
   } else {
     display.print(F("     max: "));
     display.print(topTachReported);

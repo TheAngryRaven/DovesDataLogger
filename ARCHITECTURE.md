@@ -76,7 +76,16 @@ to the matching `*_LOOP()`.
   rows stream to the DOVEX log.
 - **Tachometer** (`tachometer`) — falling-edge ISR timestamps pulses into a
   ring buffer; the loop computes mean inter-pulse period and runs it
-  through a 1-D Kalman filter.
+  through a 1-D Kalman filter (`tach_filter`). The filter sees one number
+  per pulse, so its defining feature is an **outlier gate**: a single
+  ignition ring or missed spark is a several-thousand-RPM measurement and
+  must be coasted past, not averaged in. Three consecutive rejections
+  mean the estimate is the wrong one and the measurement is adopted. Both
+  noise models scale with engine speed, because RPM = K/period makes a
+  fixed timing error worth quadratically more RPM the faster the engine
+  turns. The `tach_filter` setting switches between this, the pre-0009
+  filter, and no filter at all, so the pickup can be characterised at the
+  track (plan 0009).
 - **Accelerometer** (`accelerometer`) — onboard LSM6DS3, ±16 g, raw
   g-force. Degrades gracefully if absent (non-Sense board).
 - **SD + tracks** (`sd_functions`) — SdFat (FAT16/32), track JSON parsing
