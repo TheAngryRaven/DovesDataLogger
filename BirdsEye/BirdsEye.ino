@@ -342,6 +342,11 @@ volatile bool     tachRingOverflow = false;  // ISR sets on drop; TACH_LOOP clea
 static float tachRevsPerPulse = 1.0f;
 static const uint32_t tachStopTimeoutUs = 500000;    // 500ms = engine stopped
 
+// Which RPM estimator TACH_LOOP runs (plan 0009). Set once at boot from the
+// `tach_filter` setting; kSmooth is the shipped default and the other two
+// exist so the filter can be A/B'd against a live engine at the track.
+static tach_filter::Mode tachFilterMode = tach_filter::Mode::kSmooth;
+
 ///////////////////////////////////////////
 // ACCELEROMETER GLOBALS
 ///////////////////////////////////////////
@@ -979,6 +984,14 @@ void setup() {
       }
       tachRevsPerPulse = tach_filter::revsPerPulse(cylinders, wastedSpark);
       tachMinPulseGapUs = tach_filter::minPulseGapUs(cylinders, wastedSpark);
+      // RPM estimator (plan 0009). A track-side A/B knob, not a tuning
+      // dial: "smooth" is the shipped filter, "legacy" reproduces the
+      // pre-0009 one for comparison against existing logs, and "raw"
+      // turns the estimator off entirely so a session shows exactly what
+      // the pickup is delivering. Anything unrecognised means "smooth".
+      if (getSetting("tach_filter", buf, sizeof(buf))) {
+        tachFilterMode = tach_filter::modeFromSetting(buf);
+      }
       debug(F("Engine: cyl="));
       debug(cylinders);
       debug(F(" spark="));
@@ -986,7 +999,9 @@ void setup() {
       debug(F(" revsPerPulse="));
       debug(tachRevsPerPulse);
       debug(F(" minGapUs="));
-      debugln((uint32_t)tachMinPulseGapUs);
+      debug((uint32_t)tachMinPulseGapUs);
+      debug(F(" filter="));
+      debugln(tach_filter::modeName(tachFilterMode));
     }
     // NeoPixel strip (plan 0006). Both clamp back to the compiled-in
     // default on a missing or nonsense value, per the house idiom.

@@ -37,11 +37,51 @@ beta channel, plus the fixes below).
 - **Temp1 alert threshold setting** (`temp1_alert_c`, default 650 °C):
   the right status LED is now a tri-state — flashing red at/above the
   limit, off when good, solid blue when there is no probe signal.
+- **`tach_filter` setting** (default `smooth`, plan 0009): picks the RPM
+  estimator, so the tach can be A/B'd against a live engine at the track
+  instead of argued about from a plotted log. `smooth` is the new filter
+  below; `legacy` is the pre-0009 one, bit for bit, for comparison
+  against logs already collected; `raw` turns the estimator off entirely
+  so the `rpm` column is exactly what the pickup delivers. Anything
+  unrecognised reads as `smooth`.
+- **Tach pickup-health line**: with `debug_pages` = `show`, the
+  tachometer page's subtext becomes `max:NNNNN S rj:NN` — the estimator
+  in force plus the number of inter-pulse periods the outlier gate has
+  thrown away this power-cycle. A count that climbs with RPM is ignition
+  ringing or missed sparks reaching the ISR, i.e. the pickup rather than
+  the filter.
 - **GPS-search pip**: in race mode without a full GPS lock the strip
   shows a green pixel bouncing end-to-end instead of the RPM scale, so
   a not-yet-timing session is visibly "searching".
 
 ### Changed
+- **RPM spikes are gone from the logged trace** (plan 0009). A plotted
+  DOVEX `rpm` column showed spikes of thousands of RPM that the engine
+  did not do. The filter was not over-smoothing — it was passing single
+  bad edges straight through. Its steady-state gain was ~0.43 and a
+  measurement is one inter-pulse period, so an ignition ring clearing the
+  3 ms debounce at 3000 RPM reads as 15 000 RPM and moves the output
+  ~5000 RPM; a missed spark does the same downward. Three fixes, all in
+  the host-tested `tach_filter` unit:
+  - An **outlier gate**: a measurement 5 sigma off the estimate is not
+    folded in, the estimate coasts. Three *consecutive* rejections is a
+    real step change (clutch dump, spin) rather than three coincident bad
+    edges, and the third is adopted outright — so an instant
+    11 000 → 4000 drop now settles in 80 ms, faster than before.
+  - **Measurement noise that knows the RPM.** RPM = K/period, so a fixed
+    timing error costs RPM^2/K of RPM error. The old flat noise figure was
+    about right at 4000 RPM and far too confident above 8000 — the filter
+    trusted its noisiest readings the most, which is why the trace got
+    worse the harder the engine worked.
+  - **Process noise per second, not per update.** Updates arrive at the
+    pulse rate, so the old fixed per-update figure made the filter four
+    times looser at 12 000 RPM than at 3000, and looser again whenever an
+    SD stall batched several pulses together.
+  Modelled over the whole pipeline on a dirty pickup, error against true
+  RPM drops from 220–500 RPM standard deviation (worst case 2800–6400) to
+  a flat ~20 RPM (worst case under 300) from 1500 to 14 000 RPM. The cost
+  is ~90 ms more lag on a 5500 RPM/s pull. Set `tach_filter` to `legacy`
+  to get the old behaviour back.
 - **Engine dies mid-session** (tach-proven sessions): the LED bar goes
   dark and the pace page shows `STOPPED` instead of a still-counting
   pace — status LEDs (temp alert) stay live. Clears on restart.

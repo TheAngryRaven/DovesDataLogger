@@ -23,3 +23,8 @@ void TACH_COUNT_PULSE();
 // Drain ring buffer, update Kalman estimate, apply engine-stop timeout.
 // Call once per main-loop iteration (~250 Hz).
 void TACH_LOOP();
+
+// Count of inter-pulse periods the outlier gate rejected this power-cycle
+// (plan 0009). Pickup-health diagnostic for the tach page's debug line;
+// nothing behaves differently on it.
+uint16_t tachRejectedPeriods();

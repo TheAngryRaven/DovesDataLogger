@@ -127,7 +127,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `led_modes.{h,cpp}` | Strip modes + status actions: pace pip math (ms/m, slower = left/red), generic `ScaleSpec` left-fill (RPM red past halfway; temps later), and the `StatusAction` threshold/hysteresis/flash table — the phase-2 assignability hook |
 | `led_animations.{h,cpp}` | Boot + purple-sector animations as pure functions of `(tMs, seed)` — hash-based sparkles, no rand()/millis(), golden-testable |
 | `sector_purple.{h,cpp}` | Session-best ("purple") sector detection: open-time best snapshots + a derived S3 defeat the library's lap-line `updateBestSectors()` race; no purple on lap 1 |
-| `tach_filter.{h,cpp}` | Tachometer 1-D Kalman filter (predict/update math + Q/R tuning constants) **and the engine geometry** — `revsPerPulse` / `minPulseGapUs` from `spark_mode` + `cylinder_count` |
+| `tach_filter.{h,cpp}` | Tachometer 1-D Kalman filter — predict/update math, the RPM-aware noise models, the **outlier gate** that keeps one bad ignition edge out of the trace (plan 0009), the `tach_filter` mode parser — **and the engine geometry**: `revsPerPulse` / `minPulseGapUs` from `spark_mode` + `cylinder_count` |
 | `camera_fsm.{h,cpp}` | Insta360 auto-record lifecycle FSM (8 states, all debounce/retry/timeout timing + tunables); board-portable core shared with the nRF54 "Falcon" target |
 | `insta360_protocol.{h,cpp}` | Insta360 X4 BLE frame builders/parsers (wake advert, remote scan response, ce82 buttons, ce82 GPS/RMC frame, ce81 serial parsing, ce81 `0x10` record-timer state parse) with golden-byte tests |
 | `sensoregg_protocol.{h,cpp}` | SensorEgg `PW-ADV` v1+v2 advertising payload parser (magic filter, int16 deci-°C decode with `0x8000`→NaN sentinel, flags, sequence, v2 aux thermistor + battery) + wrap-safe 1 s staleness rule + passive-scan tuning constants |
@@ -323,12 +323,45 @@ loop()  ~250 Hz
   `TACH_LOOP()` then discards the one period spanning the gap. `TACH_LOOP()` drains the buffer
   each main-loop iteration, computes mean inter-pulse period from ALL
   accumulated pulses, and feeds the result through a 1D Kalman filter.
-- **Kalman filter** replaces the old median-of-3 + EMA. Two floats of
-  state (estimate + uncertainty in `tach_filter::Kalman`); the
-  predict/update math and tuning constants live in the host-tested
-  `tach_filter` pure unit. Process noise
-  Q = 800 (tuned for kart engine inertia). Measurement noise R scales
-  inversely with pulse count (more pulses = more confident).
+- **Kalman filter** replaces the old median-of-3 + EMA. Estimate +
+  uncertainty in `tach_filter::Kalman`; all math and tuning lives in the
+  host-tested `tach_filter` pure unit. Three properties matter, and all
+  three exist because the pre-0009 filter put visible spikes in the
+  logged trace (plan 0009 has the full derivation):
+  - **An outlier gate, not more smoothing.** The estimator sees ONE
+    number per pulse and its steady-state gain is ~0.4, so a single bad
+    edge is a spike, not a wobble: a ring clearing the 3 ms debounce at
+    3000 RPM reads as 15 000 RPM. A measurement more than `kGateSigmas`
+    (5) from the estimate is **not folded in — the estimate coasts**.
+    Three *consecutive* rejections is a real step change (clutch dump,
+    spin), so the third is **adopted outright** rather than filtered
+    toward. 5 sigma is loose on purpose: the gate catches the
+    half-/double-period signatures of a spurious/missed spark, which are
+    tens of sigma out, and real acceleration (~25 RPM between pulses at
+    5500 RPM/s) can never trip it. `k.rejected` counts rejections for the
+    tach page's debug line and **survives the engine-stop reset**.
+  - **Measurement noise knows the RPM** (`measurementNoise()`).
+    RPM = K/period, so a fixed timing error costs RPM²/K of RPM error —
+    QUADRATIC. A flat R was right at ~4000 RPM and far too confident
+    above 8000. It also takes `revsPerPulse`: a twin's shorter periods
+    are genuinely noisier at the same RPM.
+  - **Process noise is a RATE** (RPM²/s, `processNoise()`), multiplied by
+    the **engine time the batch spans** — `TACH_LOOP()` passes the sum of
+    the periods it just consumed, never wall clock. Charging a fixed Q
+    per update made the filter 4x looser at 12 000 RPM than at 3000, and
+    looser again whenever an SD stall batched pulses together.
+  The **first measurement after a reset is adopted whole**: with no prior
+  there is nothing to filter against, and a slow climb out of 0 RPM would
+  arm the gate partway up and get the engine's own speed rejected.
+- **`tach_filter` setting — the track-side A/B switch** (default
+  `smooth`). `smooth` is everything above; `legacy` reproduces the
+  pre-0009 filter bit for bit (fixed Q/R, no gate) so new sessions
+  compare against logs already collected; `raw` bypasses the estimator
+  entirely, publishing what the periods say, spikes included — which is
+  how you tell a dirty pickup from a bad filter. Read once at boot into
+  `tachFilterMode` and applied inside `TACH_LOOP()`, so there is still
+  exactly ONE RPM number in the firmware. Anything unrecognised means
+  `smooth`.
 - Time-based debounce only. Old volatile flag gate removed — ISR
   body is trivially fast (<1 µs) and cannot cause interrupt storms.
 - **True RPM, one correction, one place.** The pickup counts ignition
@@ -1467,6 +1500,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
   "debug_pages": "hide",
   "spark_mode": "wasted",
   "cylinder_count": "1",
+  "tach_filter": "smooth",
   "driver_name": "Driver",
   "lap_detection_distance": "7",
   "waypoint_detection_distance": "30",
@@ -1491,8 +1525,9 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | `waypoint_speed` | int | `30` | Speed threshold (mph) for waypoint/detection |
 | `spark_mode` | string | `"wasted"` | Ignition rate: `wasted` = 1 spark/rev (2T, or 4T wasted spark); `single` = 1 spark per 2 revs (4T single-fire). Anything other than an explicit `single` is treated as `wasted` |
 | `display_invert` | string | `"normal"` | Panel colours: `normal` = lit-on-black as shipped, `inverted` = black-on-lit. Anything other than an explicit `inverted` means normal |
-| `debug_pages` | string | `"hide"` | Race-rotation diagnostic pages (`GPS_DEBUG` + `GPS_STATS`): `hide` = rotation starts at the speed page (end-user default), `show` = diagnostics restored at the front. Anything other than an explicit `show` means hide. No-op under `ENDURANCE_MODE` (already starts at speed) |
+| `debug_pages` | string | `"hide"` | Race-rotation diagnostic pages (`GPS_DEBUG` + `GPS_STATS`): `hide` = rotation starts at the speed page (end-user default), `show` = diagnostics restored at the front. Anything other than an explicit `show` means hide. Also swaps the tachometer page's subtext line for the tach filter diagnostic (`max:NNNNN S rj:NN`, plan 0009). No-op on the rotation under `ENDURANCE_MODE` (already starts at speed) |
 | `cylinder_count` | int | `1` | Cylinders the **pickup sees** — a clamp on one plug wire of a twin sees ONE. Only a shared coil / all-cylinder harness sees them all |
+| `tach_filter` | string | `"smooth"` | RPM estimator (plan 0009). `smooth` = outlier gate + RPM-aware noise models; `legacy` = the pre-0009 filter bit for bit, for A/B against older logs; `raw` = no estimator at all, the `rpm` column is exactly what the pickup delivers. Anything else means `smooth`. Diagnostic knob — the intent is one session each at the track, not a permanent tuning dial |
 | `led_brightness` | int | `64` | NeoPixel global brightness cap 0–255 — no LED channel ever exceeds it (`led_frame::applyCap`). `0` disables the LEDs entirely (boost rail never enabled). Read only by `BIRDSEYE_ENABLE_NEOPIXEL` builds; clamp back to 64 on nonsense |
 | `rev_limit` | int | `15000` | True RPM WARNING limit: RPM-scale ceiling and the left status LED flasher threshold. Clamp 1000–20000 (tach filter's ceiling) |
 | `overrev_limit` | int | `0` (disabled) | True RPM PROBLEM limit (plan 0007): past it the whole 11-px chain flashes red (outranks the purple celebration) and the tach page shows `*OVER REV*`; latch clears below `rev_limit × 0.97`. 0 = off (no chain flash, no header); else clamp 1000–20000 |
@@ -1549,8 +1584,12 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | Tach min pulse gap | 3 ms ÷ pulses-per-rev, floor 750 µs | `tach_filter.h` (`minPulseGapUs`) |
 | Tach pulses per rev | `cylinder_count` × (`wasted` ? 1.0 : 0.5); default 1.0 | `tach_filter.h` (`revsPerPulse`) |
 | Tach ring buffer | 16 entries | `BirdsEye.ino` |
-| Tach Kalman Q | 800 RPM² | `tach_filter.h` |
-| Tach Kalman R_BASE | 2500 RPM² | `tach_filter.h` |
+| Tach Kalman Q (legacy mode) | 800 RPM² per update | `tach_filter.h` |
+| Tach Kalman process noise (smooth) | 80 000 RPM²/s × engine time, clamped 0.5 s | `tach_filter.h` |
+| Tach Kalman R_BASE | 2500 RPM² floor | `tach_filter.h` |
+| Tach measurement noise (smooth) | R_BASE + (80 µs × RPM²/K + 1% × RPM)² | `tach_filter.h` |
+| Tach outlier gate | 5 sigma; 3 consecutive rejects → adopt; armed after 4 updates | `tach_filter.h` |
+| Tach filter mode | `tach_filter` setting: `smooth` (default) / `legacy` / `raw` | `tach_filter.h` |
 | Track manifest scan throttle | 1 Hz | `BirdsEye.ino` |
 | Tach stop timeout | 500 ms | `BirdsEye.ino` |
 | Display refresh | 3 Hz | `display_ui.ino` |
