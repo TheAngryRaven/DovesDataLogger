@@ -81,6 +81,24 @@ beta channel, plus the fixes below).
   be silent.
 
 ### Fixed
+- **Four menus you could get into but not out of now have a Back/Cancel
+  row.** The transfer menu (Bluetooth / USB), the replay session browser,
+  and the course creator's first two screens (track prompt, course type)
+  offered only forward choices. None of them is the main menu, and the
+  idle-shutdown timer only runs there, so none of them timed out either —
+  opening one by mistake left the Select + side-button 5 s reboot combo,
+  which is not labelled anywhere, as the only way out. Specifically:
+  Transfer gains **Back**; the session browser gains a **Back** row after
+  the last session (it scrolls into view like any other row); and the
+  course creator's track prompt and type picker each gain **Cancel**,
+  matching the Cancel/Back every screen deeper in that flow already had.
+  The type picker's matters most — entering the creator with no known
+  track nearby skips the prompt and lands there, so it was the first
+  screen those users saw.
+- **Cancelling manual camera-serial entry returns to the camera page.**
+  It dropped to the main menu while OK returned to the camera page, so
+  backing out of a mistyped character threw you two levels out and made
+  the retry a fresh trip through the menu.
 - **Exiting USB transfer mode no longer risks a hang + watchdog reset.**
   Leaving the USB drive page (Exit button or cable pull) could wedge the
   device for ~4 seconds and come back via the watchdog instead of the clean

@@ -432,7 +432,11 @@ void handleMenuPageSelection() {
     }
     forceDisplayRefresh();
   } else if (currentPage == PAGE_TRANSFER_MENU) {
-    if (menuSelectionIndex == 0) {
+    if (menuSelectionIndex == 2) {
+      // Back — the only non-rebooting way off this page.
+      debugln(F("Transfer: Back selected"));
+      switchToDisplayPage(PAGE_MAIN_MENU);
+    } else if (menuSelectionIndex == 0) {
       // Bluetooth — same flow as before
       debugln(F("Transfer: Bluetooth selected"));
       // Transfer takes the single radio slot — kick the camera off it first
@@ -468,8 +472,8 @@ void handleMenuPageSelection() {
     debugln(F("USB Storage: Exit selected"));
     USB_MSC_DISABLE();  // does not return (NVIC_SystemReset)
   } else if (currentPage == PAGE_REPLAY_FILE_SELECT) {
-    if (numReplayFiles == 0) {
-      // No files - go back
+    if (numReplayFiles == 0 || menuSelectionIndex >= numReplayFiles) {
+      // No files, or the trailing Back row — leave the browser.
       switchToDisplayPage(PAGE_MAIN_MENU);
     } else {
       selectedReplayFile = menuSelectionIndex;
@@ -746,7 +750,7 @@ void displayLoop() {
     } else if (currentPage == PAGE_BLUETOOTH) {
       menuLimit = 1; // Only "Exit" option
     } else if (currentPage == PAGE_TRANSFER_MENU) {
-      menuLimit = 2; // Bluetooth, USB
+      menuLimit = 3; // Bluetooth, USB, Back
     } else if (currentPage == PAGE_USB_STORAGE) {
       menuLimit = 1; // Only "Exit" option
     } else if (currentPage == PAGE_PAIR_CAMERA) {
@@ -760,7 +764,7 @@ void displayLoop() {
     ) {
       menuLimit = 2;
     } else if (currentPage == PAGE_REPLAY_FILE_SELECT) {
-      menuLimit = numReplayFiles > 0 ? numReplayFiles : 1;
+      menuLimit = replayItemCount();  // files + Back
     }
   }
 
@@ -782,10 +786,15 @@ void displayLoop() {
     // (Pair / Test) render this way — without the camera pages here, their
     // first "down" press wrapped straight to the last item (e.g. Unpair /
     // Power Off) (#7).
+    //
+    // The transfer menu belongs to this group too and always did — with two
+    // items the direction was unobservable (either button wrapped to the
+    // other row), so it was never noticed. Its third row makes it visible.
     bool reverseDirection = (currentPage == PAGE_MAIN_MENU ||
                              currentPage == PAGE_PAIR_CAMERA ||
                              currentPage == PAGE_CAMERA_TEST ||
                              currentPage == PAGE_COURSE_PRUNE ||
+                             currentPage == PAGE_TRANSFER_MENU ||
                              courseCreatorActive());
 
     // BUTTON UP (or DOWN for reversed menus)
@@ -892,8 +901,11 @@ void displayLoop() {
           switchToDisplayPage(PAGE_INTERNAL_WARNING);
         }
       } else {
+        // Cancel returns to the camera page, the same place OK lands.
+        // Dropping to the main menu instead threw the user two levels out
+        // for a mistyped character.
         debugln(F("Serial Entry: cancel"));
-        switchToDisplayPage(PAGE_MAIN_MENU);
+        switchToDisplayPage(PAGE_PAIR_CAMERA);
       }
     }
   } else if (!buttonsDisabled){

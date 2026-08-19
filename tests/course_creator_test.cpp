@@ -71,6 +71,40 @@ TEST_CASE("the track prompt records which track the course lands in") {
   CHECK(s.screen == Screen::kTypeSelect);
 }
 
+TEST_CASE("both entry screens can be cancelled out of") {
+  // Every screen deeper in the flow already had a Cancel/Back. Without one
+  // here, the two steps between the main menu and the line menu were a
+  // one-way door: a mis-pressed "Create" could only be escaped by walking
+  // forward into a screen that had one.
+  State s;
+  begin(s, true);
+  CHECK(s.screen == Screen::kTrackPrompt);
+  CHECK(rowCount(s) == 3);
+  CHECK(rowAt(s, 2).row == Row::kCancel);
+  CHECK(select(s, 2) == Action::kExit);
+
+  begin(s, true);
+  select(s, 0);  // "Here" -> type picker
+  CHECK(s.screen == Screen::kTypeSelect);
+  CHECK(rowCount(s) == 3);
+  CHECK(rowAt(s, 2).row == Row::kCancel);
+  CHECK(select(s, 2) == Action::kExit);
+
+  // The no-track-nearby entry lands straight on the type picker, so that
+  // screen's Cancel is the ONLY way out of the creator for those users.
+  begin(s, false);
+  CHECK(s.screen == Screen::kTypeSelect);
+  CHECK(select(s, 2) == Action::kExit);
+}
+
+TEST_CASE("a stale index on an entry screen clamps to Cancel") {
+  State s;
+  begin(s, true);
+  CHECK(rowAt(s, 99).row == Row::kCancel);
+  begin(s, false);
+  CHECK(rowAt(s, 99).row == Row::kCancel);
+}
+
 TEST_CASE("sprint gets a finish row, circuit does not") {
   const State circuit = atLineMenu(CourseKind::kCircuit);
   const State sprint = atLineMenu(CourseKind::kSprint);

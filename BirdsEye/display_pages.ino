@@ -225,6 +225,12 @@ void displayPage_transfer_menu() {
   display.println(F("Bluetooth"));
   display.print(menuSelectionIndex == 1 ? "->" : "  ");
   display.println(F("USB"));
+  // Back matters more here than on most menus: both transfer modes leave by
+  // rebooting, and this page is not the main menu so the idle-shutdown timer
+  // never runs on it. Without this row, opening Transfer by mistake could
+  // only be undone with the (unlabelled) reboot combo.
+  display.print(menuSelectionIndex == 2 ? "->" : "  ");
+  display.println(F("Back"));
 
   safeDisplayUpdate();
 }
@@ -413,13 +419,58 @@ void displayPage_camera_serial_entry() {
   safeDisplayUpdate();
 }
 
+/**
+ * @brief Draw one row of the session browser.
+ *
+ * Every row occupies exactly two panel lines — a filename wrapped onto a
+ * second line when it exceeds the panel width, or a blank filler — so the
+ * window arithmetic below can count rows instead of lines.
+ *
+ * `index == numReplayFiles` is the trailing Back row (see
+ * replayItemCount()): browsing the sessions was otherwise a one-way door,
+ * with no way out but opening a session and walking its exit page.
+ */
+static void replayDrawEntry(int index, bool selected) {
+  display.print(selected ? F("->") : F("  "));
+
+  if (index >= numReplayFiles) {
+    display.println(F("Back"));
+    display.println();
+    return;
+  }
+
+  const int fileNameLen = strlen(replayFiles[index]);
+  char displayName[20];
+
+  strncpy(displayName, replayFiles[index], 19);
+  displayName[19] = '\0';
+  display.println(displayName);
+
+  if (fileNameLen > 19) {
+    display.print(F("  "));  // Indent to align with the first line
+    strncpy(displayName, replayFiles[index] + 19, 19);
+    displayName[19] = '\0';
+    display.println(displayName);
+  } else {
+    display.println();  // Blank line if no wrap needed
+  }
+}
+
 void displayPage_replay_file_select() {
   resetDisplay();
 
+  const int itemCount = replayItemCount();
+
   display.print(F("Select Session: "));
-  display.print(menuSelectionIndex + 1);
-  display.print(F("/"));
-  display.println(numReplayFiles);
+  // The Back row is not a session, so it gets no "n/total" — counting it
+  // would report one more session than the card holds.
+  if (menuSelectionIndex < numReplayFiles) {
+    display.print(menuSelectionIndex + 1);
+    display.print(F("/"));
+    display.println(numReplayFiles);
+  } else {
+    display.println();
+  }
   display.println();
   display.setTextSize(1);
 
@@ -430,86 +481,20 @@ void displayPage_replay_file_select() {
     display.println();
     display.println(F("Press any key"));
     display.println(F("to go back"));
-  } else if (numReplayFiles < 3) {
-    // Small menu - show all files
-    for (int i = 0; i < numReplayFiles; i++) {
-      if (menuSelectionIndex == i) {
-        display.print(F("->"));
-      } else {
-        display.print(F("  "));
-      }
-      // Split long filenames across two lines
-      int fileNameLen = strlen(replayFiles[i]);
-      char displayName[20];
-
-      // First line: first 19 characters
-      strncpy(displayName, replayFiles[i], 19);
-      displayName[19] = '\0';
-      display.println(displayName);
-
-      // Second line: next 19 characters if filename is longer
-      if (fileNameLen > 19) {
-        display.print(F("  "));  // Indent to align with first line
-        strncpy(displayName, replayFiles[i] + 19, 19);
-        displayName[19] = '\0';
-        display.println(displayName);
-      } else {
-        display.println();  // Blank line if no wrap needed
-      }
+  } else if (itemCount <= 3) {
+    // Small menu — show everything, Back row included.
+    for (int i = 0; i < itemCount; i++) {
+      replayDrawEntry(i, menuSelectionIndex == i);
     }
   } else {
-    // Scrolling menu
-    int indexA = menuSelectionIndex == numReplayFiles - 1 ? 0 : menuSelectionIndex + 1;
-    int indexB = menuSelectionIndex;
-    int indexC = menuSelectionIndex == 0 ? numReplayFiles - 1 : menuSelectionIndex - 1;
+    // Scrolling menu: next / selected / previous, wrapping over the whole
+    // item list so the Back row scrolls into view like any other row.
+    const int next = menuSelectionIndex == itemCount - 1 ? 0 : menuSelectionIndex + 1;
+    const int prev = menuSelectionIndex == 0 ? itemCount - 1 : menuSelectionIndex - 1;
 
-    char displayName[20];
-    int fileNameLen;
-
-    // First item
-    display.print(F("  "));
-    fileNameLen = strlen(replayFiles[indexA]);
-    strncpy(displayName, replayFiles[indexA], 19);
-    displayName[19] = '\0';
-    display.println(displayName);
-    if (fileNameLen > 19) {
-      display.print(F("  "));
-      strncpy(displayName, replayFiles[indexA] + 19, 19);
-      displayName[19] = '\0';
-      display.println(displayName);
-    } else {
-      display.println();
-    }
-
-    // Second item (selected)
-    display.print(F("->"));
-    fileNameLen = strlen(replayFiles[indexB]);
-    strncpy(displayName, replayFiles[indexB], 19);
-    displayName[19] = '\0';
-    display.println(displayName);
-    if (fileNameLen > 19) {
-      display.print(F("  "));
-      strncpy(displayName, replayFiles[indexB] + 19, 19);
-      displayName[19] = '\0';
-      display.println(displayName);
-    } else {
-      display.println();
-    }
-
-    // Third item
-    display.print(F("  "));
-    fileNameLen = strlen(replayFiles[indexC]);
-    strncpy(displayName, replayFiles[indexC], 19);
-    displayName[19] = '\0';
-    display.println(displayName);
-    if (fileNameLen > 19) {
-      display.print(F("  "));
-      strncpy(displayName, replayFiles[indexC] + 19, 19);
-      displayName[19] = '\0';
-      display.println(displayName);
-    } else {
-      display.println();
-    }
+    replayDrawEntry(next, false);
+    replayDrawEntry(menuSelectionIndex, true);
+    replayDrawEntry(prev, false);
   }
 
   safeDisplayUpdate();
@@ -1332,6 +1317,8 @@ void displayPage_course_track() {
   display.println(F("Yes - add course"));
   display.print(menuSelectionIndex == 1 ? F("->") : F("  "));
   display.println(F("No - new track"));
+  display.print(menuSelectionIndex == 2 ? F("->") : F("  "));
+  display.println(F("Cancel"));
 
   safeDisplayUpdate();
 }
@@ -1339,21 +1326,29 @@ void displayPage_course_track() {
 void displayPage_course_type() {
   resetDisplay();
 
+  // No blank line under the title: three size-2 rows (16 px each) plus the
+  // header and the hint line fill the panel exactly, and "Cancel" has to
+  // stay on-screen to be worth having.
   display.setTextSize(1);
   display.println(F("   COURSE TYPE"));
-  display.println();
   display.setTextSize(2);
 
   display.print(menuSelectionIndex == 0 ? F("->") : F("  "));
   display.println(F("Circuit"));
   display.print(menuSelectionIndex == 1 ? F("->") : F("  "));
   display.println(F("Sprint"));
+  display.print(menuSelectionIndex == 2 ? F("->") : F("  "));
+  display.println(F("Cancel"));
 
-  // The difference that matters when you are about to walk it.
+  // The difference that matters when you are about to walk it. Blank on the
+  // Cancel row — describing a course type the cursor is not on reads as a
+  // description OF Cancel.
   display.setTextSize(1);
-  display.println();
-  display.println(menuSelectionIndex == 0 ? F("one start/finish line")
-                                          : F("start + finish lines"));
+  if (menuSelectionIndex == 0) {
+    display.println(F("one start/finish line"));
+  } else if (menuSelectionIndex == 1) {
+    display.println(F("start + finish lines"));
+  }
 
   safeDisplayUpdate();
 }
