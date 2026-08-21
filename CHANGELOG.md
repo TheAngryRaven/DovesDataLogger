@@ -30,6 +30,16 @@ beta channel, plus the fixes below).
   sleep truly powers the LEDs off. **First boot of a flag-on build
   performs a one-way NFC-pads-to-GPIO conversion (UICR write) and
   resets once.**
+- **LED day/night brightness + a device timezone** (beta channel, plan
+  0010): new `utc_offset_min` setting (minutes east of UTC, default 0)
+  gives the device a local wall clock, and the LED strip swaps to
+  `led_brightness_night` (default 16) between `led_night_start_hour`
+  (19) and `led_day_start_hour` (7) — local hours, so 7am is the
+  driver's 7am rather than Greenwich's. Setting the two hours equal
+  disables the swap. **No DST** — a fixed offset only. **Logged data is
+  unchanged and still UTC**: DOVEX timestamps, the header datetime and
+  every filename stay exactly as they were, and timezone presentation
+  remains the viewing app's job.
 - **Overrev alert** (plan 0007): new `overrev_limit` setting (default 0
   = disabled) — past it the whole LED chain flashes red until RPM falls
   back below the normal `rev_limit`. The rev limit warns the engine is
@@ -55,6 +65,14 @@ beta channel, plus the fixes below).
   a not-yet-timing session is visibly "searching".
 
 ### Changed
+- **Settings file and JSON document buffers raised 512 -> 1024 bytes**
+  (plan 0010), and `setSetting()` now refuses a write it could not read
+  back. The settings file was already 436 bytes at 18 keys against a
+  511-byte read cap; the four new keys would have pushed it to 543,
+  where the file parses as truncated, *every* setting read fails, and
+  the boot-time corrupt-file heal quarantines and regenerates it on a
+  loop — losing the device's BLE name, PIN and pairing every boot. Costs
+  ~1 KB more RAM. **If you add settings keys, check the file size.**
 - **RPM spikes are gone from the logged trace** (plan 0009). A plotted
   DOVEX `rpm` column showed spikes of thousands of RPM that the engine
   did not do. The filter was not over-smoothing — it was passing single

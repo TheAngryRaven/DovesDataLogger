@@ -123,6 +123,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `ble_stream.{h,cpp}` | BLE file-transfer read-ahead bookkeeping: chunk size from the negotiated MTU, the compacting refill (`Move`), slice/consume, transfer rate. An off-by-one here corrupts a downloaded session, so the index math is host-tested away from the radio |
 | `sd_access_policy.{h,cpp}` | SD access arbitration decision table (mode values + grant/deny rules) |
 | `lap_format.{h,cpp}` | ms → `M:SS.mmm` lap-time rendering (three zero-minutes styles), used by all display pages |
+| `local_time.{h,cpp}` | UTC + a fixed signed minute offset → local wall clock (4-digit year, correct month/year/leap rollover both ways) + the `isNight()` window test. **No DST, and NOTHING logged goes through it** — saved data stays UTC (subsystem 17) |
 | `led_frame.{h,cpp}` | NeoPixel pixel layout (11 px: 2 status + 9-px strip), `Rgb`/`Frame` PODs, and **`applyCap()` — the single global-brightness choke point** (post-condition: no channel exceeds the cap) |
 | `led_modes.{h,cpp}` | Strip modes + status actions: pace pip math (ms/m, slower = left/red), generic `ScaleSpec` left-fill (RPM red past halfway; temps later), and the `StatusAction` threshold/hysteresis/flash table — the phase-2 assignability hook |
 | `led_animations.{h,cpp}` | Boot + purple-sector animations as pure functions of `(tMs, seed)` — hash-based sparkles, no rand()/millis(), golden-testable |
@@ -707,9 +708,21 @@ loop()  ~250 Hz
   Always reads fresh from disk (no cache).
 - `setSetting(key, value)` does read-modify-write to update a single key.
 - Uses `SD_ACCESS_TRACK_PARSE` mode for brief SD access.
-- Separate `StaticJsonDocument<512>` — does not share the track parser's
+- Separate `StaticJsonDocument<1024>` — does not share the track parser's
   `JSON_BUFFER_SIZE` buffer.
-- Total RAM cost: ~1 KB (512-byte file buffer + 512-byte JSON document).
+- Total RAM cost: ~2 KB (1024-byte file buffer + 1024-byte JSON document).
+- **The two 1024s must stay equal, and adding keys is not free.** Every
+  read path caps at `sizeof(settingsFileBuffer) - 1`, so a file bigger
+  than the buffer parses as `IncompleteInput` and *every* key read
+  fails — which `SETTINGS_SETUP()` reads as corruption, quarantines, and
+  regenerates, whereupon `ensureDefaultSettings()` grows it back over the
+  cap and the device loses its settings on a **boot loop**. Both were
+  512 until plan 0010: the 18-key file was already 436 B and four new
+  keys put it at 543, over the 511-byte read cap *and* past the old
+  document's capacity (a `<512>` doc returns `NoMemory` at 22 string
+  pairs). `setSettingInner()` now refuses any write whose
+  `measureJson()` exceeds the buffer or whose document `overflowed()`,
+  so the failure is a loud refused write rather than a silent brick.
 
 ### 9. CourseManager Integration
 
@@ -1328,11 +1341,16 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   watchdog. Every later boot skips the branch.
 - **The global brightness cap is THE invariant**: modes and animations
   author colors in full 0–255; `led_frame::applyCap()` scales every
-  channel by `led_brightness`/255 exactly once, at push time, in
-  `npxPushFrame()`. After it, no channel exceeds the cap — host-tested
-  as a post-condition. Never use `strip.setBrightness()` (lossy buffer
-  rewrite, spreads the invariant). `led_brightness` 0 = LEDs disabled:
-  the boost rail is never even enabled.
+  channel by cap/255 exactly once, at push time, in `npxPushFrame()`.
+  After it, no channel exceeds the cap — host-tested as a
+  post-condition. Never use `strip.setBrightness()` (lossy buffer
+  rewrite, spreads the invariant). **Which** cap is
+  `npxEffectiveBrightness()`: `led_brightness` by day,
+  `led_brightness_night` inside the local night window (subsystem 17).
+  `led_brightness` 0 = LEDs disabled: the boost rail is never even
+  enabled — **a night cap of 0 is NOT the same thing** (blank frames,
+  rail stays up; power-cycling the boost converter at 19:00 mid-session
+  is not a brightness change).
 - **Frame loop** (`NEOPIXEL_LOOP()`, self-throttled 30 Hz, called after
   `CAMERA_LOOP()` AND inside both parked branches so the strip blanks
   rather than freezes): snapshot inputs → step the `sector_purple`
@@ -1409,6 +1427,41 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   per-status-LED action assignment (source/threshold/color), temp
   scales through the same `ScaleSpec`, C/F preference, brightness UI.
 
+### 17. Local Time (`local_time.{h,cpp}`)
+
+- **What**: UTC plus a fixed signed minute offset (`utc_offset_min`),
+  giving the device a local wall clock. Its ONE consumer today is the
+  NeoPixel day/night brightness swap, which needs "7am" to mean the
+  driver's 7am (plan 0010).
+- **NOTHING LOGGED GOES THROUGH THIS.** DOVEX row timestamps are Unix
+  epoch ms (UTC by definition), and the header `datetime`, the log
+  filenames and the generated course names are all still UTC. That is
+  deliberate, not an oversight: a log is routinely *viewed* somewhere
+  other than where it was recorded, so the conversion belongs to the
+  viewing app, which knows the reader's preference. Do not wire
+  `local_time` into the logging pipeline.
+- **No DST, on purpose.** A fixed offset walks the boundary an hour
+  twice a year, which is beneath the resolution of a dim-after-dark
+  gate. Rule tables are a standing correctness liability (legislatures
+  keep moving the dates) and tzdata is ~100 KB shipped to a sealed
+  device. `local_time` is where rules would go if that changes — which
+  is why `DateTime` carries a **4-digit year** (the sketch's
+  `gpsData.year` is 2-digit; callers add 2000) and why the leap rule is
+  `gps_time::isLeapYear` reused rather than re-derived.
+- **Minutes, not hours** — India +330, Newfoundland −210, Chatham
+  +765. An out-of-band offset (beyond ±840) is **ignored, not clamped**:
+  a corrupt setting must not be able to walk the calendar, so it falls
+  back to 0 = UTC = the pre-0010 behaviour.
+- **`isNight(m, dayStart, nightStart)`** tests the window
+  `[nightStart, dayStart)` **modulo the day**, so the ordinary wrapped
+  case (19:00 → 07:00) needs no special casing at the call site. Equal
+  bounds = empty window = never night, which is how the swap is disabled
+  without a separate enable flag.
+- **No clock means DAY.** `gpsData.timeValid` needs the module's
+  `fullyResolved` (~12.5 min worst case from a cold start);
+  `npxEffectiveBrightness()` renders at the day cap until it lands.
+  Guessing night would bring the strip up dark and read as dead hardware.
+
 ---
 
 ## Data Formats
@@ -1441,6 +1494,13 @@ timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x
   before any data. Header written on session end. If header is empty
   (crash), GPS data after 1024 is still valid.
 - **Filename**: `20YYMMDD_HHMM.dovex`
+- **Everything here is UTC and stays that way.** The row `timestamp` is
+  Unix epoch ms, the header `datetime` is the UTC wall clock, and the
+  filename is stamped from the same UTC fields. The device's
+  `utc_offset_min` setting (subsystem 17) is presentation-only and must
+  never be applied on this path — timezone display is the viewing app's
+  job, since a log is often read in a different zone than it was
+  recorded in.
 - 1 KB handles ~100 laps (8 chars per lap time). Extremely unlikely to exceed.
 
 ### Track JSON (`/TRACKS/*.json`)
@@ -1508,7 +1568,11 @@ the one loaded). Sector lines stay optional — zero, one, or two.
   "led_brightness": "64",
   "rev_limit": "15000",
   "overrev_limit": "0",
-  "temp1_alert_c": "650"
+  "temp1_alert_c": "650",
+  "utc_offset_min": "0",
+  "led_brightness_night": "16",
+  "led_day_start_hour": "7",
+  "led_night_start_hour": "19"
 }
 ```
 
@@ -1532,6 +1596,10 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | `rev_limit` | int | `15000` | True RPM WARNING limit: RPM-scale ceiling and the left status LED flasher threshold. Clamp 1000–20000 (tach filter's ceiling) |
 | `overrev_limit` | int | `0` (disabled) | True RPM PROBLEM limit (plan 0007): past it the whole 11-px chain flashes red (outranks the purple celebration) and the tach page shows `*OVER REV*`; latch clears below `rev_limit × 0.97`. 0 = off (no chain flash, no header); else clamp 1000–20000 |
 | `temp1_alert_c` | int | `650` | Temp1 (EGT) alert threshold in **Celsius** for the right status LED: red flash at/above, clears 20 °C below, solid blue when the probe signal is NaN/stale. Clamp 50–1200 |
+| `utc_offset_min` | int | `0` | Minutes east of UTC (US Central standard `-360`, India `330`, Newfoundland `-210`). Clamp ±840; out of band keeps 0 (= UTC). **Presentation only** — nothing logged is converted (subsystem 17) |
+| `led_brightness_night` | int | `16` | NeoPixel cap 0–255 used inside the night window. `0` blanks the strip but leaves the 5 V rail UP — only `led_brightness` 0 cuts the rail |
+| `led_day_start_hour` | int | `7` | **Local** hour the day cap takes over. Clamp 0–23 |
+| `led_night_start_hour` | int | `19` | **Local** hour the night cap takes over. Clamp 0–23. Equal to `led_day_start_hour` = swap disabled (one cap around the clock) |
 
 - Created automatically on first boot with random BLE values.
 - Missing keys auto-populated on boot via `ensureDefaultSettings()`.
@@ -1604,7 +1672,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | BLE burst budget | 20 ms wall clock (`kBurstBudgetMs`) | `ble_stream.h` |
 | BLE max notify payload | 244 B (`kMaxNotifyLen`) | `ble_stream.h` |
 | JSON buffer (`JSON_BUFFER_SIZE`) | 8192 (SIM builds too) — read buffer + `trackJson` doc | `BirdsEye.ino` |
-| Settings JSON buffer | 512 | `settings.ino` |
+| Settings file buffer / JSON doc | 1024 each (keep equal; see subsystem 8) | `settings.ino` |
 | Settings file path | `/SETTINGS.json` | `settings.ino` |
 | Track upload buffer | `JSON_BUFFER_SIZE` (8192) | `bluetooth.ino` |
 | GPS serial buffer | 4096 | `gps_functions.ino` |
@@ -1642,6 +1710,9 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | GPS-search pip bounce period | 1600 ms round trip (`kSearchBouncePeriodMs`) | `led_modes.h` |
 | Overrev latch clear | `rev_limit × 0.97` (same point as the warning flasher) | `neopixel.ino` |
 | Boot / purple animation | 2600 ms / 1600 ms | `led_animations.h` |
+| UTC offset band | ±840 min (±14 h), `kOffsetMinLimit`; out of band = 0 | `local_time.h` |
+| LED day / night window | local 07:00 → 19:00 (`led_day_start_hour` / `led_night_start_hour`); equal = disabled | `settings.ino` |
+| LED night brightness default | 16 / 255 (`led_brightness_night`; 0 = blank, rail stays UP) | `settings.ino` |
 
 ---
 

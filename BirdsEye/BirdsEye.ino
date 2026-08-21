@@ -98,6 +98,7 @@
 #include "gps_status_page.h"
 #include "haversine.h"
 #include "idle_policy.h"
+#include "local_time.h"
 #include "neopixel.h"
 #include "replay.h"
 #include "sat_bars.h"
@@ -192,6 +193,18 @@ int settingRevLimit = 15000;
 // threshold in Celsius for the right status LED.
 int settingOverrevLimit = 0;
 int settingTemp1AlertC = 650;
+// Plan 0010: minutes east of UTC. PRESENTATION ONLY — the DOVEX rows,
+// the header datetime and every generated filename stay UTC, and the
+// webapp converts on the viewing side (you might be reading a log from
+// another state). The single consumer is the LED day/night swap, which
+// needs the driver's 7am rather than Greenwich's.
+int16_t settingUtcOffsetMin = 0;
+// Night-time LED cap and the LOCAL hours the swap happens on. Equal
+// hours = no swap. A night cap of 0 blanks the strip but leaves the
+// 5 V rail up — only led_brightness 0 cuts the rail (NEOPIXEL_SETUP).
+uint8_t settingLedBrightnessNight = 16;
+uint8_t settingLedDayStartHour = 7;
+uint8_t settingLedNightStartHour = 19;
 
 // Track manifest for proximity detection
 TrackManifestEntry trackManifest[MAX_LOCATIONS];
@@ -1027,6 +1040,25 @@ void setup() {
       // Celsius. Floor above any plausible ambient so a garbled value
       // can't latch the alert at power-on; ceiling past any real EGT.
       if (t >= 50 && t <= 1200) settingTemp1AlertC = t;
+    }
+    // Local time (plan 0010). The band is the pure unit's, not a literal
+    // here, so ±14 h has one home. Out of band keeps the 0 default —
+    // i.e. UTC — which is exactly the pre-0010 behaviour.
+    if (getSetting("utc_offset_min", buf, sizeof(buf))) {
+      const int o = atoi(buf);
+      if (local_time::isValidOffsetMinutes(o)) settingUtcOffsetMin = (int16_t)o;
+    }
+    if (getSetting("led_brightness_night", buf, sizeof(buf))) {
+      const int b = atoi(buf);
+      if (b >= 0 && b <= 255) settingLedBrightnessNight = (uint8_t)b;
+    }
+    if (getSetting("led_day_start_hour", buf, sizeof(buf))) {
+      const int h = atoi(buf);
+      if (h >= 0 && h <= 23) settingLedDayStartHour = (uint8_t)h;
+    }
+    if (getSetting("led_night_start_hour", buf, sizeof(buf))) {
+      const int h = atoi(buf);
+      if (h >= 0 && h <= 23) settingLedNightStartHour = (uint8_t)h;
     }
     crossingThresholdMeters = settingLapDetectionDistance;
     debug(F("Settings loaded: lap_dist="));
