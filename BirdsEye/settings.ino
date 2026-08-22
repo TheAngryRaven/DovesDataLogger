@@ -139,9 +139,9 @@ static void ensureDefaultSettings() {
     // starts the rotation at the speed page — end users never see the
     // diagnostic counters; "show" restores them for development/tuning.
     { "debug_pages", "hide" },
-    // NeoPixel strip (plan 0006). Written on every channel so
-    // SETTINGS.json has a uniform shape (SensorEgg DOVEX-column
-    // precedent); only a BIRDSEYE_ENABLE_NEOPIXEL build reads them.
+    // NeoPixel strip (plan 0006). Read on every channel since 4.1.0 —
+    // BIRDSEYE_ENABLE_NEOPIXEL defaults to 1, so these are live
+    // settings on a stock logger, not beta-only bookkeeping.
     { "led_brightness", "64" },  // global cap 0-255; 0 = LEDs disabled
     { "rev_limit", "15000" },    // true RPM: LED scale ceiling + rev flasher + OVER REV header
     // Plan 0007: the PROBLEM limit (0 = disabled) — whole LED chain

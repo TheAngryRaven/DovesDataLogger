@@ -21,25 +21,36 @@ files, the DOVEX log format, the log filenames and the BLE command protocol
 are byte-for-byte unchanged from 4.0.0, so 4.0.0 logs, tracks and companion
 apps keep working.
 
-**Which of this is live in the release firmware.** The NeoPixel strip
-(subsystem 16) and the SensorEgg EGT POC (subsystem 14) sit behind the
-`BIRDSEYE_ENABLE_NEOPIXEL` / `BIRDSEYE_ENABLE_SENSOREGG` build flags, and
-those flags are **off** in the published `BirdsEye-sense` /
-`BirdsEye-nonsense` images — a flag-on build performs a one-way
-NFC-pads-to-GPIO conversion on hardware that mostly has no LEDs wired, so it
-is not something to push to the whole fleet. Entries below marked
-*(beta channel)* therefore ship as code in this release but are only active
-in a beta build. Everything else is live for every user: the Bluetooth
-download speed-up, the RPM filter rework, the `tach_filter` and pickup-health
-diagnostics, the tach page's corrected `*OVER REV*` header, the pace page's
-`STOPPED` state, the four new Back/Cancel menu rows, and the transfer-mode
-exit fixes. The new LED settings keys are written to `/SETTINGS.json` on
-every build (so a card moved into a beta unit is already configured); only a
-flag-on build reads them.
+> ### Read this before updating
+>
+> **This release permanently converts the two NFC pads to GPIO, on every
+> device, and reboots once while doing it.**
+>
+> The LED strip stops being a beta-only experiment in 4.1.0 and ships in the
+> normal firmware, so a logger lights up the moment someone wires a strip to
+> it — no special build. Making those two pads usable as GPIO means writing
+> the chip's UICR, and **that write cannot be undone by any later firmware**;
+> reversing it needs a full chip erase and a bootloader reflash over USB.
+> Your logger does the write the first time it boots after updating, then
+> resets itself once so the change takes effect. That single extra reboot
+> during the update is expected — nothing is wrong.
+>
+> This happens whether or not you have LEDs attached, because the firmware
+> cannot know. The trade was made deliberately: this hardware does not use
+> NFC for anything, the pads are otherwise idle, and requiring a separate
+> build to use a headline feature had kept it out of everyone's hands. If you
+> have some future use for the NFC pads on your device, **do not install
+> 4.1.0.**
+>
+> With no strip wired, nothing else changes — the pins simply sit there.
+
+The SensorEgg wireless-EGT proof of concept remains beta-only
+(`BIRDSEYE_ENABLE_SENSOREGG`, off in the published images), but it gained
+nothing this release — so every entry below is live for every user.
 
 ### Added
-- **NeoPixel LED strip subsystem** (beta channel only,
-  `BIRDSEYE_ENABLE_NEOPIXEL`, plan 0006): 11 WS2812 pixels on the NFC
+- **NeoPixel LED strip subsystem** (plan 0006) — **now in every build**,
+  see the upgrade note above: 11 WS2812 pixels on the NFC
   pads converted to GPIO — 2 status indicators + a 9-px strip with a
   centerline. A global brightness cap (`led_brightness` setting, 0
   disables the LEDs entirely) that no LED can ever exceed; a pace pip
@@ -52,8 +63,7 @@ flag-on build reads them.
   sleep truly powers the LEDs off. **First boot of a flag-on build
   performs a one-way NFC-pads-to-GPIO conversion (UICR write) and
   resets once.**
-- **LED day/night brightness + a device timezone** (beta channel, plan
-  0010): new `utc_offset_min` setting (minutes east of UTC, default 0)
+- **LED day/night brightness + a device timezone** (plan 0010): new `utc_offset_min` setting (minutes east of UTC, default 0)
   gives the device a local wall clock, and the LED strip swaps to
   `led_brightness_night` (default 16) between `led_night_start_hour`
   (19) and `led_day_start_hour` (7) — local hours, so 7am is the
@@ -63,12 +73,12 @@ flag-on build reads them.
   every filename stay exactly as they were, and timezone presentation
   remains the viewing app's job.
 - **Overrev alert** (plan 0007): new `overrev_limit` setting (default 0
-  = disabled) — past it the whole LED chain flashes red *(beta channel)*
-  and the tach page's `*OVER REV*` header trips *(every build)*, both
-  until RPM falls back below the normal `rev_limit`. The rev limit warns
-  the engine is at its ceiling; the overrev limit says it's broken.
-- **Temp1 alert threshold setting** *(beta channel)* (`temp1_alert_c`,
-  default 650 °C): the right status LED is now a tri-state — flashing red
+  = disabled) — past it the whole LED chain flashes red and the tach
+  page's `*OVER REV*` header trips, both until RPM falls back below the
+  normal `rev_limit`. The rev limit warns the engine is at its ceiling;
+  the overrev limit says it's broken.
+- **Temp1 alert threshold setting** (`temp1_alert_c`, default 650 °C):
+  the right status LED is now a tri-state — flashing red
   at/above the limit, off when good, solid blue when there is no probe
   signal.
 - **`tach_filter` setting** (default `smooth`, plan 0009): picks the RPM
@@ -84,8 +94,7 @@ flag-on build reads them.
   thrown away this power-cycle. A count that climbs with RPM is ignition
   ringing or missed sparks reaching the ISR, i.e. the pickup rather than
   the filter.
-- **GPS-search pip** *(beta channel)*: in race mode without a full GPS
-  lock the strip shows a green pixel bouncing end-to-end instead of the
+- **GPS-search pip**: in race mode without a full GPS lock the strip shows a green pixel bouncing end-to-end instead of the
   RPM scale, so a not-yet-timing session is visibly "searching".
 - **The browser-sim harness can fake a GPS fix.** A "GPS fix" toggle (plus
   an mph field) streams a deterministic synthetic 25 Hz fix parked on the
@@ -130,14 +139,13 @@ flag-on build reads them.
   is ~90 ms more lag on a 5500 RPM/s pull. Set `tach_filter` to `legacy`
   to get the old behaviour back.
 - **Engine dies mid-session** (tach-proven sessions): the pace page shows
-  `STOPPED` instead of a still-counting pace *(every build)*, and the LED
-  bar goes dark while the status LEDs (temp alert) stay live
-  *(beta channel)*. Clears on restart.
+  `STOPPED` instead of a still-counting pace, and the LED bar goes dark
+  while the status LEDs (temp alert) stay live. Clears on restart.
 - **Tach page `*OVER REV*` header** now means actual overrev: it shows
   only when `overrev_limit` is enabled and RPM reaches it (was a
   hardcoded 9999 RPM). The `rev_limit` warning stays on the LED only.
-- **Temp status LED flashes red** *(beta channel)* (was orange), matching
-  the rev flasher's alert language.
+- **Temp status LED flashes red** (was orange), matching the rev
+  flasher's alert language.
 - **Bluetooth downloads are faster, and now say why when they are not**
   (plan 0008). A 3.3 MB session downloading at 28.8 KB/s on an iPad
   prompted a look at the whole transfer path. Three things were capping
