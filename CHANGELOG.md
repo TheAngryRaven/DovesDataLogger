@@ -175,6 +175,42 @@ nothing this release — so every entry below is live for every user.
   be silent.
 
 ### Fixed
+- **The Bluetooth settings list works again.** Asking the device to
+  enumerate its settings (`SLIST` — what the companion app's settings
+  screen does) answered a parse error and listed nothing. The nine keys
+  added this release took `/SETTINGS.json` from 329 to 538 bytes, and while
+  the settings module's own reader was raised to 1024 bytes to suit, a
+  *second* copy of that reader inside the Bluetooth code was left at 512 —
+  so it read 511 bytes of a 538-byte file and gave up on the truncated
+  result. Both are now sized by one shared constant, so they cannot drift
+  apart again. Reading and writing individual settings was never affected.
+- **A blank or corrupt `led_brightness` no longer looks like dead
+  hardware.** Every numeric setting was read with a parser that answers
+  "0" for an empty or non-numeric value, and 0 is a real, meaningful
+  setting for most of the new keys — for `led_brightness` it means *LEDs
+  off, and never even power up the 5 V rail*. A garbled value therefore
+  switched the strip off silently instead of falling back to the default,
+  as the code always claimed it did. Values are now parsed strictly:
+  anything that is not a whole number is rejected and the default stands.
+  A deliberate `0` still works exactly as before.
+- **The overrev alert no longer strobes when the two RPM limits are set
+  close together.** `rev_limit` and `overrev_limit` are validated
+  independently, so nothing stopped you setting the overrev limit at or
+  below the rev limit. Doing so inverted the alert's release point,
+  and the whole LED chain flickered at the frame rate instead of flashing.
+- **`STOPPED` on the pace page is no longer cut off.** At the size the page
+  draws it, the text needed 144 pixels of a 128-pixel screen, so the final
+  letter was clipped on every render.
+- **A build with the LED subsystem compiled out now still powers the LED
+  rail down.** Such a build does nothing with the LED pins by design — but
+  on a board whose pads an earlier LED-enabled build had already converted,
+  "nothing" left the boost converter's enable pin undriven, so the 5 V rail
+  could stay up through shutdown and drain the battery of a device with no
+  power switch. It now holds that pin low, but *only* on a board that has
+  already been converted; hardware that never ran an LED-enabled build is
+  still never touched. (No shipped 4.1.0 image is built this way — the LED
+  subsystem is in all of them — so this protects custom builds and anyone
+  rolling one back.)
 - **Four menus you could get into but not out of now have a Back/Cancel
   row.** The transfer menu (Bluetooth / USB), the replay session browser,
   and the course creator's first two screens (track prompt, course type)

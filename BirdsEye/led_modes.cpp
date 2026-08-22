@@ -78,9 +78,19 @@ led_frame::Rgb evalStatus(const StatusAction& a, StatusState& s, float value,
     s.active = false;
     return a.invalidColor;
   }
+  // A caller can hand us clearBelow ABOVE threshold — overrev_limit and
+  // rev_limit clamp independently, so overrev_limit <= rev_limit *
+  // kRevClearFrac makes the overrev action's release point sit above its
+  // own trip point. Left alone, a value in that inverted band sets the
+  // latch on one frame and clears it on the next: a 15 Hz strobe of the
+  // whole chain instead of the intended 100 ms flash. A release point
+  // above the trip point is never meaningful, so collapse it — the action
+  // degrades to a plain threshold with no hysteresis, which is right.
+  const float clearBelow =
+      a.clearBelow > a.threshold ? a.threshold : a.clearBelow;
   if (!s.active && value >= a.threshold) {
     s.active = true;
-  } else if (s.active && value < a.clearBelow) {
+  } else if (s.active && value < clearBelow) {
     s.active = false;
   }
   if (!s.active) {

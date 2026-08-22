@@ -123,6 +123,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `ble_stream.{h,cpp}` | BLE file-transfer read-ahead bookkeeping: chunk size from the negotiated MTU, the compacting refill (`Move`), slice/consume, transfer rate. An off-by-one here corrupts a downloaded session, so the index math is host-tested away from the radio |
 | `sd_access_policy.{h,cpp}` | SD access arbitration decision table (mode values + grant/deny rules) |
 | `lap_format.{h,cpp}` | ms → `M:SS.mmm` lap-time rendering (three zero-minutes styles), used by all display pages |
+| `setting_parse.{h,cpp}` | Strict integer parsing for `/SETTINGS.json` values. Exists because `atoi()` answers 0 for `""` and `"garbage"`, and 0 is an in-range, **destructive** value for the LED keys (`led_brightness` 0 = strip off + boost rail never raised) — so a blank setting read as a deliberate "off". Rejects anything that is not a complete integer, so the caller's range check keeps the compiled-in default |
 | `local_time.{h,cpp}` | UTC + a fixed signed minute offset → local wall clock (4-digit year, correct month/year/leap rollover both ways) + the `isNight()` window test. **No DST, and NOTHING logged goes through it** — saved data stays UTC (subsystem 17) |
 | `led_frame.{h,cpp}` | NeoPixel pixel layout (11 px: 2 status + 9-px strip), `Rgb`/`Frame` PODs, and **`applyCap()` — the single global-brightness choke point** (post-condition: no channel exceeds the cap) |
 | `led_modes.{h,cpp}` | Strip modes + status actions: pace pip math (ms/m, slower = left/red), generic `ScaleSpec` left-fill (RPM red past halfway; temps later), and the `StatusAction` threshold/hysteresis/flash table — the phase-2 assignability hook |
@@ -673,7 +674,7 @@ loop()  ~250 Hz
     cycle, plus `fwReset()` to abort any in-flight OTA and free the staging
     file + SD access.
   - *Manual Exit* (`bleExitTransferMode()`): the parked-loop Exit button
-    runs `BLE_STOP()` then the same 100 ms-delay reboot. Before 4.0.1 a
+    runs `BLE_STOP()` then the same 100 ms-delay reboot. Before 4.1.0 a
     manual exit dropped back to the menu without rebooting, so settings
     written over BLE silently didn't apply until the next power cycle. The
     SIM stub returns after stopping (no reboot) so the golden menu walk can
@@ -711,6 +712,15 @@ loop()  ~250 Hz
 - Separate `StaticJsonDocument<1024>` — does not share the track parser's
   `JSON_BUFFER_SIZE` buffer.
 - Total RAM cost: ~2 KB (1024-byte file buffer + 1024-byte JSON document).
+- **There are TWO parsers of this file, and both are sized by
+  `SETTINGS_JSON_CAPACITY` (`settings.h`).** `settings.ino` owns
+  `getSetting()`/`setSetting()`; `bluetooth.ino`'s `SLIST` handler has its
+  own buffer + document to enumerate the file for the companion app. They
+  drifted once — plan 0010 raised settings.ino's pair 512 → 1024 and
+  missed the BLE copy, so `SLIST` read 511 B of a 538 B file and answered
+  `SERR:PARSE` on every device while `SGET`/`SSET` still worked. The
+  shared constant is what makes that impossible now; if you add a third
+  parser, size it from the same macro.
 - **The two 1024s must stay equal, and adding keys is not free.** Every
   read path caps at `sizeof(settingsFileBuffer) - 1`, so a file bigger
   than the buffer parses as `IncompleteInput` and *every* key read
@@ -821,9 +831,18 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   System OFF with the conn LED still driven; GPIO state is retained
   there, hence the "blue light stays on after sleep" field report) →
   `DISPLAY_SLEEP()` → `GPS_SLEEP()` (u-blox software backup, µA, config
-  retained while powered; TIMER3 stopped) → IMU power rail off. The
-  charging-loop soft resume (`softResumeFromCharging()`) restarts the
-  egg scanner via `SENSOREGG_WAKE()`; BLE/camera stay lazy.
+  retained while powered; TIMER3 stopped) → IMU power rail off →
+  `NEOPIXEL_SLEEP()` (blank while 5 V is up, data LOW, then boost EN
+  LOW — before the charging branch, so the strip is dark on the cable
+  too). **`NEOPIXEL_SLEEP()` is not a no-op on a flag-OFF build**: it
+  still drives boost EN low when `UICR->NFCPINS` shows the pads were
+  already converted by an earlier beta build, because the driven level
+  is what survives System OFF and a floating EN leaves the rail up (the
+  same retention as the conn-LED report above). An unconverted board is
+  never touched. The charging-loop soft resume
+  (`softResumeFromCharging()`) restarts the egg scanner via
+  `SENSOREGG_WAKE()` and re-raises the strip via `NEOPIXEL_WAKE()`;
+  BLE/camera stay lazy.
 - **System OFF entry** (`shutdownSystemOff()`, no return): wait for the
   entry combo's buttons to release (a held button = SENSE satisfied =
   instant wake-reset), **sample the tach line's parked idle level**
@@ -1597,7 +1616,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | `debug_pages` | string | `"hide"` | Race-rotation diagnostic pages (`GPS_DEBUG` + `GPS_STATS`): `hide` = rotation starts at the speed page (end-user default), `show` = diagnostics restored at the front. Anything other than an explicit `show` means hide. Also swaps the tachometer page's subtext line for the tach filter diagnostic (`max:NNNNN S rj:NN`, plan 0009). No-op on the rotation under `ENDURANCE_MODE` (already starts at speed) |
 | `cylinder_count` | int | `1` | Cylinders the **pickup sees** — a clamp on one plug wire of a twin sees ONE. Only a shared coil / all-cylinder harness sees them all |
 | `tach_filter` | string | `"smooth"` | RPM estimator (plan 0009). `smooth` = outlier gate + RPM-aware noise models; `legacy` = the pre-0009 filter bit for bit, for A/B against older logs; `raw` = no estimator at all, the `rpm` column is exactly what the pickup delivers. Anything else means `smooth`. Diagnostic knob — the intent is one session each at the track, not a permanent tuning dial |
-| `led_brightness` | int | `64` | NeoPixel global brightness cap 0–255 — no LED channel ever exceeds it (`led_frame::applyCap`). `0` disables the LEDs entirely (boost rail never enabled). Read only by `BIRDSEYE_ENABLE_NEOPIXEL` builds; clamp back to 64 on nonsense |
+| `led_brightness` | int | `64` | NeoPixel global brightness cap 0–255 — no LED channel ever exceeds it (`led_frame::applyCap`). `0` disables the LEDs entirely (boost rail never enabled). Written AND parsed on every channel (`ensureDefaultSettings()` + the boot block in `BirdsEye.ino`); only its *use* is compiled out with the flag. A non-numeric value keeps the 64 default — via `setting_parse::parseIntSetting`, never `atoi()`, because `atoi("")` is 0 and 0 here means "LEDs off" |
 | `rev_limit` | int | `15000` | True RPM WARNING limit: RPM-scale ceiling and the left status LED flasher threshold. Clamp 1000–20000 (tach filter's ceiling) |
 | `overrev_limit` | int | `0` (disabled) | True RPM PROBLEM limit (plan 0007): past it the whole 11-px chain flashes red (outranks the purple celebration) and the tach page shows `*OVER REV*`; latch clears below `rev_limit × 0.97`. 0 = off (no chain flash, no header); else clamp 1000–20000 |
 | `temp1_alert_c` | int | `650` | Temp1 (EGT) alert threshold in **Celsius** for the right status LED: red flash at/above, clears 20 °C below, solid blue when the probe signal is NaN/stale. Clamp 50–1200 |
@@ -1733,7 +1752,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | SdFat | SD card (FAT16/32) |
 | DovesLapTimer | Lap/sector timing (external: TheAngryRaven/DovesLapTimer). CI refs: `BETA`-targeted builds track the library's `BETA` branch; master/release builds pin `v4.3.0` (bump deliberately) |
 | Seeed Arduino LSM6DS3 | Onboard IMU accelerometer/gyro (Sense variant, ±16g) |
-| Adafruit NeoPixel | WS2812 strip driver (subsystem 16; linked in but inert unless `BIRDSEYE_ENABLE_NEOPIXEL`) |
+| Adafruit NeoPixel | WS2812 strip driver (subsystem 16). **Only compiled/linked when `BIRDSEYE_ENABLE_NEOPIXEL` is set** — the include sits inside the `#if` in `neopixel.ino`, so a master/release image carries none of it |
 | Bluefruit nRF52 | BLE (built into board package) |
 | Adafruit TinyUSB | USB Mass Storage (`Adafruit_USBD_MSC`); built into board package |
 

@@ -233,6 +233,47 @@ TEST_CASE("overrev-style action: wide hysteresis holds the latch down to clear")
   CHECK(!st.active);
 }
 
+TEST_CASE("inverted hysteresis (clearBelow above threshold) never strobes") {
+  // rev_limit and overrev_limit clamp independently, so a user can set
+  // overrev_limit at or below rev_limit * kRevClearFrac. neopixel.ino then
+  // builds the overrev action with clearBelow ABOVE threshold. Before the
+  // clamp in evalStatus, a value inside that inverted band set the latch on
+  // one frame and cleared it on the next — all 11 pixels strobing at the
+  // 30 Hz frame rate instead of flashing at 100 ms.
+  //
+  // Concretely: rev_limit 15000 (clear 14550), overrev_limit 12000.
+  StatusAction over{Source::kRpm, 12000.0f, 14550.0f, led_frame::kRed,
+                    led_modes::kRevFlashHalfPeriodMs, led_frame::kOff};
+  StatusState st;
+
+  // At 13000 RPM: above the 12000 trip, below the bogus 14550 release.
+  led_modes::evalStatus(over, st, 13000.0f, true, 0);
+  CHECK(st.active);
+  // The latch must HOLD across successive frames, not alternate.
+  for (uint32_t f = 1; f < 20; f++) {
+    led_modes::evalStatus(over, st, 13000.0f, true, f * 33);
+    CAPTURE(f);
+    CHECK(st.active);
+  }
+  // It still releases below the (collapsed) trip point.
+  led_modes::evalStatus(over, st, 11999.0f, true, 0);
+  CHECK(!st.active);
+  // And re-arms cleanly.
+  led_modes::evalStatus(over, st, 12000.0f, true, 0);
+  CHECK(st.active);
+
+  // A sane configuration is untouched by the clamp: overrev above rev.
+  StatusAction sane{Source::kRpm, 16000.0f, 14550.0f, led_frame::kRed,
+                    led_modes::kRevFlashHalfPeriodMs, led_frame::kOff};
+  StatusState st2;
+  led_modes::evalStatus(sane, st2, 16100.0f, true, 0);
+  CHECK(st2.active);
+  led_modes::evalStatus(sane, st2, 15000.0f, true, 0);
+  CHECK(st2.active);  // wide band still latched
+  led_modes::evalStatus(sane, st2, 14000.0f, true, 0);
+  CHECK(!st2.active);
+}
+
 TEST_CASE("search pip: one green pixel, bounces to both ends, deterministic") {
   Rgb out[kStripCount];
   auto litIndex = [&](uint32_t t) {

@@ -21,6 +21,7 @@ add_executable(birdseye_tests
   sd_access_policy_test.cpp
   lap_format_test.cpp
   local_time_test.cpp
+  setting_parse_test.cpp
   tach_filter_test.cpp
   camera_fsm_test.cpp
   idle_policy_test.cpp
@@ -50,6 +51,7 @@ add_executable(birdseye_tests
   ${BIRDSEYE_DIR}/sd_access_policy.cpp
   ${BIRDSEYE_DIR}/lap_format.cpp
   ${BIRDSEYE_DIR}/local_time.cpp
+  ${BIRDSEYE_DIR}/setting_parse.cpp
   ${BIRDSEYE_DIR}/tach_filter.cpp
   ${BIRDSEYE_DIR}/camera_fsm.cpp
   ${BIRDSEYE_DIR}/idle_policy.cpp

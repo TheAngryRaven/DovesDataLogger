@@ -741,9 +741,12 @@ void displayPage_gps_pace() {
   display.setTextColor(DISPLAY_TEXT_WHITE);
   const int lineHeight = 21;
   if (engineStopped) {
-    display.setCursor(0, lineHeight);
+    // 7 chars, NOT 8 with a leading space: size 3 is an 18 px advance, so
+    // " STOPPED" needs 144 px on a 128 px panel and the trailing D was
+    // clipped on every render. 7 x 18 = 126 fits, and x=1 centres it.
+    display.setCursor(1, lineHeight);
     display.setTextSize(3);
-    display.print(F(" STOPPED"));
+    display.print(F("STOPPED"));
   } else if (sprintModeIsActive() && !activeTimerRunActive()) {
     // Sprint mode, between runs — no live pace to compare (see lap page).
     display.setCursor(0, lineHeight);

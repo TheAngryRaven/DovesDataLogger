@@ -8,6 +8,11 @@
 #include "camera_ble.h"
 #include "filename_validator.h"
 #include "firmware_ota.h"
+// For SETTINGS_JSON_CAPACITY and getSetting/setSetting. This module used
+// them via Arduino's concatenation of BirdsEye.ino's includes; naming the
+// dependency follows camera_ble.ino and keeps the SLIST buffer sizes tied
+// to the settings module that owns them.
+#include "settings.h"
 
 // Target connection interval in 1.25 ms units: 12 = 15 ms, the fastest an
 // Apple central is permitted to accept from an accessory. See bleTuneLink().
@@ -1040,7 +1045,13 @@ void processSettingsCommand() {
       return;
     }
 
-    char fileBuf[512];
+    // The SECOND parser of /SETTINGS.json (settings.ino has the other).
+    // Both are sized by SETTINGS_JSON_CAPACITY so they can never drift
+    // again — see the comment on it in settings.h for what happened when
+    // they did. static, not stack: 2 KB in one frame is more than the loop
+    // task's budget wants, and it matches the house idiom in
+    // sd_functions.ino ("keeps JSON_BUFFER_SIZE off the stack").
+    static char fileBuf[SETTINGS_JSON_CAPACITY];
     int bytesRead = settingsFile.read(fileBuf, sizeof(fileBuf) - 1);
     settingsFile.close();
     releaseSDAccess(SD_ACCESS_TRACK_PARSE);
@@ -1056,7 +1067,8 @@ void processSettingsCommand() {
     }
     fileBuf[bytesRead] = '\0';
 
-    StaticJsonDocument<512> doc;
+    static StaticJsonDocument<SETTINGS_JSON_CAPACITY> doc;
+    doc.clear();
     DeserializationError err = deserializeJson(doc, fileBuf);
     if (err != DeserializationError::Ok) {
       debug(F("BLE: SLIST - JSON parse error: "));

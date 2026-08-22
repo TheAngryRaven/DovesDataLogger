@@ -337,15 +337,49 @@ void NEOPIXEL_WAKE() {
 #else  // !BIRDSEYE_ENABLE_NEOPIXEL
 
 ///////////////////////////////////////////
-// SUBSYSTEM COMPILED OUT (the master/release default — see project.h)
+// SUBSYSTEM COMPILED OUT
 //
-// No UICR write, no pin driving, no Adafruit_NeoPixel dependency in
-// the image. The pads stay exactly as the chip shipped.
+// Since 4.1.0 no shipped channel takes this branch — the flag defaults
+// to 1 (see project.h). It is reached only by a build that forces
+// -DBIRDSEYE_ENABLE_NEOPIXEL=0, which is why the already-converted case
+// below matters more than it looks: the boards most likely to run such a
+// build are ones that already ran a flag-on one.
+//
+// No UICR write, no Adafruit_NeoPixel dependency in the image. On a
+// board that has never run a flag-on build the pads stay exactly as the
+// chip shipped, and this file drives nothing at all.
+//
+// ONE exception, and it is a power bug if you remove it: a board that
+// HAS run a flag-on build carries the one-way UICR NFC->GPIO conversion
+// forever, and a later flag-off image (a beta unit updating to a prod
+// release) inherits it. With stubs that truly do nothing, P0.09 — the
+// boost converter's EN — is left in its reset state (input, disconnected)
+// for the whole session AND through System OFF, where a driven-LOW level
+// is the only thing that holds the rail down (the same retention that
+// caused the "blue conn LED stays on after sleep" report, subsystem 10).
+// EN floating on the Adafruit boost module reads as enabled, so "off"
+// keeps the 5 V rail and 11 idle WS2812s alive on a device with no power
+// switch — a flat pack in a day or two.
+//
+// So: drive EN low, but ONLY when the conversion has already happened.
+// PROTECT clear (0) means the pads are already GPIO. On an unconverted
+// board the bit is set, this is skipped, and the promise above holds
+// exactly — we never touch a pad the user didn't opt into.
 ///////////////////////////////////////////
 
-void NEOPIXEL_SETUP() {}
+static void npxHoldConvertedBoostOff() {
+  if ((NRF_UICR->NFCPINS & UICR_NFCPINS_PROTECT_Msk) != 0) {
+    return;  // pads still NFC — never touched by a flag-off build
+  }
+  pinMode(NEOPIXEL_PIN_BOOST_EN, OUTPUT);
+  digitalWrite(NEOPIXEL_PIN_BOOST_EN, LOW);
+}
+
+void NEOPIXEL_SETUP() { npxHoldConvertedBoostOff(); }
 void NEOPIXEL_LOOP() {}
-void NEOPIXEL_SLEEP() {}
+// Re-assert before System OFF: the level is retained there, and that is
+// the case that costs a battery rather than a few mA of run current.
+void NEOPIXEL_SLEEP() { npxHoldConvertedBoostOff(); }
 void NEOPIXEL_WAKE() {}
 void neopixelNotifyPurpleSector() {}
 
