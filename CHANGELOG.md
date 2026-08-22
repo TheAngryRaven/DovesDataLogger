@@ -12,6 +12,17 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+- **Drag mode** (plan 0015): main menu → **Drag** → pick a distance
+  (1/8 Mile, 1000 ft, 1/4 Mile, 1/2 Mile, 1 Mile) and the session starts
+  — no track file, no detection. The device stages at a standstill,
+  starts the clock rollout-style (11.25 in past the staged position),
+  and ends the run at the target distance, reporting ET, trap speed,
+  and a 0-60 mph split; it re-arms automatically for the next pass. All
+  runs land in one DOVEX session with `race_mode=DRAG` (the laps line is
+  the run ETs — same backwards-compatible trailing-column scheme as
+  SPRINT). The run state machine is the host-tested `drag_timer` unit.
+
 ## [4.1.0] - 2026-08-24
 
 MINOR — new settings and device behaviour, backwards compatible with the

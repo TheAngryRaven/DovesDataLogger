@@ -392,7 +392,8 @@ void NEOPIXEL_LOOP() {
         } else {
           const bool paceValid =
               activeTimerRaceStarted() && activeTimerLaps() >= 1 &&
-              !(sprintModeIsActive() && !activeTimerRunActive());
+              !((sprintModeIsActive() || dragModeIsActive()) &&
+                !activeTimerRunActive());
           if (paceValid) {
             led_modes::renderPace(activeTimerPaceDifference(), stripPx);
           } else if (raceEntryCause == RACE_ENTRY_TACH) {

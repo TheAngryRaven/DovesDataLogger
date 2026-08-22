@@ -185,6 +185,13 @@ to the matching `*_LOOP()`.
 - **Settings** (`settings`) — JSON key/value store on the SD card.
 - **CourseManager** (external library) — owns course detection, sector
   timing, and the Lap Anything fallback once a track is matched.
+- **Drag mode** (`drag_timer` pure unit) — distance runs with no track at
+  all: pick 1/8 mile…1 mile from the menu, stage at a standstill, and a
+  rollout-style launch starts the clock. ET, trap speed, and a 0-60 split
+  per run; re-arms automatically after each pass. The whole state machine
+  (re-latching standstill anchor, interpolated rollout/finish crossings,
+  silent aborts) is host-tested; the sketch keeps only sprint-style glue
+  (plan 0015).
 
 ## Design decisions worth knowing
 
