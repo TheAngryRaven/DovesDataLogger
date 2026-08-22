@@ -31,10 +31,10 @@
 #ifdef FIRMWARE_VERSION_OVERRIDE
   #define FIRMWARE_VERSION _BE_TOSTRING(FIRMWARE_VERSION_OVERRIDE)
 #else
-  // The 4.0.0 release cut (matches the v4.0.0 tag). The webapp still keys
+  // The 4.1.0 release cut (matches the v4.1.0 tag). The webapp still keys
   // the track JSON budget off this — 8 KB at or above 3.2.0 — so never
   // stamp a build below that line again.
-  #define FIRMWARE_VERSION "4.0.0"
+  #define FIRMWARE_VERSION "4.1.0"
 #endif
 
 ///////////////////////////////////////////

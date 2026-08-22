@@ -12,8 +12,30 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
-Slated to release as **4.1.0** (minor — new NeoPixel subsystem on the
-beta channel, plus the fixes below).
+Nothing yet.
+
+## [4.1.0] - 2026-08-22
+
+MINOR — new settings and device behaviour, all backwards compatible. Track
+files, the DOVEX log format, the log filenames and the BLE command protocol
+are byte-for-byte unchanged from 4.0.0, so 4.0.0 logs, tracks and companion
+apps keep working.
+
+**Which of this is live in the release firmware.** The NeoPixel strip
+(subsystem 16) and the SensorEgg EGT POC (subsystem 14) sit behind the
+`BIRDSEYE_ENABLE_NEOPIXEL` / `BIRDSEYE_ENABLE_SENSOREGG` build flags, and
+those flags are **off** in the published `BirdsEye-sense` /
+`BirdsEye-nonsense` images — a flag-on build performs a one-way
+NFC-pads-to-GPIO conversion on hardware that mostly has no LEDs wired, so it
+is not something to push to the whole fleet. Entries below marked
+*(beta channel)* therefore ship as code in this release but are only active
+in a beta build. Everything else is live for every user: the Bluetooth
+download speed-up, the RPM filter rework, the `tach_filter` and pickup-health
+diagnostics, the tach page's corrected `*OVER REV*` header, the pace page's
+`STOPPED` state, the four new Back/Cancel menu rows, and the transfer-mode
+exit fixes. The new LED settings keys are written to `/SETTINGS.json` on
+every build (so a card moved into a beta unit is already configured); only a
+flag-on build reads them.
 
 ### Added
 - **NeoPixel LED strip subsystem** (beta channel only,
@@ -41,12 +63,14 @@ beta channel, plus the fixes below).
   every filename stay exactly as they were, and timezone presentation
   remains the viewing app's job.
 - **Overrev alert** (plan 0007): new `overrev_limit` setting (default 0
-  = disabled) — past it the whole LED chain flashes red until RPM falls
-  back below the normal `rev_limit`. The rev limit warns the engine is
-  at its ceiling; the overrev limit says it's broken.
-- **Temp1 alert threshold setting** (`temp1_alert_c`, default 650 °C):
-  the right status LED is now a tri-state — flashing red at/above the
-  limit, off when good, solid blue when there is no probe signal.
+  = disabled) — past it the whole LED chain flashes red *(beta channel)*
+  and the tach page's `*OVER REV*` header trips *(every build)*, both
+  until RPM falls back below the normal `rev_limit`. The rev limit warns
+  the engine is at its ceiling; the overrev limit says it's broken.
+- **Temp1 alert threshold setting** *(beta channel)* (`temp1_alert_c`,
+  default 650 °C): the right status LED is now a tri-state — flashing red
+  at/above the limit, off when good, solid blue when there is no probe
+  signal.
 - **`tach_filter` setting** (default `smooth`, plan 0009): picks the RPM
   estimator, so the tach can be A/B'd against a live engine at the track
   instead of argued about from a plotted log. `smooth` is the new filter
@@ -60,9 +84,14 @@ beta channel, plus the fixes below).
   thrown away this power-cycle. A count that climbs with RPM is ignition
   ringing or missed sparks reaching the ISR, i.e. the pickup rather than
   the filter.
-- **GPS-search pip**: in race mode without a full GPS lock the strip
-  shows a green pixel bouncing end-to-end instead of the RPM scale, so
-  a not-yet-timing session is visibly "searching".
+- **GPS-search pip** *(beta channel)*: in race mode without a full GPS
+  lock the strip shows a green pixel bouncing end-to-end instead of the
+  RPM scale, so a not-yet-timing session is visibly "searching".
+- **The browser-sim harness can fake a GPS fix.** A "GPS fix" toggle (plus
+  an mph field) streams a deterministic synthetic 25 Hz fix parked on the
+  bundled OKC track's start line, so fix-gated flows — most usefully the
+  on-device course creator, including its 3 s point-averaging hold — can be
+  exercised in the simulator without loading a log file.
 
 ### Changed
 - **Settings file and JSON document buffers raised 512 -> 1024 bytes**
@@ -100,16 +129,15 @@ beta channel, plus the fixes below).
   a flat ~20 RPM (worst case under 300) from 1500 to 14 000 RPM. The cost
   is ~90 ms more lag on a 5500 RPM/s pull. Set `tach_filter` to `legacy`
   to get the old behaviour back.
-- **Engine dies mid-session** (tach-proven sessions): the LED bar goes
-  dark and the pace page shows `STOPPED` instead of a still-counting
-  pace — status LEDs (temp alert) stay live. Clears on restart.
+- **Engine dies mid-session** (tach-proven sessions): the pace page shows
+  `STOPPED` instead of a still-counting pace *(every build)*, and the LED
+  bar goes dark while the status LEDs (temp alert) stay live
+  *(beta channel)*. Clears on restart.
 - **Tach page `*OVER REV*` header** now means actual overrev: it shows
   only when `overrev_limit` is enabled and RPM reaches it (was a
   hardcoded 9999 RPM). The `rev_limit` warning stays on the LED only.
-- **Temp status LED flashes red** (was orange), matching the rev
-  flasher's alert language.
-
-### Changed
+- **Temp status LED flashes red** *(beta channel)* (was orange), matching
+  the rev flasher's alert language.
 - **Bluetooth downloads are faster, and now say why when they are not**
   (plan 0008). A 3.3 MB session downloading at 28.8 KB/s on an iPad
   prompted a look at the whole transfer path. Three things were capping
@@ -178,13 +206,6 @@ beta channel, plus the fixes below).
   filtered DOVEX rows to exactly 13 columns, so logs from 4.0.0 firmware
   (16 columns after the `Temp1`/`Junction1`/`Temp2` additions) injected
   nothing. It now accepts 13+ and reads the stable first 13.
-
-### Added
-- **The browser-sim harness can fake a GPS fix.** A "GPS fix" toggle (plus
-  an mph field) streams a deterministic synthetic 25 Hz fix parked on the
-  bundled OKC track's start line, so fix-gated flows — most usefully the
-  on-device course creator, including its 3 s point-averaging hold — can be
-  exercised in the simulator without loading a log file.
 
 ## [4.0.0] - 2026-08-10
 
@@ -1419,7 +1440,9 @@ Initial tagged release. Core capabilities:
 - 8+ OLED display pages, Bluetooth LE file download / settings / track
   sync, and a low-power sleep mode.
 
-[Unreleased]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v3.1.0...HEAD
+[Unreleased]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v4.1.0...HEAD
+[4.1.0]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v4.0.0...v4.1.0
+[4.0.0]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v3.1.0...v4.0.0
 [3.1.0]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v3.0.2...v3.1.0
 [3.0.2]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v3.0.1...v3.0.2
 [3.0.1]: https://github.com/TheAngryRaven/DovesDataLogger/compare/v3.0.0...v3.0.1
