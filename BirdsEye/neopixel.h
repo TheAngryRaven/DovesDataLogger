@@ -48,6 +48,14 @@
 // Runtime settings, read at boot in BirdsEye.ino's settings block.
 extern uint8_t settingLedBrightness;  // global cap 0-255; 0 = LEDs disabled
 extern int settingRevLimit;           // true RPM: scale ceiling + rev flasher
+// Day/night swap (plan 0010). settingUtcOffsetMin is device-wide rather
+// than LED-specific — it is extern'd here because the LED strip is its
+// only consumer today; move it if a second one appears. The two hours
+// are LOCAL wall clock; equal hours disable the swap.
+extern int16_t settingUtcOffsetMin;
+extern uint8_t settingLedBrightnessNight;
+extern uint8_t settingLedDayStartHour;
+extern uint8_t settingLedNightStartHour;
 
 // One-time UICR NFC->GPIO ensure (may self-reset ONCE on the first
 // flag-on boot — must run before the SoftDevice is enabled and before

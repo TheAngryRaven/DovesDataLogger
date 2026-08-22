@@ -36,8 +36,8 @@ own header first so declaration/definition drift is caught at compile
 time.
 
 The **pure units** (`haversine`, `gps_time`, `gps_validation`,
-`dovex_header`, `filename_validator`, `course_creator`, `track_json`, …)
-deliberately avoid Arduino headers.
+`dovex_header`, `filename_validator`, `course_creator`, `track_json`,
+`local_time`, …) deliberately avoid Arduino headers.
 The *same* `.cpp` is compiled into both the firmware (Arduino picks up
 `.cpp` files in the sketch folder) and the host test binary (CMake). There
 is no copy-paste — the tests exercise the exact code that ships.
@@ -137,8 +137,10 @@ to the matching `*_LOOP()`.
   boot animation and a purple celebration when a session-best sector is
   set (detected race-free against the lap timer's lap-line best-update
   by snapshotting bests at sector open). One rule everything obeys: a
-  global brightness cap (`led_brightness`) applied at a single choke
-  point — no LED channel ever exceeds it. The strip's 5 V boost
+  global brightness cap applied at a single choke point — no LED channel
+  ever exceeds it. Which cap is in force is a local-time decision:
+  `led_brightness` by day, `led_brightness_night` after dark (see
+  *Local time* below). The strip's 5 V boost
   converter has its EN pin driven low in sleep, so System OFF really
   powers the LEDs down. Gated on `BIRDSEYE_ENABLE_NEOPIXEL`: on in
   beta, off (fully compiled out, no UICR write) in master/release.
@@ -149,6 +151,11 @@ to the matching `*_LOOP()`.
   in a paddock. No text is ever entered on-device: names come from the GPS
   clock and are renamed later in the web app. This is also the firmware's
   only track-JSON *writer* — everywhere else the format is read-only.
+- **Local time** (`local_time` pure unit) — UTC plus a fixed signed
+  minute offset (`utc_offset_min`), giving the device a local wall clock.
+  Its only consumer is the LED day/night brightness swap, which needs
+  "7am" to mean the driver's 7am. No DST, and **nothing logged goes
+  through it** — see *Local time is presentation-only* below.
 - **Replay** (`replay`) — instant DOVEX header replay.
 - **Settings** (`settings`) — JSON key/value store on the SD card.
 - **CourseManager** (external library) — owns course detection, sector
@@ -360,10 +367,54 @@ response, the ce82 button frames, the ce82 GPS/RMC frame, and the `0x10`
 record-timer parse are all captured from a genuine remote (the wake advert
 was even replayed to wake a sleeping X4).
 
+### Local time is presentation-only
+
+The GPS delivers UTC and that is what the device *logs*. DOVEX row
+timestamps are Unix epoch milliseconds, and the header `datetime`, the log
+filenames and the generated course names are all UTC too. The
+`utc_offset_min` setting (a fixed signed minute offset — `local_time`) buys
+the device a local wall clock for exactly one purpose: deciding when to
+swap the LED strip to its night brightness, where "7am" has to mean the
+driver's 7am. A US Central driver at 07:30 local is at 12:30 UTC, which a
+naive UTC gate calls the middle of the night.
+
+Nothing in the logging pipeline may call into `local_time`. A log is
+routinely *viewed* somewhere other than where it was recorded, so timezone
+presentation belongs to the app doing the viewing, which knows the reader's
+preference; baking a recording-side offset into the data would just move
+the guess earlier and make it unrecoverable.
+
+There is deliberately **no DST**. A fixed offset walks the boundary an hour
+twice a year, which is beneath the resolution of a dim-after-dark gate,
+whereas rule tables are a standing correctness liability (legislatures keep
+moving the dates) and tzdata is ~100 KB shipped to a sealed device.
+`local_time` is where rules would go if that ever changes — which is why its
+`DateTime` carries a 4-digit year even though the sketch's `gpsData.year`
+is 2-digit.
+
+### The settings file has a hard size ceiling
+
+Every settings read path caps at `sizeof(settingsFileBuffer) - 1`. A file
+larger than that parses as `IncompleteInput`, so *every* key read fails —
+which `SETTINGS_SETUP()` correctly interprets as corruption, quarantines to
+`SETTINGS.json.bad`, and regenerates (losing the BLE name, PIN and
+pairing), whereupon `ensureDefaultSettings()` grows the file back over the
+cap and it happens again on the next boot. A settings key is therefore not
+free: an innocuous four-key addition in plan 0010 took an 18-key, 436-byte
+file to 543 bytes and would have shipped that loop.
+
+Both the file buffer and the `StaticJsonDocument` are 1024 bytes (raised
+from 512) and **must stay equal** — the invariant is that the buffer can
+always hold what the document serializes. `setSettingInner()` also refuses
+any write whose document `overflowed()` or whose `measureJson()` exceeds
+the buffer, so the failure mode is one loudly refused write with the
+previous file intact, rather than a silent unreadable one.
+
 ## Data formats
 
 - **`.dovex`** — 1 KB reserved header (metadata + lap times) then streaming
-  CSV GPS rows after byte 1024. Default and only logging format.
+  CSV GPS rows after byte 1024. Default and only logging format. Every
+  timestamp in it is UTC and stays that way (see *Local time* above).
 - **Track JSON** (`/TRACKS/*.json`) — new object format with `courses[]`
   and `lengthFt`, or an older bare-array format (parsed, but falls back to
   Lap Anything since it has no length to rank courses by).

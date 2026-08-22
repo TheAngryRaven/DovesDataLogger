@@ -8,6 +8,7 @@
 #include "led_animations.h"
 #include "led_frame.h"
 #include "led_modes.h"
+#include "local_time.h"
 #include "nan_bits.h"
 #include "sector_purple.h"
 #include "sensoregg.h"
@@ -142,13 +143,48 @@ void neopixelNotifyPurpleSector() {
 }
 
 /**
+ * @brief The cap in force right now: the day value, or the night one
+ * once the LOCAL wall clock is inside the night window (plan 0010).
+ *
+ * Local time is UTC plus a fixed offset — no DST, no tzdata. Deliberate:
+ * this gate exists so the strip stops blinding the driver after dark,
+ * and an hour of seasonal drift on that boundary is beneath its
+ * resolution. Nothing that gets LOGGED goes through here.
+ *
+ * Two rules that matter:
+ *  - No clock, no swap. gpsData.timeValid is the same gate log-file
+ *    creation waits on and can be ~12.5 min out from a cold start, so
+ *    until it lands we render at DAY brightness. Guessing night would
+ *    mean a strip that comes up dark and looks broken.
+ *  - A night cap of 0 blanks the frame; it does NOT cut the 5 V rail.
+ *    Only settingLedBrightness 0 does that (NEOPIXEL_SETUP/WAKE), and
+ *    it must stay that way — power-cycling the boost converter at 19:00
+ *    mid-session is not a brightness change.
+ */
+static uint8_t npxEffectiveBrightness() {
+  if (settingLedBrightness == 0) return 0;  // master disable
+  if (!gpsData.timeValid) return settingLedBrightness;
+
+  const local_time::DateTime utc = {
+      (uint16_t)(2000 + gpsData.year),  // GpsData carries a 2-digit year
+      gpsData.month, gpsData.day, gpsData.hour, gpsData.minute};
+  const local_time::DateTime lt =
+      local_time::applyOffset(utc, settingUtcOffsetMin);
+  const bool night =
+      local_time::isNight(local_time::minuteOfDay(lt),
+                          (uint16_t)settingLedDayStartHour * 60,
+                          (uint16_t)settingLedNightStartHour * 60);
+  return night ? settingLedBrightnessNight : settingLedBrightness;
+}
+
+/**
  * @brief Push a composed frame: apply THE brightness cap (the single
- * choke point — after this no channel exceeds settingLedBrightness),
- * map logical left-to-right onto the physical wire (the chain is wired
+ * choke point — after this no channel exceeds the cap in force), map
+ * logical left-to-right onto the physical wire (the chain is wired
  * data-in on the RIGHT — led_frame::kChainReversed), and show.
  */
 static void npxPushFrame(led_frame::Frame& frame) {
-  led_frame::applyCap(frame, settingLedBrightness);
+  led_frame::applyCap(frame, npxEffectiveBrightness());
   for (int i = 0; i < led_frame::kPixelCount; i++) {
     int const phys = led_frame::physicalIndex(i);
     npxStrip.setPixelColor((uint16_t)phys, frame.px[i].r, frame.px[i].g,
