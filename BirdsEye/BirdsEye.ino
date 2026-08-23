@@ -2636,8 +2636,12 @@ void loop() {
     }
   }
 
-  // Button hold detection for shutdown/reboot combos
-  updateButtonHoldState();
+  // Button hold detection for shutdown/reboot combos. Bracketed into the
+  // same section as readButtons(): it runs the identical multi-sample
+  // debounce on all three pins, so leaving it out would park a
+  // hold-dependent cost (up to ~1 ms per HELD button) in OTH, where it
+  // reads as unexplained overhead rather than as button sampling.
+  PROFILE_SECTION(loop_profile::kButtons, updateButtonHoldState());
 
   // Long-press left+right (5s) on main menu -> shutdown
   if (currentPage == PAGE_MAIN_MENU &&

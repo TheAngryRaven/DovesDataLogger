@@ -52,7 +52,8 @@ enum Section : uint8_t {
   kIdle,       // checkAutoIdle + autoRaceModeCheck + updateGpsLockHold
   kCamera,     // CAMERA_LOOP: Insta360 FSM step + GPS overlay stream
   kLed,        // NEOPIXEL_LOOP: compose + cap + show
-  kButtons,    // readButtons + resetButtons (multi-sample debounce)
+  kButtons,    // readButtons + updateButtonHoldState (multi-sample
+               // debounce; near-free unless a button is actually held)
   kPages,      // gpsStatusPageLoop + sdFormatPageLoop + courseCreatorLoop
   kDisplay,    // displayLoop: page render + I2C framebuffer push
   kSectionCount
