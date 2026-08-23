@@ -24,6 +24,43 @@ static const uint32_t NPX_BOOST_SETTLE_MS = 5;
 static Adafruit_NeoPixel npxStrip(led_frame::kPixelCount, NEOPIXEL_PIN_DATA,
                                   NEO_GRB + NEO_KHZ800);
 
+///////////////////////////////////////////
+// BOOST EN OWNERSHIP
+//
+// In a normal build this module owns NEOPIXEL_PIN_BOOST_EN outright:
+// HIGH raises the 5 V rail, LOW drops it, and the LOW is what actually
+// keeps it down through System OFF (GPIO levels are retained there —
+// the "blue conn LED stays on after sleep" precedent).
+//
+// A PROFILING build (BIRDSEYE_ENABLE_PROFILING, plan 0011) takes that
+// pin away for its scope output, so all three helpers become no-ops and
+// the regulator is left at its hardware default (EN pulled up = rail
+// on). That is a real, accepted cost, spelled out in project.h: the
+// rail can no longer be switched off, including at shutdown. The pin
+// cannot serve both purposes, and profiling builds are bench builds.
+//
+// Everything else in this file is unchanged by the flag — the strip
+// still renders, because its DATA pin is untouched and the rail it
+// needs is up.
+///////////////////////////////////////////
+#if BIRDSEYE_ENABLE_PROFILING
+static inline void npxBoostPinInit() {}
+static inline void npxBoostEnable() {}
+static inline void npxBoostDisable() {}
+#else
+static inline void npxBoostPinInit() {
+  pinMode(NEOPIXEL_PIN_BOOST_EN, OUTPUT);
+  digitalWrite(NEOPIXEL_PIN_BOOST_EN, LOW);
+}
+static inline void npxBoostEnable() {
+  digitalWrite(NEOPIXEL_PIN_BOOST_EN, HIGH);
+}
+static inline void npxBoostDisable() {
+  pinMode(NEOPIXEL_PIN_BOOST_EN, OUTPUT);
+  digitalWrite(NEOPIXEL_PIN_BOOST_EN, LOW);
+}
+#endif
+
 static bool npxReady = false;  // strip powered + begun; LOOP is live
 static uint32_t npxLastFrameMs = 0;
 
@@ -92,9 +129,9 @@ void NEOPIXEL_SETUP() {
   npxEnsureNfcPinsAreGpio();
 
   // Hold both pins in a defined LOW state first — EN low keeps the 5 V
-  // rail off, data low can't back-power an unpowered strip.
-  pinMode(NEOPIXEL_PIN_BOOST_EN, OUTPUT);
-  digitalWrite(NEOPIXEL_PIN_BOOST_EN, LOW);
+  // rail off, data low can't back-power an unpowered strip. (On a
+  // profiling build the EN half is a no-op; see the block above.)
+  npxBoostPinInit();
   pinMode(NEOPIXEL_PIN_DATA, OUTPUT);
   digitalWrite(NEOPIXEL_PIN_DATA, LOW);
 
@@ -120,7 +157,7 @@ void NEOPIXEL_SETUP() {
   npxEgtAction.clearBelow =
       (float)settingTemp1AlertC - led_modes::kEgtClearDeltaC;
 
-  digitalWrite(NEOPIXEL_PIN_BOOST_EN, HIGH);
+  npxBoostEnable();
   delay(NPX_BOOST_SETTLE_MS);
   npxStrip.begin();
   npxStrip.clear();
@@ -318,15 +355,14 @@ void NEOPIXEL_SLEEP() {
   }
   pinMode(NEOPIXEL_PIN_DATA, OUTPUT);
   digitalWrite(NEOPIXEL_PIN_DATA, LOW);
-  pinMode(NEOPIXEL_PIN_BOOST_EN, OUTPUT);
-  digitalWrite(NEOPIXEL_PIN_BOOST_EN, LOW);
+  npxBoostDisable();
 }
 
 void NEOPIXEL_WAKE() {
   if (settingLedBrightness == 0) {
     return;  // disabled: rail stays off
   }
-  digitalWrite(NEOPIXEL_PIN_BOOST_EN, HIGH);
+  npxBoostEnable();
   delay(NPX_BOOST_SETTLE_MS);
   npxStrip.begin();
   npxStrip.clear();
@@ -368,11 +404,20 @@ void NEOPIXEL_WAKE() {
 ///////////////////////////////////////////
 
 static void npxHoldConvertedBoostOff() {
+#if BIRDSEYE_ENABLE_PROFILING
+  // The profiler owns this pin (plan 0011) — leave it alone entirely,
+  // including the retained-LOW trick below. A build with the strip
+  // compiled out AND profiling on drives no LEDs, so the rail it leaves
+  // up is powering nothing but the boost converter's own quiescent
+  // draw; the pin's scope signal is worth more than that.
+  return;
+#else
   if ((NRF_UICR->NFCPINS & UICR_NFCPINS_PROTECT_Msk) != 0) {
     return;  // pads still NFC — never touched by a flag-off build
   }
   pinMode(NEOPIXEL_PIN_BOOST_EN, OUTPUT);
   digitalWrite(NEOPIXEL_PIN_BOOST_EN, LOW);
+#endif
 }
 
 void NEOPIXEL_SETUP() { npxHoldConvertedBoostOff(); }

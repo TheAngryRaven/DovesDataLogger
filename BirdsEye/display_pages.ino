@@ -858,7 +858,7 @@ void displayPage_tachometer() {
     // Same "logging died" flag as the speed page — this is the tach
     // session's landing page, so the signal has to exist here too.
     display.print(F("  ** NOT LOGGING **"));
-  } else if (runningPageStart == GPS_DEBUG) {
+  } else if (runningPageStart <= GPS_DEBUG) {
     // Debug pages on: spend the subtext line on the tach diagnostic
     // instead of centring the max. Which estimator is running (S/L/R —
     // the `tach_filter` setting) and how many inter-pulse periods the
@@ -1149,6 +1149,84 @@ void displayPage_gps_debug() {
 
   safeDisplayUpdate();
 }
+
+#if BIRDSEYE_ENABLE_PROFILING
+/**
+ * @brief LOOP PROFILE — where a main-loop iteration's time goes.
+ *
+ * First page of the race rotation on a profiling build (plan 0011).
+ * Eight rows, all of them data:
+ *
+ *   253Hz av3.9 mx1802      loop rate, mean and worst iteration (ms)
+ *   GPS 41.2 TCH  0.4       every section's share of the last second,
+ *   ...                     as a percentage, two per row
+ *   BTN 12.0 OTH  4.1       OTH = loop time no section bracketed
+ *
+ * Two markers can lead the first row. '*' means the DWT cycle counter
+ * would not run and the numbers came from micros() instead — at 1 us
+ * resolution most of these sections quantise to zero, so treat the small
+ * ones as noise until that is fixed. '!' means the profiling pin was
+ * refused (NFC pads never converted), so the scope is dark even though
+ * these numbers are good. There is no title row: the rate line plus the
+ * two-column grid is unmistakable, and the eighth row is worth more than
+ * a caption.
+ *
+ * Shares are of WALL TIME, not of the iteration, so they are directly
+ * comparable with what a scope reads off the profiling pin.
+ */
+void displayPage_profile() {
+  resetDisplay();
+
+  const loop_profile::Report& r = profilingReport();
+  if (!r.valid) {
+    display.println(F("LOOP PROFILE"));
+    display.println();
+    display.println(F("sampling..."));
+    safeDisplayUpdate();
+    return;
+  }
+
+  // Clamped so the row can never outgrow the 21-character line. Text
+  // wrap is off, so an overflow would silently truncate rather than
+  // eat a grid row — clamping makes it visible instead ("999Hz" is
+  // obviously pegged).
+  const uint32_t rate = (r.loopRateHz > 999) ? 999 : r.loopRateHz;
+  const uint32_t meanTenthMs = (r.loopMeanUs > 99900) ? 999 : (r.loopMeanUs / 100);
+  const uint32_t maxMs = (r.loopMaxUs > 9999000) ? 9999 : (r.loopMaxUs / 1000);
+
+  char line[24];
+  snprintf(line, sizeof(line), "%s%luHz av%lu.%lu mx%lu",
+           profilingPinLive() ? "" : "!",
+           (unsigned long)rate, (unsigned long)(meanTenthMs / 10),
+           (unsigned long)(meanTenthMs % 10), (unsigned long)maxMs);
+  // '*' prefix = degraded timebase (see the doc comment); '!' = the
+  // profiling pin was refused, so the scope is dark even though these
+  // numbers are good. Both can apply; the timebase one wins the column
+  // because it is the one that makes the numbers untrustworthy.
+  if (profilingTimebaseTag()[0] != 'D') {
+    display.print(F("*"));
+  }
+  display.println(line);
+
+  // Seven rows of two slots covers all thirteen sections plus OTH with
+  // nothing left over — adding a section means finding it a row.
+  char slot[12];
+  for (uint8_t row = 0; row < 7; row++) {
+    for (uint8_t col = 0; col < 2; col++) {
+      const uint8_t idx = (uint8_t)(row * 2 + col);
+      if (idx >= loop_profile::kReportSlots) break;
+      if (col == 1) display.print(F(" "));
+      const uint16_t pm = r.permille[idx];
+      snprintf(slot, sizeof(slot), "%s %2lu.%lu", loop_profile::sectionTag(idx),
+               (unsigned long)(pm / 10), (unsigned long)(pm % 10));
+      display.print(slot);
+    }
+    display.println();
+  }
+
+  safeDisplayUpdate();
+}
+#endif  // BIRDSEYE_ENABLE_PROFILING
 
 void displayPage_internal_fault() {
   resetDisplay();

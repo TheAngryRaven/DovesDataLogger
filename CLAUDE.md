@@ -67,6 +67,11 @@ Core capabilities:
   DovesSensorEgg thermocouple pod's advertising broadcasts (`PW-ADV` v1
   and v2), logs `Temp1`/`Junction1`/`Temp2` DOVEX columns + Temp1/Temp2
   race pages (subsystem 14)
+- **Loop CPU profiling (beta only)**: `BIRDSEYE_ENABLE_PROFILING` times
+  every subsystem call in `loop()`, shows the breakdown on a LOOP PROFILE
+  race page, and drives pin 30 as a scope output — the measurement behind
+  the nRF52840-vs-nRF5340 board decision. **Takes pin 30 from the boost
+  EN line, so a beta image can never switch the 5 V rail** (subsystem 18)
 - **NeoPixel strip**: 11 WS2812 pixels on the NFC pads converted
   to GPIO — 2 status alert LEDs + a 9-px pace-pip / RPM-scale strip with
   a global brightness cap, boot animation, and a purple session-best
@@ -97,6 +102,7 @@ All sketch sources live in `BirdsEye/` so the folder name matches the
 | `display_ui.{h,ino}` | Display init, button reading (multi-sample debounce), menu navigation, I2C bus recovery |
 | `gps_functions.{h,ino}` | GPS init (SparkFun UBX PVT), time conversion, DOVEX logging pipeline, TIMER3 serial buffer ISR, V_BCKP recovery |
 | `neopixel.{h,ino}` | NeoPixel strip glue (subsystem 16): one-time UICR NFC→GPIO ensure, boost-EN power control, 30 Hz compose→cap→show frame loop, sleep/wake hooks; all decision math in the led_* / sector_purple pure units |
+| `profiling.{h,ino}` | Main-loop CPU profiling glue (subsystem 18, beta only): DWT/micros timebase probe, section brackets, the pin-30 scope output, once-a-second rollup. Also the reason a beta build never drives the 5 V boost EN |
 | `replay.{h,ino}` | Instant DOVEX header replay |
 | `sd_functions.{h,ino}` | SD init, track list/JSON parsing (dual format), track manifest, SD access arbitration |
 | `sensoregg.{h,ino}` | SensorEgg wireless EGT: passive BLE scan (observer), scan-callback→loop double buffer, `SENSOREGG_MAC` pairing, Temp1/Junction1 data surface (see subsystem 14) |
@@ -124,6 +130,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `sd_access_policy.{h,cpp}` | SD access arbitration decision table (mode values + grant/deny rules) |
 | `lap_format.{h,cpp}` | ms → `M:SS.mmm` lap-time rendering (three zero-minutes styles), used by all display pages |
 | `setting_parse.{h,cpp}` | Strict integer parsing for `/SETTINGS.json` values. Exists because `atoi()` answers 0 for `""` and `"garbage"`, and 0 is an in-range, **destructive** value for the LED keys (`led_brightness` 0 = strip off + boost rail never raised) — so a blank setting read as a deliberate "off". Rejects anything that is not a complete integer, so the caller's range check keeps the compiled-in default |
+| `loop_profile.{h,cpp}` | Main-loop CPU accounting: per-section tick accumulation, saturating (never wrapping — a uint32 of DWT ticks is only ~67 s), and the once-a-second rollup into shares of wall time, loop rate, mean and worst iteration. Works in TICKS with `ticksPerUs` supplied at rollup, so a sub-microsecond section is not quantised to zero before it is summed. Board-portable by construction — the nRF5340 comparison needs the same instrument |
 | `local_time.{h,cpp}` | UTC + a fixed signed minute offset → local wall clock (4-digit year, correct month/year/leap rollover both ways) + the `isNight()` window test. **No DST, and NOTHING logged goes through it** — saved data stays UTC (subsystem 17) |
 | `led_frame.{h,cpp}` | NeoPixel pixel layout (11 px: 2 status + 9-px strip), `Rgb`/`Frame` PODs, and **`applyCap()` — the single global-brightness choke point** (post-condition: no channel exceeds the cap) |
 | `led_modes.{h,cpp}` | Strip modes + status actions: pace pip math (ms/m, slower = left/red), generic `ScaleSpec` left-fill (RPM red past halfway; temps later), and the `StatusAction` threshold/hysteresis/flash table — the phase-2 assignability hook |
@@ -207,7 +214,7 @@ handoff spec.
 | D3 | Button 3 (Right) | INPUT_PULLUP, RC filter recommended |
 | D0 | Tachometer input | INPUT_PULLUP, falling-edge ISR |
 | PIN_VBAT / VBAT_ENABLE | Battery ADC | 1510/510 ohm divider, 3.6 V ref |
-| Pin 30 (P0.09, NFC1 pad) | 5 V boost converter EN | HIGH = rail on; LOW retained through System OFF. Beta only — needs the one-way UICR NFC→GPIO conversion (subsystem 16) |
+| Pin 30 (P0.09, NFC1 pad) | 5 V boost converter EN | HIGH = rail on; LOW retained through System OFF. Needs the one-way UICR NFC→GPIO conversion (subsystem 16). **On a profiling build this pin is the profiling output instead and EN is never driven** (subsystem 18) |
 | Pin 31 (P0.10, NFC2 pad) | NeoPixel data | 11 px WS2812, GRB, 800 kHz. Same UICR requirement; swap with pin 30 in `neopixel.h` if wired the other way |
 
 ---
@@ -229,6 +236,8 @@ loop()  ~250 Hz
  ├─ updateGpsLockHold()     pin user to tach page until GPS time lock
  ├─ CAMERA_LOOP()           step Insta360 auto-record FSM (GPS/tach fresh)
  ├─ NEOPIXEL_LOOP()         LED strip frame at 30 Hz (also called in parked branches)
+ │   (every call above is PROFILE_SECTION-bracketed; the macro expands to
+ │    the bare call unless BIRDSEYE_ENABLE_PROFILING — subsystem 18)
  ├─ cameraConsumeAutoStop() camera 30s-engine-off stop → endRaceSession + menu
  ├─ calculateGPSFrameRate() 1-second PVT counter
  ├─ readButtons()           multi-sample debounce + edge detection
@@ -486,7 +495,10 @@ loop()  ~250 Hz
   - Boot/menu: `PAGE_BOOT` (999), `PAGE_GPS_STATUS` (900, satellite status
     page every boot lands on — driven by `gpsStatusPageLoop()`, buttons
     deliberately no-op'd in `displayLoop()`), `PAGE_MAIN_MENU` (-1).
-  - Racing: `GPS_DEBUG` (3, GPS pipeline counters + lap debug) and
+  - Racing: `GPS_PROFILE` (2, LOOP PROFILE — **only exists on a
+    profiling build**, subsystem 18; being below `GPS_DEBUG` in a
+    contiguous rotation, it drags the two diagnostic pages in too),
+    `GPS_DEBUG` (3, GPS pipeline counters + lap debug) and
     `GPS_STATS` (4, battery/sats/SD/track status) through `LOGGING_STOP`.
     The two diagnostic pages are **hidden by default at runtime**: the
     `debug_pages` setting (default `hide`) leaves `runningPageStart` at
@@ -1486,6 +1498,92 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   `npxEffectiveBrightness()` renders at the day cap until it lands.
   Guessing night would bring the strip up dark and read as dead hardware.
 
+### 18. Loop CPU Profiling (`profiling.{h,ino}`, `loop_profile.{h,cpp}`)
+
+- **BUILD FLAG — `BIRDSEYE_ENABLE_PROFILING` (`project.h`)**: `0` in
+  master/release (the whole subsystem vanishes — the section brackets
+  are macros that expand to the bare call, so the loop dispatch is
+  byte-identical to what it always was), `1` on the beta channel
+  (`beta.yml`, and `compile-sketch.yml` for PRs targeting `BETA`).
+  Keep any new profiling code behind the flag.
+- **What it is for.** Two board questions gate the commercial design —
+  nRF52840 or nRF5340 (a dedicated network core would take the BLE
+  stack off this CPU), and whether leaving the Arduino core for the
+  Nordic SDK is worth the one-way effort. Both are answerable by
+  measurement, and nothing in the firmware measured anything finer than
+  a `HAS_DEBUG` millisecond-resolution "SLOW LOOP" print. Plan 0011.
+- **"CPU usage" here is NOT a duty cycle, and do not add one.** `loop()`
+  runs back to back with nothing rate-limiting it, so there is no idle
+  task and the honest duty cycle is 100%. What carries information is
+  the SHAPE of an iteration: mean and **worst-case** length (an SD
+  garbage-collection stall of 100 ms–2 s never shows in a mean), the
+  per-subsystem split, and how much no subsystem accounts for.
+- **Two instruments, and the second exists to check the first**:
+  - **The pin.** Pin 30 goes HIGH for the span being profiled and LOW
+    outside it — loop period off the rising edges, span cost off the
+    high time, no software in the measurement path.
+    `PROFILING_PIN_SECTION` picks the span: whole loop body by default,
+    or `-DPROFILING_PIN_SECTION=PROF_SEC_GPS` (and friends — a
+    preprocessor mirror of `loop_profile::Section`, `static_assert`ed
+    against it, because `#if` cannot evaluate a scoped C++ name).
+  - **The rollup.** The same sections timed in software and rolled up
+    once a second onto the `GPS_PROFILE` page.
+- **THE PIN COSTS THE 5 V RAIL — this is the whole trade.** Pin 30 is
+  the NeoPixel boost converter's EN line and cannot be both. The
+  profiler takes it, so a profiling build never drives EN (setup, sleep
+  and the charging-loop resume all no-op via `npxBoost*()` in
+  `neopixel.ino`) and the regulator sits at its hardware default
+  (EN pulled up = rail on). That works because the rail does not need
+  firmware control, only switchability — and switching it is a
+  requirement of **use**, not of **testing**. Two accepted consequences:
+  the rail stays up through System OFF (levels are retained there and
+  the driven LOW was the only thing holding it down — the "blue conn LED
+  stays on after sleep" precedent), so a beta unit asleep on a battery
+  with a strip wired drains it; and if the EN jumper is still physically
+  connected on the rig the toggling chops the rail at loop rate — pull
+  it or tie EN high.
+- **Timebase: DWT, verified, with a self-announcing fallback.** Most
+  sections are well under a microsecond, so `micros()` alone quantises
+  half of them to zero. `profEnableDwt()` turns on the Cortex-M4 cycle
+  counter (64 ticks/µs at 64 MHz) and then **reads it across a spin to
+  prove it moved** — a debug probe can hold TRCENA off and CYCCNTENA is
+  architecturally optional, so setting the bit is not evidence. On
+  fallback the page prefixes its first row with `*`.
+- **The pure unit works in TICKS**, taking `ticksPerUs` only at rollup,
+  so shares come out of raw ticks and lose nothing. Accumulators
+  **saturate, never wrap**: a uint32 of DWT ticks is only ~67 s and a
+  rollup can be arbitrarily late behind a stall — a pegged window reads
+  as pegged, a wrapped one reads as near-idle, which is a lie.
+- **`OTH` is reported, not hidden**: loop time no section bracketed. It
+  is the honesty check on the instrumentation — if it is large, work is
+  happening where `loop()` is not looking.
+- **A scope guard, not a `*_LOOP()`.** Both parked branches (`bleActive`,
+  `usbMscActive`) return early and `enterShutdown()` never returns, so
+  the whole-iteration timing AND the rollup live in `~ProfLoopScope()`
+  (`PROFILE_LOOP_SCOPE()` at the top of `loop()`). `PROFILING_SLEEP()`
+  parks the pin LOW on the shutdown path the destructor never reaches.
+  This module deliberately has no `PROFILING_LOOP()`.
+- **Overhead is inside the numbers, on purpose.** A bracket is two
+  counter reads plus a saturating add (~30 cycles; under 0.1% of a 4 ms
+  loop) and it lands in the section it brackets rather than in `OTH` —
+  what you read is what the instrumented firmware costs. The pin edges
+  are `#if`'d rather than compared at runtime: with the default
+  whole-loop setting the comparison is provably false for every section,
+  and a dead branch in the two hottest functions in the firmware is
+  exactly the cost a profiler must not add.
+- **The page** (`GPS_PROFILE` = 2, first of the race rotation on a
+  profiling build; the session still LANDS on the speed page, so it is
+  three Lefts away). Eight rows, no title: a stats line (`253Hz av3.9
+  mx1802`, `*` = degraded timebase, `!` = pin refused) then seven rows of
+  two slots covering all 13 sections plus `OTH`. **Adding a section means
+  finding it a row** — the grid is exactly full. Because the rotation is
+  a contiguous range and this page sits below `GPS_DEBUG`, a profiling
+  build effectively forces `debug_pages=show`.
+- **Sim**: `profiling.ino` is excluded from the sim TU (BLE-module
+  precedent) and stubbed in `module_stubs.cpp` — there is no pin and
+  host timings of a virtual-clock loop would mean nothing. The pure unit
+  still builds in via `SIM_CORE_SOURCES`.
+
 ---
 
 ## Data Formats
@@ -1724,6 +1822,10 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | SensorEgg RSSI floor | −90 dBm | `sensoregg_protocol.h` |
 | SensorEgg pairing MAC | `SENSOREGG_MAC` (all-zeros = any egg) | `sensoregg.h` |
 | NeoPixel strip flag | `BIRDSEYE_ENABLE_NEOPIXEL`, default **1** on every channel since 4.1.0 | `project.h` |
+| Loop profiling flag | `BIRDSEYE_ENABLE_PROFILING`, default 0; 1 on the beta channel | `project.h` |
+| Profiling pin / span | 30 (`PROFILING_PIN`, = boost EN) / whole loop (`PROFILING_PIN_SECTION`) | `profiling.h` |
+| Profiling rollup window | 1000 ms (`PROFILING_WINDOW_MS`) | `profiling.h` |
+| Profiling timebase | DWT cycle counter, 64 ticks/us; `micros()` fallback (page shows `*`) | `profiling.ino` |
 | NeoPixel pins | 30 = boost EN, 31 = data (NFC pads, post-UICR) | `neopixel.h` |
 | NeoPixel layout | 11 px: status 0 + strip 1–9 (center px 5) + status 10 | `led_frame.h` |
 | LED frame rate | 30 Hz (`NPX_FRAME_INTERVAL_MS` 33) | `neopixel.ino` |
@@ -1815,6 +1917,10 @@ This device operates in ignition-noise environments. Three layers of defense:
     (`beta.yml`, plus `compile-sketch.yml` for PRs targeting `BETA` so the
     flag-on build is compile-checked before it reaches the publish
     workflow). See subsystem 14.
+  - `BIRDSEYE_ENABLE_PROFILING` — off in master/release, **on in beta**
+    (`beta.yml`, plus `compile-sketch.yml` for PRs targeting `BETA`).
+    See subsystem 18: it takes pin 30 from the NeoPixel boost EN line,
+    so a beta image can never switch the 5 V rail.
   - `BIRDSEYE_ENABLE_NEOPIXEL` — **on everywhere since 4.1.0** (the
     `project.h` default; no workflow needs to pass it). The first boot of
     any 4.1.0+ image performs the ONE-WAY UICR NFC→GPIO conversion and

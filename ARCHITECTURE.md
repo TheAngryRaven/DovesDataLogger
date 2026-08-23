@@ -61,9 +61,14 @@ loop()
  ├─ checkAutoIdle()              60 s < 2 mph -> end session
  ├─ autoRaceModeCheck()          RPM/speed on menu -> enter race
  ├─ CAMERA_LOOP()                step the Insta360 auto-record FSM
+ ├─ NEOPIXEL_LOOP()              LED strip frame (30 Hz, self-throttled)
  ├─ button hold combos           shutdown / reboot; menu idle -> shutdown
  ├─ readButtons() / gpsStatusPageLoop() / displayLoop() / resetButtons()
 ```
+
+On the beta channel each of those calls is bracketed by the loop
+profiler (see *Subsystems* below); off beta the brackets are macros that
+expand to the bare call, so the dispatch above is literally unchanged.
 
 Each subsystem exposes `*_SETUP()` (called once from `setup()`) and
 `*_LOOP()` (called each iteration). ISRs stay trivially short and hand off
@@ -158,6 +163,14 @@ to the matching `*_LOOP()`.
   Its only consumer is the LED day/night brightness swap, which needs
   "7am" to mean the driver's 7am. No DST, and **nothing logged goes
   through it** — see *Local time is presentation-only* below.
+- **Loop profiling** (`profiling` + the `loop_profile` pure unit,
+  beta channel only) — times every subsystem call in `loop()`, rolls the
+  result up once a second onto a LOOP PROFILE race page, and drives
+  pin 30 as a scope-readable profiling output. Built to answer two board
+  questions with measurement instead of argument: nRF52840 or nRF5340,
+  and is the Arduino core costing enough to be worth leaving. It takes
+  pin 30 from the NeoPixel boost EN line to do it — see *Profiling costs
+  the 5 V rail* below.
 - **Replay** (`replay`) — instant DOVEX header replay.
 - **Settings** (`settings`) — JSON key/value store on the SD card.
 - **CourseManager** (external library) — owns course detection, sector
@@ -411,6 +424,59 @@ always hold what the document serializes. `setSettingInner()` also refuses
 any write whose document `overflowed()` or whose `measureJson()` exceeds
 the buffer, so the failure mode is one loudly refused write with the
 previous file intact, rather than a silent unreadable one.
+
+### Profiling costs the 5 V rail
+
+A profiling build (`BIRDSEYE_ENABLE_PROFILING`, beta only) drives pin 30
+HIGH for the span being profiled and LOW outside it, so a scope reads the
+loop period off the rising edges with no software in the measurement
+path. Pin 30 is also the NeoPixel boost converter's EN line, and it
+cannot be both.
+
+The profiler takes it. A profiling build therefore never drives EN — not
+at setup, not at sleep, not on the charging-loop resume — and the
+regulator sits at its hardware default (EN pulled up = rail on). That is
+what makes the trade work at all: the rail does not need firmware
+control, it needs to be *switchable*, and switching it is a requirement
+of **use**, not of **testing**.
+
+Two consequences, both deliberate:
+
+- The rail stays up through System OFF. GPIO levels are retained there
+  and the driven LOW was the only thing holding it down (same retention
+  as the "blue conn LED stays on after sleep" report above). A profiling
+  unit left asleep on a battery with a strip wired to it goes flat.
+- If the EN jumper is still physically connected on the rig, the
+  toggling chops the rail at loop rate. Pull it or tie EN high before
+  profiling.
+
+Master and release are untouched: the flag defaults to 0, the section
+brackets are macros that expand to the bare call, and pin 30 goes on
+being EN.
+
+### There is no idle task, so "CPU usage" is not a duty cycle
+
+`loop()` runs back to back with nothing rate-limiting it, so the honest
+duty cycle is 100% and always will be. The profiler therefore reports
+the **shape of an iteration** instead: how long one takes (mean *and*
+worst case — an SD garbage-collection stall of 100 ms–2 s is invisible
+in a mean), how that time divides between subsystems, and how much of it
+no subsystem accounts for. `OTH` — loop time no section bracketed — is
+reported rather than hidden, because it is the honesty check on the
+instrumentation.
+
+Timing comes from the Cortex-M4 DWT cycle counter (64 ticks/µs), not
+`micros()`: most sections are well under a microsecond and 1 µs
+resolution would quantise half of them to zero. DWT is *verified* to be
+counting at setup rather than assumed — a debug probe can hold TRCENA
+off — and the page marks the `micros()` fallback with a leading `*` so a
+reader knows the small numbers stopped meaning anything.
+
+The pure unit accumulates ticks and is handed `ticksPerUs` only at
+rollup, so ratios come out of raw ticks and lose nothing. Its
+accumulators saturate rather than wrap: a uint32 of DWT ticks is only
+~67 s, and a pegged window reads as pegged, where a wrapped one would
+read as near-idle.
 
 ## Data formats
 

@@ -34,14 +34,15 @@ jobs:
       # release tag.
       LAPTIMER_REF: ${{ (github.base_ref == 'BETA' || github.head_ref == 'BETA' || github.ref_name == 'BETA') && 'BETA' || 'v4.3.0' }}
       # Feature flags for this build (see project.h). BETA enables the
-      # SensorEgg POC and the NeoPixel strip exactly as beta.yml does, so
-      # the flag-on build is compile-checked on the PR rather than first
-      # failing on the publish workflow. Everything else builds the
-      # project.h defaults — which since 4.1.0 means the NeoPixel strip is
-      # ON (it is a core feature now; the flag defaults to 1) and only the
-      # SensorEgg POC is off. So the difference between the two arms is
-      # now just SensorEgg and the DovesLapTimer ref.
-      FEATURE_FLAGS: ${{ (github.base_ref == 'BETA' || github.head_ref == 'BETA' || github.ref_name == 'BETA') && '-DBIRDSEYE_ENABLE_SENSOREGG=1 -DBIRDSEYE_ENABLE_NEOPIXEL=1' || '' }}
+      # SensorEgg POC, the NeoPixel strip and loop profiling exactly as
+      # beta.yml does, so the flag-on build is compile-checked on the PR
+      # rather than first failing on the publish workflow. Everything else
+      # builds the project.h defaults — which since 4.1.0 means the
+      # NeoPixel strip is ON (it is a core feature now; the flag defaults
+      # to 1) and only the SensorEgg POC and profiling are off. So the
+      # difference between the two arms is SensorEgg, profiling, and the
+      # DovesLapTimer ref.
+      FEATURE_FLAGS: ${{ (github.base_ref == 'BETA' || github.head_ref == 'BETA' || github.ref_name == 'BETA') && '-DBIRDSEYE_ENABLE_SENSOREGG=1 -DBIRDSEYE_ENABLE_NEOPIXEL=1 -DBIRDSEYE_ENABLE_PROFILING=1' || '' }}
     # Build both XIAO nRF52840 variants. The Sense board has the onboard
     # LSM6DS3 IMU; the plain board does not (accelerometer logging degrades
     # gracefully). Same MCU/BLE/bootloader otherwise.

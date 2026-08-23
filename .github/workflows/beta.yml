@@ -9,7 +9,7 @@ name: beta
 # builds you flash from your phone via DovesDataViewer's beta channel while
 # wrenching at the track.
 #
-# Three things differ from release.yml:
+# Four things differ from release.yml:
 #   1. The image self-reports a beta version. The build injects
 #      -DFIRMWARE_VERSION_OVERRIDE=<base>-beta.<gitsha> so a flashed unit
 #      reports its exact commit over BLE (DIS) — you can read the version off
@@ -23,6 +23,14 @@ name: beta
 #      from master/release, which default the flag to 0. See project.h for
 #      the full flag list — anything else defaulted off stays off here too
 #      (BIRDSEYE_ENABLE_ONBOARD_CHARGING in particular).
+#   4. Beta is also the loop-profiling channel: -DBIRDSEYE_ENABLE_PROFILING=1
+#      turns on the LOOP PROFILE page and the pin-30 scope output (plan
+#      0011). That flag TAKES PIN 30 FROM THE NEOPIXEL BOOST EN LINE, so a
+#      beta image can no longer switch the 5 V rail — including at sleep,
+#      where the level is retained. A beta unit left asleep on a battery
+#      with LEDs wired will drain it. That is the accepted cost of getting
+#      real per-subsystem CPU numbers off the hardware; prod images are
+#      unaffected. See project.h and BirdsEye/profiling.h.
 #
 # NOTE: the build steps intentionally mirror release.yml's build job. If the
 # BSP version, library list, or asset layout changes there, mirror it here.
@@ -104,7 +112,7 @@ jobs:
         run: |
           arduino-cli compile \
             --fqbn "${{ matrix.board.fqbn }}" \
-            --build-property "compiler.cpp.extra_flags=-D${{ matrix.board.define }} -DFIRMWARE_VERSION_OVERRIDE=${{ steps.ver.outputs.betaver }} -DSERIAL_BUFFER_SIZE=256 -DDOVES_DISABLE_DEBUG -DBIRDSEYE_ENABLE_SENSOREGG=1 -DBIRDSEYE_ENABLE_NEOPIXEL=1" \
+            --build-property "compiler.cpp.extra_flags=-D${{ matrix.board.define }} -DFIRMWARE_VERSION_OVERRIDE=${{ steps.ver.outputs.betaver }} -DSERIAL_BUFFER_SIZE=256 -DDOVES_DISABLE_DEBUG -DBIRDSEYE_ENABLE_SENSOREGG=1 -DBIRDSEYE_ENABLE_NEOPIXEL=1 -DBIRDSEYE_ENABLE_PROFILING=1" \
             --output-dir dist \
             --warnings none \
             BirdsEye

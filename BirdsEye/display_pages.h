@@ -58,6 +58,12 @@ void displayPage_optimal_lap();
 void displayPage_gps_lap_list();
 void displayPage_gps_debug();
 
+#if BIRDSEYE_ENABLE_PROFILING
+// Loop CPU profile (plan 0011, beta only) — first page of the race
+// rotation on a profiling build. See the definition for the layout.
+void displayPage_profile();
+#endif
+
 // Stop-logging confirmation.
 void displayPage_stop_logging();
 void displayPage_stop_logging_confirm();

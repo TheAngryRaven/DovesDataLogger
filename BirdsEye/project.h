@@ -40,7 +40,7 @@
 ///////////////////////////////////////////
 // BUILD FEATURE FLAGS
 //
-// Both are plain 0/1 macros with a #ifndef default, so a build can force
+// Each is a plain 0/1 macro with a #ifndef default, so a build can force
 // either state explicitly (-DFLAG=1 / -DFLAG=0). A bare -DFLAG also works
 // (the compiler defines it as 1). Test them with #if, never #ifdef — a
 // deliberate -DFLAG=0 must lose to the feature being off.
@@ -109,6 +109,34 @@
 // neopixel.ino.
 #ifndef BIRDSEYE_ENABLE_NEOPIXEL
   #define BIRDSEYE_ENABLE_NEOPIXEL 1
+#endif
+
+// ---- Main-loop CPU profiling (plan 0011) ----
+//
+// 0 (default — master and release): compiled out completely. The section
+// brackets in loop() vanish (they are macros, not calls), no LOOP PROFILE
+// page exists, and pin 30 goes on being the NeoPixel boost converter's EN
+// line exactly as it always has.
+//
+// 1 (the beta channel passes -DBIRDSEYE_ENABLE_PROFILING=1): every
+// subsystem call in loop() is timed, rolled up once a second onto the
+// LOOP PROFILE race page, and pin 30 becomes a scope-readable profiling
+// output. This exists to measure what a main-loop iteration actually
+// costs on this hardware, as the input to the nRF52840-vs-nRF5340 board
+// decision and to any "what would leaving the Arduino core buy us"
+// comparison.
+//
+// KNOW WHAT THIS COSTS, and it is not free: a profiling build gives up
+// firmware control of the 5 V boost rail. Pin 30 cannot be both EN and a
+// profiling output, so the profiler takes it and the regulator is left at
+// its hardware default (EN pulled up = on). NEOPIXEL_SETUP/SLEEP/WAKE
+// stop driving EN, which means the rail — and the idle current of 11
+// WS2812s — stays up through System OFF, where GPIO levels are retained
+// and nothing else will pull it down. A profiling unit left asleep on a
+// battery goes flat. This is a bench build; do not hand one to a driver.
+// See profiling.h for the pin's wiring caveat and the timebase notes.
+#ifndef BIRDSEYE_ENABLE_PROFILING
+  #define BIRDSEYE_ENABLE_PROFILING 0
 #endif
 
 ///////////////////////////////////////////

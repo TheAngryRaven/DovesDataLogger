@@ -12,7 +12,31 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Main-loop CPU profiling (beta channel only)** — a new
+  `BIRDSEYE_ENABLE_PROFILING` build flag, off in master and release, on
+  in every beta build. It times each subsystem call in `loop()`, rolls
+  the result up once a second onto a new **LOOP PROFILE** race page
+  (loop rate, mean and worst iteration, and every section's share of the
+  last second), and drives **pin 30** as a scope-readable profiling
+  output. Groundwork for the nRF52840-vs-nRF5340 board decision and for
+  judging what leaving the Arduino core would buy. See
+  `docs/plans/0011-loop-cpu-profiling.md`.
+  - Timing comes from the Cortex-M4 DWT cycle counter (64 ticks/µs)
+    with a `micros()` fallback; the page flags the fallback with a
+    leading `*` because at 1 µs resolution the small sections are noise.
+  - New host-tested pure unit `loop_profile` holds all the accounting.
+  - **A beta image can no longer switch the 5 V LED boost rail.** Pin 30
+    is the boost converter's EN line and the profiler takes it, so the
+    regulator is left at its hardware default (on) and is never driven
+    low — including at sleep, where the level is retained. A beta unit
+    left asleep on a battery with a strip wired to it will drain it, and
+    if the EN jumper is still connected the profiling toggles will chop
+    the rail at loop rate. Bench builds only; prod images are unaffected.
+  - On a profiling build the race rotation starts at the profile page,
+    which also pulls the two diagnostic pages in regardless of the
+    `debug_pages` setting.
 
 ## [4.1.0] - 2026-08-22
 
