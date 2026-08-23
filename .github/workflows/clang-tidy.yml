@@ -46,4 +46,6 @@ jobs:
             BirdsEye/led_modes.cpp \
             BirdsEye/led_animations.cpp \
             BirdsEye/sector_purple.cpp \
+            BirdsEye/local_time.cpp \
+            BirdsEye/setting_parse.cpp \
             BirdsEye/ble_stream.cpp

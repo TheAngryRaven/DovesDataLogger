@@ -99,6 +99,7 @@
 #include "haversine.h"
 #include "idle_policy.h"
 #include "local_time.h"
+#include "setting_parse.h"
 #include "neopixel.h"
 #include "replay.h"
 #include "sat_bars.h"
@@ -1018,25 +1019,38 @@ void setup() {
     }
     // NeoPixel strip (plan 0006). Both clamp back to the compiled-in
     // default on a missing or nonsense value, per the house idiom.
-    if (getSetting("led_brightness", buf, sizeof(buf))) {
-      const int b = atoi(buf);
+    //
+    // That idiom needs setting_parse::parseIntSetting, not atoi(): atoi
+    // answers 0 for "" and for "garbage", and for every setting below
+    // EXCEPT rev_limit and temp1_alert_c, 0 is inside the accepted range.
+    // led_brightness 0 disables the LEDs and never raises the 5 V boost
+    // rail, so a blank value read as a deliberate "off" and looked exactly
+    // like dead hardware. parseIntSetting rejects a non-integer outright,
+    // the range check then fails, and the compiled-in default stands.
+    int parsedSetting = 0;
+    if (getSetting("led_brightness", buf, sizeof(buf)) &&
+        setting_parse::parseIntSetting(buf, &parsedSetting)) {
+      const int b = parsedSetting;
       if (b >= 0 && b <= 255) settingLedBrightness = (uint8_t)b;
     }
-    if (getSetting("rev_limit", buf, sizeof(buf))) {
-      const int r = atoi(buf);
+    if (getSetting("rev_limit", buf, sizeof(buf)) &&
+        setting_parse::parseIntSetting(buf, &parsedSetting)) {
+      const int r = parsedSetting;
       // Floor keeps a garbled value from parking the scale at zero;
       // ceiling matches the tach filter's ~20k true-RPM limit.
       if (r >= 1000 && r <= 20000) settingRevLimit = r;
     }
-    if (getSetting("overrev_limit", buf, sizeof(buf))) {
-      const int r = atoi(buf);
+    if (getSetting("overrev_limit", buf, sizeof(buf)) &&
+        setting_parse::parseIntSetting(buf, &parsedSetting)) {
+      const int r = parsedSetting;
       // 0 (the default) disables the whole-chain overrev flash; any
       // other value clamps to the same band as rev_limit.
       if (r == 0) settingOverrevLimit = 0;
       else if (r >= 1000 && r <= 20000) settingOverrevLimit = r;
     }
-    if (getSetting("temp1_alert_c", buf, sizeof(buf))) {
-      const int t = atoi(buf);
+    if (getSetting("temp1_alert_c", buf, sizeof(buf)) &&
+        setting_parse::parseIntSetting(buf, &parsedSetting)) {
+      const int t = parsedSetting;
       // Celsius. Floor above any plausible ambient so a garbled value
       // can't latch the alert at power-on; ceiling past any real EGT.
       if (t >= 50 && t <= 1200) settingTemp1AlertC = t;
@@ -1044,20 +1058,24 @@ void setup() {
     // Local time (plan 0010). The band is the pure unit's, not a literal
     // here, so ±14 h has one home. Out of band keeps the 0 default —
     // i.e. UTC — which is exactly the pre-0010 behaviour.
-    if (getSetting("utc_offset_min", buf, sizeof(buf))) {
-      const int o = atoi(buf);
+    if (getSetting("utc_offset_min", buf, sizeof(buf)) &&
+        setting_parse::parseIntSetting(buf, &parsedSetting)) {
+      const int o = parsedSetting;
       if (local_time::isValidOffsetMinutes(o)) settingUtcOffsetMin = (int16_t)o;
     }
-    if (getSetting("led_brightness_night", buf, sizeof(buf))) {
-      const int b = atoi(buf);
+    if (getSetting("led_brightness_night", buf, sizeof(buf)) &&
+        setting_parse::parseIntSetting(buf, &parsedSetting)) {
+      const int b = parsedSetting;
       if (b >= 0 && b <= 255) settingLedBrightnessNight = (uint8_t)b;
     }
-    if (getSetting("led_day_start_hour", buf, sizeof(buf))) {
-      const int h = atoi(buf);
+    if (getSetting("led_day_start_hour", buf, sizeof(buf)) &&
+        setting_parse::parseIntSetting(buf, &parsedSetting)) {
+      const int h = parsedSetting;
       if (h >= 0 && h <= 23) settingLedDayStartHour = (uint8_t)h;
     }
-    if (getSetting("led_night_start_hour", buf, sizeof(buf))) {
-      const int h = atoi(buf);
+    if (getSetting("led_night_start_hour", buf, sizeof(buf)) &&
+        setting_parse::parseIntSetting(buf, &parsedSetting)) {
+      const int h = parsedSetting;
       if (h >= 0 && h <= 23) settingLedNightStartHour = (uint8_t)h;
     }
     crossingThresholdMeters = settingLapDetectionDistance;

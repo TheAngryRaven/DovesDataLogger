@@ -23,8 +23,8 @@ static const char SETTINGS_BAD_PATH[] = "/SETTINGS.json.bad";
 // string pairs need JSON_OBJECT_SIZE(22) and a <512> doc returns
 // NoMemory. Keep the two numbers equal, and see the measureJson() guard
 // in setSettingInner() before adding more keys.
-static char settingsFileBuffer[1024];
-static StaticJsonDocument<1024> settingsJson;
+static char settingsFileBuffer[SETTINGS_JSON_CAPACITY];
+static StaticJsonDocument<SETTINGS_JSON_CAPACITY> settingsJson;
 
 // 12 racing-adjacent words used to build a friendly default device name so
 // logs dumped from a fleet of devices stay distinguishable. The literals
