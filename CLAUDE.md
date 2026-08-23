@@ -67,7 +67,7 @@ Core capabilities:
   DovesSensorEgg thermocouple pod's advertising broadcasts (`PW-ADV` v1
   and v2), logs `Temp1`/`Junction1`/`Temp2` DOVEX columns + Temp1/Temp2
   race pages (subsystem 14)
-- **NeoPixel strip (beta)**: 11 WS2812 pixels on the NFC pads converted
+- **NeoPixel strip**: 11 WS2812 pixels on the NFC pads converted
   to GPIO — 2 status alert LEDs + a 9-px pace-pip / RPM-scale strip with
   a global brightness cap, boot animation, and a purple session-best
   sector celebration (subsystem 16)
@@ -176,7 +176,7 @@ handoff spec.
 
 | Path | Contents |
 |---|---|
-| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, sim-build (native sim TU + 60 s boot soak + determinism + goldens + lap oracles + two-session carryover, plus a wasm job: emsdk 3.1.61 build + node smoke + `birdseye-sim-wasm` artifact), release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). Per-channel build config: `BETA` builds track DovesLapTimer's `BETA` branch and pass `-DBIRDSEYE_ENABLE_SENSOREGG=1`; master/release pin `v4.3.0` and build the all-flags-off defaults |
+| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, sim-build (native sim TU + 60 s boot soak + determinism + goldens + lap oracles + two-session carryover, plus a wasm job: emsdk 3.1.61 build + node smoke + `birdseye-sim-wasm` artifact), release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). Per-channel build config: `BETA` builds track DovesLapTimer's `BETA` branch and pass `-DBIRDSEYE_ENABLE_SENSOREGG=1`; master/release pin `v4.3.0` and build the `project.h` defaults — which since 4.1.0 means NeoPixel ON, SensorEgg off |
 | `tests/` | Host doctest harness (CMake) for the pure-logic units |
 | `docs/plans/` | Numbered design records (`NNNN-slug.md`, see its README) — the rationale behind each chunk of work; plan-executing commits cite the number. Same convention as DovesDataViewer |
 | `CHANGELOG.md` | Keep-a-Changelog history; release workflow ties to version tags |
@@ -1312,12 +1312,17 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
 
 ### 16. NeoPixel Strip (`neopixel.{h,ino}`, `led_frame/led_modes/led_animations/sector_purple.{h,cpp}`)
 
-- **BUILD FLAG — `BIRDSEYE_ENABLE_NEOPIXEL` (`project.h`)**: `0`
-  (master/release default) compiles the whole subsystem down to no-op
-  `NEOPIXEL_*` entry points — no UICR write, no pin driving, no
-  Adafruit NeoPixel dependency in the image. `1` (beta channel, passed
-  by `beta.yml` + BETA-targeted `compile-sketch.yml` runs) is
-  everything below.
+- **BUILD FLAG — `BIRDSEYE_ENABLE_NEOPIXEL` (`project.h`)**: `1` on
+  **every** channel as of 4.1.0 — master, beta and release — so the strip
+  is a core feature rather than a special build. Everything below is in
+  every image. The cost is charged fleet-wide and cannot be taken back:
+  the first boot after updating performs the ONE-WAY UICR NFC→GPIO
+  conversion and self-resets once, on every device, LEDs wired or not.
+  `0` (no shipped channel sets it) compiles the subsystem out — no
+  Adafruit NeoPixel dependency, and no UICR write on a board that has not
+  already been converted; on one that HAS, the `#else` stubs still hold
+  boost EN low, because a floating EN leaves the 5 V rail up through
+  System OFF.
 - **Hardware**: 11 WS2812 pixels fed by an Adafruit 5 V boost converter.
   Pixels 0 and 10 are status indicators; pixels 1–9 are the strip with
   pixel 5 the centerline. Pin 30 (P0.09/NFC1) drives the boost EN
@@ -1699,7 +1704,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | SensorEgg scanner self-heal | 30 s no packet → stop+start kick | `sensoregg_protocol.h` |
 | SensorEgg RSSI floor | −90 dBm | `sensoregg_protocol.h` |
 | SensorEgg pairing MAC | `SENSOREGG_MAC` (all-zeros = any egg) | `sensoregg.h` |
-| NeoPixel strip flag | `BIRDSEYE_ENABLE_NEOPIXEL`, default 0; 1 on the beta channel | `project.h` |
+| NeoPixel strip flag | `BIRDSEYE_ENABLE_NEOPIXEL`, default **1** on every channel since 4.1.0 | `project.h` |
 | NeoPixel pins | 30 = boost EN, 31 = data (NFC pads, post-UICR) | `neopixel.h` |
 | NeoPixel layout | 11 px: status 0 + strip 1–9 (center px 5) + status 10 | `led_frame.h` |
 | LED frame rate | 30 Hz (`NPX_FRAME_INTERVAL_MS` 33) | `neopixel.ino` |
@@ -1781,8 +1786,9 @@ This device operates in ignition-noise environments. Three layers of defense:
   `compiler.cpp.extra_flags` property — a second `--build-property` for
   one key replaces the first). Local setup: CONTRIBUTING.md "Local build
   flags".
-- **Feature flags** (`project.h`, all default `0`, all tested with `#if`
-  so an explicit `-DFLAG=0` wins):
+- **Feature flags** (`project.h`, tested with `#if` so an explicit
+  `-DFLAG=0` wins; `BIRDSEYE_ENABLE_NEOPIXEL` defaults to `1`, the rest
+  to `0`):
   - `BIRDSEYE_ENABLE_ONBOARD_CHARGING` — off in **every** channel. See
     subsystem 10: HICHG hold + the USB charging UX. The hardware now has
     an external charging circuit.
@@ -1790,10 +1796,12 @@ This device operates in ignition-noise environments. Three layers of defense:
     (`beta.yml`, plus `compile-sketch.yml` for PRs targeting `BETA` so the
     flag-on build is compile-checked before it reaches the publish
     workflow). See subsystem 14.
-  - `BIRDSEYE_ENABLE_NEOPIXEL` — off in master/release, **on in beta**
-    (same two workflows as SENSOREGG). First flag-on boot performs the
-    ONE-WAY UICR NFC→GPIO conversion and self-resets once. See
-    subsystem 16.
+  - `BIRDSEYE_ENABLE_NEOPIXEL` — **on everywhere since 4.1.0** (the
+    `project.h` default; no workflow needs to pass it). The first boot of
+    any 4.1.0+ image performs the ONE-WAY UICR NFC→GPIO conversion and
+    self-resets once, on every device. This is the one flag whose default
+    is 1 — see subsystem 16 and the upgrade note at the top of
+    CHANGELOG.md's 4.1.0 section.
   When adding a flag: give it a `#ifndef` default in `project.h`, decide
   its per-channel value in the workflows, and document it here + in
   CONTRIBUTING.md's flag table.

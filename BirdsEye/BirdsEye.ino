@@ -1078,8 +1078,10 @@ void setup() {
   // beta channel): the one-time UICR NFC->GPIO write needs direct NVMC
   // access, which is illegal once the SoftDevice is up. Also before
   // wdtSetup() so the one-time self-reset can't race the watchdog. Needs
-  // SETTINGS_SETUP (led_brightness) — a no-op unless
-  // BIRDSEYE_ENABLE_NEOPIXEL is set (beta channel only).
+  // SETTINGS_SETUP (led_brightness). Since 4.1.0 this runs on EVERY
+  // channel — BIRDSEYE_ENABLE_NEOPIXEL defaults to 1 — so the first boot
+  // of any 4.1.0+ image is the one that spends the NFC pads and resets
+  // once. See project.h.
   NEOPIXEL_SETUP();
 
   // Camera auto-record: load the persisted Insta360 serial + init the FSM

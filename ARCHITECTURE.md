@@ -142,8 +142,10 @@ to the matching `*_LOOP()`.
   `led_brightness` by day, `led_brightness_night` after dark (see
   *Local time* below). The strip's 5 V boost
   converter has its EN pin driven low in sleep, so System OFF really
-  powers the LEDs down. Gated on `BIRDSEYE_ENABLE_NEOPIXEL`: on in
-  beta, off (fully compiled out, no UICR write) in master/release.
+  powers the LEDs down. `BIRDSEYE_ENABLE_NEOPIXEL` is on in **every**
+  channel as of 4.1.0, which is what makes the strip a core feature — at
+  the price of a one-way, fleet-wide UICR NFC→GPIO conversion on the
+  first boot after updating.
 - **Course creator** (`course_creator` + `track_json` pure units, glued
   into the menu/pages/SD modules) — authors a track course on the device
   by walking to each cone and holding for a 3 s GPS average. Autocross

@@ -31,10 +31,10 @@
 #ifdef FIRMWARE_VERSION_OVERRIDE
   #define FIRMWARE_VERSION _BE_TOSTRING(FIRMWARE_VERSION_OVERRIDE)
 #else
-  // The 4.0.0 release cut (matches the v4.0.0 tag). The webapp still keys
+  // The 4.1.0 release cut (matches the v4.1.0 tag). The webapp still keys
   // the track JSON budget off this — 8 KB at or above 3.2.0 — so never
   // stamp a build below that line again.
-  #define FIRMWARE_VERSION "4.0.0"
+  #define FIRMWARE_VERSION "4.1.0"
 #endif
 
 ///////////////////////////////////////////
@@ -84,21 +84,31 @@
 
 // ---- NeoPixel strip (11 px: 2 status + 9-px pace/RPM strip) ----
 //
-// 0 (default — master and release): the whole subsystem is compiled out.
-// The module's entry points become no-ops and, critically, the firmware
-// NEVER writes UICR->NFCPINS and never drives pins 30/31 (P0.09/P0.10,
-// the NFC pads) — a flag-off build leaves the pads exactly as it found
-// them.
+// 1 (default — master, beta and release all ship this as of 4.1.0): the
+// strip is a CORE feature, present in every image so a logger works the
+// moment someone wires LEDs to it. On first boot NEOPIXEL_SETUP()
+// converts the NFC pads to GPIO by programming UICR->NFCPINS and
+// self-resets once so the pin latch takes effect. After that: pin 30 =
+// boost converter EN, pin 31 = WS2812 data. See plan 0006 and neopixel.h.
 //
-// 1 (the beta channel passes -DBIRDSEYE_ENABLE_NEOPIXEL=1): on first
-// boot NEOPIXEL_SETUP() converts the NFC pads to GPIO by programming
-// UICR->NFCPINS (a ONE-WAY change — undoing it needs a full chip erase,
-// i.e. a bootloader reflash; accepted, NFC is never used on this
-// hardware) and self-resets once so the pin latch takes effect. After
-// that: pin 30 = boost converter EN, pin 31 = WS2812 data. See plan
-// 0006 and neopixel.h.
+// KNOW WHAT THIS COSTS, because it is charged to every unit in the field,
+// not just the ones with LEDs on them. The UICR write is ONE-WAY — undoing
+// it needs a full chip erase, i.e. a bootloader reflash over USB — so the
+// first boot after updating to 4.1.0 permanently spends the NFC pads and
+// reboots itself once, on every device, wired for LEDs or not. That was the
+// deliberate 4.1.0 decision (NFC is not used on this hardware and the pads
+// are otherwise idle); it is recorded here rather than in a commit message
+// because nothing about a later build can undo it.
+//
+// 0 (no shipped channel sets this; -DBIRDSEYE_ENABLE_NEOPIXEL=0 forces it):
+// the subsystem is compiled out — no Adafruit_NeoPixel dependency, and on a
+// board that has NOT already been converted the firmware never writes UICR
+// and never drives pins 30/31. On one that HAS (it ran a flag-on build
+// before), the stubs still hold the boost EN pin low, because a floating EN
+// leaves the 5 V rail up through System OFF — see the #else block in
+// neopixel.ino.
 #ifndef BIRDSEYE_ENABLE_NEOPIXEL
-  #define BIRDSEYE_ENABLE_NEOPIXEL 0
+  #define BIRDSEYE_ENABLE_NEOPIXEL 1
 #endif
 
 ///////////////////////////////////////////
