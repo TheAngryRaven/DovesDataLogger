@@ -100,20 +100,32 @@ bool renderBoot(uint32_t tMs, uint32_t seed, Frame& out) {
   return true;
 }
 
-bool renderPurple(uint32_t tMs, uint32_t seed, Frame& out) {
+namespace {
+
+// The shared purple core. Both celebrations are the same animation with
+// different timings and a different number of wave passes, so there is
+// exactly one implementation of the wave/hold/fade and one place a
+// visual tweak has to land.
+bool renderPurpleSpec(uint32_t tMs, uint32_t seed, Frame& out,
+                      uint32_t durationMs, uint32_t waveMs, int waves,
+                      uint32_t fadeStartMs) {
   led_frame::clear(out);
-  if (tMs >= kPurpleDurationMs) {
+  if (tMs >= durationMs) {
     return false;
   }
 
   // Chain-absolute center of the whole 11-px run (strip centerline).
   const int center = led_frame::kStripFirst + led_frame::kStripCenter;
+  const uint32_t wavePhaseEnd = waveMs * (uint32_t)waves;
 
-  if (tMs < kPurpleWaveMs) {
-    // Expanding wave: radius sweeps 0..full-chain over the wave phase;
-    // the wavefront pixel gets a white kick so the edge reads as motion.
+  if (tMs < wavePhaseEnd) {
+    // Expanding wave: radius sweeps 0..full-chain over each pass; the
+    // wavefront pixel gets a white kick so the edge reads as motion. A
+    // second pass simply restarts the sweep (tMs % waveMs), which is why
+    // a single-pass spec is bit-identical to the original code.
+    const uint32_t phase = tMs % waveMs;
     const int maxRadius = kPixelCount - 1 - center + 1;  // reaches px 10
-    int const radius = (int)((tMs * (uint32_t)(maxRadius + 1)) / kPurpleWaveMs);
+    int const radius = (int)((phase * (uint32_t)(maxRadius + 1)) / waveMs);
     for (int i = 0; i < kPixelCount; i++) {
       int const d = i > center ? i - center : center - i;
       if (d < radius) {
@@ -128,17 +140,29 @@ bool renderPurple(uint32_t tMs, uint32_t seed, Frame& out) {
 
   // Hold solid, then fade.
   uint32_t level = 255;
-  if (tMs >= kPurpleFadeStartMs) {
-    level = ((kPurpleDurationMs - tMs) * 255) /
-            (kPurpleDurationMs - kPurpleFadeStartMs);
+  if (tMs >= fadeStartMs) {
+    level = ((durationMs - tMs) * 255) / (durationMs - fadeStartMs);
   }
   for (int i = 0; i < kPixelCount; i++) {
     out.px[i] = led_frame::scale(led_frame::kPurple, (uint8_t)level);
   }
-  if (tMs < kPurpleFadeStartMs) {
+  if (tMs < fadeStartMs) {
     addSparkles(out, tMs, seed, 48);
   }
   return true;
+}
+
+}  // namespace
+
+bool renderPurple(uint32_t tMs, uint32_t seed, Frame& out) {
+  return renderPurpleSpec(tMs, seed, out, kPurpleDurationMs, kPurpleWaveMs,
+                          1, kPurpleFadeStartMs);
+}
+
+bool renderPurpleLap(uint32_t tMs, uint32_t seed, Frame& out) {
+  return renderPurpleSpec(tMs, seed, out, kPurpleLapDurationMs,
+                          kPurpleLapWaveMs, kPurpleLapWaves,
+                          kPurpleLapFadeStartMs);
 }
 
 }  // namespace led_animations

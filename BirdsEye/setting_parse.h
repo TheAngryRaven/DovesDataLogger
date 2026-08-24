@@ -13,7 +13,7 @@
 //                                    if (inRange(v)) applyIt(v); }
 //
 // which is safe only while 0 is OUT of the accepted range — true for
-// rev_limit (floor 1000) and temp1_alert_c (floor 50), and FALSE for
+// target_rpm (floor 1000) and temp1_alert_c (floor 50), and FALSE for
 // every setting plan 0006/0010 added. For led_brightness, 0 is a real and
 // destructive value: it disables the LEDs and the 5 V boost rail never
 // comes up. So a blank or corrupt led_brightness did not "clamp back to

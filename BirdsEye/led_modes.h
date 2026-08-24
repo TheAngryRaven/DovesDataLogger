@@ -71,6 +71,15 @@ struct ScaleSpec {
 // starts turning red past the halfway mark".
 constexpr float kRpmRedFrac = 0.5f;
 
+// The SPEED bar (plan 0012) has NO red band. The RPM bar's red half
+// means "approaching the limiter — back off"; there is no equivalent
+// hazard in approaching your target speed, and painting the same nine
+// pixels red for the thing you were aiming at inverts their meaning.
+// renderScale()'s redFrom becomes kStripCount, which no lit index ever
+// reaches, so the bar is green all the way up. The "you got there"
+// signal is a full bar, plus the `speed` status-LED mode.
+constexpr float kSpeedRedFrac = 1.0f;
+
 // Left-fill: lit count = round(fraction * 9), value clamped into
 // [min, max]. Unlit pixels are off.
 void renderScale(float value, const ScaleSpec& spec,
@@ -84,6 +93,7 @@ enum class Source : uint8_t {
   kNone = 0,
   kRpm,
   kEgtC,
+  kSpeedMph,
 };
 
 // One status LED's assignment. POD on purpose: the phase-2 settings
@@ -118,6 +128,19 @@ constexpr float kRevClearFrac = 0.97f;
 
 constexpr uint16_t kRevFlashHalfPeriodMs = 100;  // urgent
 constexpr uint16_t kEgtFlashHalfPeriodMs = 250;  // noticeable, calmer
+
+// Speed target (plan 0012). GPS speed noise is roughly absolute in mph,
+// not proportional, so the release point is a fixed delta below the
+// threshold rather than kRevClearFrac's percentage. Reaching a target
+// is good news, not an alarm, so it flashes at the calmer EGT rate.
+constexpr float kSpeedClearDeltaMph = 2.0f;
+constexpr uint16_t kSpeedFlashHalfPeriodMs = 250;
+
+// Is a flash in its ON phase right now? THE single definition of flash
+// phase — evalStatus() uses it, and so does any mode that flashes
+// without a threshold latch (led_status' camera mode). A half-period of
+// 0 means solid: a rate of zero is a configuration, not a divide-by-zero.
+bool flashOn(uint32_t nowMs, uint16_t halfPeriodMs);
 
 // Evaluate one action. valid=false (stale/NaN input — the glue decides,
 // isNanF-guarded) releases the latch and shows the action's

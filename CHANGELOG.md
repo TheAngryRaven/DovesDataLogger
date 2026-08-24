@@ -28,6 +28,35 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ### Added
 
+- **Assignable LED status modes** — the two status pixels are no longer
+  hardcoded. `led_status_left` and `led_status_right` each select one of
+  eight modes from the companion app: **Off**, **Target RPM** (the old
+  rev flasher), **Target speed**, **GPS** (red no sats / yellow sats but
+  no fix / blue fix but no time lock / green locked), **Camera sync**
+  (yellow session-running-camera-not-up / flashing blue linked but not
+  subscribed / steady blue ready / red recording), **Last lap** and
+  **Last sector** (green faster than the previous one, red slower, purple
+  a session best), and **EGT** (SensorEgg builds only). The GPS and
+  camera modes stay lit on the main menu — they answer "am I ready to
+  drive", which is a paddock question. See
+  `docs/plans/0012-led-status-modes.md`.
+  - The lap and sector indicators compare against the **previous** lap or
+    the same sector on the previous lap, deliberately not against the
+    session best: a best-based indicator only ever answers purple or red
+    and tells you nothing about whether you are improving. Nothing to
+    compare against yet renders dark rather than guessing, so lap 1 is
+    unlit.
+- **A speed bar for sessions with no tachometer.** With the engine
+  signal absent the 9-px bar used to sit dark until the first lap
+  completed. It now scales against a new **`target_speed_mph`** setting
+  (default 60 mph, stored in mph — the app converts for display) until
+  pace timing takes over. The speed bar is green all the way up: the RPM
+  bar's red band means "approaching the limiter", and there is no
+  equivalent hazard in reaching a speed you were aiming for.
+- **The purple celebration is now two-stage.** A session-best **sector**
+  keeps the 1.6 s animation; a session-best **lap** gets a longer 2.6 s
+  version with two wave passes, and outranks a sector celebration when
+  both land on the same crossing.
 - **Connection interval + PHY on the Bluetooth transfer page** — a second
   diagnostic line during a transfer (e.g. `15.0ms 2M`) alongside plan 0008's
   rate/SD/PDU/payload line. These are the two throughput levers the central
@@ -74,6 +103,37 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   - On a profiling build the race rotation starts at the profile page,
     which also pulls the two diagnostic pages in regardless of the
     `debug_pages` setting.
+
+
+### Changed
+
+- **`rev_limit` is now `target_rpm`.** It always was the shift/warning
+  point — `overrev_limit` is the real limit — and the old name taught
+  the wrong thing to everyone who opened `/SETTINGS.json`. Existing
+  devices migrate on first boot: the old value is copied into the new key
+  and the old key removed, and the old key is only dropped once the new
+  one is confirmed written. No user action needed, and a tuned value is
+  never lost.
+- **The DOVEX `Temp1` / `Junction1` / `Temp2` columns are now written
+  only on SensorEgg builds.** Until now they were written on every
+  channel, as the literal `nan` on a stock image, so the log shape never
+  forked. Stock logs are now 13 data columns and SensorEgg logs 16.
+  Readers key the data section off its own CSV header line, where all
+  three are optional, so both shapes load — but anything that assumed a
+  fixed 16-column row needs to read the header. The `temp1_alert_c`
+  setting is likewise SensorEgg-only now.
+- The right status LED's default is **EGT** on a SensorEgg build (what it
+  did before) and **Last lap** on a stock one.
+
+### Fixed
+
+- **The right status LED no longer sits solid blue for an entire race on
+  a logger without SensorEgg support.** The pixel was hardwired to the
+  Temp1 tri-state, whose "no probe signal" state is a solid blue — and on
+  a stock build the reading is permanently unavailable, so every shipped
+  logger with LEDs fitted showed it from lights-out to chequered flag. A
+  build with no probe now renders that mode dark, because there is no
+  signal there to be missing.
 
 ## [4.1.0] - 2026-08-22
 

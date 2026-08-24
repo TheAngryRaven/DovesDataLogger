@@ -73,9 +73,11 @@ Core capabilities:
   the nRF52840-vs-nRF5340 board decision. **Takes pin 30 from the boost
   EN line, so a beta image can never switch the 5 V rail** (subsystem 18)
 - **NeoPixel strip**: 11 WS2812 pixels on the NFC pads converted
-  to GPIO — 2 status alert LEDs + a 9-px pace-pip / RPM-scale strip with
-  a global brightness cap, boot animation, and a purple session-best
-  sector celebration (subsystem 16)
+  to GPIO — 2 **user-assignable** status LEDs (eight modes: target RPM,
+  target speed, GPS lock, camera sync, last lap, last sector, EGT, off)
+  flanking a 9-px pace-pip / RPM- or speed-scale strip, with a global
+  brightness cap, boot animation, and a two-stage purple celebration for
+  a session-best sector or lap (subsystem 16)
 
 ---
 
@@ -133,9 +135,10 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `loop_profile.{h,cpp}` | Main-loop CPU accounting: per-section tick accumulation, saturating (never wrapping — a uint32 of DWT ticks is only ~67 s), and the once-a-second rollup into shares of wall time, loop rate, mean and worst iteration, plus measured idle (`SLP`). **Two clocks on purpose**: durations in TICKS with `ticksPerUs` supplied at rollup (so a sub-microsecond section is not quantised to zero), but the WINDOW closed on `millis()` — DWT counts cycles and stops when the core halts, and using it as a wall clock inflated the very first hardware reading. Board-portable by construction — the nRF5340 comparison needs the same instrument |
 | `local_time.{h,cpp}` | UTC + a fixed signed minute offset → local wall clock (4-digit year, correct month/year/leap rollover both ways) + the `isNight()` window test. **No DST, and NOTHING logged goes through it** — saved data stays UTC (subsystem 17) |
 | `led_frame.{h,cpp}` | NeoPixel pixel layout (11 px: 2 status + 9-px strip), `Rgb`/`Frame` PODs, and **`applyCap()` — the single global-brightness choke point** (post-condition: no channel exceeds the cap) |
-| `led_modes.{h,cpp}` | Strip modes + status actions: pace pip math (ms/m, slower = left/red), generic `ScaleSpec` left-fill (RPM red past halfway; temps later), and the `StatusAction` threshold/hysteresis/flash table — the phase-2 assignability hook |
+| `led_modes.{h,cpp}` | Strip modes + status actions: pace pip math (ms/m, slower = left/red), generic `ScaleSpec` left-fill (RPM red past halfway, speed with no red band at all), the `StatusAction` threshold/hysteresis/flash table, and `flashOn()` — the ONE definition of flash phase, shared with `led_status` |
+| `led_status.{h,cpp}` | The eight assignable status-LED modes (subsystem 16): the mode enum + strict name parser that the `led_status_left`/`led_status_right` settings store, the GPS and camera readiness ladders, and `evalMode()` — which delegates every threshold mode to `led_modes::evalStatus` rather than re-implementing hysteresis. `Inputs.eggSupported` is why an `egt` LED is dark on a stock build instead of a permanent solid blue |
 | `led_animations.{h,cpp}` | Boot + purple-sector animations as pure functions of `(tMs, seed)` — hash-based sparkles, no rand()/millis(), golden-testable |
-| `sector_purple.{h,cpp}` | Session-best ("purple") sector detection: open-time best snapshots + a derived S3 defeat the library's lap-line `updateBestSectors()` race; no purple on lap 1 |
+| `sector_purple.{h,cpp}` | The lap/sector CLOSE-EDGE monitor (the name predates half its job): open-time best snapshots + a derived S3 defeat the library's lap-line `updateBestSectors()` race, and the same trick one level up defeats it for `getBestLapTime()`. Emits which sector or lap just closed, its verdict **against the last recorded one** (not the best — that only ever answers purple or red), and the two purple flags. No purple on lap 1 |
 | `tach_filter.{h,cpp}` | Tachometer 1-D Kalman filter — predict/update math, the RPM-aware noise models, the **outlier gate** that keeps one bad ignition edge out of the trace (plan 0009), the `tach_filter` mode parser — **and the engine geometry**: `revsPerPulse` / `minPulseGapUs` from `spark_mode` + `cylinder_count` |
 | `camera_fsm.{h,cpp}` | Insta360 auto-record lifecycle FSM (8 states, all debounce/retry/timeout timing + tunables); board-portable core shared with the nRF54 "Falcon" target |
 | `insta360_protocol.{h,cpp}` | Insta360 X4 BLE frame builders/parsers (wake advert, remote scan response, ce82 buttons, ce82 GPS/RMC frame, ce81 serial parsing, ce81 `0x10` record-timer state parse) with golden-byte tests |
@@ -1203,8 +1206,14 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   (`display_pages.ino` + the page-constant block in `BirdsEye.ino`), and
   returns BLE to lazy init. `1` (passed by `beta.yml`, and by
   `compile-sketch.yml` for PRs targeting `BETA`) is everything described
-  below. The DOVEX `Temp1`/`Junction1` columns are written either way —
-  `nan` when the POC is off — so the log format never forks by channel.
+  below. **Plan 0012 closed the three leaks**: the DOVEX
+  `Temp1`/`Junction1`/`Temp2` columns, the `temp1_alert_c` setting, and
+  the status LED that was hardwired to Temp1 are all now behind the flag
+  too — so the log format DOES fork by channel (13 stock columns vs 16),
+  reversing the earlier uniform-shape rule, and a stock logger no longer
+  shows a permanent solid-blue "no probe signal" pixel all race. The
+  `egt` status mode still parses and round-trips on any build; only its
+  rendering is gated (`led_status::Inputs.eggSupported`).
   Keep any new egg code behind the flag.
 - **What (POC)**: a wireless thermocouple pod (DovesSensorEgg repo) reads a
   K-type EGT probe via MCP9600 and broadcasts EGT + cold junction in BLE
@@ -1393,8 +1402,9 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   monitor → compose by priority — **boot animation > overrev
   whole-chain red flash > purple animation > (parked ‖ !raceActive ‖
   brightness 0 → off) > race rendering** — → `applyCap` → show.
-- **Strip policy** (plan 0007 order): off outside a race session
-  (driving aid, not menu bling). In race, first match wins:
+- **Strip policy** (plan 0007 order + the 0012 speed arm): the 9-px bar
+  is off outside a race session (driving aid, not menu bling); the two
+  status LEDs follow their own rule below. In race, first match wins:
   1. **Engine stopped** (`raceEngineStopped()`: tach-proven session —
      `raceEntryCause == RACE_ENTRY_TACH`, which manual/speed promote
      to — at 0 RPM) → bar OFF; status LEDs stay live (a hot engine
@@ -1410,33 +1420,78 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
      = slower; full deflection ±1.0 ms/m (`kPaceFullScaleMsPerM`,
      0.25/pixel), ±0.125 deadband = dim-white centerline only. Slower =
      LEFT of center in red, faster = RIGHT in green.
-  4. Else → **RPM scale** (green filling left→right, red past halfway,
-     ceiling = `rev_limit`).
-- **Status actions** (`led_modes::StatusAction` PODs — the phase-2
-  assignability hook; settings will parse into the same structs):
-  pixel 0 = rev-limit flasher (red, ≥ `rev_limit`, clears at 97%,
-  100 ms half-period); pixel 10 = Temp1 **tri-state** (red flash ≥
-  `temp1_alert_c`, clears 20 °C below; OFF when good; **solid blue**
-  when the probe signal is NaN/stale — `invalidColor`, a dropout is
-  information). A NaN/stale source (checked with `isNanF()`, NEVER
-  `isnan()` — `-Ofast`) always releases the latch. Latches also release
-  when leaving race mode. **Overrev** reuses the same machinery as a
-  whole-chain action: ≥ `overrev_limit` (setting, 0 = disabled) flashes
-  ALL 11 px red at 100 ms until RPM falls below `rev_limit × 0.97` —
-  the engine-is-broken signal, ranked above the purple celebration.
-  A logger with no SensorEgg shows the blue no-signal LED all race —
-  known, accepted until phase-2 assignability.
-- **Purple sector** (`sector_purple`, host-tested): the library updates
-  best-sector times **at the start/finish crossing**, not at sector
-  lines, so the monitor snapshots each sector's best when the sector
-  OPENS, closes S1/S2 on `getCurrentSector()` transitions, and derives
-  S3 on the lap edge as `lastLapTime − s1 − s2` — immune to the
-  lap-line race. Fires only against a nonzero prior best (no purple on
-  lap 1). Feeds `neopixelNotifyPurpleSector()` → 1.6 s purple
-  wave/hold/fade over ALL 11 px. New sprint-first wrappers:
+  4. **Tach session** (`raceEntryCause == RACE_ENTRY_TACH`) → **RPM
+     scale** (green filling left→right, red past halfway, ceiling =
+     `target_rpm`).
+  5. Else → **SPEED scale** (plan 0012), ceiling = `target_speed_mph`,
+     **green all the way up** (`kSpeedRedFrac = 1.0`). Without a tach
+     the RPM scale was nine dark pixels until the first lap landed.
+     `RACE_ENTRY_TACH` is the gate rather than a live `rpm > 0` test
+     because manual/speed sessions promote to it at >500 rpm
+     (`idle_policy::tachProven`), so it means "has never seen an
+     engine" and cannot flicker between two scales at every stall. The
+     RPM bar's red band means "approaching the limiter"; there is no
+     equivalent hazard in reaching a target speed, so painting it red
+     would invert the meaning of the same nine pixels.
+- **Status LEDs are USER-ASSIGNED** (plan 0012, `led_status`): pixel 0
+  from `led_status_left`, pixel 10 from `led_status_right`, each one of
+  eight modes — `off` / `rpm` (red flash ≥ `target_rpm`, clears at 97%,
+  100 ms) / `speed` (red flash ≥ `target_speed_mph`, clears 2 mph
+  below, dark with no fix) / `gps` (steady red no sats · yellow sats but
+  no fix · blue fix but no time lock · green locked) / `camera` (dark
+  unpaired · yellow session up but camera not · **flashing** blue linked
+  yet not ce82-subscribed, i.e. we cannot command it · steady blue ready
+  · red recording) / `lap` / `sector` (steady green–red–purple verdicts,
+  below) / `egt` (Temp1 tri-state: red flash ≥ `temp1_alert_c`, clears
+  20 °C below, OFF when good, **solid blue** when the probe signal is
+  NaN/stale — a dropout is information).
+  - `rpm`/`speed`/`egt` build a `StatusAction` on the stack and delegate
+    to `led_modes::evalStatus` — hysteresis, latch-release-on-invalid
+    and flash phase have exactly one implementation, with the
+    regression tests they already had. **Never re-implement them.**
+  - A NaN/stale source (checked with `isNanF()`, NEVER `isnan()` —
+    `-Ofast`) always releases the latch. So does leaving race mode, and
+    so does a pixel whose mode is not currently being rendered —
+    a latch left set would flash the instant the next session starts.
+  - **`egt` is dark on a build without `BIRDSEYE_ENABLE_SENSOREGG`**
+    (`led_status::Inputs.eggSupported`), because there is no probe there
+    to lose. Before plan 0012 pixel 10 was hardwired to this mode, so a
+    stock logger showed the blue no-signal state for the whole of every
+    race. The setting still parses and round-trips either way — only the
+    rendering is gated.
+  - **`gps` and `camera` stay lit on the main menu**
+    (`led_status::activeOutsideRace()`); every other mode, and the bar,
+    is race-only.
+  - **Overrev** is not a status mode — it reuses `StatusAction` as a
+    whole-chain action: ≥ `overrev_limit` (setting, 0 = disabled)
+    flashes ALL 11 px red at 100 ms until RPM falls below
+    `target_rpm × 0.97`, the engine-is-broken signal, ranked above the
+    purple celebration.
+- **Lap/sector close-edge monitor** (`sector_purple`, host-tested — the
+  filename predates half its job): the library updates best-sector times
+  **at the start/finish crossing**, not at sector lines, so the monitor
+  snapshots each sector's best when the sector OPENS, closes S1/S2 on
+  `getCurrentSector()` transitions, and derives S3 on the lap edge as
+  `lastLapTime − s1 − s2` — immune to the lap-line race. `bestLapAtOpen`
+  is the same trick one level up, because `getBestLapTime()` is folded at
+  the crossing too. Sprint-first wrappers feed it:
   `activeTimerCurrentSector()`, `activeTimerLapSectorTime(n)`,
-  `activeTimerBestSectorTime(n)` (WaypointLapTimer → 0, monitor stays
-  reset).
+  `activeTimerBestSectorTime(n)` (WaypointLapTimer → 0, sector half
+  stays idle) plus `activeTimerBestLapTime()`.
+  - **Two outputs.** Purple flags → `neopixelNotifyPurpleSector()` /
+    `neopixelNotifyPurpleLap()`. And a **verdict** per close edge, held
+    by the glue until the next one, driving the `lap` / `sector` status
+    modes: green faster than the LAST recorded one, red slower, purple a
+    session best, **dark when there is nothing to compare against**.
+  - **Verdicts compare the last recorded time, NOT the best** — against
+    the best you only ever get purple or red, which says nothing about
+    whether you are improving. Purple still requires beating a nonzero
+    prior best, so lap 1 is dark everywhere.
+  - **Lap tracking does not need sector lines.** Only the sector half is
+    gated on `sectorsConfigured`; a Lap Anything session still reports
+    lap verdicts. Equal times read as "slower" (strict improvement), and
+    a sector that never closed emits no event at all rather than a bogus
+    verdict.
 - **Animations** (`led_animations`): pure functions of `(tMs, seed)` —
   sparkles hash `(seed, timeSlot, pixel)`, no `rand()`/`millis()`
   inside, so frames are golden-testable. Boot: 2.6 s hue comet circling
@@ -1459,9 +1514,11 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
 - **Sim**: `neopixel.ino` excluded from the sim TU (BLE-module
   precedent), surface no-op'd in `module_stubs.cpp`; the four pure
   units build into the sim via `SIM_CORE_SOURCES`.
-- **Phase 2 (planned, not built)**: settings-driven mode selection and
-  per-status-LED action assignment (source/threshold/color), temp
-  scales through the same `ScaleSpec`, C/F preference, brightness UI.
+- **Still not built**: per-mode threshold/colour customisation (today a
+  mode's colours and hysteresis are the unit's, only the assignment is
+  the user's), temp scales through the same `ScaleSpec`, a C/F display
+  preference, and a strip-mode (bar) selector to match the status-LED
+  one.
 
 ### 17. Local Time (`local_time.{h,cpp}`)
 
@@ -1645,6 +1702,14 @@ timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x
   egg link is stale (>1 s), the egg reports an invalid probe/divider, or
   (for `Temp2`) the egg is v1 — a dropout must be a visible gap, never a
   held value. These fields never cause a GPS row to be skipped.
+  **THE THREE COLUMNS EXIST ONLY ON A `BIRDSEYE_ENABLE_SENSOREGG` BUILD**
+  (plan 0012), so a stock log has 13 data columns and a beta log 16.
+  Until 0012 they were written on every channel purely so the shape never
+  forked; three dead `nan` columns on every row of every stock log paid
+  for nothing. Readers must key off the CSV header line (all three
+  optional there) rather than assuming a column count — the companion
+  app's `doveParser.ts` already builds a name→index map, which is why
+  this cost no client change.
 - **Crash safety**: file created with pre-filled newlines to 1024 bytes
   before any data. Header written on session end. If header is empty
   (crash), GPS data after 1024 is still valid.
@@ -1721,8 +1786,11 @@ the one loaded). Sector lines stay optional — zero, one, or two.
   "waypoint_detection_distance": "30",
   "waypoint_speed": "30",
   "led_brightness": "64",
-  "rev_limit": "15000",
+  "target_rpm": "15000",
   "overrev_limit": "0",
+  "target_speed_mph": "60",
+  "led_status_left": "rpm",
+  "led_status_right": "egt",
   "temp1_alert_c": "650",
   "utc_offset_min": "0",
   "led_brightness_night": "16",
@@ -1748,13 +1816,16 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | `cylinder_count` | int | `1` | Cylinders the **pickup sees** — a clamp on one plug wire of a twin sees ONE. Only a shared coil / all-cylinder harness sees them all |
 | `tach_filter` | string | `"smooth"` | RPM estimator (plan 0009). `smooth` = outlier gate + RPM-aware noise models; `legacy` = the pre-0009 filter bit for bit, for A/B against older logs; `raw` = no estimator at all, the `rpm` column is exactly what the pickup delivers. Anything else means `smooth`. Diagnostic knob — the intent is one session each at the track, not a permanent tuning dial |
 | `led_brightness` | int | `64` | NeoPixel global brightness cap 0–255 — no LED channel ever exceeds it (`led_frame::applyCap`). `0` disables the LEDs entirely (boost rail never enabled). Written AND parsed on every channel (`ensureDefaultSettings()` + the boot block in `BirdsEye.ino`); only its *use* is compiled out with the flag. A non-numeric value keeps the 64 default — via `setting_parse::parseIntSetting`, never `atoi()`, because `atoi("")` is 0 and 0 here means "LEDs off" |
-| `rev_limit` | int | `15000` | True RPM WARNING limit: RPM-scale ceiling and the left status LED flasher threshold. Clamp 1000–20000 (tach filter's ceiling) |
-| `overrev_limit` | int | `0` (disabled) | True RPM PROBLEM limit (plan 0007): past it the whole 11-px chain flashes red (outranks the purple celebration) and the tach page shows `*OVER REV*`; latch clears below `rev_limit × 0.97`. 0 = off (no chain flash, no header); else clamp 1000–20000 |
-| `temp1_alert_c` | int | `650` | Temp1 (EGT) alert threshold in **Celsius** for the right status LED: red flash at/above, clears 20 °C below, solid blue when the probe signal is NaN/stale. Clamp 50–1200 |
+| `target_rpm` | int | `15000` | True RPM SHIFT/warning point: RPM-scale ceiling and the `rpm` status-LED flasher threshold. Clamp 1000–20000 (tach filter's ceiling). Was `rev_limit` before plan 0012 — a device carrying the old key has its value migrated into this one on first boot and the old key removed |
+| `overrev_limit` | int | `0` (disabled) | True RPM PROBLEM limit (plan 0007): past it the whole 11-px chain flashes red (outranks the purple celebration) and the tach page shows `*OVER REV*`; latch clears below `target_rpm × 0.97`. 0 = off (no chain flash, no header); else clamp 1000–20000 |
+| `temp1_alert_c` | int | `650` | **SensorEgg builds only** since plan 0012 — a stock image neither writes nor reads it. Temp1 (EGT) alert threshold in **Celsius** for the `egt` status mode: red flash at/above, clears 20 °C below, solid blue when the probe signal is NaN/stale. Clamp 50–1200 |
 | `utc_offset_min` | int | `0` | Minutes east of UTC (US Central standard `-360`, India `330`, Newfoundland `-210`). Clamp ±840; out of band keeps 0 (= UTC). **Presentation only** — nothing logged is converted (subsystem 17) |
 | `led_brightness_night` | int | `16` | NeoPixel cap 0–255 used inside the night window. `0` blanks the strip but leaves the 5 V rail UP — only `led_brightness` 0 cuts the rail |
 | `led_day_start_hour` | int | `7` | **Local** hour the day cap takes over. Clamp 0–23 |
 | `led_night_start_hour` | int | `19` | **Local** hour the night cap takes over. Clamp 0–23. Equal to `led_day_start_hour` = swap disabled (one cap around the clock) |
+| `target_speed_mph` | int | `60` | Ceiling of the LED speed bar on a session with no tachometer, and the `speed` status mode's threshold. **Stored in mph**; the companion app converts for display. Clamp 5–250 — the floor is 5, not 0, because a zero ceiling trips `renderScale`'s span guard and blanks the bar, which is indistinguishable from dead hardware |
+| `led_status_left` | string | `"rpm"` | What the LEFT status pixel shows: `off`/`rpm`/`speed`/`gps`/`camera`/`lap`/`sector`/`egt` (subsystem 16). **Strictly** parsed — anything unrecognised keeps the compiled-in default rather than darkening the LED or picking another mode |
+| `led_status_right` | string | `"egt"` (SensorEgg) / `"lap"` (stock) | Same, for the RIGHT status pixel. `egt` renders dark on a build without SensorEgg support, but still parses and still round-trips over `SGET`/`SLIST` |
 
 - Created automatically on first boot with random BLE values.
 - Missing keys auto-populated on boot via `ensureDefaultSettings()`.
@@ -1865,10 +1936,15 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | LED brightness default | 64 / 255 (`led_brightness`; 0 = disabled) | `settings.ino` |
 | Pace pip full scale / deadband | ±1.0 ms/m (0.25 per pixel) / ±0.125 | `led_modes.h` |
 | RPM scale red fraction | 0.5 (red past halfway) | `led_modes.h` |
-| Rev flasher clear / EGT clear delta | 97% of `rev_limit` / alert − 20 °C | `led_modes.h` |
+| Rev flasher clear / EGT clear delta | 97% of `target_rpm` / alert − 20 °C | `led_modes.h` |
 | GPS-search pip bounce period | 1600 ms round trip (`kSearchBouncePeriodMs`) | `led_modes.h` |
-| Overrev latch clear | `rev_limit × 0.97` (same point as the warning flasher) | `neopixel.ino` |
-| Boot / purple animation | 2600 ms / 1600 ms | `led_animations.h` |
+| Overrev latch clear | `target_rpm × 0.97` (same point as the warning flasher) | `neopixel.ino` |
+| Boot / purple animation | 2600 ms / 1600 ms sector, 2600 ms lap (2 waves) | `led_animations.h` |
+| Status LED modes | `off`/`rpm`/`speed`/`gps`/`camera`/`lap`/`sector`/`egt`; `gps`+`camera` also lit on the menu | `led_status.h` |
+| Status LED defaults | left `rpm`; right `egt` on a SensorEgg build, `lap` otherwise | `settings.ino` |
+| Speed bar ceiling / red band | `target_speed_mph` (default 60, clamp 5–250) / none (`kSpeedRedFrac` 1.0) | `settings.ino`, `led_modes.h` |
+| Speed alert clear delta / flash | 2 mph (`kSpeedClearDeltaMph`) / 250 ms half-period | `led_modes.h` |
+| Camera "cannot command" flash | 400 ms half-period (`kCameraFlashHalfPeriodMs`) | `led_status.h` |
 | UTC offset band | ±840 min (±14 h), `kOffsetMinLimit`; out of band = 0 | `local_time.h` |
 | LED day / night window | local 07:00 → 19:00 (`led_day_start_hour` / `led_night_start_hour`); equal = disabled | `settings.ino` |
 | LED night brightness default | 16 / 255 (`led_brightness_night`; 0 = blank, rail stays UP) | `settings.ino` |

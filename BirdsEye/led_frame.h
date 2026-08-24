@@ -61,6 +61,10 @@ constexpr Rgb kPurple{160, 0, 255};
 constexpr Rgb kBlue{0, 0, 255};
 // Orange needs the green held well down or it reads yellow.
 constexpr Rgb kOrange{255, 64, 0};
+// Yellow sits between kOrange and a true 255/255/0, which on a WS2812
+// reads as a washed-out white rather than yellow. 150 green is the
+// point where it is unmistakably yellow next to kOrange and kGreen.
+constexpr Rgb kYellow{255, 150, 0};
 
 // All pixels off.
 void clear(Frame& f);

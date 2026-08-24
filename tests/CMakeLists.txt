@@ -38,6 +38,7 @@ add_executable(birdseye_tests
   course_prune_test.cpp
   led_frame_test.cpp
   led_modes_test.cpp
+  led_status_test.cpp
   led_animations_test.cpp
   sector_purple_test.cpp
   ble_stream_test.cpp
@@ -69,6 +70,7 @@ add_executable(birdseye_tests
   ${BIRDSEYE_DIR}/track_json.cpp
   ${BIRDSEYE_DIR}/led_frame.cpp
   ${BIRDSEYE_DIR}/led_modes.cpp
+  ${BIRDSEYE_DIR}/led_status.cpp
   ${BIRDSEYE_DIR}/led_animations.cpp
   ${BIRDSEYE_DIR}/sector_purple.cpp
   ${BIRDSEYE_DIR}/ble_stream.cpp

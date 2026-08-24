@@ -8,8 +8,10 @@
 #include "led_animations.h"
 #include "led_frame.h"
 #include "led_modes.h"
+#include "led_status.h"
 #include "local_time.h"
 #include "nan_bits.h"
+#include "camera_ble.h"
 #include "sector_purple.h"
 #include "sensoregg.h"
 #include "tachometer.h"
@@ -69,28 +71,23 @@ static bool npxBootAnimActive = false;
 static uint32_t npxBootAnimStartMs = 0;
 static uint32_t npxBootAnimSeed = 0;
 static bool npxPurpleActive = false;
+static bool npxPurpleIsLap = false;  // which of the two animations is running
 static uint32_t npxPurpleStartMs = 0;
 static uint32_t npxPurpleSeed = 0;
 
-// Purple-sector monitor + status LED latches.
+// Lap/sector close-edge monitor + per-status-LED state.
 static sector_purple::State npxPurpleMon;
-static led_modes::StatusState npxRevState;
-static led_modes::StatusState npxEgtState;
+static led_status::State npxLeftState;
+static led_status::State npxRightState;
 static led_modes::StatusState npxOverrevState;
 
-// Status LED assignments. Hardcoded defaults for now — phase 2 parses
-// user settings into these same PODs (led_modes.h). Thresholds that
-// depend on settings are filled in at NEOPIXEL_SETUP().
-static led_modes::StatusAction npxRevAction = {
-    led_modes::Source::kRpm, 15000.0f, 14550.0f, led_frame::kRed,
-    led_modes::kRevFlashHalfPeriodMs, led_frame::kOff};
-// Temp1 tri-state (plan 0007): red flash when hot, OFF when good, solid
-// BLUE when there is no probe signal (NaN/stale — a dropout is
-// information, not silence).
-static led_modes::StatusAction npxEgtAction = {
-    led_modes::Source::kEgtC, led_modes::kEgtAlertC,
-    led_modes::kEgtAlertC - led_modes::kEgtClearDeltaC, led_frame::kRed,
-    led_modes::kEgtFlashHalfPeriodMs, led_frame::kBlue};
+// The last verdict each indicator mode reports, HELD until the next
+// close edge — that hold is the whole point: the driver looks down some
+// seconds after the line, not at the instant of it. Cleared when the
+// session ends so the next one starts blank.
+static sector_purple::Verdict npxLapVerdict = sector_purple::Verdict::kNone;
+static sector_purple::Verdict npxSectorVerdict = sector_purple::Verdict::kNone;
+
 // Overrev (plan 0007): past this the engine is BROKEN, not just at its
 // ceiling — the whole 11-px chain flashes red. Latch clears down at the
 // normal rev limit's clear point so a spike leaves a visible flash.
@@ -140,22 +137,18 @@ void NEOPIXEL_SETUP() {
     return;
   }
 
-  // Rev flasher tracks the configured limit; clear just below it so
-  // Kalman jitter at the limiter can't strobe the latch.
-  npxRevAction.threshold = (float)settingRevLimit;
-  npxRevAction.clearBelow = (float)settingRevLimit * led_modes::kRevClearFrac;
   // Overrev: fire at the problem limit, release only once back under
-  // the NORMAL limit's clear point — the whole band stays latched.
+  // the TARGET RPM's clear point — the whole band stays latched.
+  // (The per-status-LED thresholds are no longer built here: each
+  // assignable mode derives its own StatusAction from the settings
+  // every frame in led_status::evalMode. This one stays because it
+  // drives the whole chain, not a status pixel.)
   if (settingOverrevLimit > 0) {
     npxOverrevAction.source = led_modes::Source::kRpm;
     npxOverrevAction.threshold = (float)settingOverrevLimit;
     npxOverrevAction.clearBelow =
-        (float)settingRevLimit * led_modes::kRevClearFrac;
+        (float)settingTargetRpm * led_modes::kRevClearFrac;
   }
-  // Temp1 alert threshold from the setting (Celsius), fixed clear delta.
-  npxEgtAction.threshold = (float)settingTemp1AlertC;
-  npxEgtAction.clearBelow =
-      (float)settingTemp1AlertC - led_modes::kEgtClearDeltaC;
 
   npxBoostEnable();
   delay(NPX_BOOST_SETTLE_MS);
@@ -174,7 +167,24 @@ void neopixelNotifyPurpleSector() {
   if (!npxReady) {
     return;
   }
+  // A lap celebration already running outranks a sector one — the last
+  // sector of a purple lap is very often purple too, and re-arming the
+  // shorter animation here would cut the bigger moment short.
+  if (npxPurpleActive && npxPurpleIsLap) {
+    return;
+  }
   npxPurpleActive = true;
+  npxPurpleIsLap = false;
+  npxPurpleStartMs = millis();
+  npxPurpleSeed = micros();
+}
+
+void neopixelNotifyPurpleLap() {
+  if (!npxReady) {
+    return;
+  }
+  npxPurpleActive = true;
+  npxPurpleIsLap = true;  // takes over an in-flight sector animation
   npxPurpleStartMs = millis();
   npxPurpleSeed = micros();
 }
@@ -230,6 +240,60 @@ static void npxPushFrame(led_frame::Frame& frame) {
   npxStrip.show();
 }
 
+/**
+ * @brief Snapshot every source the status modes can read, once per
+ * frame. Built once and evaluated twice (one call per pixel) so the two
+ * LEDs can never disagree about the same instant.
+ *
+ * All of these are trivial flag/staleness reads at 30 Hz. Deliberately
+ * NOT gated on "does either LED actually want this" — that optimisation
+ * costs more in branches than it saves, and loop_profile can say if it
+ * ever stops being true.
+ *
+ * cameraConsumeAutoStop() must NEVER appear here: it clears a latch the
+ * main sketch owns, and a renderer that consumes state is a renderer
+ * that steals a session end.
+ */
+static void npxFillStatusInputs(led_status::Inputs& in) {
+  in.rpm = (float)tachLastReported;
+  in.targetRpm = (float)settingTargetRpm;
+  in.speedMph = gps_speed_mph;
+  in.speedValid = gpsInitialized && gpsData.fix;
+  in.targetSpeedMph = (float)settingTargetSpeedMph;
+
+#if BIRDSEYE_ENABLE_SENSOREGG
+  // isNanF, never isnan: -Ofast folds isnan() to false (nan_bits.h).
+  const float egtC = sensoreggEgtC();
+  in.egtC = egtC;
+  in.egtValid = !isNanF(egtC);
+  in.egtAlertC = (float)settingTemp1AlertC;
+  in.eggSupported = true;
+#else
+  // The accessor is not even called on a stock build. Before plan 0012
+  // it was, unconditionally, and its permanent NaN drove the right
+  // status pixel to a solid blue "no probe signal" for the whole of
+  // every race on every shipped logger. With eggSupported false the
+  // `egt` mode renders dark instead — there is no probe here to lose.
+  in.eggSupported = false;
+#endif
+
+  in.gpsSats = gpsData.satellites;
+  in.gpsFix = gpsData.fix;
+  in.gpsTimeValid = gpsData.timeValid;
+
+  in.cameraPaired = cameraIsPaired();
+  in.sessionActive = raceActive;
+  in.cameraLinkUp = cameraRemoteLinkUp();
+  in.cameraSubscribed = cameraCe82Subscribed();
+  // Our own belief OR the camera's own report: the FSM knows it asked
+  // for a recording, the 0x10 display-string observation knows one is
+  // actually running. Either is reason enough to show red.
+  in.cameraRecording = cameraActivelyRecording() || cameraObservedRecording();
+
+  in.lapVerdict = npxLapVerdict;
+  in.sectorVerdict = npxSectorVerdict;
+}
+
 void NEOPIXEL_LOOP() {
   if (!npxReady) {
     return;
@@ -240,7 +304,9 @@ void NEOPIXEL_LOOP() {
   }
   npxLastFrameMs = now;
 
-  // Purple-sector monitor: poll-and-diff against the active timer.
+  // Lap/sector close-edge monitor: poll-and-diff against the active
+  // timer. One state machine feeds both the purple celebrations and the
+  // held verdicts the lap/sector status modes render.
   {
     sector_purple::Sample smp;
     smp.sectorsConfigured = activeTimerSectorsConfigured();
@@ -248,11 +314,25 @@ void NEOPIXEL_LOOP() {
     smp.currentSector = activeTimerCurrentSector();
     smp.laps = activeTimerLaps();
     smp.lastLapTime = activeTimerLastLapTime();
+    smp.bestLapTime = activeTimerBestLapTime();
     for (int s = 0; s < 3; s++) {
       smp.lapSectorTime[s] = activeTimerLapSectorTime(s + 1);
       smp.bestSectorTime[s] = activeTimerBestSectorTime(s + 1);
     }
-    if (sector_purple::update(npxPurpleMon, smp) != 0) {
+    const sector_purple::Event ev = sector_purple::update(npxPurpleMon, smp);
+    if (ev.closedSector != 0) {
+      npxSectorVerdict = ev.sectorVerdict;
+    }
+    if (ev.lapClosed) {
+      npxLapVerdict = ev.lapVerdict;
+    }
+    // Lap first: notifyPurpleLap() takes over an in-flight sector
+    // animation, and notifyPurpleSector() declines to stomp a lap one,
+    // so this order is what makes the bigger event win when both fire.
+    if (ev.purpleLap) {
+      neopixelNotifyPurpleLap();
+    }
+    if (ev.purpleSector != 0) {
       neopixelNotifyPurpleSector();
     }
   }
@@ -281,24 +361,29 @@ void NEOPIXEL_LOOP() {
   } else {
     npxOverrevState.active = false;
   }
-  // Priority 3: purple celebration.
+  // Priority 3: purple celebration — the longer two-wave version for a
+  // session-best LAP, the original for a session-best SECTOR.
   if (!rendered && npxPurpleActive) {
-    rendered = led_animations::renderPurple(now - npxPurpleStartMs,
-                                            npxPurpleSeed, frame);
+    const uint32_t tMs = now - npxPurpleStartMs;
+    rendered = npxPurpleIsLap
+                   ? led_animations::renderPurpleLap(tMs, npxPurpleSeed, frame)
+                   : led_animations::renderPurple(tMs, npxPurpleSeed, frame);
     npxPurpleActive = rendered;
   }
-  // Priority 4/5: parked or menu -> off; racing -> mode + status.
+  // Priority 4/5: parked -> off; otherwise the bar in race, and the two
+  // assignable status LEDs.
   if (!rendered) {
     led_frame::clear(frame);
     const bool parked = bleActive || usbMscActive;
     if (!parked && raceActive) {
-      // Strip selection (plan 0007 order):
+      // Strip selection (plan 0007 order, plus the 0012 speed arm):
       //   engine died (proven tach session, RPM 0) -> bar OFF — a pace
       //     pip counting next to a dead engine reads as a glitch;
       //   no GPS lock -> green search pip (same fix+timeValid gate that
       //     allows log-file creation);
       //   pace valid -> pace pip;
-      //   else -> RPM scale.
+      //   tach session -> RPM scale;
+      //   else -> SPEED scale.
       led_frame::Rgb stripPx[led_frame::kStripCount];
       bool stripOff = raceEngineStopped();
       if (!stripOff) {
@@ -310,33 +395,75 @@ void NEOPIXEL_LOOP() {
               !(sprintModeIsActive() && !activeTimerRunActive());
           if (paceValid) {
             led_modes::renderPace(activeTimerPaceDifference(), stripPx);
-          } else {
+          } else if (raceEntryCause == RACE_ENTRY_TACH) {
             const led_modes::ScaleSpec rpmSpec = {
-                0.0f, (float)settingRevLimit, led_modes::kRpmRedFrac,
+                0.0f, (float)settingTargetRpm, led_modes::kRpmRedFrac,
                 led_frame::kGreen, led_frame::kRed};
             led_modes::renderScale((float)tachLastReported, rpmSpec, stripPx);
+          } else {
+            // No tachometer has proven itself this session, so an RPM
+            // scale would be nine dark pixels until the first lap lands
+            // (plan 0012). Scale against the target speed instead —
+            // RACE_ENTRY_TACH is the right gate because MANUAL and SPEED
+            // sessions promote to it the moment the engine clears
+            // 500 rpm (idle_policy::tachProven), so this is exactly "has
+            // never seen an engine" and it never flickers per-frame the
+            // way a live `tachLastReported > 0` test would.
+            //
+            // gps_speed_mph, NOT gpsData.speed — that one is knots. The
+            // search-pip branch above already caught !fix, so the speed
+            // is live by the time we get here.
+            const led_modes::ScaleSpec spdSpec = {
+                0.0f, (float)settingTargetSpeedMph, led_modes::kSpeedRedFrac,
+                led_frame::kGreen, led_frame::kRed};
+            led_modes::renderScale(gps_speed_mph, spdSpec, stripPx);
           }
         }
         for (int i = 0; i < led_frame::kStripCount; i++) {
           frame.px[led_frame::kStripFirst + i] = stripPx[i];
         }
       }
-      // Status LEDs stay live even with the bar off — a hot engine
-      // cooling after a stall is exactly when the temp alert matters.
-      // RPM is always a live value (0 when stopped); EGT validity is
-      // the NaN gate — isNanF, never isnan (-Ofast folds isnan to
-      // false, see nan_bits.h). NaN -> the action's invalidColor
-      // (solid blue = no probe signal).
-      frame.px[led_frame::kStatusLeft] = led_modes::evalStatus(
-          npxRevAction, npxRevState, (float)tachLastReported, true, now);
-      const float egtC = sensoreggEgtC();
-      frame.px[led_frame::kStatusRight] = led_modes::evalStatus(
-          npxEgtAction, npxEgtState, egtC, !isNanF(egtC), now);
+    }
+
+    // The two status LEDs. In a session both render whatever the user
+    // assigned; parked on the menu only the modes that mean something
+    // with no session running stay lit (GPS lock and camera readiness —
+    // exactly what you want to see from the paddock). Status LEDs stay
+    // live even when the bar is off: a hot engine cooling after a stall
+    // is precisely when a temp alert matters.
+    if (!parked) {
+      led_status::Inputs in;
+      npxFillStatusInputs(in);
+      const bool showLeft =
+          raceActive || led_status::activeOutsideRace(settingLedStatusLeft);
+      const bool showRight =
+          raceActive || led_status::activeOutsideRace(settingLedStatusRight);
+      // A pixel we are not rendering gets its latch released, not just a
+      // dark colour: leaving one set would let a threshold that tripped
+      // in the last seconds of a session flash the instant the next one
+      // starts, before its own source has said anything.
+      if (showLeft) {
+        frame.px[led_frame::kStatusLeft] =
+            led_status::evalMode(settingLedStatusLeft, in, npxLeftState, now);
+      } else {
+        led_status::reset(npxLeftState);
+      }
+      if (showRight) {
+        frame.px[led_frame::kStatusRight] =
+            led_status::evalMode(settingLedStatusRight, in, npxRightState, now);
+      } else {
+        led_status::reset(npxRightState);
+      }
     } else {
-      // Out of race: release the latches so a stale alert can't flash
-      // the instant the next session starts.
-      npxRevState.active = false;
-      npxEgtState.active = false;
+      led_status::reset(npxLeftState);
+      led_status::reset(npxRightState);
+    }
+
+    if (!raceActive) {
+      // Out of race: drop the held verdicts so the next session starts
+      // blank rather than showing the last one's last lap.
+      npxLapVerdict = sector_purple::Verdict::kNone;
+      npxSectorVerdict = sector_purple::Verdict::kNone;
     }
   }
 
@@ -427,5 +554,6 @@ void NEOPIXEL_LOOP() {}
 void NEOPIXEL_SLEEP() { npxHoldConvertedBoostOff(); }
 void NEOPIXEL_WAKE() {}
 void neopixelNotifyPurpleSector() {}
+void neopixelNotifyPurpleLap() {}
 
 #endif  // BIRDSEYE_ENABLE_NEOPIXEL
