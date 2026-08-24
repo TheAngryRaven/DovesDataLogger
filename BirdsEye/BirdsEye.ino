@@ -370,11 +370,19 @@ volatile uint8_t  tachRingTail = 0;  // Main-loop read index (only TACH_LOOP wri
 volatile bool     tachRingOverflow = false;  // ISR sets on drop; TACH_LOOP clears
 
 // Revolutions per ignition pulse — the single place the engine's geometry
-// enters the RPM path. Set once at boot from spark_mode + cylinder_count;
-// the default (1 cyl, wasted spark) is 1.0, exactly today's behaviour.
+// enters the RPM path. Set once at boot from spark_mode ALONE: one clamp
+// on one plug wire sees one cylinder's ignition, so the engine's cylinder
+// count is not a term (see tach_filter.h "ENGINE GEOMETRY"). Wasted spark
+// / 2-stroke = 1.0, 4-stroke single-fire = 2.0.
 // Applied ONCE, before the Kalman filter, in TACH_LOOP(). No consumer may
 // re-derive or re-apply it — they all read the corrected tachLastReported.
 static float tachRevsPerPulse = 1.0f;
+
+// The engine's cylinder count as configured (clamped). Descriptive only:
+// nothing in the RPM path reads it — it says whether crank speed is being
+// inferred from a single cylinder's firing rate, which is what the
+// settings-UI warning and the boot log report.
+static int tachCylinderCount = 1;
 static const uint32_t tachStopTimeoutUs = 500000;    // 500ms = engine stopped
 
 // Which RPM estimator TACH_LOOP runs (plan 0009). Set once at boot from the
@@ -1032,6 +1040,13 @@ void setup() {
     // Engine geometry. Anything other than an explicit "single" is treated as
     // wasted spark, so a blank, garbled or future value degrades to today's
     // behaviour rather than doubling every RPM reading.
+    //
+    // ONLY spark_mode feeds the RPM math. There is one sense wire and one
+    // clamp, so the pickup sees ONE cylinder's ignition however many the
+    // engine has; cylinder_count is read for the inferred-RPM warning and
+    // the debug line, and is deliberately NOT a divider (it used to be,
+    // which read a V8 on a single plug wire at an eighth of its real crank
+    // speed — see tach_filter.h "ENGINE GEOMETRY").
     {
       bool wastedSpark = true;
       int cylinders = 1;
@@ -1042,8 +1057,9 @@ void setup() {
         const int n = atoi(buf);
         if (n >= tach_filter::kMinCylinders) cylinders = n;
       }
-      tachRevsPerPulse = tach_filter::revsPerPulse(cylinders, wastedSpark);
-      tachMinPulseGapUs = tach_filter::minPulseGapUs(cylinders, wastedSpark);
+      tachCylinderCount = tach_filter::clampCylinderCount(cylinders);
+      tachRevsPerPulse = tach_filter::revsPerPulse(wastedSpark);
+      tachMinPulseGapUs = tach_filter::minPulseGapUs(wastedSpark);
       // RPM estimator (plan 0009). A track-side A/B knob, not a tuning
       // dial: "smooth" is the shipped filter, "legacy" reproduces the
       // pre-0009 one for comparison against existing logs, and "raw"
@@ -1053,7 +1069,14 @@ void setup() {
         tachFilterMode = tach_filter::modeFromSetting(buf);
       }
       debug(F("Engine: cyl="));
-      debug(cylinders);
+      debug(tachCylinderCount);
+      if (tach_filter::rpmIsInferred(tachCylinderCount)) {
+        // Not a fault — the accepted behaviour of every clamp-on inductive
+        // tach — but it belongs in the boot log, because "RPM looks low
+        // between firings" on a multi-cylinder engine is this line, not a
+        // filter bug.
+        debug(F(" (RPM inferred from 1 cylinder)"));
+      }
       debug(F(" spark="));
       debug(wastedSpark ? F("wasted") : F("single"));
       debug(F(" revsPerPulse="));

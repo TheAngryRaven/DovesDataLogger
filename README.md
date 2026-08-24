@@ -223,9 +223,9 @@ Settings are stored in `/SETTINGS.json` on the SD card. The file is created auto
 | `lap_detection_distance` | Crossing detection threshold in meters | `7` |
 | `waypoint_detection_distance` | Waypoint proximity zone in meters (Lap Anything) | `30` |
 | `waypoint_speed` | Minimum speed in mph to activate lap timing | `30` |
-| `spark_mode` | How often the ignition fires: `wasted` = once per revolution (2-stroke, or 4-stroke wasted spark), `single` = once per two revolutions (4-stroke single-fire) | `wasted` |
+| `spark_mode` | How often the plug on the clamped wire fires — the **only** setting that scales RPM: `wasted` = once per revolution (2-stroke, or 4-stroke wasted spark), `single` = once per two revolutions (4-stroke single-fire, i.e. a traditional distributor or magneto) | `wasted` |
 | `display_invert` | Screen colours: `normal` is the white-on-black it has always been, `inverted` swaps them (black text on a lit screen) for glare | `normal` |
-| `cylinder_count` | Cylinders the **pickup sees** — a clamp on one plug wire of a twin sees ONE; only a shared coil or all-cylinder harness sees them all | `1` |
+| `cylinder_count` | The engine's **actual** cylinder count — enter 8 for a V8. It does **not** scale RPM: the pickup is one clamp on one plug wire, so it sees one cylinder's ignition and `spark_mode` alone sets the math. ⚠️ Above 1 cylinder, crank RPM is **inferred from that one cylinder's ignition pulses** — between firings the reading is an assumption, and a cylinder that drops out reads as a stopped engine. This is normal, expected behaviour for every clamp-on inductive tach | `1` |
 
 ## Data Format
 
@@ -403,7 +403,7 @@ DovesDataLogger/                  # repo root
 - **Dead Time**: Volatile flag gating prevents interrupt storms from noisy ignition pickups
 - **Update Rate**: 3Hz with EMA filter (alpha 0.20)
 - **Timeout**: 500ms with no pulse = engine stopped (RPM 0)
-- **Configuration**: 1 pulse per revolution (adjust `tachRevsPerPulse` for multi-cylinder)
+- **Configuration**: `spark_mode` sets the pulses per revolution on the clamped wire — 1 for a 2-stroke or wasted-spark plug, 0.5 for a 4-stroke single-fire (distributor/magneto) plug. The engine's cylinder count does **not** enter it: one clamp reads one cylinder, and its firing rate is the crank speed
 
 ### Display Update Rate
 - **Refresh**: 3Hz (reduces power consumption)

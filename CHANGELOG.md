@@ -104,8 +104,42 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
     which also pulls the two diagnostic pages in regardless of the
     `debug_pages` setting.
 
+### Fixed
+
+- **RPM on multi-cylinder engines — the cylinder count no longer divides
+  it.** Since 4.0.0 the tachometer computed
+  `pulses_per_rev = cylinder_count × spark_factor`, which is only correct
+  for a pickup clamped on a shared coil or distributor king lead. This
+  device has one sense wire and one clamp, and it goes around **one spark
+  plug wire** — so it sees one cylinder's ignition however many the engine
+  has, and the cylinder term divided RPM by that count. A V8 on a
+  traditional magneto, configured honestly as 8 cylinders + single fire,
+  read **an eighth** of its real crank speed. RPM is now
+  `revs_per_pulse = spark_mode == wasted ? 1.0 : 2.0` — the spark mode
+  alone. See `docs/plans/0012-tach-rpm-single-pickup.md`.
+  - **BREAKING for anyone who set `cylinder_count` above 1**: their RPM
+    changes, because it stops being divided. Logs recorded before this
+    release read low by exactly the configured cylinder count. Devices
+    left at the default (1 cylinder) are byte-identical.
+  - The ISR debounce loses the same term — one wire can't deliver pulses
+    faster than the cylinder it wraps fires — so it returns to a flat
+    3 ms (6 ms for single-fire) and the ~20 000 RPM ceiling is now
+    identical in both spark modes instead of falling with each configured
+    cylinder.
 
 ### Changed
+
+- **`cylinder_count` means the engine's actual cylinder count.** It was
+  documented as "cylinders the **pickup sees**", which asked a V8 owner
+  to enter `1` in a field labelled Cylinders — a trap that produced wrong
+  RPM for anyone who read it literally. It is now descriptive: enter what
+  the engine has. Nothing in the RPM path reads it. Above 1 it drives a
+  warning, in the settings UI and in the docs, that crank speed is
+  **inferred from one cylinder's ignition pulses** — between firings the
+  reading is an assumption and a cylinder that drops out reads as a
+  stopped engine, which is the known and accepted behaviour of every
+  clamp-on inductive tach. No settings-file migration: same keys, same
+  defaults, same size.
 
 - **`rev_limit` is now `target_rpm`.** It always was the shift/warning
   point — `overrev_limit` is the real limit — and the old name taught
