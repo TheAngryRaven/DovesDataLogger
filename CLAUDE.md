@@ -1563,19 +1563,31 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   (`PROFILE_LOOP_SCOPE()` at the top of `loop()`). `PROFILING_SLEEP()`
   parks the pin LOW on the shutdown path the destructor never reaches.
   This module deliberately has no `PROFILING_LOOP()`.
-- **Overhead is inside the numbers, on purpose.** A bracket is two
-  counter reads plus a saturating add (~30 cycles; under 0.1% of a 4 ms
-  loop) and it lands in the section it brackets rather than in `OTH` —
-  what you read is what the instrumented firmware costs. The pin edges
+- **Overhead is inside the numbers, on purpose — and it is NOT small.**
+  A bracket is two counter reads plus a saturating add (~30 cycles,
+  ~0.5 µs; ~6–8 µs per iteration across all 13). That was written off
+  as "under 0.1%" against the ~4 ms iteration this file assumed for
+  years; the first hardware run measured a mean iteration **under
+  100 µs**, which puts the instrument at order 10% of what it reports
+  and means the un-instrumented loop is faster than the rate shown. A
+  bracket still lands in the section it brackets rather than in `OTH`,
+  because for a subsystem's SHARE that is the honest accounting — but a
+  section reading under ~1% is at its own bracket's noise floor, so do
+  not rank those against each other. The pin edges
   are `#if`'d rather than compared at runtime: with the default
   whole-loop setting the comparison is provably false for every section,
   and a dead branch in the two hottest functions in the firmware is
   exactly the cost a profiler must not add.
 - **The page** (`GPS_PROFILE` = 2, first of the race rotation on a
   profiling build; the session still LANDS on the speed page, so it is
-  three Lefts away). Eight rows, no title: a stats line (`253Hz av3.9
-  mx1802`, `*` = degraded timebase, `!` = pin refused) then seven rows of
-  two slots covering all 13 sections plus `OTH`. **Adding a section means
+  three Lefts away). Eight rows, no title: a stats line (`14481Hz 61us
+  mx42` — mean in µs below 1 ms and ms above, worst iteration always ms;
+  `*` = degraded timebase, `!` = pin refused) then seven rows of two
+  slots covering all 13 sections plus `OTH`. The stats row's clamps are
+  reciprocal-aware rather than fixed: the first hardware run came back
+  `999Hz av0.0` because both fields had been sized from the stale
+  ~250 Hz assumption, and a clamp that hides the finding is worse than
+  no clamp. **Adding a section means
   finding it a row** — the grid is exactly full. Because the rotation is
   a contiguous range and this page sits below `GPS_DEBUG`, a profiling
   build effectively forces `debug_pages=show`.

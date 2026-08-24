@@ -122,11 +122,16 @@ lose nothing.
   returns at all. A profiler that goes quiet exactly when the firmware
   parks would be measuring the wrong thing, so the whole-iteration
   timing and the rollup live in `~ProfLoopScope()`.
-- **The overhead is inside the numbers.** A bracket is two counter reads
-  plus a saturating add — order 30 cycles, under 0.1% of a 4 ms loop —
-  and it lands in the section it brackets rather than in `OTH`. That is
-  the right place for it: what you read is what the instrumented
-  firmware actually costs.
+- **The overhead is inside the numbers — and at the real loop rate it is
+  order 10%, not the 0.1% first claimed.** A bracket is two counter reads
+  plus a saturating add: ~30 cycles, ~0.5 µs, so ~6–8 µs per iteration
+  across all 13. That was written off against the ~4 ms iteration this
+  project's docs assumed; the first hardware run measured a mean
+  iteration under 100 µs. A bracket still lands in the section it
+  brackets rather than in `OTH`, because for a subsystem's *share* that
+  is the honest accounting — but sections under ~1% sit at their own
+  bracket's noise floor, and the un-instrumented loop is faster than the
+  rate shown.
 - **The pin edges are `#if`'d, not branched.** With the default
   whole-loop setting the runtime comparison is provably false for every
   section, and a dead branch in the two hottest functions in the
@@ -152,11 +157,58 @@ Then:
 - **`OTH` is large** → the instrumentation is incomplete; bracket more
   before drawing any conclusion.
 
+## First hardware run (bench, 2026-08-24)
+
+Not a track session — treat these as a bench baseline, not the answer:
+
+```
+999Hz av0.0 mx42          <- 999 and 0.0 are display clamp artifacts, since fixed
+GPS 20.6   TCH  3.0
+ACC  0.7   BLE  0.8
+EGG  2.3   TRK  1.3
+LAP  2.0   IDL  4.6
+CAM  7.9   LED  3.1
+BTN  8.8   PGE  1.1
+DSP 14.9   OTH 17.6
+```
+
+No `*` and no `!`, so the DWT timebase and the pin were both live. What
+it says, and what it changes:
+
+- **The loop is at least an order of magnitude faster than the ~250 Hz
+  this project's docs had claimed for years.** The rate hit the 999
+  clamp and the mean was under 100 µs — the stats row's clamps had been
+  sized from that stale figure and hid the very finding they were meant
+  to surface. Both fields were rebuilt reciprocal-aware.
+- **`mx` 42 ms against a 1600 ms GPS-ring ceiling and a 4000 ms
+  watchdog.** Worst-case latency is nowhere near anything that matters.
+- **Nothing dominates.** The largest section is `GPS` at 20.6%, and the
+  sections sum to ~88.7% — the remaining ~11% is time outside `loop()`
+  entirely, i.e. the Arduino core's `loop(); yield();` dispatch and the
+  FreeRTOS scheduler. That ~11% is the closest thing to a direct answer
+  on what the core costs.
+- **The shape is polling overhead, not work.** `BTN` at 8.8% with nobody
+  touching a button is six `digitalRead()` calls per iteration at over a
+  kilohertz; `DSP` at 14.9% is mostly a `displayLoop()` that early-returns
+  on a 3 Hz gate; `OTH` at 17.6% is the unbracketed glue's `millis()`
+  calls. Subsystems that need 3–50 Hz are being polled ~1000× faster.
+
+**Read on the board question: this is not a CPU-bound firmware, and
+nothing here argues for an nRF5340 on throughput grounds.** If the 5340
+is bought it should be for BLE reliability — which this page cannot
+measure directly (see the caveat below).
+
 ## Still outstanding
 
-- No hardware numbers are recorded here yet. Once a session has been
-  captured, the headline figures belong in this section — that is the
-  deliverable, not the code.
+- **A session under real load.** The run above was almost certainly
+  without a GPS fix and therefore without logging, so `GPS` never paid
+  for 25 Hz PVT frames, 13 `dtostrf` conversions per row, or SD writes.
+  That is the number that decides things, and it is not captured yet.
+- **The BLE question.** Neither instrument separates SoftDevice /
+  Bluefruit task time from the section it preempted — FreeRTOS preemption
+  smears it across whatever was running. Watching how section *variance*
+  moves when a phone connects or the camera links is the available proxy;
+  a direct measurement would need the ISRs instrumented too.
 - The nRF5340 comparison needs the same instrument on that target. The
   pure unit is board-portable by construction (no Arduino headers, no
   platform `#ifdef`s) — same rule as `camera_fsm`, for the same reason.

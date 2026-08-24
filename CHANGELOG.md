@@ -26,6 +26,11 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   - Timing comes from the Cortex-M4 DWT cycle counter (64 ticks/µs)
     with a `micros()` fallback; the page flags the fallback with a
     leading `*` because at 1 µs resolution the small sections are noise.
+  - The stats row shows the mean iteration in microseconds below a
+    millisecond. The first hardware run read `999Hz av0.0` — the loop is
+    an order of magnitude faster than the ~250 Hz this project's docs had
+    long assumed, and both fields had been clamped against that stale
+    figure. See `docs/plans/0011-loop-cpu-profiling.md`.
   - New host-tested pure unit `loop_profile` holds all the accounting.
   - **A beta image can no longer switch the 5 V LED boost rail.** Pin 30
     is the boost converter's EN line and the profiler takes it, so the
