@@ -189,6 +189,8 @@ uint32_t sdActiveSpiHz();
 uint32_t bleTransferRateBps();
 uint16_t bleLinkDataLength();
 uint16_t bleLinkChunkSize();
+uint16_t bleLinkIntervalUnits();
+uint8_t bleLinkPhy();
 bool SD_SETUP();
 bool sdEnsureTracksFolder();
 void sdPerformFormat();
