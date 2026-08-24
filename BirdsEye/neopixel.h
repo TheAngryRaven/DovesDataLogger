@@ -45,6 +45,14 @@
 #define NEOPIXEL_PIN_BOOST_EN 30  // boost EN: HIGH = 5 V rail on, LOW = off
 #define NEOPIXEL_PIN_DATA     31  // WS2812 data in (GRB, 800 kHz)
 
+// BOOST EN IS NOT ALWAYS OURS. A profiling build
+// (BIRDSEYE_ENABLE_PROFILING, plan 0011 — the beta channel) claims pin 30
+// as its scope output, so this module stops driving EN entirely and the
+// regulator runs at its hardware default (pulled up = rail on). The
+// strip still works — only the ability to switch the rail is gone,
+// including the driven-LOW that holds it down through System OFF. See
+// the "BOOST EN OWNERSHIP" block in neopixel.ino and profiling.h.
+
 // Runtime settings, read at boot in BirdsEye.ino's settings block.
 extern uint8_t settingLedBrightness;  // global cap 0-255; 0 = LEDs disabled
 extern int settingRevLimit;           // true RPM: scale ceiling + rev flasher

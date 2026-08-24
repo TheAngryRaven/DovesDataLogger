@@ -1,7 +1,7 @@
 ///////////////////////////////////////////
 // Stubs for the firmware modules deliberately excluded from the sim TU:
 // bluetooth.ino, camera_ble.ino, usb_msc.ino, firmware_ota.ino,
-// sensoregg.ino, neopixel.ino.
+// sensoregg.ino, neopixel.ino, profiling.ino.
 //
 // The sim has no BLE, no camera, no USB host, no LED strip (demo scope
 // — see the handoff spec). These implement the excluded modules' public headers
@@ -17,6 +17,7 @@
 #include "bluetooth.h"
 #include "camera_ble.h"
 #include "neopixel.h"
+#include "profiling.h"
 #include "sensoregg.h"
 #include "usb_msc.h"
 
@@ -131,6 +132,17 @@ void NEOPIXEL_LOOP() {}
 void NEOPIXEL_SLEEP() {}
 void NEOPIXEL_WAKE() {}
 void neopixelNotifyPurpleSector() {}
+
+// ---- profiling.ino surface ----
+
+// BIRDSEYE_ENABLE_PROFILING is a beta-firmware flag and is never set for
+// the sim: there is no pin to toggle and host wall-clock timings of a
+// virtual-clock loop would mean nothing. These are the flag-off stubs
+// the real profiling.ino would provide; the pure loop_profile unit still
+// builds into the sim via SIM_CORE_SOURCES.
+
+void PROFILING_SETUP() {}
+void PROFILING_SLEEP() {}
 
 // ---- usb_msc.ino surface ----
 

@@ -149,6 +149,7 @@ set(SIM_CORE_SOURCES
   ${BIRDSEYE_DIR}/idle_policy.cpp
   ${BIRDSEYE_DIR}/lap_format.cpp
   ${BIRDSEYE_DIR}/local_time.cpp
+  ${BIRDSEYE_DIR}/loop_profile.cpp
   ${BIRDSEYE_DIR}/setting_parse.cpp
   ${BIRDSEYE_DIR}/led_animations.cpp
   ${BIRDSEYE_DIR}/led_frame.cpp

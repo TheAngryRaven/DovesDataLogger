@@ -1,0 +1,162 @@
+# 0011 — Main-loop CPU profiling (beta channel)
+
+**Status:** implemented (beta channel only)
+**Flag:** `BIRDSEYE_ENABLE_PROFILING` (`project.h`, default 0; `beta.yml`
+and `compile-sketch.yml` pass `=1` on the BETA branch)
+**Touches:** `loop_profile.{h,cpp}` (new pure unit), `profiling.{h,ino}`
+(new glue module), `BirdsEye.ino` (loop instrumentation, page constant),
+`display_pages.{h,ino}` (LOOP PROFILE page), `display_ui.ino` (routing),
+`neopixel.ino` (yields the boost EN pin), `beta.yml`,
+`compile-sketch.yml`, `clang-tidy.yml`, `tests/`
+
+## Why
+
+The commercial board has to be specified, and two open questions gate it:
+
+1. **nRF52840 or nRF5340?** The 5340 is the reliability upgrade for BLE
+   (dedicated network core, so the radio stack stops sharing a CPU with
+   the superloop), and it is more silicon than the product may need.
+2. **Arduino core or Nordic SDK?** Leaving the Arduino core is a large,
+   one-way piece of work. It is worth doing only if the core is where a
+   meaningful fraction of the time goes.
+
+Both are answerable with measurement rather than argument, and neither
+is answerable today: the firmware carries no timing instrumentation
+beyond a `HAS_DEBUG` "SLOW LOOP" print with millisecond resolution — too
+coarse to see a subsystem that costs 400 µs, and compiled out of every
+shipped build.
+
+So: measure a real iteration, on the real hardware, under a real 25 Hz
+GPS + logging + LED + BLE workload, and see where it goes.
+
+## What "CPU usage" means here, and why the obvious metric is wrong
+
+The instinct is to report a duty cycle. There is no idle task in this
+firmware — `loop()` runs back to back with nothing rate-limiting it — so
+the honest duty cycle is 100% and always will be. It says nothing.
+
+The number that carries information is the **shape of an iteration**:
+
+- how long one takes (mean **and** worst case — an SD garbage-collection
+  stall of 100 ms–2 s is invisible in a mean),
+- how that time divides between subsystems,
+- how much of it no subsystem accounts for.
+
+That is what decides both questions above. If the loop is 4 ms and
+`readButtons()`'s multi-sample debounce is 1.5 ms of pure blocking
+`delayMicroseconds`, the answer is "fix the firmware", not "buy a bigger
+chip". If it is spread evenly across genuine work, the chip is the
+conversation.
+
+## Two instruments
+
+**The pin.** Pin 30 is driven HIGH for the span being profiled and LOW
+outside it. A scope or logic analyser reads the loop period off the
+rising edges and the span's cost off the high time, with no software in
+the measurement path — which is exactly what makes it worth having
+alongside the software numbers: it is the thing that says the software
+is telling the truth. `PROFILING_PIN_SECTION` picks the span (the whole
+loop body by default; `-DPROFILING_PIN_SECTION=PROF_SEC_GPS` and friends
+re-point it).
+
+**The rollup.** Every section is also timed in software and rolled up
+once a second onto the LOOP PROFILE race page — first page of the race
+rotation on a profiling build, three Lefts from the speed page the
+session lands on. That is the instrument you can read while driving, and
+the one that survives not having a scope at the track.
+
+## The pin costs the 5 V rail, and that is the whole trade
+
+Pin 30 is the NeoPixel boost converter's EN line. It cannot be both.
+
+The profiler takes it, so a profiling build never drives EN — not at
+setup, not at sleep, not on the charging-loop resume. The regulator sits
+at its hardware default (EN pulled up = rail on), which is why this
+works at all: the rail does not *need* firmware control, it only needs
+it to be switchable, and switching it is a *use* requirement, not a
+*testing* one.
+
+Two consequences, both accepted:
+
+- **The rail stays up through System OFF.** GPIO levels are retained
+  there and the driven LOW was the only thing holding it down (the same
+  retention behind the "blue conn LED stays on after sleep" report). A
+  profiling unit left asleep on a battery with a strip wired to it goes
+  flat. Bench builds only.
+- **If the EN jumper is still physically connected on the rig, the
+  toggling chops the rail at loop rate.** Pull it, or tie EN high,
+  before profiling. The LEDs are not what is being measured.
+
+Prod is untouched: `BIRDSEYE_ENABLE_PROFILING` defaults to 0, the
+section brackets are macros that expand to the bare call, and pin 30
+goes on being EN exactly as it always has.
+
+## Timebase: DWT, with a fallback that announces itself
+
+Most sections are well under a microsecond, so `micros()` alone would
+quantise half of them to zero. The profiler uses the Cortex-M4's DWT
+cycle counter — 64 ticks per microsecond at 64 MHz — and falls back to
+`micros()` when it will not run (a debug probe can own TRCENA, and
+CYCCNTENA is architecturally optional).
+
+"We set the bit" is not evidence, so `profEnableDwt()` reads the counter
+across a short spin and requires it to have moved. When the fallback is
+live the page prefixes its first row with `*`, because at 1 µs
+resolution the small numbers are noise and a reader has to know that.
+
+The pure unit therefore accumulates **ticks**, not microseconds, and is
+handed `ticksPerUs` only at rollup — ratios come out of raw ticks and
+lose nothing.
+
+## Design notes worth keeping
+
+- **Saturating accumulators.** A uint32 of DWT ticks is only ~67 s and a
+  rollup can be arbitrarily late if the loop stalls. A saturated window
+  reads as pegged, which is true; a wrapped one reads as near-idle,
+  which is a lie.
+- **`OTH` is reported, not hidden.** Loop time that no section bracketed
+  gets its own slot. It is the honesty check on the instrumentation: if
+  it is large, time is going somewhere `loop()` is not bracketing.
+- **A scope guard, not a `PROFILING_LOOP()` call.** Both parked branches
+  (`bleActive`, `usbMscActive`) return early and `enterShutdown()` never
+  returns at all. A profiler that goes quiet exactly when the firmware
+  parks would be measuring the wrong thing, so the whole-iteration
+  timing and the rollup live in `~ProfLoopScope()`.
+- **The overhead is inside the numbers.** A bracket is two counter reads
+  plus a saturating add — order 30 cycles, under 0.1% of a 4 ms loop —
+  and it lands in the section it brackets rather than in `OTH`. That is
+  the right place for it: what you read is what the instrumented
+  firmware actually costs.
+- **The pin edges are `#if`'d, not branched.** With the default
+  whole-loop setting the runtime comparison is provably false for every
+  section, and a dead branch in the two hottest functions in the
+  firmware is precisely the cost a profiler must not add.
+- **Profiling implies `debug_pages=show`.** The race rotation is a
+  contiguous range and the profile page sits below `GPS_DEBUG`, so
+  lowering the start to reach it pulls the two diagnostic pages in too.
+  On a bench build that is what you want anyway.
+
+## What to do with the numbers
+
+Read a full session — idle in the pits, out on track, during an SD
+flush, with the camera connected and streaming its 10 Hz GPS overlay.
+Then:
+
+- **One subsystem dominates** → fix or offload that, and neither the
+  5340 nor the SDK port is justified yet.
+- **`BLE`/`CAM` cost is spiky and correlates with radio activity** →
+  that is the 5340's actual argument: a separate network core takes the
+  stack off this CPU entirely.
+- **Time is spread evenly across genuine work and `loopMaxUs` is
+  brushing the 40 ms 25 Hz PVT budget** → the chip is the conversation.
+- **`OTH` is large** → the instrumentation is incomplete; bracket more
+  before drawing any conclusion.
+
+## Still outstanding
+
+- No hardware numbers are recorded here yet. Once a session has been
+  captured, the headline figures belong in this section — that is the
+  deliverable, not the code.
+- The nRF5340 comparison needs the same instrument on that target. The
+  pure unit is board-portable by construction (no Arduino headers, no
+  platform `#ifdef`s) — same rule as `camera_fsm`, for the same reason.

@@ -10,6 +10,7 @@
 //   display_pages.ino - All display page rendering functions
 //   display_ui.ino   - Display setup, button handling, menu navigation
 //   gps_functions.ino - GPS setup, loop, time functions, data logging
+//   profiling.ino    - Main-loop CPU profiling (beta channel only)
 //   replay.ino       - Session replay system
 //   sd_functions.ino - SD card setup, track parsing, access management
 //   settings.ino     - Persistent JSON settings on SD (/SETTINGS.json)
@@ -101,6 +102,7 @@
 #include "local_time.h"
 #include "setting_parse.h"
 #include "neopixel.h"
+#include "profiling.h"
 #include "replay.h"
 #include "sat_bars.h"
 #include "sd_format_page.h"
@@ -733,6 +735,15 @@ const int PAGE_COURSE_POINT = -15;   // "Save current pos" averaging hold
 const int PAGE_COURSE_PRUNE = -16;   // "Track full - drop N old runs?"
 
 // running menu (these must be in order)
+#if BIRDSEYE_ENABLE_PROFILING
+// Loop CPU profile (plan 0011). Only exists on a profiling build, and
+// when it does it is the FIRST page of the race rotation — the numbers
+// are only interesting under a real 25 Hz + logging + LED workload, so
+// the rotation is where they belong, and a bench session should not have
+// to arrow past six pages to reach them. Sits below GPS_DEBUG so the
+// diagnostic block stays contiguous.
+const int GPS_PROFILE = 2;
+#endif
 const int GPS_DEBUG = 3;
 const int GPS_STATS = 4;
 
@@ -784,13 +795,24 @@ int lastPage = 0;
 
 // "pageStart" defines where the UI starts, you cannot backup beyond this
 #ifdef ENDURANCE_MODE
+  // ENDURANCE_MODE keeps a const start, so it never picks up the debug or
+  // profile pages — it is a deliberately trimmed rotation.
   const int runningPageStart = GPS_SPEED;
 #else
   // Runtime, not const: the debug_pages setting decides whether the two
   // diagnostic pages (GPS_DEBUG, GPS_STATS) are in the rotation. Default is
   // hidden — the boot settings read raises the start only on an explicit
   // "show", so a blank or garbled value gives an end user the clean rotation.
+  #if BIRDSEYE_ENABLE_PROFILING
+  // A profiling build starts one page lower still, unconditionally: the
+  // page is the reason the build exists, so it must not be reachable only
+  // via a setting on the card. Because the rotation is a contiguous range,
+  // this also pulls GPS_DEBUG and GPS_STATS in — i.e. profiling implies
+  // debug_pages=show, which on a bench build is what you want anyway.
+  int runningPageStart = GPS_PROFILE;
+  #else
   int runningPageStart = GPS_SPEED;
+  #endif
 #endif
 
 int runningPageEnd = LOGGING_STOP; // only changes if sd:/tracks not found
@@ -980,7 +1002,12 @@ void setup() {
     // value) keeps the clean end-user rotation starting at the speed page.
     // ENDURANCE_MODE already starts at GPS_SPEED, so it ignores the setting.
     if (getSetting("debug_pages", buf, sizeof(buf))) {
-      if (strcasecmp(buf, "show") == 0) runningPageStart = GPS_DEBUG;
+      // Lower it only. On a profiling build the start is already below
+      // GPS_DEBUG and an unguarded assignment here would hide the very
+      // page that build exists for.
+      if (strcasecmp(buf, "show") == 0 && runningPageStart > GPS_DEBUG) {
+        runningPageStart = GPS_DEBUG;
+      }
     }
 #endif
     // Engine geometry. Anything other than an explicit "single" is treated as
@@ -1101,6 +1128,12 @@ void setup() {
   // of any 4.1.0+ image is the one that spends the NFC pads and resets
   // once. See project.h.
   NEOPIXEL_SETUP();
+
+  // Loop profiling (plan 0011, beta only). MUST run after NEOPIXEL_SETUP:
+  // the profiling pin is one of the NFC pads, and that call is what
+  // converts them to GPIO — and may self-reset the chip doing it. On a
+  // flag-off build this is an empty function.
+  PROFILING_SETUP();
 
   // Camera auto-record: load the persisted Insta360 serial + init the FSM
   CAMERA_SETUP();
@@ -2450,6 +2483,12 @@ void enterShutdown() {
   // retained through System OFF, and the charging loop below never
   // re-enables it, so the strip is dark while charging too).
   NEOPIXEL_SLEEP();
+  // Park the profiling pin LOW. The loop scope guard's destructor is what
+  // normally lowers it, and this path never returns to it — without this
+  // the pin would sit HIGH for the whole power-down. No-op off the beta
+  // channel. (Note it does NOT drop the 5 V rail: on a profiling build
+  // NEOPIXEL_SLEEP no longer owns EN — see project.h.)
+  PROFILING_SLEEP();
   wdtPet();
 
   // VBUS exception: never System OFF while a cable is present. Powering
@@ -2481,13 +2520,20 @@ void loop() {
   wdtPet();
   #endif
 
+  // Whole-iteration timing + the once-a-second rollup (plan 0011, beta
+  // only). A scope guard rather than a call at the bottom because both
+  // parked branches below return early and enterShutdown() never returns
+  // at all — a profiler that goes quiet exactly when the firmware parks
+  // would be measuring the wrong thing. Compiles to nothing off beta.
+  PROFILE_LOOP_SCOPE();
+
   #ifdef HAS_DEBUG
   unsigned long loopStart = millis();
   #endif
 
   // When BLE is active, skip GPS/tach/lap processing for better throughput
   if (bleActive) {
-    BLUETOOTH_LOOP();
+    PROFILE_SECTION(loop_profile::kBle, BLUETOOTH_LOOP());
 
     // Keep battery voltage fresh for BLE BATT command and display
     if (millis() - lastBatteryCheck > batteryUpdateInterval) {
@@ -2498,7 +2544,7 @@ void loop() {
     // Minimal button check for exit. Leaving transfer mode reboots (same
     // as the phone-disconnect auto-reboot and the USB exit) so changed
     // settings take effect and no session state leaks.
-    readButtons();
+    PROFILE_SECTION(loop_profile::kButtons, readButtons());
     if (btn2->pressed) {
       bleExitTransferMode();  // does not return (NVIC_SystemReset)
     }
@@ -2508,12 +2554,12 @@ void loop() {
     unsigned long displayInterval = bleTransferInProgress ? 5000 : (1000 / displayUpdateRateHz);
     if (millis() - displayLastUpdate > displayInterval) {
       displayLastUpdate = millis();
-      displayPage_bluetooth();
+      PROFILE_SECTION(loop_profile::kDisplay, displayPage_bluetooth());
     }
 
     // Keep the LED frame ticking so the strip blanks (composition sees
     // the parked state) instead of freezing mid-pattern.
-    NEOPIXEL_LOOP();
+    PROFILE_SECTION(loop_profile::kLed, NEOPIXEL_LOOP());
 
     return; // Skip GPS, tach, lap checks while BLE is active
   }
@@ -2533,7 +2579,7 @@ void loop() {
     }
 
     // Minimal button check for the on-device Exit (Select).
-    readButtons();
+    PROFILE_SECTION(loop_profile::kButtons, readButtons());
     if (btn2->pressed) {
       USB_MSC_DISABLE();  // does not return (NVIC_SystemReset)
     }
@@ -2542,28 +2588,36 @@ void loop() {
     // Refresh the status page at the normal rate.
     if (millis() - displayLastUpdate > (1000 / displayUpdateRateHz)) {
       displayLastUpdate = millis();
-      displayPage_usb_storage();
+      PROFILE_SECTION(loop_profile::kDisplay, displayPage_usb_storage());
     }
 
     // Same as the BLE branch: blank the strip rather than freeze it.
-    NEOPIXEL_LOOP();
+    PROFILE_SECTION(loop_profile::kLed, NEOPIXEL_LOOP());
 
     return;  // host owns the card — skip GPS/tach/lap/SD entirely
   }
 
-  GPS_LOOP();
-  TACH_LOOP();
-  ACCEL_LOOP();
-  BLUETOOTH_LOOP();
-  SENSOREGG_LOOP();  // drain SensorEgg scan buffer (Temp1 fresh for logging)
+  // Each subsystem call is bracketed for the loop profiler (plan 0011).
+  // PROFILE_SECTION expands to the bare call off the beta channel, so
+  // this is the same sequence it has always been.
+  PROFILE_SECTION(loop_profile::kGps, GPS_LOOP());
+  PROFILE_SECTION(loop_profile::kTach, TACH_LOOP());
+  PROFILE_SECTION(loop_profile::kAccel, ACCEL_LOOP());
+  PROFILE_SECTION(loop_profile::kBle, BLUETOOTH_LOOP());
+  // drain SensorEgg scan buffer (Temp1 fresh for logging)
+  PROFILE_SECTION(loop_profile::kEgg, SENSOREGG_LOOP());
 
-  trackDetectionLoop();
-  checkForNewLapData();
-  checkAutoIdle();
-  autoRaceModeCheck();
-  updateGpsLockHold();
-  CAMERA_LOOP();  // step the Insta360 auto-record FSM (GPS/tach fresh above)
-  NEOPIXEL_LOOP();  // LED strip frame (RPM/pace/purple fresh above)
+  PROFILE_SECTION(loop_profile::kTrack, trackDetectionLoop());
+  PROFILE_SECTION(loop_profile::kLap, checkForNewLapData());
+  // One section for the three session-state checks: individually they are
+  // a handful of comparisons, and thirteen slots on a 128x64 page is
+  // already the budget.
+  PROFILE_SECTION(loop_profile::kIdle, checkAutoIdle(); autoRaceModeCheck();
+                  updateGpsLockHold());
+  // step the Insta360 auto-record FSM (GPS/tach fresh above)
+  PROFILE_SECTION(loop_profile::kCamera, CAMERA_LOOP());
+  // LED strip frame (RPM/pace/purple fresh above)
+  PROFILE_SECTION(loop_profile::kLed, NEOPIXEL_LOOP());
 
   // Camera auto-stopped recording (30 s engine-off): end + save the race
   // session and return to the menu — the camera stays connected in WATCHING,
@@ -2582,8 +2636,12 @@ void loop() {
     }
   }
 
-  // Button hold detection for shutdown/reboot combos
-  updateButtonHoldState();
+  // Button hold detection for shutdown/reboot combos. Bracketed into the
+  // same section as readButtons(): it runs the identical multi-sample
+  // debounce on all three pins, so leaving it out would park a
+  // hold-dependent cost (up to ~1 ms per HELD button) in OTH, where it
+  // reads as unexplained overhead rather than as button sampling.
+  PROFILE_SECTION(loop_profile::kButtons, updateButtonHoldState());
 
   // Long-press left+right (5s) on main menu -> shutdown
   if (currentPage == PAGE_MAIN_MENU &&
@@ -2656,11 +2714,13 @@ void loop() {
 
   calculateGPSFrameRate();
 
-  readButtons();
-  gpsStatusPageLoop();  // boot status page: consume presses, hold/auto-close
-  sdFormatPageLoop();   // boot format-confirm page: hold Select 3s to format
-  courseCreatorLoop();  // course creator: feed GPS into an averaging hold
-  displayLoop();
+  PROFILE_SECTION(loop_profile::kButtons, readButtons());
+  // boot status page: consume presses, hold/auto-close
+  // boot format-confirm page: hold Select 3s to format
+  // course creator: feed GPS into an averaging hold
+  PROFILE_SECTION(loop_profile::kPages, gpsStatusPageLoop(); sdFormatPageLoop();
+                  courseCreatorLoop());
+  PROFILE_SECTION(loop_profile::kDisplay, displayLoop());
   resetButtons();
 
   if (tachLastReported > topTachReported) {

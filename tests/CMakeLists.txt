@@ -41,6 +41,7 @@ add_executable(birdseye_tests
   led_animations_test.cpp
   sector_purple_test.cpp
   ble_stream_test.cpp
+  loop_profile_test.cpp
   ${BIRDSEYE_DIR}/haversine.cpp
   ${BIRDSEYE_DIR}/gps_stats.cpp
   ${BIRDSEYE_DIR}/gps_time.cpp
@@ -71,6 +72,7 @@ add_executable(birdseye_tests
   ${BIRDSEYE_DIR}/led_animations.cpp
   ${BIRDSEYE_DIR}/sector_purple.cpp
   ${BIRDSEYE_DIR}/ble_stream.cpp
+  ${BIRDSEYE_DIR}/loop_profile.cpp
 )
 
 target_include_directories(birdseye_tests PRIVATE

@@ -6,9 +6,10 @@
 // translation unit, with sim_prototypes.h standing in for the IDE's
 // auto-generated function prototypes.
 //
-// bluetooth.ino, camera_ble.ino, firmware_ota.ino, usb_msc.ino and
-// neopixel.ino are DELIBERATELY ABSENT — no BLE / camera / USB-host /
-// LED strip in the demo scope. Their public surfaces are satisfied by
+// bluetooth.ino, camera_ble.ino, firmware_ota.ino, usb_msc.ino,
+// neopixel.ino and profiling.ino are DELIBERATELY ABSENT — no BLE /
+// camera / USB-host / LED strip in the demo scope, and no pin to profile
+// against a virtual clock. Their public surfaces are satisfied by
 // stubs/module_stubs.cpp.
 //
 // The firmware sources compile UNMODIFIED (ground rule): everything

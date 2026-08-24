@@ -710,6 +710,10 @@ void displayLoop() {
       displayPage_stop_logging_confirm();
     } else if (currentPage == GPS_DEBUG) {
       displayPage_gps_debug();
+#if BIRDSEYE_ENABLE_PROFILING
+    } else if (currentPage == GPS_PROFILE) {
+      displayPage_profile();
+#endif
     } else if (currentPage == PAGE_INTERNAL_FAULT) {
       displayPage_internal_fault();
     } else if (currentPage == PAGE_INTERNAL_WARNING) {
