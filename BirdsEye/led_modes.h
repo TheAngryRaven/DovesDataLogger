@@ -71,7 +71,7 @@ struct ScaleSpec {
 // starts turning red past the halfway mark".
 constexpr float kRpmRedFrac = 0.5f;
 
-// The SPEED bar (plan 0012) has NO red band. The RPM bar's red half
+// The SPEED bar (plan 0013) has NO red band. The RPM bar's red half
 // means "approaching the limiter — back off"; there is no equivalent
 // hazard in approaching your target speed, and painting the same nine
 // pixels red for the thing you were aiming at inverts their meaning.
@@ -129,7 +129,7 @@ constexpr float kRevClearFrac = 0.97f;
 constexpr uint16_t kRevFlashHalfPeriodMs = 100;  // urgent
 constexpr uint16_t kEgtFlashHalfPeriodMs = 250;  // noticeable, calmer
 
-// Speed target (plan 0012). GPS speed noise is roughly absolute in mph,
+// Speed target (plan 0013). GPS speed noise is roughly absolute in mph,
 // not proportional, so the release point is a fixed delta below the
 // threshold rather than kRevClearFrac's percentage. Reaching a target
 // is good news, not an alarm, so it flashes at the calmer EGT rate.

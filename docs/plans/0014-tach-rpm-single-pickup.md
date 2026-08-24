@@ -1,4 +1,4 @@
-# 0012 — Tach RPM from a single pickup: cylinder count is not a divider
+# 0014 — Tach RPM from a single pickup: cylinder count is not a divider
 
 > Status: implemented.
 > Supersedes the RPM geometry of

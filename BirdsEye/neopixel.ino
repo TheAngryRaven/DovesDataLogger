@@ -269,7 +269,7 @@ static void npxFillStatusInputs(led_status::Inputs& in) {
   in.egtAlertC = (float)settingTemp1AlertC;
   in.eggSupported = true;
 #else
-  // The accessor is not even called on a stock build. Before plan 0012
+  // The accessor is not even called on a stock build. Before plan 0013
   // it was, unconditionally, and its permanent NaN drove the right
   // status pixel to a solid blue "no probe signal" for the whole of
   // every race on every shipped logger. With eggSupported false the
@@ -376,7 +376,7 @@ void NEOPIXEL_LOOP() {
     led_frame::clear(frame);
     const bool parked = bleActive || usbMscActive;
     if (!parked && raceActive) {
-      // Strip selection (plan 0007 order, plus the 0012 speed arm):
+      // Strip selection (plan 0007 order, plus the 0013 speed arm):
       //   engine died (proven tach session, RPM 0) -> bar OFF — a pace
       //     pip counting next to a dead engine reads as a glitch;
       //   no GPS lock -> green search pip (same fix+timeValid gate that
@@ -403,7 +403,7 @@ void NEOPIXEL_LOOP() {
           } else {
             // No tachometer has proven itself this session, so an RPM
             // scale would be nine dark pixels until the first lap lands
-            // (plan 0012). Scale against the target speed instead —
+            // (plan 0013). Scale against the target speed instead —
             // RACE_ENTRY_TACH is the right gate because MANUAL and SPEED
             // sessions promote to it the moment the engine clears
             // 500 rpm (idle_policy::tachProven), so this is exactly "has

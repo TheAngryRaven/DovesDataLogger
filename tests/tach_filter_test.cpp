@@ -430,7 +430,7 @@ TEST_CASE("legacy - ignores dt entirely") {
 }
 
 // ---------------------------------------------------------------------------
-// revsPerPulse — engine geometry (plans 0003, 0012)
+// revsPerPulse — engine geometry (plans 0003, 0014)
 //
 // One sense wire, one clamp, one cylinder's ignition. The cylinder count is
 // NOT a term — it was, and on the shipped hardware that divided a V8's RPM

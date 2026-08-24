@@ -205,7 +205,7 @@ jobs:
   # The `compile` job above picks ONE flag set per PR: BETA-targeted work
   # builds with SensorEgg + profiling ON, everything else with them off.
   # That means code inside a `#else` arm of one of those flags reaches
-  # master having never been through a compiler — and plan 0012 added
+  # master having never been through a compiler — and plan 0013 added
   # several (the DOVEX row/header shapes and the settings defaults now
   # differ by channel). This job closes that hole from the BETA side.
   #

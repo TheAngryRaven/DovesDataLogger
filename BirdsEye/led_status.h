@@ -13,7 +13,7 @@
 // is the "phase 2" led_modes.h has always pointed at: the evaluation
 // machinery does not change, only where the assignment comes from.
 //
-// Before plan 0012 both pixels were hardcoded — left the rev flasher,
+// Before plan 0013 both pixels were hardcoded — left the rev flasher,
 // right the SensorEgg Temp1 tri-state. The right one was the bug: on a
 // build without BIRDSEYE_ENABLE_SENSOREGG the accessor is permanently
 // NaN, so the pixel showed a solid blue "no probe signal" for every

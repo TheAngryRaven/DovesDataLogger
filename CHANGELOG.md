@@ -84,7 +84,7 @@ else below is live for every user.
   a session best), and **EGT** (SensorEgg builds only). The GPS and
   camera modes stay lit on the main menu — they answer "am I ready to
   drive", which is a paddock question. See
-  `docs/plans/0012-led-status-modes.md`.
+  `docs/plans/0013-led-status-modes.md`.
   - The lap and sector indicators compare against the **previous** lap or
     the same sector on the previous lap, deliberately not against the
     session best: a best-based indicator only ever answers purple or red
@@ -372,7 +372,7 @@ else below is live for every user.
   traditional magneto, configured honestly as 8 cylinders + single fire,
   read **an eighth** of its real crank speed. RPM is now
   `revs_per_pulse = spark_mode == wasted ? 1.0 : 2.0` — the spark mode
-  alone. See `docs/plans/0012-tach-rpm-single-pickup.md`.
+  alone. See `docs/plans/0014-tach-rpm-single-pickup.md`.
   - **BREAKING for anyone who set `cylinder_count` above 1**: their RPM
     changes, because it stops being divided. Logs recorded before this
     release read low by exactly the configured cylinder count. Devices

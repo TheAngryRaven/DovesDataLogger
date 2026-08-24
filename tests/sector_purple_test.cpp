@@ -5,7 +5,7 @@ using sector_purple::Sample;
 using sector_purple::State;
 using sector_purple::Verdict;
 
-// update() returns an Event since plan 0012. The purple-sector contract
+// update() returns an Event since plan 0013. The purple-sector contract
 // these cases pin is unchanged, so they read it through this shim
 // rather than being rewritten around the new struct.
 static int purpleOf(State& st, const Sample& in) {
@@ -44,7 +44,7 @@ TEST_CASE("no sectors configured: no sector events, but laps still track") {
   }
 
   // Lap Anything has no sector lines but absolutely has laps, and the
-  // `lap` status mode has to work there. Before plan 0012 the whole
+  // `lap` status mode has to work there. Before plan 0013 the whole
   // monitor reset every frame on this input.
   in.currentSector = 0;
   in.laps = 1;
@@ -256,7 +256,7 @@ TEST_CASE("race not started resets; mid-race attach adopts without firing") {
 }
 
 ///////////////////////////////////////////
-// Plan 0012: lap + sector VERDICTS (better/worse vs the LAST recorded
+// Plan 0013: lap + sector VERDICTS (better/worse vs the LAST recorded
 // one, not vs the best), the purple LAP, and the hold semantics the
 // status LEDs depend on.
 ///////////////////////////////////////////

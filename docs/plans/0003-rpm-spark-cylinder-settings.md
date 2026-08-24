@@ -1,6 +1,6 @@
 # RPM Accuracy — Spark Type & Cylinder Count Settings
 
-> **SUPERSEDED IN PART by [0012](0012-tach-rpm-single-pickup.md).**
+> **SUPERSEDED IN PART by [0014](0014-tach-rpm-single-pickup.md).**
 > The `pulses_per_rev = cylinder_count × sparkFactor` geometry below is
 > WRONG for this hardware: there is one sense wire and one clamp, on one
 > plug wire, so the pickup never sees more than one cylinder and the

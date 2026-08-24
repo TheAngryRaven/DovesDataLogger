@@ -39,7 +39,7 @@ constexpr uint32_t kPurpleWaveMs = 400;      // center-out expansion
 constexpr uint32_t kPurpleFadeStartMs = 1200;
 
 // A session-best LAP is the bigger moment, so it gets its own longer
-// version (plan 0012): TWO center-out wave passes and 2600 ms total —
+// version (plan 0013): TWO center-out wave passes and 2600 ms total —
 // the same length as the boot flourish, already proven not to overstay.
 // Two stages, one look: a driver can tell a purple sector from a purple
 // lap without counting pixels.

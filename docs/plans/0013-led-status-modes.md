@@ -1,4 +1,4 @@
-# 0012 — Assignable status LEDs, speed bar, lap/sector verdicts, two-stage purple
+# 0013 — Assignable status LEDs, speed bar, lap/sector verdicts, two-stage purple
 
 Phase 2 of the NeoPixel subsystem. Plan 0006 ended with an explicit
 promise — *"settings-driven assignment: strip mode selection,
@@ -37,7 +37,7 @@ the two pixels can never disagree about the same instant.
 | Mode | Token | Rendering |
 |---|---|---|
 | Off | `off` | dark |
-| Target RPM | `rpm` | red flash at/above `target_rpm`, clears below 97 % — byte-for-byte the pre-0012 left LED |
+| Target RPM | `rpm` | red flash at/above `target_rpm`, clears below 97 % — byte-for-byte the pre-0013 left LED |
 | Target speed | `speed` | red flash at/above `target_speed_mph`, clears 2 mph below; **off** with no GPS fix |
 | GPS | `gps` | steady: red no sats · yellow sats-no-fix · blue fix-no-time-lock · green locked |
 | Camera | `camera` | off unpaired · yellow session running with the camera not up · **flashing** blue linked but not ce82-subscribed · steady blue linked + subscribed · red recording |

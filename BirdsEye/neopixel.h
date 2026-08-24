@@ -64,8 +64,8 @@ extern int settingTargetRpm;          // true RPM: scale ceiling + rpm flasher
 // The bar's ceiling on a session with no tachometer, and the `speed`
 // status mode's threshold. mph — the companion app converts for display.
 extern int settingTargetSpeedMph;
-// What each status pixel shows (plan 0012). Both default to what the
-// pre-0012 hardcoded pair did on a SensorEgg build.
+// What each status pixel shows (plan 0013). Both default to what the
+// pre-0013 hardcoded pair did on a SensorEgg build.
 extern led_status::Mode settingLedStatusLeft;
 extern led_status::Mode settingLedStatusRight;
 // Day/night swap (plan 0010). settingUtcOffsetMin is device-wide rather
@@ -100,7 +100,7 @@ void NEOPIXEL_WAKE();
 void neopixelNotifyPurpleSector();
 
 // Fire the session-best-LAP celebration — the longer, two-wave version
-// (plan 0012). A purple lap OUTRANKS a purple sector: they land on the
+// (plan 0013). A purple lap OUTRANKS a purple sector: they land on the
 // same frame whenever the last sector of a purple lap is also purple,
 // and re-arming the shorter sector animation there would stomp it.
 void neopixelNotifyPurpleLap();

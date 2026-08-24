@@ -315,7 +315,7 @@ TEST_CASE("search pip: one green pixel, bounces to both ends, deterministic") {
 }
 
 ///////////////////////////////////////////
-// Plan 0012: the speed bar's no-red contract, flashOn(), and the new
+// Plan 0013: the speed bar's no-red contract, flashOn(), and the new
 // Source tag.
 ///////////////////////////////////////////
 

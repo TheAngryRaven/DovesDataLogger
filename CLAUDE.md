@@ -330,7 +330,7 @@ loop()  ~250 Hz
 - Minimum pulse gap comes from the spark mode only: `tach_filter::minPulseGapUs()`
   returns 3 ms for a plug firing every rev and 6 ms for a 4-stroke single-fire
   plug, so the ~20 000 RPM ceiling is the same in both modes. Cylinder count is
-  not a term (plan 0012) — one clamped wire never delivers pulses faster than
+  not a term (plan 0014) — one clamped wire never delivers pulses faster than
   the cylinder it is wrapped around fires.
 - **Ring buffer architecture**: ISR timestamps every valid pulse into a
   16-entry ring buffer (`tachRingBuf`). The ISR checks full before
@@ -381,7 +381,7 @@ loop()  ~250 Hz
 - Time-based debounce only. Old volatile flag gate removed — ISR
   body is trivially fast (<1 µs) and cannot cause interrupt storms.
 - **One correction, one place, and cylinder count is NOT in it** (plan
-  0012). There is one sense wire and one clamp, and it goes around one
+  0014). There is one sense wire and one clamp, and it goes around one
   spark plug wire — so the pickup sees ONE cylinder's ignition whatever
   the engine has. The whole geometry is the spark mode:
   `revs_per_pulse = (spark_mode == wasted ? 1.0 : 2.0)`. `tachRevsPerPulse`
@@ -1222,7 +1222,7 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   (`display_pages.ino` + the page-constant block in `BirdsEye.ino`), and
   returns BLE to lazy init. `1` (passed by `beta.yml`, and by
   `compile-sketch.yml` for PRs targeting `BETA`) is everything described
-  below. **Plan 0012 closed the three leaks**: the DOVEX
+  below. **Plan 0013 closed the three leaks**: the DOVEX
   `Temp1`/`Junction1`/`Temp2` columns, the `temp1_alert_c` setting, and
   the status LED that was hardwired to Temp1 are all now behind the flag
   too — so the log format DOES fork by channel (13 stock columns vs 16),
@@ -1418,7 +1418,7 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   monitor → compose by priority — **boot animation > overrev
   whole-chain red flash > purple animation > (parked ‖ !raceActive ‖
   brightness 0 → off) > race rendering** — → `applyCap` → show.
-- **Strip policy** (plan 0007 order + the 0012 speed arm): the 9-px bar
+- **Strip policy** (plan 0007 order + the 0013 speed arm): the 9-px bar
   is off outside a race session (driving aid, not menu bling); the two
   status LEDs follow their own rule below. In race, first match wins:
   1. **Engine stopped** (`raceEngineStopped()`: tach-proven session —
@@ -1439,7 +1439,7 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   4. **Tach session** (`raceEntryCause == RACE_ENTRY_TACH`) → **RPM
      scale** (green filling left→right, red past halfway, ceiling =
      `target_rpm`).
-  5. Else → **SPEED scale** (plan 0012), ceiling = `target_speed_mph`,
+  5. Else → **SPEED scale** (plan 0013), ceiling = `target_speed_mph`,
      **green all the way up** (`kSpeedRedFrac = 1.0`). Without a tach
      the RPM scale was nine dark pixels until the first lap landed.
      `RACE_ENTRY_TACH` is the gate rather than a live `rpm > 0` test
@@ -1449,7 +1449,7 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
      RPM bar's red band means "approaching the limiter"; there is no
      equivalent hazard in reaching a target speed, so painting it red
      would invert the meaning of the same nine pixels.
-- **Status LEDs are USER-ASSIGNED** (plan 0012, `led_status`): pixel 0
+- **Status LEDs are USER-ASSIGNED** (plan 0013, `led_status`): pixel 0
   from `led_status_left`, pixel 10 from `led_status_right`, each one of
   eight modes — `off` / `rpm` (red flash ≥ `target_rpm`, clears at 97%,
   100 ms) / `speed` (red flash ≥ `target_speed_mph`, clears 2 mph
@@ -1471,7 +1471,7 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
     a latch left set would flash the instant the next session starts.
   - **`egt` is dark on a build without `BIRDSEYE_ENABLE_SENSOREGG`**
     (`led_status::Inputs.eggSupported`), because there is no probe there
-    to lose. Before plan 0012 pixel 10 was hardwired to this mode, so a
+    to lose. Before plan 0013 pixel 10 was hardwired to this mode, so a
     stock logger showed the blue no-signal state for the whole of every
     race. The setting still parses and round-trips either way — only the
     rendering is gated.
@@ -1719,8 +1719,8 @@ timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x
   (for `Temp2`) the egg is v1 — a dropout must be a visible gap, never a
   held value. These fields never cause a GPS row to be skipped.
   **THE THREE COLUMNS EXIST ONLY ON A `BIRDSEYE_ENABLE_SENSOREGG` BUILD**
-  (plan 0012), so a stock log has 13 data columns and a beta log 16.
-  Until 0012 they were written on every channel purely so the shape never
+  (plan 0013), so a stock log has 13 data columns and a beta log 16.
+  Until 0013 they were written on every channel purely so the shape never
   forked; three dead `nan` columns on every row of every stock log paid
   for nothing. Readers must key off the CSV header line (all three
   optional there) rather than assuming a column count — the companion
@@ -1829,12 +1829,12 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | `spark_mode` | string | `"wasted"` | Ignition rate: `wasted` = 1 spark/rev (2T, or 4T wasted spark); `single` = 1 spark per 2 revs (4T single-fire). Anything other than an explicit `single` is treated as `wasted` |
 | `display_invert` | string | `"normal"` | Panel colours: `normal` = lit-on-black as shipped, `inverted` = black-on-lit. Anything other than an explicit `inverted` means normal |
 | `debug_pages` | string | `"hide"` | Race-rotation diagnostic pages (`GPS_DEBUG` + `GPS_STATS`): `hide` = rotation starts at the speed page (end-user default), `show` = diagnostics restored at the front. Anything other than an explicit `show` means hide. Also swaps the tachometer page's subtext line for the tach filter diagnostic (`max:NNNNN S rj:NN`, plan 0009). No-op on the rotation under `ENDURANCE_MODE` (already starts at speed) |
-| `cylinder_count` | int | `1` | The engine's **actual** cylinder count. **Does not scale RPM** (plan 0012): one clamp on one plug wire sees one cylinder, so `spark_mode` alone sets the geometry. Above 1 it means crank speed is *inferred* from one cylinder's ignition pulses — standard clamp-on-tach behaviour, warned about in the settings UI. Clamp 1–16 |
+| `cylinder_count` | int | `1` | The engine's **actual** cylinder count. **Does not scale RPM** (plan 0014): one clamp on one plug wire sees one cylinder, so `spark_mode` alone sets the geometry. Above 1 it means crank speed is *inferred* from one cylinder's ignition pulses — standard clamp-on-tach behaviour, warned about in the settings UI. Clamp 1–16 |
 | `tach_filter` | string | `"smooth"` | RPM estimator (plan 0009). `smooth` = outlier gate + RPM-aware noise models; `legacy` = the pre-0009 filter bit for bit, for A/B against older logs; `raw` = no estimator at all, the `rpm` column is exactly what the pickup delivers. Anything else means `smooth`. Diagnostic knob — the intent is one session each at the track, not a permanent tuning dial |
 | `led_brightness` | int | `64` | NeoPixel global brightness cap 0–255 — no LED channel ever exceeds it (`led_frame::applyCap`). `0` disables the LEDs entirely (boost rail never enabled). Written AND parsed on every channel (`ensureDefaultSettings()` + the boot block in `BirdsEye.ino`); only its *use* is compiled out with the flag. A non-numeric value keeps the 64 default — via `setting_parse::parseIntSetting`, never `atoi()`, because `atoi("")` is 0 and 0 here means "LEDs off" |
-| `target_rpm` | int | `15000` | True RPM SHIFT/warning point: RPM-scale ceiling and the `rpm` status-LED flasher threshold. Clamp 1000–20000 (tach filter's ceiling). Was `rev_limit` before plan 0012 — a device carrying the old key has its value migrated into this one on first boot and the old key removed |
+| `target_rpm` | int | `15000` | True RPM SHIFT/warning point: RPM-scale ceiling and the `rpm` status-LED flasher threshold. Clamp 1000–20000 (tach filter's ceiling). Was `rev_limit` before plan 0013 — a device carrying the old key has its value migrated into this one on first boot and the old key removed |
 | `overrev_limit` | int | `0` (disabled) | True RPM PROBLEM limit (plan 0007): past it the whole 11-px chain flashes red (outranks the purple celebration) and the tach page shows `*OVER REV*`; latch clears below `target_rpm × 0.97`. 0 = off (no chain flash, no header); else clamp 1000–20000 |
-| `temp1_alert_c` | int | `650` | **SensorEgg builds only** since plan 0012 — a stock image neither writes nor reads it. Temp1 (EGT) alert threshold in **Celsius** for the `egt` status mode: red flash at/above, clears 20 °C below, solid blue when the probe signal is NaN/stale. Clamp 50–1200 |
+| `temp1_alert_c` | int | `650` | **SensorEgg builds only** since plan 0013 — a stock image neither writes nor reads it. Temp1 (EGT) alert threshold in **Celsius** for the `egt` status mode: red flash at/above, clears 20 °C below, solid blue when the probe signal is NaN/stale. Clamp 50–1200 |
 | `utc_offset_min` | int | `0` | Minutes east of UTC (US Central standard `-360`, India `330`, Newfoundland `-210`). Clamp ±840; out of band keeps 0 (= UTC). **Presentation only** — nothing logged is converted (subsystem 17) |
 | `led_brightness_night` | int | `16` | NeoPixel cap 0–255 used inside the night window. `0` blanks the strip but leaves the 5 V rail UP — only `led_brightness` 0 cuts the rail |
 | `led_day_start_hour` | int | `7` | **Local** hour the day cap takes over. Clamp 0–23 |
@@ -1892,7 +1892,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | Sprint prune order | renamed-in-app first, then oldest `date_created`; confirm only when a device-named course would go | `course_prune.h` |
 | Track JSON coordinate precision | 8 decimals (~1.1 mm) | `track_json.h` |
 | Tach min pulse gap | 3 ms (`wasted`) / 6 ms (`single`) — same ~20 000 RPM ceiling either way | `tach_filter.h` (`minPulseGapUs`) |
-| Tach revs per pulse | `wasted` ? 1.0 : 2.0 — **no cylinder term** (plan 0012) | `tach_filter.h` (`revsPerPulse`) |
+| Tach revs per pulse | `wasted` ? 1.0 : 2.0 — **no cylinder term** (plan 0014) | `tach_filter.h` (`revsPerPulse`) |
 | Tach ring buffer | 16 entries | `BirdsEye.ino` |
 | Tach Kalman Q (legacy mode) | 800 RPM² per update | `tach_filter.h` |
 | Tach Kalman process noise (smooth) | 80 000 RPM²/s × engine time, clamped 0.5 s | `tach_filter.h` |

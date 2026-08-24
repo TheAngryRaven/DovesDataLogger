@@ -92,7 +92,7 @@ TEST_CASE("off mode is dark and holds no latch") {
 // Threshold modes
 ///////////////////////////////////////////
 
-TEST_CASE("rpm mode reproduces the pre-0012 rev flasher") {
+TEST_CASE("rpm mode reproduces the pre-0013 rev flasher") {
   State s;
   Inputs in = base();
 
@@ -263,7 +263,7 @@ TEST_CASE("egt mode is the Temp1 tri-state on a SensorEgg build") {
 }
 
 TEST_CASE("egt mode on a build WITHOUT SensorEgg support is OFF, never blue") {
-  // The regression test for the shipped bug: before plan 0012 the right
+  // The regression test for the shipped bug: before plan 0013 the right
   // status pixel was hardwired to Temp1, so on every master/release
   // image sensoreggEgtC() answered a permanent NaN and the LED sat
   // solid blue — "no probe signal" — for the whole of every race. There

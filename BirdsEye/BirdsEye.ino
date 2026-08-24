@@ -191,7 +191,7 @@ bool settingRaceModePrefSprint = false;
 // are anchored to. Read at boot only, like every other setting.
 //
 // settingTargetRpm was `settingRevLimit` / the `rev_limit` key until plan
-// 0012. It is the SHIFT point — where the driver wants to know the engine
+// 0013. It is the SHIFT point — where the driver wants to know the engine
 // is at its working ceiling — and never was a limiter; settingOverrevLimit
 // below is the real limit. The old name taught the wrong thing to
 // everyone who opened SETTINGS.json, so both the key and the global moved.
@@ -214,10 +214,10 @@ int16_t settingUtcOffsetMin = 0;
 uint8_t settingLedBrightnessNight = 16;
 uint8_t settingLedDayStartHour = 7;
 uint8_t settingLedNightStartHour = 19;
-// Plan 0012: the speed the 9-px bar scales against on a session with no
+// Plan 0013: the speed the 9-px bar scales against on a session with no
 // tachometer (mph, stored in mph — the companion app converts for
 // display), and what each status LED is assigned to show. The defaults
-// reproduce the pre-0012 hardcoded pair on a SensorEgg build; a stock
+// reproduce the pre-0013 hardcoded pair on a SensorEgg build; a stock
 // build gets the lap indicator on the right instead of a Temp1 readout
 // with no probe behind it.
 int settingTargetSpeedMph = 60;
@@ -1102,7 +1102,7 @@ void setup() {
       const int b = parsedSetting;
       if (b >= 0 && b <= 255) settingLedBrightness = (uint8_t)b;
     }
-    // The shift/warning point. `rev_limit` before plan 0012 — devices
+    // The shift/warning point. `rev_limit` before plan 0013 — devices
     // upgrading get the old value migrated into the new key by
     // ensureDefaultSettings(), so this only ever reads target_rpm.
     if (getSetting("target_rpm", buf, sizeof(buf)) &&
@@ -1121,7 +1121,7 @@ void setup() {
       else if (r >= 1000 && r <= 20000) settingOverrevLimit = r;
     }
 #if BIRDSEYE_ENABLE_SENSOREGG
-    // SensorEgg builds only (plan 0012). ensureDefaultSettings() writes
+    // SensorEgg builds only (plan 0013). ensureDefaultSettings() writes
     // the key on the same condition, so on a stock image the key is not
     // in the file and the compiled-in default stands unused — the `egt`
     // status mode renders dark there regardless.
@@ -1156,7 +1156,7 @@ void setup() {
       const int h = parsedSetting;
       if (h >= 0 && h <= 23) settingLedNightStartHour = (uint8_t)h;
     }
-    // Plan 0012: the speed the LED bar scales against when a session has
+    // Plan 0013: the speed the LED bar scales against when a session has
     // no tachometer, in mph.
     if (getSetting("target_speed_mph", buf, sizeof(buf)) &&
         setting_parse::parseIntSetting(buf, &parsedSetting)) {
@@ -1166,7 +1166,7 @@ void setup() {
       // failure mode parseIntSetting exists to prevent for led_brightness.
       if (v >= 5 && v <= 250) settingTargetSpeedMph = v;
     }
-    // Status-LED assignment (plan 0012). STRICT parse on purpose: an
+    // Status-LED assignment (plan 0013). STRICT parse on purpose: an
     // unknown or blank mode keeps the compiled-in default rather than
     // silently darkening a status LED or picking a different one. A mode
     // this build cannot render (`egt` with no SensorEgg support) still

@@ -553,7 +553,7 @@ void GPS_LOOP() {
         // emits "nan" and isNumericString rejects it into the same
         // fallback - luck, not design.)
         //
-        // SENSOREGG BUILDS ONLY since plan 0012. Until then these three
+        // SENSOREGG BUILDS ONLY since plan 0013. Until then these three
         // columns were written on every channel, as the literal "nan"
         // on a stock image, so that the log shape never forked. That
         // rule is deliberately retired: three dead columns on every row
@@ -712,7 +712,7 @@ void GPS_LOOP() {
           } else {
             // Cursor is now at exactly DOVEX_HEADER_SIZE.
             // The trailing Temp1/Junction1/Temp2 columns exist only on a
-            // SensorEgg build (plan 0012) — must match the two row
+            // SensorEgg build (plan 0013) — must match the two row
             // shapes in the write path above.
 #if BIRDSEYE_ENABLE_SENSOREGG
             dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z,Temp1,Junction1,Temp2"));
