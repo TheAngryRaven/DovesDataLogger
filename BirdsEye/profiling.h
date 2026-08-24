@@ -54,12 +54,33 @@
 // The page shows which one is live; trust sub-microsecond figures only
 // under DWT.
 //
-// OVERHEAD: a section bracket is two counter reads plus a saturating
-// add — order 30 cycles, ~0.5 us per iteration across all 13 sections,
-// under 0.1% of a 4 ms loop. It is inside the numbers it reports (it
-// lands in the bracketed section, not in OTH), which is the right place
-// for it: what you read is what the instrumented firmware actually
-// costs.
+// DWT IS A DURATION CLOCK, NOT A WALL CLOCK, and the difference is not
+// academic: it counts CPU cycles, so it stops dead whenever the core
+// halts (WFE/WFI in the FreeRTOS idle task, sd_app_evt_wait). It times
+// code that is definitely executing; it cannot tell you how much time
+// passed. The rollup window is therefore closed on millis() and every
+// share is computed against that wall time — see loop_profile.h for the
+// bug this cost us the first time. The leftover, wall time not spent
+// inside loop(), is reported as SLP and is the real headroom number.
+//
+// OVERHEAD — READ THIS BEFORE TRUSTING A SMALL SECTION. A bracket is
+// two counter reads plus a saturating add: order 30 cycles, ~0.5 us,
+// so ~6-8 us per iteration across all 13 sections. That was written off
+// as "under 0.1%" against the ~4 ms iteration this project's docs had
+// long assumed. The first hardware run measured a mean iteration UNDER
+// 100 us, which puts the instrument's own cost at order 10% of what it
+// reports — not negligible, and it depresses the loop rate it measures.
+//
+// It is still deliberately inside the numbers (a bracket lands in the
+// section it brackets, never in OTH), because for a subsystem's SHARE
+// that is the honest accounting: what you read is what the instrumented
+// firmware costs. But two things follow at this loop rate:
+//   - a section reading under ~1% is at the noise floor of its own
+//     bracket; do not rank those against each other;
+//   - the un-instrumented loop is somewhat faster than the rate shown.
+// If the absolute rate ever needs to be exact, measure it with the pin
+// on a build whose section brackets are compiled out (the loop scope
+// alone is two reads) rather than trying to subtract an estimate.
 ///////////////////////////////////////////
 
 // Sentinel for PROFILING_PIN_SECTION: mark the whole loop body rather
@@ -82,8 +103,7 @@
 #define PROF_SEC_CAMERA 8
 #define PROF_SEC_LED 9
 #define PROF_SEC_BUTTONS 10
-#define PROF_SEC_PAGES 11
-#define PROF_SEC_DISPLAY 12
+#define PROF_SEC_DISPLAY 11
 
 static_assert(PROF_SEC_GPS == loop_profile::kGps, "section mirror drift");
 static_assert(PROF_SEC_TACH == loop_profile::kTach, "section mirror drift");
@@ -97,7 +117,6 @@ static_assert(PROF_SEC_CAMERA == loop_profile::kCamera, "section mirror drift");
 static_assert(PROF_SEC_LED == loop_profile::kLed, "section mirror drift");
 static_assert(PROF_SEC_BUTTONS == loop_profile::kButtons,
               "section mirror drift");
-static_assert(PROF_SEC_PAGES == loop_profile::kPages, "section mirror drift");
 static_assert(PROF_SEC_DISPLAY == loop_profile::kDisplay,
               "section mirror drift");
 static_assert(PROFILING_PIN_WHOLE_LOOP > loop_profile::kSectionCount,

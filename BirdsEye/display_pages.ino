@@ -1157,10 +1157,20 @@ void displayPage_gps_debug() {
  * First page of the race rotation on a profiling build (plan 0011).
  * Eight rows, all of them data:
  *
- *   253Hz av3.9 mx1802      loop rate, mean and worst iteration (ms)
+ *   14481Hz 61us mx42       loop rate, mean iteration, worst iteration
+ *                           (mean in us below 1 ms, else ms; mx in ms)
  *   GPS 41.2 TCH  0.4       every section's share of the last second,
  *   ...                     as a percentage, two per row
- *   BTN 12.0 OTH  4.1       OTH = loop time no section bracketed
+ *   DSP 14.9 OTH  4.1       OTH = loop() time no section bracketed
+ *   SLP 11.3                SLP = wall time not inside loop() at all
+ *
+ * All fourteen slots are shares of the same wall-clock second, so they
+ * sum to ~100 (integer truncation loses a few tenths). If they do not,
+ * something is wrong with the measurement, not with the firmware.
+ *
+ * SLP is the headroom number: scheduler dispatch, other FreeRTOS tasks,
+ * and any time the CPU spent asleep. A large SLP means the loop rate is
+ * NOT the thing limiting this firmware.
  *
  * Two markers can lead the first row. '*' means the DWT cycle counter
  * would not run and the numbers came from micros() instead — at 1 us
@@ -1186,19 +1196,40 @@ void displayPage_profile() {
     return;
   }
 
-  // Clamped so the row can never outgrow the 21-character line. Text
-  // wrap is off, so an overflow would silently truncate rather than
-  // eat a grid row — clamping makes it visible instead ("999Hz" is
-  // obviously pegged).
-  const uint32_t rate = (r.loopRateHz > 999) ? 999 : r.loopRateHz;
-  const uint32_t meanTenthMs = (r.loopMeanUs > 99900) ? 999 : (r.loopMeanUs / 100);
+  // The mean is rendered in WHOLE MICROSECONDS below a millisecond and
+  // in milliseconds above it. The first hardware run came back reading
+  // `999Hz av0.0` — a loop rate pinned at what was then a 999 clamp and
+  // a mean quantised to nothing, because both fields had been sized
+  // from the "~250 Hz / 4 ms iteration" figure this project had carried
+  // in its docs for years. The real loop turned out to be an order of
+  // magnitude faster than that, which is precisely the sort of thing
+  // this page exists to find — so the clamps must not be the thing that
+  // hides it.
+  //
+  // The row still cannot outgrow the 21-character line, because rate
+  // and mean are reciprocal: a five-digit rate forces a sub-millisecond
+  // (<=4-char) mean, and a mean big enough to need "99.9ms" forces a
+  // three-digit rate. Text wrap is off, so an overflow would silently
+  // truncate rather than wrap — worth the coupling argument.
+  const uint32_t rate = (r.loopRateHz > 99999) ? 99999 : r.loopRateHz;
   const uint32_t maxMs = (r.loopMaxUs > 9999000) ? 9999 : (r.loopMaxUs / 1000);
 
-  char line[24];
-  snprintf(line, sizeof(line), "%s%luHz av%lu.%lu mx%lu",
-           profilingPinLive() ? "" : "!",
-           (unsigned long)rate, (unsigned long)(meanTenthMs / 10),
-           (unsigned long)(meanTenthMs % 10), (unsigned long)maxMs);
+  char mean[12];
+  if (r.loopMeanUs < 1000) {
+    snprintf(mean, sizeof(mean), "%luus", (unsigned long)r.loopMeanUs);
+  } else {
+    const uint32_t tenthMs =
+        (r.loopMeanUs > 99900) ? 999 : (r.loopMeanUs / 100);
+    snprintf(mean, sizeof(mean), "%lu.%lums", (unsigned long)(tenthMs / 10),
+             (unsigned long)(tenthMs % 10));
+  }
+
+  // Sized well past the 21-column line so the compiler can prove no
+  // truncation: 1 marker + 5 rate + "Hz " + 6 mean + " mx" + 4 max + NUL.
+  char line[32];
+  snprintf(line, sizeof(line), "%s%luHz %s mx%lu",
+           profilingPinLive() ? "" : "!", (unsigned long)rate, mean,
+           (unsigned long)maxMs);
   // '*' prefix = degraded timebase (see the doc comment); '!' = the
   // profiling pin was refused, so the scope is dark even though these
   // numbers are good. Both can apply; the timebase one wins the column
@@ -1208,8 +1239,8 @@ void displayPage_profile() {
   }
   display.println(line);
 
-  // Seven rows of two slots covers all thirteen sections plus OTH with
-  // nothing left over — adding a section means finding it a row.
+  // Seven rows of two slots covers all twelve sections plus OTH and SLP
+  // with nothing left over — adding a section means finding it a row.
   char slot[12];
   for (uint8_t row = 0; row < 7; row++) {
     for (uint8_t col = 0; col < 2; col++) {

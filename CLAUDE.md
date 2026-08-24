@@ -130,7 +130,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `sd_access_policy.{h,cpp}` | SD access arbitration decision table (mode values + grant/deny rules) |
 | `lap_format.{h,cpp}` | ms → `M:SS.mmm` lap-time rendering (three zero-minutes styles), used by all display pages |
 | `setting_parse.{h,cpp}` | Strict integer parsing for `/SETTINGS.json` values. Exists because `atoi()` answers 0 for `""` and `"garbage"`, and 0 is an in-range, **destructive** value for the LED keys (`led_brightness` 0 = strip off + boost rail never raised) — so a blank setting read as a deliberate "off". Rejects anything that is not a complete integer, so the caller's range check keeps the compiled-in default |
-| `loop_profile.{h,cpp}` | Main-loop CPU accounting: per-section tick accumulation, saturating (never wrapping — a uint32 of DWT ticks is only ~67 s), and the once-a-second rollup into shares of wall time, loop rate, mean and worst iteration. Works in TICKS with `ticksPerUs` supplied at rollup, so a sub-microsecond section is not quantised to zero before it is summed. Board-portable by construction — the nRF5340 comparison needs the same instrument |
+| `loop_profile.{h,cpp}` | Main-loop CPU accounting: per-section tick accumulation, saturating (never wrapping — a uint32 of DWT ticks is only ~67 s), and the once-a-second rollup into shares of wall time, loop rate, mean and worst iteration, plus measured idle (`SLP`). **Two clocks on purpose**: durations in TICKS with `ticksPerUs` supplied at rollup (so a sub-microsecond section is not quantised to zero), but the WINDOW closed on `millis()` — DWT counts cycles and stops when the core halts, and using it as a wall clock inflated the very first hardware reading. Board-portable by construction — the nRF5340 comparison needs the same instrument |
 | `local_time.{h,cpp}` | UTC + a fixed signed minute offset → local wall clock (4-digit year, correct month/year/leap rollover both ways) + the `isNight()` window test. **No DST, and NOTHING logged goes through it** — saved data stays UTC (subsystem 17) |
 | `led_frame.{h,cpp}` | NeoPixel pixel layout (11 px: 2 status + 9-px strip), `Rgb`/`Frame` PODs, and **`applyCap()` — the single global-brightness choke point** (post-condition: no channel exceeds the cap) |
 | `led_modes.{h,cpp}` | Strip modes + status actions: pace pip math (ms/m, slower = left/red), generic `ScaleSpec` left-fill (RPM red past halfway; temps later), and the `StatusAction` threshold/hysteresis/flash table — the phase-2 assignability hook |
@@ -1512,12 +1512,18 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   Nordic SDK is worth the one-way effort. Both are answerable by
   measurement, and nothing in the firmware measured anything finer than
   a `HAS_DEBUG` millisecond-resolution "SLOW LOOP" print. Plan 0011.
-- **"CPU usage" here is NOT a duty cycle, and do not add one.** `loop()`
-  runs back to back with nothing rate-limiting it, so there is no idle
-  task and the honest duty cycle is 100%. What carries information is
-  the SHAPE of an iteration: mean and **worst-case** length (an SD
-  garbage-collection stall of 100 ms–2 s never shows in a mean), the
-  per-subsystem split, and how much no subsystem accounts for.
+- **Idle is MEASURED, not assumed.** The first version of this
+  subsystem asserted that `loop()` runs back to back so the duty cycle
+  is 100% by construction and a duty cycle should never be added. That
+  assumption got baked into the measurement and produced a wrong first
+  reading (see the two-clocks note below). The rollup now computes
+  `busyPermille` — wall time actually spent executing `loop()` — and
+  reports the balance as the `SLP` slot: scheduler dispatch, other
+  FreeRTOS tasks, and CPU sleep. Alongside it, what always carried the
+  information: the SHAPE of an iteration — mean and **worst-case**
+  length (an SD garbage-collection stall of 100 ms–2 s never shows in a
+  mean), the per-subsystem split, and how much no subsystem accounts
+  for.
 - **Two instruments, and the second exists to check the first**:
   - **The pin.** Pin 30 goes HIGH for the span being profiled and LOW
     outside it — loop period off the rising edges, span cost off the
@@ -1549,6 +1555,17 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   prove it moved** — a debug probe can hold TRCENA off and CYCCNTENA is
   architecturally optional, so setting the bit is not evidence. On
   fallback the page prefixes its first row with `*`.
+- **TWO CLOCKS — do not collapse them back into one.** DWT counts CPU
+  CYCLES, so it stops dead when the core halts (WFE/WFI in the FreeRTOS
+  idle task, `sd_app_evt_wait`). It measures DURATIONS; it is not a
+  clock. The rollup window is closed on `millis()` and every share is
+  computed against that wall time. Using DWT to close the window was the
+  first real bug here: a "one second" window was one second of
+  CPU-awake time, so the loop rate came out multiplied by the sleep
+  factor (the first hardware run pegged the display clamp) and every
+  share was a fraction of awake time wearing a wall-time label. The
+  `micros()` fallback never had the bug — it is a real clock. `Report`
+  carries `awakeUs` next to `windowUs` so the discrepancy stays visible.
 - **The pure unit works in TICKS**, taking `ticksPerUs` only at rollup,
   so shares come out of raw ticks and lose nothing. Accumulators
   **saturate, never wrap**: a uint32 of DWT ticks is only ~67 s and a
@@ -1556,27 +1573,43 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   as pegged, a wrapped one reads as near-idle, which is a lie.
 - **`OTH` is reported, not hidden**: loop time no section bracketed. It
   is the honesty check on the instrumentation — if it is large, work is
-  happening where `loop()` is not looking.
+  happening where `loop()` is not looking. **`SLP`** is its counterpart:
+  wall time not inside `loop()` at all. All 14 slots are shares of the
+  same wall-clock second, so they sum to ~1000‰ — an invariant a reader
+  can check on the page at a glance.
 - **A scope guard, not a `*_LOOP()`.** Both parked branches (`bleActive`,
   `usbMscActive`) return early and `enterShutdown()` never returns, so
   the whole-iteration timing AND the rollup live in `~ProfLoopScope()`
   (`PROFILE_LOOP_SCOPE()` at the top of `loop()`). `PROFILING_SLEEP()`
   parks the pin LOW on the shutdown path the destructor never reaches.
   This module deliberately has no `PROFILING_LOOP()`.
-- **Overhead is inside the numbers, on purpose.** A bracket is two
-  counter reads plus a saturating add (~30 cycles; under 0.1% of a 4 ms
-  loop) and it lands in the section it brackets rather than in `OTH` —
-  what you read is what the instrumented firmware costs. The pin edges
+- **Overhead is inside the numbers, on purpose — and it is NOT small.**
+  A bracket is two counter reads plus a saturating add (~30 cycles,
+  ~0.5 µs; ~6–8 µs per iteration across all 13). That was written off
+  as "under 0.1%" against the ~4 ms iteration this file assumed for
+  years; the first hardware run measured a mean iteration **under
+  100 µs**, which puts the instrument at order 10% of what it reports
+  and means the un-instrumented loop is faster than the rate shown. A
+  bracket still lands in the section it brackets rather than in `OTH`,
+  because for a subsystem's SHARE that is the honest accounting — but a
+  section reading under ~1% is at its own bracket's noise floor, so do
+  not rank those against each other. The pin edges
   are `#if`'d rather than compared at runtime: with the default
   whole-loop setting the comparison is provably false for every section,
   and a dead branch in the two hottest functions in the firmware is
   exactly the cost a profiler must not add.
 - **The page** (`GPS_PROFILE` = 2, first of the race rotation on a
   profiling build; the session still LANDS on the speed page, so it is
-  three Lefts away). Eight rows, no title: a stats line (`253Hz av3.9
-  mx1802`, `*` = degraded timebase, `!` = pin refused) then seven rows of
-  two slots covering all 13 sections plus `OTH`. **Adding a section means
-  finding it a row** — the grid is exactly full. Because the rotation is
+  three Lefts away). Eight rows, no title: a stats line (`14481Hz 61us
+  mx42` — mean in µs below 1 ms and ms above, worst iteration always ms;
+  `*` = degraded timebase, `!` = pin refused) then seven rows of two
+  slots covering all 12 sections plus `OTH` and `SLP`. The stats row's
+  clamps are reciprocal-aware rather than fixed: the first hardware run
+  came back `999Hz av0.0` because both fields had been sized from the
+  stale ~250 Hz assumption, and a clamp that hides the finding is worse
+  than no clamp. **Adding a section means finding it a row** — the grid
+  is exactly full, and `SLP`'s slot came from folding the boot-page
+  state machines (`PGE`) into `DSP`. Because the rotation is
   a contiguous range and this page sits below `GPS_DEBUG`, a profiling
   build effectively forces `debug_pages=show`.
 - **Sim**: `profiling.ino` is excluded from the sim TU (BLE-module

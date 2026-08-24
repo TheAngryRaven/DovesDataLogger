@@ -26,6 +26,21 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   - Timing comes from the Cortex-M4 DWT cycle counter (64 ticks/µs)
     with a `micros()` fallback; the page flags the fallback with a
     leading `*` because at 1 µs resolution the small sections are noise.
+  - The stats row shows the mean iteration in microseconds below a
+    millisecond. The first hardware run read `999Hz av0.0` — both fields
+    had been clamped against the ~250 Hz figure this project's docs had
+    long assumed. See `docs/plans/0011-loop-cpu-profiling.md`.
+  - **Rollup windows are closed on `millis()`, not on the cycle
+    counter.** The DWT counter counts CPU cycles and stops when the core
+    halts, so using it to time the window made a "one second" window one
+    second of CPU-awake time — inflating the reported loop rate by the
+    sleep factor and turning every share into a fraction of awake time
+    wearing a wall-time label. All shares are now of real wall time.
+  - New **`SLP`** slot on the page: wall time not spent inside `loop()`
+    at all — scheduler dispatch, other FreeRTOS tasks and CPU sleep, i.e.
+    the actual headroom. Its grid slot came from folding the boot-page
+    state machines (`PGE`) into `DSP`. All fourteen slots are shares of
+    the same second and sum to ~100%.
   - New host-tested pure unit `loop_profile` holds all the accounting.
   - **A beta image can no longer switch the 5 V LED boost rail.** Pin 30
     is the boost converter's EN line and the profiler takes it, so the

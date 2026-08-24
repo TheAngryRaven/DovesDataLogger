@@ -29,11 +29,17 @@ shipped build.
 So: measure a real iteration, on the real hardware, under a real 25 Hz
 GPS + logging + LED + BLE workload, and see where it goes.
 
-## What "CPU usage" means here, and why the obvious metric is wrong
+## What "CPU usage" means here
 
-The instinct is to report a duty cycle. There is no idle task in this
-firmware — `loop()` runs back to back with nothing rate-limiting it — so
-the honest duty cycle is 100% and always will be. It says nothing.
+> **Superseded, and the correction is the interesting part.** This
+> section originally argued that a duty cycle was meaningless because
+> `loop()` runs back to back and therefore the CPU is busy 100% of the
+> time by construction. That was an *assumption*, it was baked into the
+> measurement (see *Two clocks* below), and it made the first hardware
+> reading wrong. The profiler now measures how much wall time is
+> actually spent executing `loop()` and reports the balance as `SLP`.
+> Everything below about the shape of an iteration still holds; it is
+> just no longer the only thing worth reporting.
 
 The number that carries information is the **shape of an iteration**:
 
@@ -110,6 +116,16 @@ lose nothing.
 
 ## Design notes worth keeping
 
+- **Two clocks, and mixing them was the first real bug.** DWT counts CPU
+  *cycles*: it stops dead when the core halts (WFE/WFI in the FreeRTOS
+  idle task, `sd_app_evt_wait`). It is the right instrument for timing
+  code that is definitely executing and the wrong one for deciding how
+  much time has passed. Closing the rollup window on it meant the "one
+  second" window was one second of CPU-awake time, so the loop rate came
+  out multiplied by the sleep factor and every share was a fraction of
+  awake time wearing a wall-time label. Windows now close on `millis()`
+  and all shares are of wall time; durations are still ticks. The
+  `micros()` fallback never had the bug — it is a real clock.
 - **Saturating accumulators.** A uint32 of DWT ticks is only ~67 s and a
   rollup can be arbitrarily late if the loop stalls. A saturated window
   reads as pegged, which is true; a wrapped one reads as near-idle,
@@ -122,11 +138,16 @@ lose nothing.
   returns at all. A profiler that goes quiet exactly when the firmware
   parks would be measuring the wrong thing, so the whole-iteration
   timing and the rollup live in `~ProfLoopScope()`.
-- **The overhead is inside the numbers.** A bracket is two counter reads
-  plus a saturating add — order 30 cycles, under 0.1% of a 4 ms loop —
-  and it lands in the section it brackets rather than in `OTH`. That is
-  the right place for it: what you read is what the instrumented
-  firmware actually costs.
+- **The overhead is inside the numbers — and at the real loop rate it is
+  order 10%, not the 0.1% first claimed.** A bracket is two counter reads
+  plus a saturating add: ~30 cycles, ~0.5 µs, so ~6–8 µs per iteration
+  across all 13. That was written off against the ~4 ms iteration this
+  project's docs assumed; the first hardware run measured a mean
+  iteration under 100 µs. A bracket still lands in the section it
+  brackets rather than in `OTH`, because for a subsystem's *share* that
+  is the honest accounting — but sections under ~1% sit at their own
+  bracket's noise floor, and the un-instrumented loop is faster than the
+  rate shown.
 - **The pin edges are `#if`'d, not branched.** With the default
   whole-loop setting the runtime comparison is provably false for every
   section, and a dead branch in the two hottest functions in the
@@ -152,11 +173,69 @@ Then:
 - **`OTH` is large** → the instrumentation is incomplete; bracket more
   before drawing any conclusion.
 
+## First hardware run (bench, 2026-08-24)
+
+Not a track session — treat these as a bench baseline, not the answer:
+
+```
+999Hz av0.0 mx42          <- 999 and 0.0 are display clamp artifacts, since fixed
+GPS 20.6   TCH  3.0
+ACC  0.7   BLE  0.8
+EGG  2.3   TRK  1.3
+LAP  2.0   IDL  4.6
+CAM  7.9   LED  3.1
+BTN  8.8   PGE  1.1
+DSP 14.9   OTH 17.6
+```
+
+No `*` and no `!`, so the DWT timebase and the pin were both live. What
+it says, and what it changes:
+
+- **The rate is not trustworthy as printed, and chasing why found a
+  bug.** It hit the 999 display clamp and the mean read 0.0 — both
+  fields had been sized from the stale ~250 Hz figure. But the deeper
+  problem was the window: it was closed on the DWT cycle counter, which
+  stops when the core sleeps, so the reported rate is the true rate
+  multiplied by however much of the second the CPU was awake, and every
+  share is a fraction of awake time rather than of wall time. Whether
+  the loop really is that fast, or the CPU sleeps most of the second,
+  the fixed build now answers directly: `SLP` reads ~0 in the first
+  case and large in the second.
+- **`mx` 42 ms against a 1600 ms GPS-ring ceiling and a 4000 ms
+  watchdog.** Worst-case latency is nowhere near anything that matters.
+- **Nothing dominates.** The largest section is `GPS` at 20.6%, and the
+  sections sum to ~88.7%. Shares are ratios of the same (mis-sized)
+  denominator, so their RELATIVE sizes survive the bug even though their
+  absolute values do not — the ranking below is still worth reading.
+- **The shape is polling overhead, not work.** `BTN` at 8.8% with nobody
+  touching a button is six `digitalRead()` calls per iteration at over a
+  kilohertz; `DSP` at 14.9% is mostly a `displayLoop()` that early-returns
+  on a 3 Hz gate; `OTH` at 17.6% is the unbracketed glue's `millis()`
+  calls. Subsystems that need 3–50 Hz are being polled ~1000× faster.
+
+**Read on the board question, held loosely until a re-run:** `mx` is
+nowhere near any budget and no section dominates, so nothing here argues
+for an nRF5340 on throughput grounds. If the 5340 is bought it should be
+for BLE reliability — which this page cannot measure directly (see the
+caveat below).
+
 ## Still outstanding
 
-- No hardware numbers are recorded here yet. Once a session has been
-  captured, the headline figures belong in this section — that is the
-  deliverable, not the code.
+- **A re-run on the fixed build.** The absolute rate and every absolute
+  share from the run above are suspect until the window is wall-clocked.
+  The first thing to read on the new build is `SLP`: near zero means the
+  loop genuinely is that fast and the old numbers were only clamped;
+  large means the CPU sleeps and the old numbers were inflated by
+  exactly that factor.
+- **A session under real load.** The run above did have a GPS lock and
+  did trigger camera recording, so it was not idle — but a full track
+  session with sustained logging is still the number that decides
+  things.
+- **The BLE question.** Neither instrument separates SoftDevice /
+  Bluefruit task time from the section it preempted — FreeRTOS preemption
+  smears it across whatever was running. Watching how section *variance*
+  moves when a phone connects or the camera links is the available proxy;
+  a direct measurement would need the ISRs instrumented too.
 - The nRF5340 comparison needs the same instrument on that target. The
   pure unit is board-portable by construction (no Arduino headers, no
   platform `#ifdef`s) — same rule as `camera_fsm`, for the same reason.

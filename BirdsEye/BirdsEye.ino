@@ -2715,12 +2715,14 @@ void loop() {
   calculateGPSFrameRate();
 
   PROFILE_SECTION(loop_profile::kButtons, readButtons());
-  // boot status page: consume presses, hold/auto-close
-  // boot format-confirm page: hold Select 3s to format
-  // course creator: feed GPS into an averaging hold
-  PROFILE_SECTION(loop_profile::kPages, gpsStatusPageLoop(); sdFormatPageLoop();
-                  courseCreatorLoop());
-  PROFILE_SECTION(loop_profile::kDisplay, displayLoop());
+  // The boot-page state machines share the display section: they are the
+  // same family of work (page logic), and folding them freed the one grid
+  // slot the LOOP PROFILE page needed for SLP — see loop_profile.h.
+  //   gpsStatusPageLoop: consume presses, hold/auto-close
+  //   sdFormatPageLoop:  hold Select 3s to format
+  //   courseCreatorLoop: feed GPS into an averaging hold
+  PROFILE_SECTION(loop_profile::kDisplay, gpsStatusPageLoop();
+                  sdFormatPageLoop(); courseCreatorLoop(); displayLoop());
   resetButtons();
 
   if (tachLastReported > topTachReported) {

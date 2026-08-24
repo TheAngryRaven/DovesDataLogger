@@ -21,7 +21,6 @@ static uint32_t profSectionStart[loop_profile::kSectionCount];
 // is the fallback when a debugger owns DWT or TRCENA will not stick.
 static bool profUseDwt = false;
 static uint32_t profTicksPerUs = 1;
-static uint32_t profWindowTicks = 0;
 
 // Cached port + mask for the profiling pin so an edge is a single
 // register store rather than a digitalWrite() pin-map lookup — the pin
@@ -92,15 +91,13 @@ static void profClaimPin() {
 void PROFILING_SETUP() {
   profUseDwt = profEnableDwt();
   profTicksPerUs = profUseDwt ? (uint32_t)(F_CPU / 1000000UL) : 1UL;
-  profWindowTicks = (uint32_t)(PROFILING_WINDOW_MS * 1000UL) * profTicksPerUs;
-
   for (uint8_t i = 0; i < loop_profile::kSectionCount; i++) {
     profSectionStart[i] = 0;
   }
   profLastReport.valid = false;
 
   profClaimPin();
-  loop_profile::reset(profState, profNow());
+  loop_profile::reset(profState, profNow(), millis());
 
   debug(F("Profiling: timebase "));
   debug(profUseDwt ? F("DWT") : F("micros"));
@@ -159,8 +156,11 @@ ProfLoopScope::~ProfLoopScope() {
   // bottom of loop() for the same reason the loop span does: the BLE
   // and USB parked branches return early, and a profiler that stops
   // reporting exactly when the firmware parks is worse than none.
-  if (loop_profile::rollup(profState, now, profWindowTicks, profTicksPerUs,
-                           profLastReport)) {
+  // millis(), not the tick counter, decides when the window is over —
+  // see the loop_profile header. The tick counter measures durations;
+  // it is not a clock.
+  if (loop_profile::rollup(profState, now, millis(), PROFILING_WINDOW_MS,
+                           profTicksPerUs, profLastReport)) {
 #ifdef HAS_DEBUG
     debug(F("PROFILE "));
     debug(profLastReport.loopRateHz);
@@ -168,6 +168,12 @@ ProfLoopScope::~ProfLoopScope() {
     debug(profLastReport.loopMeanUs);
     debug(F("us max "));
     debug(profLastReport.loopMaxUs);
+    debug(F("us busy "));
+    debug(profLastReport.busyPermille);
+    debug(F("/1000 awake "));
+    debug(profLastReport.awakeUs);
+    debug(F("/"));
+    debug(profLastReport.windowUs);
     debug(F("us | "));
     for (uint8_t i = 0; i < loop_profile::kReportSlots; i++) {
       debug(loop_profile::sectionTag(i));
