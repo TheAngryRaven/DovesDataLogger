@@ -8,6 +8,9 @@
 #include "camera_ble.h"
 #include "filename_validator.h"
 #include "firmware_ota.h"
+// For SENSOREGG_SLEEP() — BLE_SETUP() quiesces the egg scanner so the
+// transfer link never shares the radio with a scan window (plan 0012).
+#include "sensoregg.h"
 // For SETTINGS_JSON_CAPACITY and getSetting/setSetting. This module used
 // them via Arduino's concatenation of BirdsEye.ino's includes; naming the
 // dependency follows camera_ble.ino and keeps the SLIST buffer sizes tied
@@ -841,6 +844,16 @@ void BLE_SETUP() {
   // in BLE_STOP() (and by the auto-reboot on phone disconnect).
   sdSetTransferSpeed(true);
 
+  // Quiesce the SensorEgg scanner for the whole transfer session (plan
+  // 0012). The scanner is race-gated and the transfer page is only
+  // reachable from the menu (race over, scan already down), so this is
+  // belt-and-suspenders — but the 44% scan duty was measured throttling
+  // downloads to ~33 KB/s by denying connection-event extension, so the
+  // transfer link gets an explicit guarantee, not an inference. No wake
+  // path needed: every exit from transfer mode reboots. No-op on
+  // flag-off builds.
+  SENSOREGG_SLEEP();
+
   debugln(F("BLE: Starting transfer mode..."));
 
   bleCoreEnsureInit();
@@ -1432,3 +1445,23 @@ void BLUETOOTH_LOOP() {
 uint32_t bleTransferRateBps() { return bleTransferRate; }
 uint16_t bleLinkDataLength() { return bleLinkDataLen; }
 uint16_t bleLinkChunkSize() { return ble_stream::chunkSize(bleNegotiatedMtu); }
+
+// Live connection interval / PHY for the transfer page's second diagnostic
+// line (plan 0012). These read the BLEConnection object's cached values —
+// plain RAM updated by GAP events, safe from the display path on the main
+// loop — rather than a snapshot from bleTuneLink(), so a central that
+// renegotiates mid-transfer shows its real numbers. 0 when no peer is
+// connected.
+uint16_t bleLinkIntervalUnits() {
+  if (!bleInitialized || !Bluefruit.connected()) return 0;
+  BLEConnection* connection = Bluefruit.Connection(Bluefruit.connHandle());
+  return (connection && connection->connected())
+             ? connection->getConnectionInterval()
+             : 0;
+}
+
+uint8_t bleLinkPhy() {
+  if (!bleInitialized || !Bluefruit.connected()) return 0;
+  BLEConnection* connection = Bluefruit.Connection(Bluefruit.connHandle());
+  return (connection && connection->connected()) ? connection->getPHY() : 0;
+}

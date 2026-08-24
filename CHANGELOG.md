@@ -12,6 +12,20 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Fixed
+
+- **BLE download throughput on SensorEgg (beta) builds** — the SensorEgg
+  passive scanner (44% radio duty) ran from boot forever, including through
+  every Bluetooth file transfer, where it denied the link's connection-event
+  extension and throttled downloads to ~33 KB/s against a 120+ KB/s
+  baseline. The scanner is now **race-gated**: it starts when a race session
+  begins and stops when the session ends, so the menu, replay, and transfer
+  mode never share the radio with a scan window. `BLE_SETUP()` additionally
+  quiesces it explicitly so a transfer session carries a guarantee rather
+  than an inference. EGT data is unaffected — the Temp pages and the DOVEX
+  `Temp1`/`Junction1`/`Temp2` columns are race-only consumers. See
+  `docs/plans/0012-download-throughput-regression-deepdive.md`.
+
 ### Added
 
 - **Assignable LED status modes** — the two status pixels are no longer
@@ -43,6 +57,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   keeps the 1.6 s animation; a session-best **lap** gets a longer 2.6 s
   version with two wave passes, and outranks a sector celebration when
   both land on the same crossing.
+- **Connection interval + PHY on the Bluetooth transfer page** — a second
+  diagnostic line during a transfer (e.g. `15.0ms 2M`) alongside plan 0008's
+  rate/SD/PDU/payload line. These are the two throughput levers the central
+  decides and the device can only request: an interval of 30 ms instead of
+  15 ms is a silent 2x on every download, and a link that ignored the 2M PHY
+  request pays double airtime per packet. Live values, so a mid-transfer
+  renegotiation shows up.
+
 - **Main-loop CPU profiling (beta channel only)** — a new
   `BIRDSEYE_ENABLE_PROFILING` build flag, off in master and release, on
   in every beta build. It times each subsystem call in `loop()`, rolls
