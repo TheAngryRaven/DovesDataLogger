@@ -12,22 +12,67 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
-### Fixed
+## [4.1.0] - 2026-08-24
 
-- **BLE download throughput on SensorEgg (beta) builds** — the SensorEgg
-  passive scanner (44% radio duty) ran from boot forever, including through
-  every Bluetooth file transfer, where it denied the link's connection-event
-  extension and throttled downloads to ~33 KB/s against a 120+ KB/s
-  baseline. The scanner is now **race-gated**: it starts when a race session
-  begins and stops when the session ends, so the menu, replay, and transfer
-  mode never share the radio with a scan window. `BLE_SETUP()` additionally
-  quiesces it explicitly so a transfer session carries a guarantee rather
-  than an inference. EGT data is unaffected — the Temp pages and the DOVEX
-  `Temp1`/`Junction1`/`Temp2` columns are race-only consumers. See
-  `docs/plans/0012-download-throughput-regression-deepdive.md`.
+MINOR — new settings and device behaviour, backwards compatible with the
+caveats below. Track files, the log filenames and the BLE command protocol
+are unchanged from 4.0.0, so existing tracks, cards and companion apps
+keep working. Two things do change:
+
+- **Stock DOVEX logs drop the three always-`nan` temperature columns** —
+  `Temp1`/`Junction1`/`Temp2` are now written only on SensorEgg builds, so
+  a stock data row has 13 columns instead of 16. Readers key the data
+  section off its own CSV header line, where all three are optional, so
+  4.0.0 and 4.1.0 logs both load — but anything that assumed a fixed
+  16-column row needs to read the header.
+- **RPM changes on any device with `cylinder_count` set above 1** — the
+  reading was wrongly divided by the cylinder count and no longer is (see
+  Fixed). Devices left at the default of 1 are byte-identical.
+
+> ### Read this before updating
+>
+> **This release permanently converts the two NFC pads to GPIO, on every
+> device, and reboots once while doing it.**
+>
+> The LED strip stops being a beta-only experiment in 4.1.0 and ships in the
+> normal firmware, so a logger lights up the moment someone wires a strip to
+> it — no special build. Making those two pads usable as GPIO means writing
+> the chip's UICR, and **that write cannot be undone by any later firmware**;
+> reversing it needs a full chip erase and a bootloader reflash over USB.
+> Your logger does the write the first time it boots after updating, then
+> resets itself once so the change takes effect. That single extra reboot
+> during the update is expected — nothing is wrong.
+>
+> This happens whether or not you have LEDs attached, because the firmware
+> cannot know. The trade was made deliberately: this hardware does not use
+> NFC for anything, the pads are otherwise idle, and requiring a separate
+> build to use a headline feature had kept it out of everyone's hands. If you
+> have some future use for the NFC pads on your device, **do not install
+> 4.1.0.**
+>
+> With no strip wired, nothing else changes — the pins simply sit there.
+
+The SensorEgg wireless-EGT proof of concept remains beta-only
+(`BIRDSEYE_ENABLE_SENSOREGG`, off in the published images), and the new
+main-loop CPU profiler is likewise a beta-channel diagnostic
+(`BIRDSEYE_ENABLE_PROFILING`, also off in the published images). Everything
+else below is live for every user.
 
 ### Added
-
+- **NeoPixel LED strip subsystem** (plan 0006) — **now in every build**,
+  see the upgrade note above: 11 WS2812 pixels on the NFC
+  pads converted to GPIO — 2 status indicators + a 9-px strip with a
+  centerline. A global brightness cap (`led_brightness` setting, 0
+  disables the LEDs entirely) that no LED can ever exceed; a pace pip
+  strip mode (left of center red = slower than best, right green =
+  faster) with an RPM scale (green filling to red past halfway toward
+  the new `target_rpm` setting) until pace is meaningful; two
+  user-assignable status LEDs (see the status-modes entry below); a
+  boot animation; and a purple celebration when a session-best sector is
+  set. The strip's 5 V boost converter is enabled by its own pin, so
+  sleep truly powers the LEDs off. **First boot of a flag-on build
+  performs a one-way NFC-pads-to-GPIO conversion (UICR write) and
+  resets once.**
 - **Assignable LED status modes** — the two status pixels are no longer
   hardcoded. `led_status_left` and `led_status_right` each select one of
   eight modes from the companion app: **Off**, **Target RPM** (the old
@@ -57,6 +102,39 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   keeps the 1.6 s animation; a session-best **lap** gets a longer 2.6 s
   version with two wave passes, and outranks a sector celebration when
   both land on the same crossing.
+- **LED day/night brightness + a device timezone** (plan 0010): new `utc_offset_min` setting (minutes east of UTC, default 0)
+  gives the device a local wall clock, and the LED strip swaps to
+  `led_brightness_night` (default 16) between `led_night_start_hour`
+  (19) and `led_day_start_hour` (7) — local hours, so 7am is the
+  driver's 7am rather than Greenwich's. Setting the two hours equal
+  disables the swap. **No DST** — a fixed offset only. **Logged data is
+  unchanged and still UTC**: DOVEX timestamps, the header datetime and
+  every filename stay exactly as they were, and timezone presentation
+  remains the viewing app's job.
+- **Overrev alert** (plan 0007): new `overrev_limit` setting (default 0
+  = disabled) — past it the whole LED chain flashes red and the tach
+  page's `*OVER REV*` header trips, both until RPM falls back below the
+  normal `target_rpm`. The target-RPM warning means the engine is at its
+  ceiling; the overrev limit says it's broken.
+- **Temp1 alert threshold setting** (`temp1_alert_c`, default 650 °C,
+  SensorEgg builds only): the `egt` status-LED mode is a tri-state —
+  flashing red at/above the limit, off when good, solid blue when there
+  is no probe signal.
+- **`tach_filter` setting** (default `smooth`, plan 0009): picks the RPM
+  estimator, so the tach can be A/B'd against a live engine at the track
+  instead of argued about from a plotted log. `smooth` is the new filter
+  below; `legacy` is the pre-0009 one, bit for bit, for comparison
+  against logs already collected; `raw` turns the estimator off entirely
+  so the `rpm` column is exactly what the pickup delivers. Anything
+  unrecognised reads as `smooth`.
+- **Tach pickup-health line**: with `debug_pages` = `show`, the
+  tachometer page's subtext becomes `max:NNNNN S rj:NN` — the estimator
+  in force plus the number of inter-pulse periods the outlier gate has
+  thrown away this power-cycle. A count that climbs with RPM is ignition
+  ringing or missed sparks reaching the ISR, i.e. the pickup rather than
+  the filter.
+- **GPS-search pip**: in race mode without a full GPS lock the strip shows a green pixel bouncing end-to-end instead of the
+  RPM scale, so a not-yet-timing session is visibly "searching".
 - **Connection interval + PHY on the Bluetooth transfer page** — a second
   diagnostic line during a transfer (e.g. `15.0ms 2M`) alongside plan 0008's
   rate/SD/PDU/payload line. These are the two throughput levers the central
@@ -64,7 +142,6 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   15 ms is a silent 2x on every download, and a link that ignored the 2M PHY
   request pays double airtime per packet. Live values, so a mid-transfer
   renegotiation shows up.
-
 - **Main-loop CPU profiling (beta channel only)** — a new
   `BIRDSEYE_ENABLE_PROFILING` build flag, off in master and release, on
   in every beta build. It times each subsystem call in `loop()`, rolls
@@ -103,154 +180,6 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   - On a profiling build the race rotation starts at the profile page,
     which also pulls the two diagnostic pages in regardless of the
     `debug_pages` setting.
-
-### Fixed
-
-- **RPM on multi-cylinder engines — the cylinder count no longer divides
-  it.** Since 4.0.0 the tachometer computed
-  `pulses_per_rev = cylinder_count × spark_factor`, which is only correct
-  for a pickup clamped on a shared coil or distributor king lead. This
-  device has one sense wire and one clamp, and it goes around **one spark
-  plug wire** — so it sees one cylinder's ignition however many the engine
-  has, and the cylinder term divided RPM by that count. A V8 on a
-  traditional magneto, configured honestly as 8 cylinders + single fire,
-  read **an eighth** of its real crank speed. RPM is now
-  `revs_per_pulse = spark_mode == wasted ? 1.0 : 2.0` — the spark mode
-  alone. See `docs/plans/0012-tach-rpm-single-pickup.md`.
-  - **BREAKING for anyone who set `cylinder_count` above 1**: their RPM
-    changes, because it stops being divided. Logs recorded before this
-    release read low by exactly the configured cylinder count. Devices
-    left at the default (1 cylinder) are byte-identical.
-  - The ISR debounce loses the same term — one wire can't deliver pulses
-    faster than the cylinder it wraps fires — so it returns to a flat
-    3 ms (6 ms for single-fire) and the ~20 000 RPM ceiling is now
-    identical in both spark modes instead of falling with each configured
-    cylinder.
-
-### Changed
-
-- **`cylinder_count` means the engine's actual cylinder count.** It was
-  documented as "cylinders the **pickup sees**", which asked a V8 owner
-  to enter `1` in a field labelled Cylinders — a trap that produced wrong
-  RPM for anyone who read it literally. It is now descriptive: enter what
-  the engine has. Nothing in the RPM path reads it. Above 1 it drives a
-  warning, in the settings UI and in the docs, that crank speed is
-  **inferred from one cylinder's ignition pulses** — between firings the
-  reading is an assumption and a cylinder that drops out reads as a
-  stopped engine, which is the known and accepted behaviour of every
-  clamp-on inductive tach. No settings-file migration: same keys, same
-  defaults, same size.
-
-- **`rev_limit` is now `target_rpm`.** It always was the shift/warning
-  point — `overrev_limit` is the real limit — and the old name taught
-  the wrong thing to everyone who opened `/SETTINGS.json`. Existing
-  devices migrate on first boot: the old value is copied into the new key
-  and the old key removed, and the old key is only dropped once the new
-  one is confirmed written. No user action needed, and a tuned value is
-  never lost.
-- **The DOVEX `Temp1` / `Junction1` / `Temp2` columns are now written
-  only on SensorEgg builds.** Until now they were written on every
-  channel, as the literal `nan` on a stock image, so the log shape never
-  forked. Stock logs are now 13 data columns and SensorEgg logs 16.
-  Readers key the data section off its own CSV header line, where all
-  three are optional, so both shapes load — but anything that assumed a
-  fixed 16-column row needs to read the header. The `temp1_alert_c`
-  setting is likewise SensorEgg-only now.
-- The right status LED's default is **EGT** on a SensorEgg build (what it
-  did before) and **Last lap** on a stock one.
-
-### Fixed
-
-- **The right status LED no longer sits solid blue for an entire race on
-  a logger without SensorEgg support.** The pixel was hardwired to the
-  Temp1 tri-state, whose "no probe signal" state is a solid blue — and on
-  a stock build the reading is permanently unavailable, so every shipped
-  logger with LEDs fitted showed it from lights-out to chequered flag. A
-  build with no probe now renders that mode dark, because there is no
-  signal there to be missing.
-
-## [4.1.0] - 2026-08-22
-
-MINOR — new settings and device behaviour, all backwards compatible. Track
-files, the DOVEX log format, the log filenames and the BLE command protocol
-are byte-for-byte unchanged from 4.0.0, so 4.0.0 logs, tracks and companion
-apps keep working.
-
-> ### Read this before updating
->
-> **This release permanently converts the two NFC pads to GPIO, on every
-> device, and reboots once while doing it.**
->
-> The LED strip stops being a beta-only experiment in 4.1.0 and ships in the
-> normal firmware, so a logger lights up the moment someone wires a strip to
-> it — no special build. Making those two pads usable as GPIO means writing
-> the chip's UICR, and **that write cannot be undone by any later firmware**;
-> reversing it needs a full chip erase and a bootloader reflash over USB.
-> Your logger does the write the first time it boots after updating, then
-> resets itself once so the change takes effect. That single extra reboot
-> during the update is expected — nothing is wrong.
->
-> This happens whether or not you have LEDs attached, because the firmware
-> cannot know. The trade was made deliberately: this hardware does not use
-> NFC for anything, the pads are otherwise idle, and requiring a separate
-> build to use a headline feature had kept it out of everyone's hands. If you
-> have some future use for the NFC pads on your device, **do not install
-> 4.1.0.**
->
-> With no strip wired, nothing else changes — the pins simply sit there.
-
-The SensorEgg wireless-EGT proof of concept remains beta-only
-(`BIRDSEYE_ENABLE_SENSOREGG`, off in the published images), but it gained
-nothing this release — so every entry below is live for every user.
-
-### Added
-- **NeoPixel LED strip subsystem** (plan 0006) — **now in every build**,
-  see the upgrade note above: 11 WS2812 pixels on the NFC
-  pads converted to GPIO — 2 status indicators + a 9-px strip with a
-  centerline. A global brightness cap (`led_brightness` setting, 0
-  disables the LEDs entirely) that no LED can ever exceed; a pace pip
-  strip mode (left of center red = slower than best, right green =
-  faster) with an RPM scale (green filling to red past halfway toward
-  the new `rev_limit` setting) until pace is meaningful; assignable
-  status-LED alert actions (rev-limit flasher + EGT flasher for now); a
-  boot animation; and a purple celebration when a session-best sector is
-  set. The strip's 5 V boost converter is enabled by its own pin, so
-  sleep truly powers the LEDs off. **First boot of a flag-on build
-  performs a one-way NFC-pads-to-GPIO conversion (UICR write) and
-  resets once.**
-- **LED day/night brightness + a device timezone** (plan 0010): new `utc_offset_min` setting (minutes east of UTC, default 0)
-  gives the device a local wall clock, and the LED strip swaps to
-  `led_brightness_night` (default 16) between `led_night_start_hour`
-  (19) and `led_day_start_hour` (7) — local hours, so 7am is the
-  driver's 7am rather than Greenwich's. Setting the two hours equal
-  disables the swap. **No DST** — a fixed offset only. **Logged data is
-  unchanged and still UTC**: DOVEX timestamps, the header datetime and
-  every filename stay exactly as they were, and timezone presentation
-  remains the viewing app's job.
-- **Overrev alert** (plan 0007): new `overrev_limit` setting (default 0
-  = disabled) — past it the whole LED chain flashes red and the tach
-  page's `*OVER REV*` header trips, both until RPM falls back below the
-  normal `rev_limit`. The rev limit warns the engine is at its ceiling;
-  the overrev limit says it's broken.
-- **Temp1 alert threshold setting** (`temp1_alert_c`, default 650 °C):
-  the right status LED is now a tri-state — flashing red
-  at/above the limit, off when good, solid blue when there is no probe
-  signal.
-- **`tach_filter` setting** (default `smooth`, plan 0009): picks the RPM
-  estimator, so the tach can be A/B'd against a live engine at the track
-  instead of argued about from a plotted log. `smooth` is the new filter
-  below; `legacy` is the pre-0009 one, bit for bit, for comparison
-  against logs already collected; `raw` turns the estimator off entirely
-  so the `rpm` column is exactly what the pickup delivers. Anything
-  unrecognised reads as `smooth`.
-- **Tach pickup-health line**: with `debug_pages` = `show`, the
-  tachometer page's subtext becomes `max:NNNNN S rj:NN` — the estimator
-  in force plus the number of inter-pulse periods the outlier gate has
-  thrown away this power-cycle. A count that climbs with RPM is ignition
-  ringing or missed sparks reaching the ISR, i.e. the pickup rather than
-  the filter.
-- **GPS-search pip**: in race mode without a full GPS lock the strip shows a green pixel bouncing end-to-end instead of the
-  RPM scale, so a not-yet-timing session is visibly "searching".
 - **The browser-sim harness can fake a GPS fix.** A "GPS fix" toggle (plus
   an mph field) streams a deterministic synthetic 25 Hz fix parked on the
   bundled OKC track's start line, so fix-gated flows — most usefully the
@@ -328,6 +257,34 @@ nothing this release — so every entry below is live for every user.
   actually running, not the one requested — the 8 MHz transfer speed-up
   falls back to 2 MHz if the card refuses it, and that fallback used to
   be silent.
+- **`cylinder_count` means the engine's actual cylinder count.** It was
+  documented as "cylinders the **pickup sees**", which asked a V8 owner
+  to enter `1` in a field labelled Cylinders — a trap that produced wrong
+  RPM for anyone who read it literally. It is now descriptive: enter what
+  the engine has. Nothing in the RPM path reads it. Above 1 it drives a
+  warning, in the settings UI and in the docs, that crank speed is
+  **inferred from one cylinder's ignition pulses** — between firings the
+  reading is an assumption and a cylinder that drops out reads as a
+  stopped engine, which is the known and accepted behaviour of every
+  clamp-on inductive tach. No settings-file migration: same keys, same
+  defaults, same size.
+- **`rev_limit` is now `target_rpm`.** It always was the shift/warning
+  point — `overrev_limit` is the real limit — and the old name taught
+  the wrong thing to everyone who opened `/SETTINGS.json`. The old key
+  only ever shipped on the beta channel during this cycle; a device
+  carrying it migrates on first boot — the value is copied into the new
+  key, which is confirmed written before the old key is dropped. No user
+  action needed, and a tuned value is never lost.
+- **The DOVEX `Temp1` / `Junction1` / `Temp2` columns are now written
+  only on SensorEgg builds.** Until now they were written on every
+  channel, as the literal `nan` on a stock image, so the log shape never
+  forked. Stock logs are now 13 data columns and SensorEgg logs 16.
+  Readers key the data section off its own CSV header line, where all
+  three are optional, so both shapes load — but anything that assumed a
+  fixed 16-column row needs to read the header. The `temp1_alert_c`
+  setting is likewise SensorEgg-only now.
+- The right status LED's default is **EGT** on a SensorEgg build (what it
+  did before) and **Last lap** on a stock one.
 
 ### Fixed
 - **The Bluetooth settings list works again.** Asking the device to
@@ -405,6 +362,44 @@ nothing this release — so every entry below is live for every user.
   filtered DOVEX rows to exactly 13 columns, so logs from 4.0.0 firmware
   (16 columns after the `Temp1`/`Junction1`/`Temp2` additions) injected
   nothing. It now accepts 13+ and reads the stable first 13.
+- **RPM on multi-cylinder engines — the cylinder count no longer divides
+  it.** Since 4.0.0 the tachometer computed
+  `pulses_per_rev = cylinder_count × spark_factor`, which is only correct
+  for a pickup clamped on a shared coil or distributor king lead. This
+  device has one sense wire and one clamp, and it goes around **one spark
+  plug wire** — so it sees one cylinder's ignition however many the engine
+  has, and the cylinder term divided RPM by that count. A V8 on a
+  traditional magneto, configured honestly as 8 cylinders + single fire,
+  read **an eighth** of its real crank speed. RPM is now
+  `revs_per_pulse = spark_mode == wasted ? 1.0 : 2.0` — the spark mode
+  alone. See `docs/plans/0012-tach-rpm-single-pickup.md`.
+  - **BREAKING for anyone who set `cylinder_count` above 1**: their RPM
+    changes, because it stops being divided. Logs recorded before this
+    release read low by exactly the configured cylinder count. Devices
+    left at the default (1 cylinder) are byte-identical.
+  - The ISR debounce loses the same term — one wire can't deliver pulses
+    faster than the cylinder it wraps fires — so it returns to a flat
+    3 ms (6 ms for single-fire) and the ~20 000 RPM ceiling is now
+    identical in both spark modes instead of falling with each configured
+    cylinder.
+- **The right status LED no longer sits solid blue for an entire race on
+  a logger without SensorEgg support.** The pixel was hardwired to the
+  Temp1 tri-state, whose "no probe signal" state is a solid blue — and on
+  a stock build the reading is permanently unavailable, so every shipped
+  logger with LEDs fitted showed it from lights-out to chequered flag. A
+  build with no probe now renders that mode dark, because there is no
+  signal there to be missing.
+- **BLE download throughput on SensorEgg (beta) builds** — the SensorEgg
+  passive scanner (44% radio duty) ran from boot forever, including through
+  every Bluetooth file transfer, where it denied the link's connection-event
+  extension and throttled downloads to ~33 KB/s against a 120+ KB/s
+  baseline. The scanner is now **race-gated**: it starts when a race session
+  begins and stops when the session ends, so the menu, replay, and transfer
+  mode never share the radio with a scan window. `BLE_SETUP()` additionally
+  quiesces it explicitly so a transfer session carries a guarantee rather
+  than an inference. EGT data is unaffected — the Temp pages and the DOVEX
+  `Temp1`/`Junction1`/`Temp2` columns are race-only consumers. See
+  `docs/plans/0012-download-throughput-regression-deepdive.md`.
 
 ## [4.0.0] - 2026-08-10
 
@@ -565,6 +560,7 @@ nothing this release — so every entry below is live for every user.
 - The scan-tuning test's pinned egg advertising interval was stale at
   160 units; the egg de-aliased to 179 units (111.875 ms) — pin updated
   (anti-phase-lock invariants still hold).
+
 ### Fixed
 - **A corrupted settings file now heals itself instead of poisoning the
   device forever.** A hand-edited `SETTINGS.json` with a typo (or any
@@ -767,6 +763,44 @@ makes migrating to it safe on sealed units.
   `-DBIRDSEYE_ENABLE_SENSOREGG=1`, and `compile-sketch.yml` does the same
   for pull requests targeting `BETA`, so the flag-on build is
   compile-checked on the PR rather than first failing at publish time.
+- **Simulator oracle diagnostic replay modes.** `birdseye_sim_oracle
+  --dovex-noheader <file>` replays a header-less DOVEX log (crashed /
+  power-cut session) through the full pipeline, printing live page / race /
+  track-detect / course / lap state instead of asserting against header
+  laps. `--two-session <file> [break-minutes]` reproduces a whole track
+  day — synthetic session 1, auto-idle session end, a parked break with
+  deterministic GPS drift, then the real log as session 2 — validating the
+  carried-over CourseManager against the log's own header laps (wired into
+  CI as `sim_two_session_carryover`).
+- **GPS pipeline drop instrumentation.** The ~0.9% dropped-PVT regression
+  was invisible on-device (the only signal was the frame-rate readout).
+  The GPS serial path now carries permanent lightweight counters: missing
+  PVT frames vs the nav-rate expectation (window math in the new
+  host-tested `gps_stats` pure unit), worst-case TIMER3 drain deferral in
+  µs (hardware timer capture — measures SoftDevice radio-ISR pressure),
+  the biggest single-fire drain burst vs the core UART ring capacity, and
+  overflow event counts for both the core ring and the 4 KB GPS ring.
+  Surfaced on the GPS debug page — now first in the race rotation — with
+  a one-line `Drops / Ovf` summary on the GPS stats page. ISR cost is a
+  few cycles per fire; ~50 B RAM.
+- **SensorEgg wireless EGT (proof of concept).** The logger passively
+  scans for the DovesSensorEgg — a wireless thermocouple pod that
+  broadcasts EGT + cold-junction temperature in BLE advertising packets
+  (protocol `PW-ADV-1`, 14-byte manufacturer data, ~10 Hz). Passive
+  observer only: no SCAN_REQ, no connection, no GATT link to the egg, so
+  the scanner cannot contend with the Insta360 X4 camera link for TX
+  airtime. Pairing is a hardcoded MAC (`SENSOREGG_MAC` in `sensoregg.h`);
+  the all-zeros default accepts any egg matching the payload magic (POC:
+  exactly one egg exists). Payload parsing + staleness rules live in the
+  host-tested `sensoregg_protocol` pure unit.
+- **DOVEX columns `Temp1` / `Junction1`** (degC, appended after
+  `accel_z`). A stale link (>1 s) or an egg-reported invalid probe logs
+  the literal `nan` — a dropout is a visible gap, never a held flat line
+  (which would be indistinguishable from real data). Old logs and readers
+  are unaffected; the egg fields can never cause a GPS row to be skipped.
+- **Temp1 race page** after the tachometer page: big EGT (degC), small
+  cold-junction + `rf:` link-status subtext, `---` when the egg is
+  silent, `*TC FAULT*` header when the egg reports an open/faulted probe.
 
 ### Changed
 - **USB behavior with onboard charging disabled (i.e. by default).** A
@@ -781,17 +815,51 @@ makes migrating to it safe on sealed units.
 - **DOVEX `Temp1` / `Junction1` are written on every build.** With the
   SensorEgg POC compiled out they log the literal `nan`, so logs from the
   master and beta channels have identical column layout.
-
-### Added
-- **Simulator oracle diagnostic replay modes.** `birdseye_sim_oracle
-  --dovex-noheader <file>` replays a header-less DOVEX log (crashed /
-  power-cut session) through the full pipeline, printing live page / race /
-  track-detect / course / lap state instead of asserting against header
-  laps. `--two-session <file> [break-minutes]` reproduces a whole track
-  day — synthetic session 1, auto-idle session end, a parked break with
-  deterministic GPS drift, then the real log as session 2 — validating the
-  carried-over CourseManager against the log's own header laps (wired into
-  CI as `sim_two_session_carryover`).
+- **GPS serial pipeline hardened against BLE radio load (dropped-PVT
+  fix).** SoftDevice radio interrupts (SensorEgg scan windows, camera
+  connection events) can defer the TIMER3 GPS drain; at 57600 baud the
+  core's stock 64-byte Serial1 ring gave only ~1 ms of deferral slack
+  before bytes were silently lost (~0.9% of 25 Hz PVT frames in the
+  field). Two changes: the drain now runs every 5 ms instead of 10
+  (`GPS_DRAIN_INTERVAL_US`), and the core ring is grown to 256 bytes via
+  a required `-DSERIAL_BUFFER_SIZE=256` build flag (~44 ms of slack;
+  +384 B RAM). `project.h` fails the compile with instructions if the
+  flag is missing, so a stock IDE build can't silently reintroduce the
+  bug — see CONTRIBUTING.md "Local build flags".
+- **SensorEgg scan duty reduced 60% → 44% (dropped-PVT fix, part 2).**
+  The scanner now listens 40 ms out of every 90 ms (was 60 of 100). The
+  wider-than-spec 60 ms window existed to break adv/scan phase-lock, but
+  that job moves to the off-100 ms interval: 90 ms scan vs the egg's
+  ~100 ms advertising sweeps their relative phase ~10 ms per cycle, so a
+  deaf-zone park escapes in under half a second — invisible at the 1 s
+  staleness rule. Less radio time in SoftDevice scan windows means less
+  deferral of the GPS drain ISR. Camera connection parameters are
+  deliberately untouched (we're the peripheral; the X4 dictates the real
+  interval, and the 10 Hz GPS heartbeat needs the short interval).
+- **Camera recording requires 1500+ RPM sustained for 5 s.** The record
+  start gate moved from the 500 RPM wake threshold to a dedicated
+  `kRecordRpmThreshold` (1500), held continuously for the full 5 s delay —
+  any dip below restarts the clock. Pull-start cranking registers real
+  ignition pulses above 500 RPM, which could start a camera recording
+  during a failed start; cranking cannot sustain 1500. Camera wake and the
+  30 s engine-off stop keep the 500/300 hysteresis band.
+- **PVT callback math moved off software doubles.** The nRF52840's FPU
+  is single-precision; `double` is software-emulated. The 25 Hz PVT
+  callback now computes altitude/speed/HDOP/heading/accuracy as `float`
+  reciprocal multiplies (lat/lng stay `double` — 1e-7° needs the
+  precision). No logged or displayed digit changes at the precisions
+  used; the sim lap oracles reproduce the hardware fixture to the exact
+  millisecond. Also deduplicated a triple `toDegMin()` call in the
+  camera RMC builder (byte-identical output, golden-pinned).
+- **SensorEgg temperatures display in Fahrenheit.** The Temp1 race page
+  (big EGT + junction subtext) and the camera bench page's `egg:` soak
+  readout now render in °F, converted at display time via the host-tested
+  `sensoregg_protocol::celsiusToFahrenheit()`. DOVEX logging is unchanged
+  (`Temp1`/`Junction1` stay Celsius). A C/F display setting will follow
+  in a later release.
+- **BLE core now starts at boot** (was lazy — first camera/transfer use)
+  so the SensorEgg scanner is always listening. Idle power draw increases
+  accordingly; GATT service registration order is unchanged.
 
 ### Fixed
 - **Zombie SensorEgg no longer reads as a live link (field incident
@@ -836,88 +904,6 @@ makes migrating to it safe on sealed units.
   session stays active and navigable), the pinned tach page shows
   `WAITING GPS LOCK..` instead of pinning silently, and auto-idle may end
   a still-fileless session even while the camera records.
-
-### Changed
-- **GPS serial pipeline hardened against BLE radio load (dropped-PVT
-  fix).** SoftDevice radio interrupts (SensorEgg scan windows, camera
-  connection events) can defer the TIMER3 GPS drain; at 57600 baud the
-  core's stock 64-byte Serial1 ring gave only ~1 ms of deferral slack
-  before bytes were silently lost (~0.9% of 25 Hz PVT frames in the
-  field). Two changes: the drain now runs every 5 ms instead of 10
-  (`GPS_DRAIN_INTERVAL_US`), and the core ring is grown to 256 bytes via
-  a required `-DSERIAL_BUFFER_SIZE=256` build flag (~44 ms of slack;
-  +384 B RAM). `project.h` fails the compile with instructions if the
-  flag is missing, so a stock IDE build can't silently reintroduce the
-  bug — see CONTRIBUTING.md "Local build flags".
-- **SensorEgg scan duty reduced 60% → 44% (dropped-PVT fix, part 2).**
-  The scanner now listens 40 ms out of every 90 ms (was 60 of 100). The
-  wider-than-spec 60 ms window existed to break adv/scan phase-lock, but
-  that job moves to the off-100 ms interval: 90 ms scan vs the egg's
-  ~100 ms advertising sweeps their relative phase ~10 ms per cycle, so a
-  deaf-zone park escapes in under half a second — invisible at the 1 s
-  staleness rule. Less radio time in SoftDevice scan windows means less
-  deferral of the GPS drain ISR. Camera connection parameters are
-  deliberately untouched (we're the peripheral; the X4 dictates the real
-  interval, and the 10 Hz GPS heartbeat needs the short interval).
-- **Camera recording requires 1500+ RPM sustained for 5 s.** The record
-  start gate moved from the 500 RPM wake threshold to a dedicated
-  `kRecordRpmThreshold` (1500), held continuously for the full 5 s delay —
-  any dip below restarts the clock. Pull-start cranking registers real
-  ignition pulses above 500 RPM, which could start a camera recording
-  during a failed start; cranking cannot sustain 1500. Camera wake and the
-  30 s engine-off stop keep the 500/300 hysteresis band.
-- **PVT callback math moved off software doubles.** The nRF52840's FPU
-  is single-precision; `double` is software-emulated. The 25 Hz PVT
-  callback now computes altitude/speed/HDOP/heading/accuracy as `float`
-  reciprocal multiplies (lat/lng stay `double` — 1e-7° needs the
-  precision). No logged or displayed digit changes at the precisions
-  used; the sim lap oracles reproduce the hardware fixture to the exact
-  millisecond. Also deduplicated a triple `toDegMin()` call in the
-  camera RMC builder (byte-identical output, golden-pinned).
-- **SensorEgg temperatures display in Fahrenheit.** The Temp1 race page
-  (big EGT + junction subtext) and the camera bench page's `egg:` soak
-  readout now render in °F, converted at display time via the host-tested
-  `sensoregg_protocol::celsiusToFahrenheit()`. DOVEX logging is unchanged
-  (`Temp1`/`Junction1` stay Celsius). A C/F display setting will follow
-  in a later release.
-
-### Added
-- **GPS pipeline drop instrumentation.** The ~0.9% dropped-PVT regression
-  was invisible on-device (the only signal was the frame-rate readout).
-  The GPS serial path now carries permanent lightweight counters: missing
-  PVT frames vs the nav-rate expectation (window math in the new
-  host-tested `gps_stats` pure unit), worst-case TIMER3 drain deferral in
-  µs (hardware timer capture — measures SoftDevice radio-ISR pressure),
-  the biggest single-fire drain burst vs the core UART ring capacity, and
-  overflow event counts for both the core ring and the 4 KB GPS ring.
-  Surfaced on the GPS debug page — now first in the race rotation — with
-  a one-line `Drops / Ovf` summary on the GPS stats page. ISR cost is a
-  few cycles per fire; ~50 B RAM.
-- **SensorEgg wireless EGT (proof of concept).** The logger passively
-  scans for the DovesSensorEgg — a wireless thermocouple pod that
-  broadcasts EGT + cold-junction temperature in BLE advertising packets
-  (protocol `PW-ADV-1`, 14-byte manufacturer data, ~10 Hz). Passive
-  observer only: no SCAN_REQ, no connection, no GATT link to the egg, so
-  the scanner cannot contend with the Insta360 X4 camera link for TX
-  airtime. Pairing is a hardcoded MAC (`SENSOREGG_MAC` in `sensoregg.h`);
-  the all-zeros default accepts any egg matching the payload magic (POC:
-  exactly one egg exists). Payload parsing + staleness rules live in the
-  host-tested `sensoregg_protocol` pure unit.
-- **DOVEX columns `Temp1` / `Junction1`** (degC, appended after
-  `accel_z`). A stale link (>1 s) or an egg-reported invalid probe logs
-  the literal `nan` — a dropout is a visible gap, never a held flat line
-  (which would be indistinguishable from real data). Old logs and readers
-  are unaffected; the egg fields can never cause a GPS row to be skipped.
-- **Temp1 race page** after the tachometer page: big EGT (degC), small
-  cold-junction + `rf:` link-status subtext, `---` when the egg is
-  silent, `*TC FAULT*` header when the egg reports an open/faulted probe.
-
-### Changed
-- **BLE core now starts at boot** (was lazy — first camera/transfer use)
-  so the SensorEgg scanner is always listening. Idle power draw increases
-  accordingly; GATT service registration order is unchanged.
-
-### Fixed
 - **SensorEgg reception flapping** (1 s of readings, then 1–30 s of
   `NA`/`nan`, seen on the first bench soak). Three scanner fixes: an
   inline manufacturer-ID filter (`filterMSD(0xFFFF)`) so ambient BLE
@@ -1526,6 +1512,11 @@ all breaking under this project's semver policy.
   retried (throttled to 1 Hz) instead of faulting, and a mid-session write
   failure stops logging while the race continues — none of these show the
   full-screen "Please Reboot Device" fault anymore.
+- Sketch sources moved into the `BirdsEye/` subfolder so the folder name
+  matches `BirdsEye.ino` (Arduino IDE / arduino-cli requirement).
+- DOVEX header read/write now goes through a single tested
+  `dovex_header::format()` / `parse()` implementation. On-disk format is
+  unchanged (byte-for-byte compatible with existing `.dovex` files).
 
 ### Added
 - **SD-staged firmware OTA over the custom BLE file service.** Because
@@ -1603,13 +1594,6 @@ all breaking under this project's semver policy.
 - `compile-sketch` and `arduino-lint` CI workflows for the Seeed XIAO
   nRF52840 Sense, plus status badges in the README.
 - Per-module `.h` headers documenting each subsystem's public interface.
-
-### Changed
-- Sketch sources moved into the `BirdsEye/` subfolder so the folder name
-  matches `BirdsEye.ino` (Arduino IDE / arduino-cli requirement).
-- DOVEX header read/write now goes through a single tested
-  `dovex_header::format()` / `parse()` implementation. On-disk format is
-  unchanged (byte-for-byte compatible with existing `.dovex` files).
 
 ### Removed
 - **(Breaking)** The legacy `ENABLE_NEW_UI` compile path and everything it
