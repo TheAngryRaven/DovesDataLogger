@@ -454,29 +454,43 @@ Master and release are untouched: the flag defaults to 0, the section
 brackets are macros that expand to the bare call, and pin 30 goes on
 being EN.
 
-### There is no idle task, so "CPU usage" is not a duty cycle
+### The profiler reports the shape of an iteration — and measures idle rather than assuming it
 
-`loop()` runs back to back with nothing rate-limiting it, so the honest
-duty cycle is 100% and always will be. The profiler therefore reports
-the **shape of an iteration** instead: how long one takes (mean *and*
-worst case — an SD garbage-collection stall of 100 ms–2 s is invisible
-in a mean), how that time divides between subsystems, and how much of it
-no subsystem accounts for. `OTH` — loop time no section bracketed — is
-reported rather than hidden, because it is the honesty check on the
-instrumentation.
+`loop()` runs back to back with nothing rate-limiting it, so the first
+version of this subsystem asserted there was no idle time and that a
+duty cycle would be meaningless. That was an assumption, it was baked
+into the measurement, and it produced a wrong first reading — see *Two
+clocks* below. The profiler now **measures** how much wall time the CPU
+spends executing `loop()` and reports the balance as `SLP` (scheduler
+dispatch, other FreeRTOS tasks, sleep). If that number is large, the
+loop rate is not what limits this firmware.
 
-Timing comes from the Cortex-M4 DWT cycle counter (64 ticks/µs), not
-`micros()`: most sections are well under a microsecond and 1 µs
-resolution would quantise half of them to zero. DWT is *verified* to be
-counting at setup rather than assumed — a debug probe can hold TRCENA
-off — and the page marks the `micros()` fallback with a leading `*` so a
-reader knows the small numbers stopped meaning anything.
+Alongside it, the **shape of an iteration**: how long one takes (mean
+*and* worst case — an SD garbage-collection stall of 100 ms–2 s is
+invisible in a mean), how that time divides between subsystems, and how
+much of it no subsystem accounts for. `OTH` — loop time no section
+bracketed — is reported rather than hidden, because it is the honesty
+check on the instrumentation. Every slot is a share of the same
+wall-clock second, so all fourteen sum to ~100%.
 
-The pure unit accumulates ticks and is handed `ticksPerUs` only at
-rollup, so ratios come out of raw ticks and lose nothing. Its
-accumulators saturate rather than wrap: a uint32 of DWT ticks is only
-~67 s, and a pegged window reads as pegged, where a wrapped one would
-read as near-idle.
+### Two clocks, and why mixing them was a real bug
+
+Durations are measured with the Cortex-M4 DWT cycle counter (64 ticks/µs):
+most sections are well under a microsecond and `micros()` would quantise
+half of them to zero. DWT is *verified* to be counting at setup rather
+than assumed — a debug probe can hold TRCENA off — and the page marks
+the `micros()` fallback with a leading `*`.
+
+But DWT counts **cycles, not time**. It stops whenever the core halts.
+The first implementation also used it to close the one-second rollup
+window, which meant the window was one second of *CPU-awake* time: the
+loop rate came out multiplied by the sleep factor, and every share was a
+fraction of awake time wearing a wall-time label. The window is now
+closed on `millis()` and all shares are computed against wall time. The
+pure unit still accumulates ticks and is handed `ticksPerUs` at rollup,
+so per-call resolution is preserved; its accumulators saturate rather
+than wrap, since a uint32 of DWT ticks is only ~67 s and a pegged window
+reads as pegged where a wrapped one would read as near-idle.
 
 ## Data formats
 

@@ -54,6 +54,15 @@
 // The page shows which one is live; trust sub-microsecond figures only
 // under DWT.
 //
+// DWT IS A DURATION CLOCK, NOT A WALL CLOCK, and the difference is not
+// academic: it counts CPU cycles, so it stops dead whenever the core
+// halts (WFE/WFI in the FreeRTOS idle task, sd_app_evt_wait). It times
+// code that is definitely executing; it cannot tell you how much time
+// passed. The rollup window is therefore closed on millis() and every
+// share is computed against that wall time — see loop_profile.h for the
+// bug this cost us the first time. The leftover, wall time not spent
+// inside loop(), is reported as SLP and is the real headroom number.
+//
 // OVERHEAD — READ THIS BEFORE TRUSTING A SMALL SECTION. A bracket is
 // two counter reads plus a saturating add: order 30 cycles, ~0.5 us,
 // so ~6-8 us per iteration across all 13 sections. That was written off
@@ -94,8 +103,7 @@
 #define PROF_SEC_CAMERA 8
 #define PROF_SEC_LED 9
 #define PROF_SEC_BUTTONS 10
-#define PROF_SEC_PAGES 11
-#define PROF_SEC_DISPLAY 12
+#define PROF_SEC_DISPLAY 11
 
 static_assert(PROF_SEC_GPS == loop_profile::kGps, "section mirror drift");
 static_assert(PROF_SEC_TACH == loop_profile::kTach, "section mirror drift");
@@ -109,7 +117,6 @@ static_assert(PROF_SEC_CAMERA == loop_profile::kCamera, "section mirror drift");
 static_assert(PROF_SEC_LED == loop_profile::kLed, "section mirror drift");
 static_assert(PROF_SEC_BUTTONS == loop_profile::kButtons,
               "section mirror drift");
-static_assert(PROF_SEC_PAGES == loop_profile::kPages, "section mirror drift");
 static_assert(PROF_SEC_DISPLAY == loop_profile::kDisplay,
               "section mirror drift");
 static_assert(PROFILING_PIN_WHOLE_LOOP > loop_profile::kSectionCount,

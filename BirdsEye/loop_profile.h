@@ -19,11 +19,26 @@
 // is. That is what feeds the nRF52840-vs-nRF5340 decision (plan 0011).
 //
 // Design notes:
-// - TICKS, not microseconds. The caller picks the timebase and passes
-//   its ticksPerUs at rollup; ratios are computed from raw ticks so a
-//   sub-microsecond section is not quantised to 0 before it is summed.
-//   profiling.ino prefers the DWT cycle counter (64 ticks/us) and falls
-//   back to micros() (1 tick/us) when DWT will not run.
+// - TWO CLOCKS, and mixing them up was the first real bug in this unit.
+//   Durations are measured in TICKS from whatever counter profiling.ino
+//   probed (the DWT cycle counter at 64 ticks/us, or micros()), because
+//   a sub-microsecond section must not be quantised to 0 before it is
+//   summed. But the WINDOW is measured in milliseconds off millis(),
+//   and every share is computed against that wall time.
+//
+//   The DWT counter counts CPU CYCLES, not time: if the core ever halts
+//   (WFE/WFI in the FreeRTOS idle task, sd_app_evt_wait) it stops while
+//   the world keeps going. Using it to close the window meant the
+//   "one second" window was really one second of CPU-awake time, so the
+//   loop rate came out multiplied by the sleep factor and every share
+//   was a fraction of awake time wearing a wall-time label. The first
+//   hardware run reported a rate pinned at the display clamp; this is
+//   why. (The micros() fallback never had the bug — it is a real clock.)
+//
+//   The upside of fixing it properly: wall time minus loop() execution
+//   time is now a MEASURED number (kSleep), so the question "does this
+//   firmware have any CPU headroom at all" gets an answer instead of an
+//   assumption.
 // - Shares are permille (tenths of a percent), integer math throughout.
 //   A float here would be fine on this M4F, but the exactness of the
 //   "everything adds to 1000" property is worth more than the syntax.
@@ -35,6 +50,10 @@
 // - The window's unaccounted remainder is reported (kOther) instead of
 //   being hidden. It is the honesty check on the instrumentation: if
 //   OTH is large, time is going somewhere loop() is not bracketing.
+// - Every reported slot is a share of the same wall-clock window, so
+//   the sections plus kOther plus kSleep sum to ~1000 permille (integer
+//   truncation loses a few). That is checkable on the display page at a
+//   glance, and it is the property that makes a wrong reading obvious.
 ///////////////////////////////////////////
 
 namespace loop_profile {
@@ -54,15 +73,21 @@ enum Section : uint8_t {
   kLed,        // NEOPIXEL_LOOP: compose + cap + show
   kButtons,    // readButtons + updateButtonHoldState (multi-sample
                // debounce; near-free unless a button is actually held)
-  kPages,      // gpsStatusPageLoop + sdFormatPageLoop + courseCreatorLoop
-  kDisplay,    // displayLoop: page render + I2C framebuffer push
+  kDisplay,    // displayLoop: page render + I2C framebuffer push, plus
+               // the boot-page state machines (gpsStatusPageLoop,
+               // sdFormatPageLoop, courseCreatorLoop) — same family of
+               // work, and folding them freed the grid slot kSleep needed
   kSectionCount
 };
 
-// Report slot for loop time not inside any bracketed section. Not a
-// Section — nothing accumulates into it; rollup() derives it.
+// Derived report slots. Neither is a Section — nothing accumulates into
+// them; rollup() computes both.
+//   kOther: loop() time no section bracketed.
+//   kSleep: wall time not inside loop() at all — scheduler dispatch,
+//           other FreeRTOS tasks, and CPU sleep. THE headroom number.
 constexpr uint8_t kOther = kSectionCount;
-constexpr uint8_t kReportSlots = kSectionCount + 1;
+constexpr uint8_t kSleep = kSectionCount + 1;
+constexpr uint8_t kReportSlots = kSectionCount + 2;
 
 // Three-character tag for the debug page's two-column grid. Returns
 // "???" out of range so a mismatched enum shows up on screen instead
@@ -76,29 +101,34 @@ struct SectionStat {
 };
 
 // Live accumulators. Zero-initialised is a valid empty window; the glue
-// still calls reset() at setup so windowStartTicks is anchored.
+// still calls reset() at setup so both window anchors are set.
 struct State {
   SectionStat sec[kSectionCount];
   uint32_t loops;           // completed iterations this window
   uint32_t loopTotalTicks;  // sum of whole-iteration spans
   uint32_t loopMaxTicks;    // worst iteration this window
-  uint32_t windowStartTicks;
+  uint32_t windowStartTicks;  // duration clock (may stop when asleep)
+  uint32_t windowStartMs;     // wall clock — this is what closes a window
 };
 
-// One window's rolled-up answer. All *Permille are of the WINDOW's wall
-// time, so section shares plus kOther plus outsideLoopPermille sum to
+// One window's rolled-up answer. Every permille is a share of the
+// WALL-CLOCK window, so the sections plus kOther plus kSleep sum to
 // ~1000 (integer truncation loses a few).
 struct Report {
-  bool valid;                      // false until the first rollup lands
-  uint16_t permille[kReportSlots];  // per section, plus kOther
+  bool valid;                       // false until the first rollup lands
+  uint16_t permille[kReportSlots];  // per section, plus kOther and kSleep
   uint32_t maxUs[kSectionCount];    // worst single call, microseconds
-  uint16_t outsideLoopPermille;    // window time between iterations
-  uint32_t loops;                  // iterations in the window
-  uint32_t loopRateHz;             // rounded iterations per second
-  uint32_t loopMeanUs;             // mean iteration length
-  uint32_t loopMaxUs;              // worst iteration
-  uint32_t windowUs;               // the window actually measured
-  bool saturated;                  // an accumulator pegged (see header)
+  uint16_t busyPermille;            // wall time spent executing loop()
+  uint32_t loops;                   // iterations in the window
+  uint32_t loopRateHz;              // rounded iterations per WALL second
+  uint32_t loopMeanUs;              // mean iteration execution time
+  uint32_t loopMaxUs;               // worst iteration
+  uint32_t windowUs;                // wall time the window covered
+  uint32_t awakeUs;                 // duration-clock time in the same
+                                    // window; well under windowUs means
+                                    // the CPU was asleep (or the tick
+                                    // counter stopped) for the balance
+  bool saturated;                   // an accumulator pegged (see header)
 };
 
 // Wrap-safe tick difference. uint32 subtraction is already modular; this
@@ -109,8 +139,8 @@ inline uint32_t ticksSince(uint32_t from, uint32_t to) { return to - from; }
 // zero whole.
 uint16_t permilleOf(uint32_t part, uint32_t whole);
 
-// Clear the accumulators and anchor a fresh window at nowTicks.
-void reset(State& s, uint32_t nowTicks);
+// Clear the accumulators and anchor a fresh window at both clocks.
+void reset(State& s, uint32_t nowTicks, uint32_t nowMs);
 
 // Fold one bracketed section span in.
 void addSection(State& s, uint8_t section, uint32_t elapsedTicks);
@@ -118,11 +148,13 @@ void addSection(State& s, uint8_t section, uint32_t elapsedTicks);
 // Fold one whole-iteration span in.
 void addLoop(State& s, uint32_t elapsedTicks);
 
-// If the window is complete, fill `out`, restart the window at nowTicks
+// If windowMs of WALL time has passed, fill `out`, restart the window
 // and return true; otherwise leave `out` untouched and return false.
-// ticksPerUs converts the tick totals to the microsecond fields (0 is
-// treated as 1 so a mis-probed timebase still reports ratios).
-bool rollup(State& s, uint32_t nowTicks, uint32_t windowTicks,
+// The window is closed on nowMs specifically so a stopped duration clock
+// (a sleeping CPU) cannot stretch it — see the header. ticksPerUs
+// converts the tick totals to microseconds (0 is treated as 1 so a
+// mis-probed timebase still reports ratios).
+bool rollup(State& s, uint32_t nowTicks, uint32_t nowMs, uint32_t windowMs,
             uint32_t ticksPerUs, Report& out);
 
 }  // namespace loop_profile

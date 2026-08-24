@@ -1161,7 +1161,16 @@ void displayPage_gps_debug() {
  *                           (mean in us below 1 ms, else ms; mx in ms)
  *   GPS 41.2 TCH  0.4       every section's share of the last second,
  *   ...                     as a percentage, two per row
- *   BTN 12.0 OTH  4.1       OTH = loop time no section bracketed
+ *   DSP 14.9 OTH  4.1       OTH = loop() time no section bracketed
+ *   SLP 11.3                SLP = wall time not inside loop() at all
+ *
+ * All fourteen slots are shares of the same wall-clock second, so they
+ * sum to ~100 (integer truncation loses a few tenths). If they do not,
+ * something is wrong with the measurement, not with the firmware.
+ *
+ * SLP is the headroom number: scheduler dispatch, other FreeRTOS tasks,
+ * and any time the CPU spent asleep. A large SLP means the loop rate is
+ * NOT the thing limiting this firmware.
  *
  * Two markers can lead the first row. '*' means the DWT cycle counter
  * would not run and the numbers came from micros() instead — at 1 us
@@ -1230,8 +1239,8 @@ void displayPage_profile() {
   }
   display.println(line);
 
-  // Seven rows of two slots covers all thirteen sections plus OTH with
-  // nothing left over — adding a section means finding it a row.
+  // Seven rows of two slots covers all twelve sections plus OTH and SLP
+  // with nothing left over — adding a section means finding it a row.
   char slot[12];
   for (uint8_t row = 0; row < 7; row++) {
     for (uint8_t col = 0; col < 2; col++) {
