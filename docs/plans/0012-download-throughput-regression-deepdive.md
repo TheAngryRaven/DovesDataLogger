@@ -1,7 +1,15 @@
 # BLE download throughput regression — transport-stack deep dive
 
-> Status: **INVESTIGATION.** Findings + a ranked fix plan; no code changed in
-> this record. Field observation (2026-08-24): `Transfer: 77% / 33KB/s 8M 251
+> Status: **FIXES 1+2 IMPLEMENTED** (same branch). Fix 1 landed *wider* than
+> first proposed, by owner decision: the egg scanner is **race-gated** — it
+> runs only while a race session is active (`SENSOREGG_LOOP()` reconcile on
+> `raceActive`), not merely stopped during transfer mode; `BLE_SETUP()` still
+> calls `SENSOREGG_SLEEP()` as an explicit guarantee. Fix 2 adds a second
+> transfer-page line with the live connection interval + PHY
+> (`bleLinkIntervalUnits()` / `bleLinkPhy()`). Fix 3 (the bench matrix) is
+> the outstanding step; fix 4 stays contingent on its results.
+>
+> Field observation (2026-08-24): `Transfer: 77% / 33KB/s 8M 251
 > 244` on the device's own transfer page, against a remembered 120+ KB/s.
 
 ## The one photo already rules most of the stack out
