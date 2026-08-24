@@ -9,6 +9,13 @@
   real .dovex file: rows are injected at 25 Hz virtual time with the RPM
   column driving the tach, exactly like the viewer's playback engine
   will in Phase 5.
+
+  The "GPS fix" toggle injects a synthetic stationary fix (parked on the
+  preloaded OKC track's start line, deterministic timestamps) so the
+  flows that refuse to run without a fix + time lock are reachable —
+  most usefully the on-device course creator (main menu -> Create), whose
+  3 s point-averaging hold needs a live 25 Hz fix stream. The mph field
+  sets the injected speed (10+ trips auto-race from a settled menu).
 -->
 <html lang="en">
 <head>
@@ -36,6 +43,9 @@
     <option value="1">1x</option><option value="2">2x</option>
     <option value="5">5x</option><option value="10" selected>10x</option>
   </select></label>
+  <label><input type="checkbox" id="fix"> GPS fix</label>
+  <label>mph <input type="number" id="mph" value="0" min="0" max="120"
+                    style="width:4em"></label>
   <input type="file" id="dovex" accept=".dovex">
 </div>
 <div id="state">loading…</div>
@@ -86,7 +96,9 @@ addEventListener('keyup', (e) => {
   if (e.key === 'ArrowRight') sim.buttonUp(2);
 });
 
-// Optional dovex playback (Phase-5 semantics, minimally).
+// Optional dovex playback (Phase-5 semantics, minimally). Rows are >= 13
+// fields, not exactly 13: 4.0.0 logs append Temp1/Junction1/Temp2 columns
+// (16 fields), and the playback only reads the stable first 13.
 let rows = null, rowIdx = 0, playClockMs = 0;
 document.getElementById('dovex').addEventListener('change', async (e) => {
   const file = e.target.files[0];
@@ -94,13 +106,33 @@ document.getElementById('dovex').addEventListener('change', async (e) => {
   const text = new TextDecoder().decode(
       (await file.arrayBuffer()).slice(1024));
   rows = text.split('\n').slice(1).map((l) => l.split(',')).filter(
-      (f) => f.length === 13);
+      (f) => f.length >= 13);
   rowIdx = 0;
+  document.getElementById('fix').checked = false;  // dovex owns the GPS feed
   await sim.reset();
   sim.init();
   playClockMs = Number(rows[0][0]) - 3000;  // ~3 s no-fix pre-roll
   console.log(`dovex loaded: ${rows.length} rows`);
 });
+
+// Synthetic fix stream for the fix toggle: parked on the preloaded OKC
+// track's start/finish line (the sdfat_shim asset), so track detection
+// fires and the course creator's "Here" prompt has something to offer.
+// Timestamps run from a fixed epoch on the virtual clock — deterministic,
+// and the creator stamps N{YYMMDD}_{HHMM} names from it.
+const kOkcStartLat = 28.41271928, kOkcStartLon = -81.37965158;
+const kSynthEpochMs = 1785076320000;  // 2026-08-03T14:32Z
+let synthClockMs = 0;
+
+function injectSynthFix() {
+  sim.injectPvt(JSON.stringify({
+    timestamp: kSynthEpochMs + synthClockMs, sats: 12, hdop: 0.8,
+    lat: kOkcStartLat, lng: kOkcStartLon,
+    speed_mph: Number(document.getElementById('mph').value) || 0,
+    altitude_m: 25, heading_deg: 0, h_acc_m: 1.2, fix: true,
+    accelX: 0, accelY: 0, accelZ: 1,
+  }));
+}
 
 let prev = performance.now();
 function frame(now) {
@@ -122,9 +154,23 @@ function frame(now) {
       }));
       sim.setRpm(Number(f[9]));
     }
+    sim.stepMillis(delta);
+  } else if (document.getElementById('fix').checked) {
+    // Synthetic fix: one PVT per <=40 ms step slice — the documented
+    // injection rate (25 Hz). A burst of injects before one big step
+    // would collapse into a single fix and starve the course creator's
+    // averaging hold (it needs >=8 fixes across its 3 s window).
+    let remaining = delta;
+    while (remaining > 0) {
+      const slice = Math.min(remaining, 40);
+      remaining -= slice;
+      synthClockMs += slice;
+      injectSynthFix();
+      sim.stepMillis(slice);
+    }
+  } else {
+    sim.stepMillis(delta);
   }
-
-  sim.stepMillis(delta);
   blit();
 
   const st = sim.getStateJson();

@@ -31,16 +31,16 @@
 #ifdef FIRMWARE_VERSION_OVERRIDE
   #define FIRMWARE_VERSION _BE_TOSTRING(FIRMWARE_VERSION_OVERRIDE)
 #else
-  // The 4.0.0 release cut (matches the v4.0.0 tag). The webapp still keys
+  // The 4.1.0 release cut (matches the v4.1.0 tag). The webapp still keys
   // the track JSON budget off this — 8 KB at or above 3.2.0 — so never
   // stamp a build below that line again.
-  #define FIRMWARE_VERSION "4.0.0"
+  #define FIRMWARE_VERSION "4.1.0"
 #endif
 
 ///////////////////////////////////////////
 // BUILD FEATURE FLAGS
 //
-// Both are plain 0/1 macros with a #ifndef default, so a build can force
+// Each is a plain 0/1 macro with a #ifndef default, so a build can force
 // either state explicitly (-DFLAG=1 / -DFLAG=0). A bare -DFLAG also works
 // (the compiler defines it as 1). Test them with #if, never #ifdef — a
 // deliberate -DFLAG=0 must lose to the feature being off.
@@ -80,6 +80,63 @@
 // display page and live readings all present.
 #ifndef BIRDSEYE_ENABLE_SENSOREGG
   #define BIRDSEYE_ENABLE_SENSOREGG 0
+#endif
+
+// ---- NeoPixel strip (11 px: 2 status + 9-px pace/RPM strip) ----
+//
+// 1 (default — master, beta and release all ship this as of 4.1.0): the
+// strip is a CORE feature, present in every image so a logger works the
+// moment someone wires LEDs to it. On first boot NEOPIXEL_SETUP()
+// converts the NFC pads to GPIO by programming UICR->NFCPINS and
+// self-resets once so the pin latch takes effect. After that: pin 30 =
+// boost converter EN, pin 31 = WS2812 data. See plan 0006 and neopixel.h.
+//
+// KNOW WHAT THIS COSTS, because it is charged to every unit in the field,
+// not just the ones with LEDs on them. The UICR write is ONE-WAY — undoing
+// it needs a full chip erase, i.e. a bootloader reflash over USB — so the
+// first boot after updating to 4.1.0 permanently spends the NFC pads and
+// reboots itself once, on every device, wired for LEDs or not. That was the
+// deliberate 4.1.0 decision (NFC is not used on this hardware and the pads
+// are otherwise idle); it is recorded here rather than in a commit message
+// because nothing about a later build can undo it.
+//
+// 0 (no shipped channel sets this; -DBIRDSEYE_ENABLE_NEOPIXEL=0 forces it):
+// the subsystem is compiled out — no Adafruit_NeoPixel dependency, and on a
+// board that has NOT already been converted the firmware never writes UICR
+// and never drives pins 30/31. On one that HAS (it ran a flag-on build
+// before), the stubs still hold the boost EN pin low, because a floating EN
+// leaves the 5 V rail up through System OFF — see the #else block in
+// neopixel.ino.
+#ifndef BIRDSEYE_ENABLE_NEOPIXEL
+  #define BIRDSEYE_ENABLE_NEOPIXEL 1
+#endif
+
+// ---- Main-loop CPU profiling (plan 0011) ----
+//
+// 0 (default — master and release): compiled out completely. The section
+// brackets in loop() vanish (they are macros, not calls), no LOOP PROFILE
+// page exists, and pin 30 goes on being the NeoPixel boost converter's EN
+// line exactly as it always has.
+//
+// 1 (the beta channel passes -DBIRDSEYE_ENABLE_PROFILING=1): every
+// subsystem call in loop() is timed, rolled up once a second onto the
+// LOOP PROFILE race page, and pin 30 becomes a scope-readable profiling
+// output. This exists to measure what a main-loop iteration actually
+// costs on this hardware, as the input to the nRF52840-vs-nRF5340 board
+// decision and to any "what would leaving the Arduino core buy us"
+// comparison.
+//
+// KNOW WHAT THIS COSTS, and it is not free: a profiling build gives up
+// firmware control of the 5 V boost rail. Pin 30 cannot be both EN and a
+// profiling output, so the profiler takes it and the regulator is left at
+// its hardware default (EN pulled up = on). NEOPIXEL_SETUP/SLEEP/WAKE
+// stop driving EN, which means the rail — and the idle current of 11
+// WS2812s — stays up through System OFF, where GPIO levels are retained
+// and nothing else will pull it down. A profiling unit left asleep on a
+// battery goes flat. This is a bench build; do not hand one to a driver.
+// See profiling.h for the pin's wiring caveat and the timebase notes.
+#ifndef BIRDSEYE_ENABLE_PROFILING
+  #define BIRDSEYE_ENABLE_PROFILING 0
 #endif
 
 ///////////////////////////////////////////

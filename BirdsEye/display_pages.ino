@@ -180,17 +180,49 @@ void displayPage_bluetooth() {
   }
 
   display.setTextSize(1);
-  display.println();
 
   if (bleTransferInProgress) {
+    // The spacer row the else-branch keeps is spent on the second
+    // diagnostic line below — with it the page is exactly 8 rows.
     display.print(F("Transfer: "));
-    display.print((bleBytesTransferred * 100) / bleFileSize);
+    // bleFileSize is 0 for a zero-byte file — print 100% rather than divide
+    // by zero.
+    display.print(bleFileSize ? ((bleBytesTransferred * 100) / bleFileSize) : 100);
     display.println(F("%"));
+
+    // The diagnostic line. A download that has gone slow used to show only a
+    // creeping percentage, which says nothing about WHY — so this names the
+    // three things that decide the rate: the SD clock actually in force (the
+    // 8 MHz transfer bump falls back to 2 MHz silently), the negotiated
+    // link-layer PDU (27 = Data Length Extension never happened, the biggest
+    // tax there is), and the ATT payload per notification.
+    display.print(bleTransferRateBps() / 1024);
+    display.print(F("KB/s "));
+    display.print(sdActiveSpiHz() / 1000000UL);
+    display.print(F("M "));
+    display.print(bleLinkDataLength());
+    display.print(F(" "));
+    display.println(bleLinkChunkSize());
+
+    // Second diagnostic line (plan 0012): the two levers the line above
+    // cannot show. The connection interval is the CENTRAL's choice — the
+    // device only requests, and 30 ms instead of 15 ms is a silent 2x on
+    // every download. The PHY doubles per-packet airtime if the 2M request
+    // was ignored. A slow transfer with a healthy first line is one of
+    // these two, or radio contention.
+    display.print(bleLinkIntervalUnits() * 1.25, 1);
+    display.print(F("ms "));
+    const uint8_t phy = bleLinkPhy();
+    display.println(phy == 2 ? F("2M")
+                    : phy == 1 ? F("1M")
+                    : phy == 4 ? F("Coded")
+                               : F("?"));
   } else {
+    display.println();
+    display.println();
     display.println();
   }
 
-  display.println();
   display.setTextSize(1);
   display.println(F("->Exit"));
 
@@ -209,6 +241,12 @@ void displayPage_transfer_menu() {
   display.println(F("Bluetooth"));
   display.print(menuSelectionIndex == 1 ? "->" : "  ");
   display.println(F("USB"));
+  // Back matters more here than on most menus: both transfer modes leave by
+  // rebooting, and this page is not the main menu so the idle-shutdown timer
+  // never runs on it. Without this row, opening Transfer by mistake could
+  // only be undone with the (unlabelled) reboot combo.
+  display.print(menuSelectionIndex == 2 ? "->" : "  ");
+  display.println(F("Back"));
 
   safeDisplayUpdate();
 }
@@ -397,13 +435,58 @@ void displayPage_camera_serial_entry() {
   safeDisplayUpdate();
 }
 
+/**
+ * @brief Draw one row of the session browser.
+ *
+ * Every row occupies exactly two panel lines — a filename wrapped onto a
+ * second line when it exceeds the panel width, or a blank filler — so the
+ * window arithmetic below can count rows instead of lines.
+ *
+ * `index == numReplayFiles` is the trailing Back row (see
+ * replayItemCount()): browsing the sessions was otherwise a one-way door,
+ * with no way out but opening a session and walking its exit page.
+ */
+static void replayDrawEntry(int index, bool selected) {
+  display.print(selected ? F("->") : F("  "));
+
+  if (index >= numReplayFiles) {
+    display.println(F("Back"));
+    display.println();
+    return;
+  }
+
+  const int fileNameLen = strlen(replayFiles[index]);
+  char displayName[20];
+
+  strncpy(displayName, replayFiles[index], 19);
+  displayName[19] = '\0';
+  display.println(displayName);
+
+  if (fileNameLen > 19) {
+    display.print(F("  "));  // Indent to align with the first line
+    strncpy(displayName, replayFiles[index] + 19, 19);
+    displayName[19] = '\0';
+    display.println(displayName);
+  } else {
+    display.println();  // Blank line if no wrap needed
+  }
+}
+
 void displayPage_replay_file_select() {
   resetDisplay();
 
+  const int itemCount = replayItemCount();
+
   display.print(F("Select Session: "));
-  display.print(menuSelectionIndex + 1);
-  display.print(F("/"));
-  display.println(numReplayFiles);
+  // The Back row is not a session, so it gets no "n/total" — counting it
+  // would report one more session than the card holds.
+  if (menuSelectionIndex < numReplayFiles) {
+    display.print(menuSelectionIndex + 1);
+    display.print(F("/"));
+    display.println(numReplayFiles);
+  } else {
+    display.println();
+  }
   display.println();
   display.setTextSize(1);
 
@@ -414,86 +497,20 @@ void displayPage_replay_file_select() {
     display.println();
     display.println(F("Press any key"));
     display.println(F("to go back"));
-  } else if (numReplayFiles < 3) {
-    // Small menu - show all files
-    for (int i = 0; i < numReplayFiles; i++) {
-      if (menuSelectionIndex == i) {
-        display.print(F("->"));
-      } else {
-        display.print(F("  "));
-      }
-      // Split long filenames across two lines
-      int fileNameLen = strlen(replayFiles[i]);
-      char displayName[20];
-
-      // First line: first 19 characters
-      strncpy(displayName, replayFiles[i], 19);
-      displayName[19] = '\0';
-      display.println(displayName);
-
-      // Second line: next 19 characters if filename is longer
-      if (fileNameLen > 19) {
-        display.print(F("  "));  // Indent to align with first line
-        strncpy(displayName, replayFiles[i] + 19, 19);
-        displayName[19] = '\0';
-        display.println(displayName);
-      } else {
-        display.println();  // Blank line if no wrap needed
-      }
+  } else if (itemCount <= 3) {
+    // Small menu — show everything, Back row included.
+    for (int i = 0; i < itemCount; i++) {
+      replayDrawEntry(i, menuSelectionIndex == i);
     }
   } else {
-    // Scrolling menu
-    int indexA = menuSelectionIndex == numReplayFiles - 1 ? 0 : menuSelectionIndex + 1;
-    int indexB = menuSelectionIndex;
-    int indexC = menuSelectionIndex == 0 ? numReplayFiles - 1 : menuSelectionIndex - 1;
+    // Scrolling menu: next / selected / previous, wrapping over the whole
+    // item list so the Back row scrolls into view like any other row.
+    const int next = menuSelectionIndex == itemCount - 1 ? 0 : menuSelectionIndex + 1;
+    const int prev = menuSelectionIndex == 0 ? itemCount - 1 : menuSelectionIndex - 1;
 
-    char displayName[20];
-    int fileNameLen;
-
-    // First item
-    display.print(F("  "));
-    fileNameLen = strlen(replayFiles[indexA]);
-    strncpy(displayName, replayFiles[indexA], 19);
-    displayName[19] = '\0';
-    display.println(displayName);
-    if (fileNameLen > 19) {
-      display.print(F("  "));
-      strncpy(displayName, replayFiles[indexA] + 19, 19);
-      displayName[19] = '\0';
-      display.println(displayName);
-    } else {
-      display.println();
-    }
-
-    // Second item (selected)
-    display.print(F("->"));
-    fileNameLen = strlen(replayFiles[indexB]);
-    strncpy(displayName, replayFiles[indexB], 19);
-    displayName[19] = '\0';
-    display.println(displayName);
-    if (fileNameLen > 19) {
-      display.print(F("  "));
-      strncpy(displayName, replayFiles[indexB] + 19, 19);
-      displayName[19] = '\0';
-      display.println(displayName);
-    } else {
-      display.println();
-    }
-
-    // Third item
-    display.print(F("  "));
-    fileNameLen = strlen(replayFiles[indexC]);
-    strncpy(displayName, replayFiles[indexC], 19);
-    displayName[19] = '\0';
-    display.println(displayName);
-    if (fileNameLen > 19) {
-      display.print(F("  "));
-      strncpy(displayName, replayFiles[indexC] + 19, 19);
-      displayName[19] = '\0';
-      display.println(displayName);
-    } else {
-      display.println();
-    }
+    replayDrawEntry(next, false);
+    replayDrawEntry(menuSelectionIndex, true);
+    replayDrawEntry(prev, false);
   }
 
   safeDisplayUpdate();
@@ -714,9 +731,13 @@ void displayPage_gps_pace() {
   int paceLaps = activeTimerLaps();
   float paceDiff = activeTimerPaceDifference();
   bool paceRaceStarted = activeTimerRaceStarted();
+  // Engine died mid-session (plan 0007): the timer keeps running, but a
+  // live-counting pace next to a dead engine is a lie — say STOPPED.
+  // Also gates the notably-faster flash animation below.
+  bool engineStopped = raceEngineStopped();
 
   // animation
-  if (paceLaps >= 1 && paceDiff < (-1)) {
+  if (!engineStopped && paceLaps >= 1 && paceDiff < (-1)) {
     if (paceFlashStatus) {
       paceFlashStatus = false;
       display.setTextColor(DISPLAY_TEXT_BLACK, DISPLAY_TEXT_WHITE);
@@ -735,7 +756,14 @@ void displayPage_gps_pace() {
   // main page into
   display.setTextColor(DISPLAY_TEXT_WHITE);
   const int lineHeight = 21;
-  if (sprintModeIsActive() && !activeTimerRunActive()) {
+  if (engineStopped) {
+    // 7 chars, NOT 8 with a leading space: size 3 is an 18 px advance, so
+    // " STOPPED" needs 144 px on a 128 px panel and the trailing D was
+    // clipped on every render. 7 x 18 = 126 fits, and x=1 centres it.
+    display.setCursor(1, lineHeight);
+    display.setTextSize(3);
+    display.print(F("STOPPED"));
+  } else if (sprintModeIsActive() && !activeTimerRunActive()) {
     // Sprint mode, between runs — no live pace to compare (see lap page).
     display.setCursor(0, lineHeight);
     display.setTextSize(2);
@@ -758,7 +786,7 @@ void displayPage_gps_pace() {
   display.println();
   display.setTextSize(1);
 
-  if (paceLaps >= 1 && paceDiff < (-1)) {
+  if (!engineStopped && paceLaps >= 1 && paceDiff < (-1)) {
     if (paceFlashStatus) {
       display.setTextColor(DISPLAY_TEXT_BLACK, DISPLAY_TEXT_WHITE);
       display.print(F("           "));
@@ -809,7 +837,11 @@ void displayPage_gps_best_lap() {
 void displayPage_tachometer() {
   resetDisplay();
 
-  if (tachLastReported > 9999) {
+  // OVER REV header means ACTUAL overrev (plan 0007): it trips only at
+  // the PROBLEM limit, and only when that limit is enabled — the
+  // target_rpm warning flag is a status LED's job, not the header's.
+  // (Was hardcoded >9999, which a 7600-limiter engine could never reach.)
+  if (settingOverrevLimit > 0 && tachLastReported >= settingOverrevLimit) {
     display.println(F("Engine RPM *OVER REV*"));
   } else {
     display.println(F("     Engine RPM"));
@@ -842,6 +874,19 @@ void displayPage_tachometer() {
     // Same "logging died" flag as the speed page — this is the tach
     // session's landing page, so the signal has to exist here too.
     display.print(F("  ** NOT LOGGING **"));
+  } else if (runningPageStart <= GPS_DEBUG) {
+    // Debug pages on: spend the subtext line on the tach diagnostic
+    // instead of centring the max. Which estimator is running (S/L/R —
+    // the `tach_filter` setting) and how many inter-pulse periods the
+    // outlier gate has thrown away. A reject count that climbs with RPM
+    // is the pickup, not the filter, and that distinction is the whole
+    // reason this line exists. 19 of the 21 columns at text size 1.
+    display.print(F("max:"));
+    display.print(topTachReported);
+    display.print(F(" "));
+    display.print(tach_filter::modeTag(tachFilterMode));
+    display.print(F(" rj:"));
+    display.print(tachRejectedPeriods());
   } else {
     display.print(F("     max: "));
     display.print(topTachReported);
@@ -1121,6 +1166,115 @@ void displayPage_gps_debug() {
   safeDisplayUpdate();
 }
 
+#if BIRDSEYE_ENABLE_PROFILING
+/**
+ * @brief LOOP PROFILE — where a main-loop iteration's time goes.
+ *
+ * First page of the race rotation on a profiling build (plan 0011).
+ * Eight rows, all of them data:
+ *
+ *   14481Hz 61us mx42       loop rate, mean iteration, worst iteration
+ *                           (mean in us below 1 ms, else ms; mx in ms)
+ *   GPS 41.2 TCH  0.4       every section's share of the last second,
+ *   ...                     as a percentage, two per row
+ *   DSP 14.9 OTH  4.1       OTH = loop() time no section bracketed
+ *   SLP 11.3                SLP = wall time not inside loop() at all
+ *
+ * All fourteen slots are shares of the same wall-clock second, so they
+ * sum to ~100 (integer truncation loses a few tenths). If they do not,
+ * something is wrong with the measurement, not with the firmware.
+ *
+ * SLP is the headroom number: scheduler dispatch, other FreeRTOS tasks,
+ * and any time the CPU spent asleep. A large SLP means the loop rate is
+ * NOT the thing limiting this firmware.
+ *
+ * Two markers can lead the first row. '*' means the DWT cycle counter
+ * would not run and the numbers came from micros() instead — at 1 us
+ * resolution most of these sections quantise to zero, so treat the small
+ * ones as noise until that is fixed. '!' means the profiling pin was
+ * refused (NFC pads never converted), so the scope is dark even though
+ * these numbers are good. There is no title row: the rate line plus the
+ * two-column grid is unmistakable, and the eighth row is worth more than
+ * a caption.
+ *
+ * Shares are of WALL TIME, not of the iteration, so they are directly
+ * comparable with what a scope reads off the profiling pin.
+ */
+void displayPage_profile() {
+  resetDisplay();
+
+  const loop_profile::Report& r = profilingReport();
+  if (!r.valid) {
+    display.println(F("LOOP PROFILE"));
+    display.println();
+    display.println(F("sampling..."));
+    safeDisplayUpdate();
+    return;
+  }
+
+  // The mean is rendered in WHOLE MICROSECONDS below a millisecond and
+  // in milliseconds above it. The first hardware run came back reading
+  // `999Hz av0.0` — a loop rate pinned at what was then a 999 clamp and
+  // a mean quantised to nothing, because both fields had been sized
+  // from the "~250 Hz / 4 ms iteration" figure this project had carried
+  // in its docs for years. The real loop turned out to be an order of
+  // magnitude faster than that, which is precisely the sort of thing
+  // this page exists to find — so the clamps must not be the thing that
+  // hides it.
+  //
+  // The row still cannot outgrow the 21-character line, because rate
+  // and mean are reciprocal: a five-digit rate forces a sub-millisecond
+  // (<=4-char) mean, and a mean big enough to need "99.9ms" forces a
+  // three-digit rate. Text wrap is off, so an overflow would silently
+  // truncate rather than wrap — worth the coupling argument.
+  const uint32_t rate = (r.loopRateHz > 99999) ? 99999 : r.loopRateHz;
+  const uint32_t maxMs = (r.loopMaxUs > 9999000) ? 9999 : (r.loopMaxUs / 1000);
+
+  char mean[12];
+  if (r.loopMeanUs < 1000) {
+    snprintf(mean, sizeof(mean), "%luus", (unsigned long)r.loopMeanUs);
+  } else {
+    const uint32_t tenthMs =
+        (r.loopMeanUs > 99900) ? 999 : (r.loopMeanUs / 100);
+    snprintf(mean, sizeof(mean), "%lu.%lums", (unsigned long)(tenthMs / 10),
+             (unsigned long)(tenthMs % 10));
+  }
+
+  // Sized well past the 21-column line so the compiler can prove no
+  // truncation: 1 marker + 5 rate + "Hz " + 6 mean + " mx" + 4 max + NUL.
+  char line[32];
+  snprintf(line, sizeof(line), "%s%luHz %s mx%lu",
+           profilingPinLive() ? "" : "!", (unsigned long)rate, mean,
+           (unsigned long)maxMs);
+  // '*' prefix = degraded timebase (see the doc comment); '!' = the
+  // profiling pin was refused, so the scope is dark even though these
+  // numbers are good. Both can apply; the timebase one wins the column
+  // because it is the one that makes the numbers untrustworthy.
+  if (profilingTimebaseTag()[0] != 'D') {
+    display.print(F("*"));
+  }
+  display.println(line);
+
+  // Seven rows of two slots covers all twelve sections plus OTH and SLP
+  // with nothing left over — adding a section means finding it a row.
+  char slot[12];
+  for (uint8_t row = 0; row < 7; row++) {
+    for (uint8_t col = 0; col < 2; col++) {
+      const uint8_t idx = (uint8_t)(row * 2 + col);
+      if (idx >= loop_profile::kReportSlots) break;
+      if (col == 1) display.print(F(" "));
+      const uint16_t pm = r.permille[idx];
+      snprintf(slot, sizeof(slot), "%s %2lu.%lu", loop_profile::sectionTag(idx),
+               (unsigned long)(pm / 10), (unsigned long)(pm % 10));
+      display.print(slot);
+    }
+    display.println();
+  }
+
+  safeDisplayUpdate();
+}
+#endif  // BIRDSEYE_ENABLE_PROFILING
+
 void displayPage_internal_fault() {
   resetDisplay();
   display.setCursor(0, 0);
@@ -1304,6 +1458,8 @@ void displayPage_course_track() {
   display.println(F("Yes - add course"));
   display.print(menuSelectionIndex == 1 ? F("->") : F("  "));
   display.println(F("No - new track"));
+  display.print(menuSelectionIndex == 2 ? F("->") : F("  "));
+  display.println(F("Cancel"));
 
   safeDisplayUpdate();
 }
@@ -1311,21 +1467,29 @@ void displayPage_course_track() {
 void displayPage_course_type() {
   resetDisplay();
 
+  // No blank line under the title: three size-2 rows (16 px each) plus the
+  // header and the hint line fill the panel exactly, and "Cancel" has to
+  // stay on-screen to be worth having.
   display.setTextSize(1);
   display.println(F("   COURSE TYPE"));
-  display.println();
   display.setTextSize(2);
 
   display.print(menuSelectionIndex == 0 ? F("->") : F("  "));
   display.println(F("Circuit"));
   display.print(menuSelectionIndex == 1 ? F("->") : F("  "));
   display.println(F("Sprint"));
+  display.print(menuSelectionIndex == 2 ? F("->") : F("  "));
+  display.println(F("Cancel"));
 
-  // The difference that matters when you are about to walk it.
+  // The difference that matters when you are about to walk it. Blank on the
+  // Cancel row — describing a course type the cursor is not on reads as a
+  // description OF Cancel.
   display.setTextSize(1);
-  display.println();
-  display.println(menuSelectionIndex == 0 ? F("one start/finish line")
-                                          : F("start + finish lines"));
+  if (menuSelectionIndex == 0) {
+    display.println(F("one start/finish line"));
+  } else if (menuSelectionIndex == 1) {
+    display.println(F("start + finish lines"));
+  }
 
   safeDisplayUpdate();
 }

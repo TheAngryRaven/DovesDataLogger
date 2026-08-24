@@ -67,6 +67,17 @@ Core capabilities:
   DovesSensorEgg thermocouple pod's advertising broadcasts (`PW-ADV` v1
   and v2), logs `Temp1`/`Junction1`/`Temp2` DOVEX columns + Temp1/Temp2
   race pages (subsystem 14)
+- **Loop CPU profiling (beta only)**: `BIRDSEYE_ENABLE_PROFILING` times
+  every subsystem call in `loop()`, shows the breakdown on a LOOP PROFILE
+  race page, and drives pin 30 as a scope output — the measurement behind
+  the nRF52840-vs-nRF5340 board decision. **Takes pin 30 from the boost
+  EN line, so a beta image can never switch the 5 V rail** (subsystem 18)
+- **NeoPixel strip**: 11 WS2812 pixels on the NFC pads converted
+  to GPIO — 2 **user-assignable** status LEDs (eight modes: target RPM,
+  target speed, GPS lock, camera sync, last lap, last sector, EGT, off)
+  flanking a 9-px pace-pip / RPM- or speed-scale strip, with a global
+  brightness cap, boot animation, and a two-stage purple celebration for
+  a session-best sector or lap (subsystem 16)
 
 ---
 
@@ -86,12 +97,14 @@ All sketch sources live in `BirdsEye/` so the folder name matches the
 | `gps_config.h` | GPS configuration constants (baud rate, nav rate, serial port) |
 | `images.h` | PROGMEM bitmap data — the bird splash only; the crossing animation is generated (`crossing_pattern`) |
 | `accelerometer.{h,ino}` | LSM6DS3 IMU init and g-force reads (onboard XIAO Sense) |
-| `bluetooth.{h,ino}` | BLE service (file listing, transfer, settings, track sync), auto-reboot on disconnect; shared peripheral BLE core init (+ Just-Works bonding) + `bleOwner` radio-ownership routing |
+| `bluetooth.{h,ino}` | BLE service (file listing, transfer, settings, track sync), reboot on leaving transfer mode (peer disconnect or manual Exit); shared peripheral BLE core init (+ Just-Works bonding) + `bleOwner` radio-ownership routing |
 | `camera_ble.{h,ino}` | Insta360 X4 auto-record BLE glue: peripheral remote GATT (0xCE80), all control via ce82 button notifies, executes `camera_fsm` actions, deferred callback→loop pattern (see subsystem 13) |
 | `firmware_ota.{h,ino}` | SD-staged firmware OTA: `FW*` BLE protocol, SD staging, CRC verify, self-flash apply (see subsystem 11) |
 | `display_pages.{h,ino}` | All page rendering functions (`displayPage_*()`) |
 | `display_ui.{h,ino}` | Display init, button reading (multi-sample debounce), menu navigation, I2C bus recovery |
 | `gps_functions.{h,ino}` | GPS init (SparkFun UBX PVT), time conversion, DOVEX logging pipeline, TIMER3 serial buffer ISR, V_BCKP recovery |
+| `neopixel.{h,ino}` | NeoPixel strip glue (subsystem 16): one-time UICR NFC→GPIO ensure, boost-EN power control, 30 Hz compose→cap→show frame loop, sleep/wake hooks; all decision math in the led_* / sector_purple pure units |
+| `profiling.{h,ino}` | Main-loop CPU profiling glue (subsystem 18, beta only): DWT/micros timebase probe, section brackets, the pin-30 scope output, once-a-second rollup. Also the reason a beta build never drives the 5 V boost EN |
 | `replay.{h,ino}` | Instant DOVEX header replay |
 | `sd_functions.{h,ino}` | SD init, track list/JSON parsing (dual format), track manifest, SD access arbitration |
 | `sensoregg.{h,ino}` | SensorEgg wireless EGT: passive BLE scan (observer), scan-callback→loop double buffer, `SENSOREGG_MAC` pairing, Temp1/Junction1 data surface (see subsystem 14) |
@@ -115,9 +128,18 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `dovex_header.{h,cpp}` | DOVEX 1 KB header `format()` / `parse()` |
 | `filename_validator.{h,cpp}` | FAT-safe / traversal-proof check for BLE filenames |
 | `crc32.{h,cpp}` | CRC-32/IEEE-802.3 (zlib) incremental + hex; pins firmware-OTA CRC to the web client |
+| `ble_stream.{h,cpp}` | BLE file-transfer read-ahead bookkeeping: chunk size from the negotiated MTU, the compacting refill (`Move`), slice/consume, transfer rate. An off-by-one here corrupts a downloaded session, so the index math is host-tested away from the radio |
 | `sd_access_policy.{h,cpp}` | SD access arbitration decision table (mode values + grant/deny rules) |
 | `lap_format.{h,cpp}` | ms → `M:SS.mmm` lap-time rendering (three zero-minutes styles), used by all display pages |
-| `tach_filter.{h,cpp}` | Tachometer 1-D Kalman filter (predict/update math + Q/R tuning constants) **and the engine geometry** — `revsPerPulse` / `minPulseGapUs` from `spark_mode` + `cylinder_count` |
+| `setting_parse.{h,cpp}` | Strict integer parsing for `/SETTINGS.json` values. Exists because `atoi()` answers 0 for `""` and `"garbage"`, and 0 is an in-range, **destructive** value for the LED keys (`led_brightness` 0 = strip off + boost rail never raised) — so a blank setting read as a deliberate "off". Rejects anything that is not a complete integer, so the caller's range check keeps the compiled-in default |
+| `loop_profile.{h,cpp}` | Main-loop CPU accounting: per-section tick accumulation, saturating (never wrapping — a uint32 of DWT ticks is only ~67 s), and the once-a-second rollup into shares of wall time, loop rate, mean and worst iteration, plus measured idle (`SLP`). **Two clocks on purpose**: durations in TICKS with `ticksPerUs` supplied at rollup (so a sub-microsecond section is not quantised to zero), but the WINDOW closed on `millis()` — DWT counts cycles and stops when the core halts, and using it as a wall clock inflated the very first hardware reading. Board-portable by construction — the nRF5340 comparison needs the same instrument |
+| `local_time.{h,cpp}` | UTC + a fixed signed minute offset → local wall clock (4-digit year, correct month/year/leap rollover both ways) + the `isNight()` window test. **No DST, and NOTHING logged goes through it** — saved data stays UTC (subsystem 17) |
+| `led_frame.{h,cpp}` | NeoPixel pixel layout (11 px: 2 status + 9-px strip), `Rgb`/`Frame` PODs, and **`applyCap()` — the single global-brightness choke point** (post-condition: no channel exceeds the cap) |
+| `led_modes.{h,cpp}` | Strip modes + status actions: pace pip math (ms/m, slower = left/red), generic `ScaleSpec` left-fill (RPM red past halfway, speed with no red band at all), the `StatusAction` threshold/hysteresis/flash table, and `flashOn()` — the ONE definition of flash phase, shared with `led_status` |
+| `led_status.{h,cpp}` | The eight assignable status-LED modes (subsystem 16): the mode enum + strict name parser that the `led_status_left`/`led_status_right` settings store, the GPS and camera readiness ladders, and `evalMode()` — which delegates every threshold mode to `led_modes::evalStatus` rather than re-implementing hysteresis. `Inputs.eggSupported` is why an `egt` LED is dark on a stock build instead of a permanent solid blue |
+| `led_animations.{h,cpp}` | Boot + purple-sector animations as pure functions of `(tMs, seed)` — hash-based sparkles, no rand()/millis(), golden-testable |
+| `sector_purple.{h,cpp}` | The lap/sector CLOSE-EDGE monitor (the name predates half its job): open-time best snapshots + a derived S3 defeat the library's lap-line `updateBestSectors()` race, and the same trick one level up defeats it for `getBestLapTime()`. Emits which sector or lap just closed, its verdict **against the last recorded one** (not the best — that only ever answers purple or red), and the two purple flags. No purple on lap 1 |
+| `tach_filter.{h,cpp}` | Tachometer 1-D Kalman filter — predict/update math, the RPM-aware noise models, the **outlier gate** that keeps one bad ignition edge out of the trace (plan 0009), the `tach_filter` mode parser — **and the engine geometry**: `revsPerPulse` / `minPulseGapUs` from `spark_mode` + `cylinder_count` |
 | `camera_fsm.{h,cpp}` | Insta360 auto-record lifecycle FSM (8 states, all debounce/retry/timeout timing + tunables); board-portable core shared with the nRF54 "Falcon" target |
 | `insta360_protocol.{h,cpp}` | Insta360 X4 BLE frame builders/parsers (wake advert, remote scan response, ce82 buttons, ce82 GPS/RMC frame, ce81 serial parsing, ce81 `0x10` record-timer state parse) with golden-byte tests |
 | `sensoregg_protocol.{h,cpp}` | SensorEgg `PW-ADV` v1+v2 advertising payload parser (magic filter, int16 deci-°C decode with `0x8000`→NaN sentinel, flags, sequence, v2 aux thermistor + battery) + wrap-safe 1 s staleness rule + passive-scan tuning constants |
@@ -157,7 +179,7 @@ handoff spec.
 | `API.md` | Canonical WASM API contract (v1): artifact set, method surface, injectPvt schema, deltas from the handoff-spec draft (async `reset()` via module re-instantiation) |
 | `wasm/bindings.cpp` | EMSCRIPTEN_KEEPALIVE exports over sim_host.h + getStateJson/getVersion/readFile/listFiles |
 | `wasm/birdseye-sim.mjs` | Hand-written public ESM wrapper (stable import; async `reset()` re-instantiates the core module) |
-| `wasm/test.html` | Standalone browser harness: canvas blit (hash dirty-check), buttons, dovex file playback |
+| `wasm/test.html` | Standalone browser harness: canvas blit (hash dirty-check), buttons, dovex file playback (≥13 columns — 4.0.0 logs carry 16), synthetic GPS-fix toggle + mph field (parked on the OKC asset track, 40 ms inject/step interleave) so fix-gated flows like the course creator are reachable |
 | `wasm/smoke.mjs` | Node smoke test the wasm CI job runs (boot→menu, state/version/VFS, determinism across instances, reset) |
 | `CMakeLists.txt` | Native build; FetchContent pins: DovesLapTimer `BETA` (matches CI channel), SparkFun GNSS v3.1.9 (header-only use), ArduinoJson v6.21.5, ArxTypeTraits v0.3.2, Adafruit GFX 1.12.6 + SH110X 2.1.14 (real display stack) |
 
@@ -165,7 +187,7 @@ handoff spec.
 
 | Path | Contents |
 |---|---|
-| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, sim-build (native sim TU + 60 s boot soak + determinism + goldens + lap oracles + two-session carryover, plus a wasm job: emsdk 3.1.61 build + node smoke + `birdseye-sim-wasm` artifact), release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). Per-channel build config: `BETA` builds track DovesLapTimer's `BETA` branch and pass `-DBIRDSEYE_ENABLE_SENSOREGG=1`; master/release pin `v4.3.0` and build the all-flags-off defaults |
+| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, sim-build (native sim TU + 60 s boot soak + determinism + goldens + lap oracles + two-session carryover, plus a wasm job: emsdk 3.1.61 build + node smoke + `birdseye-sim-wasm` artifact), release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). Per-channel build config: `BETA` builds track DovesLapTimer's `BETA` branch and pass `-DBIRDSEYE_ENABLE_SENSOREGG=1`; master/release pin `v4.3.0` and build the `project.h` defaults — which since 4.1.0 means NeoPixel ON, SensorEgg off |
 | `tests/` | Host doctest harness (CMake) for the pure-logic units |
 | `docs/plans/` | Numbered design records (`NNNN-slug.md`, see its README) — the rationale behind each chunk of work; plan-executing commits cite the number. Same convention as DovesDataViewer |
 | `CHANGELOG.md` | Keep-a-Changelog history; release workflow ties to version tags |
@@ -195,6 +217,8 @@ handoff spec.
 | D3 | Button 3 (Right) | INPUT_PULLUP, RC filter recommended |
 | D0 | Tachometer input | INPUT_PULLUP, falling-edge ISR |
 | PIN_VBAT / VBAT_ENABLE | Battery ADC | 1510/510 ohm divider, 3.6 V ref |
+| Pin 30 (P0.09, NFC1 pad) | 5 V boost converter EN | HIGH = rail on; LOW retained through System OFF. Needs the one-way UICR NFC→GPIO conversion (subsystem 16). **On a profiling build this pin is the profiling output instead and EN is never driven** (subsystem 18) |
+| Pin 31 (P0.10, NFC2 pad) | NeoPixel data | 11 px WS2812, GRB, 800 kHz. Same UICR requirement; swap with pin 30 in `neopixel.h` if wired the other way |
 
 ---
 
@@ -214,6 +238,9 @@ loop()  ~250 Hz
  ├─ checkAutoIdle()         tach: 60s <2mph; manual/speed: 5min <5mph (+ camera stop)
  ├─ updateGpsLockHold()     pin user to tach page until GPS time lock
  ├─ CAMERA_LOOP()           step Insta360 auto-record FSM (GPS/tach fresh)
+ ├─ NEOPIXEL_LOOP()         LED strip frame at 30 Hz (also called in parked branches)
+ │   (every call above is PROFILE_SECTION-bracketed; the macro expands to
+ │    the bare call unless BIRDSEYE_ENABLE_PROFILING — subsystem 18)
  ├─ cameraConsumeAutoStop() camera 30s-engine-off stop → endRaceSession + menu
  ├─ calculateGPSFrameRate() 1-second PVT counter
  ├─ readButtons()           multi-sample debounce + edge detection
@@ -300,9 +327,11 @@ loop()  ~250 Hz
 ### 2. Tachometer (`tachometer.ino`)
 
 - ISR `TACH_COUNT_PULSE()` fires on falling edge of D0.
-- Minimum pulse gap is **derived**, not fixed: `tach_filter::minPulseGapUs()`
-  returns 3 ms ÷ pulses-per-rev with a 750 µs floor, so the ~20 000 true-RPM
-  ceiling holds up to four cylinders instead of halving with each one added.
+- Minimum pulse gap comes from the spark mode only: `tach_filter::minPulseGapUs()`
+  returns 3 ms for a plug firing every rev and 6 ms for a 4-stroke single-fire
+  plug, so the ~20 000 RPM ceiling is the same in both modes. Cylinder count is
+  not a term (plan 0014) — one clamped wire never delivers pulses faster than
+  the cylinder it is wrapped around fires.
 - **Ring buffer architecture**: ISR timestamps every valid pulse into a
   16-entry ring buffer (`tachRingBuf`). The ISR checks full before
   publishing (SPSC, one slot sacrificed) and drops + sets
@@ -310,30 +339,77 @@ loop()  ~250 Hz
   `TACH_LOOP()` then discards the one period spanning the gap. `TACH_LOOP()` drains the buffer
   each main-loop iteration, computes mean inter-pulse period from ALL
   accumulated pulses, and feeds the result through a 1D Kalman filter.
-- **Kalman filter** replaces the old median-of-3 + EMA. Two floats of
-  state (estimate + uncertainty in `tach_filter::Kalman`); the
-  predict/update math and tuning constants live in the host-tested
-  `tach_filter` pure unit. Process noise
-  Q = 800 (tuned for kart engine inertia). Measurement noise R scales
-  inversely with pulse count (more pulses = more confident).
+- **Kalman filter** replaces the old median-of-3 + EMA. Estimate +
+  uncertainty in `tach_filter::Kalman`; all math and tuning lives in the
+  host-tested `tach_filter` pure unit. Three properties matter, and all
+  three exist because the pre-0009 filter put visible spikes in the
+  logged trace (plan 0009 has the full derivation):
+  - **An outlier gate, not more smoothing.** The estimator sees ONE
+    number per pulse and its steady-state gain is ~0.4, so a single bad
+    edge is a spike, not a wobble: a ring clearing the 3 ms debounce at
+    3000 RPM reads as 15 000 RPM. A measurement more than `kGateSigmas`
+    (5) from the estimate is **not folded in — the estimate coasts**.
+    Three *consecutive* rejections is a real step change (clutch dump,
+    spin), so the third is **adopted outright** rather than filtered
+    toward. 5 sigma is loose on purpose: the gate catches the
+    half-/double-period signatures of a spurious/missed spark, which are
+    tens of sigma out, and real acceleration (~25 RPM between pulses at
+    5500 RPM/s) can never trip it. `k.rejected` counts rejections for the
+    tach page's debug line and **survives the engine-stop reset**.
+  - **Measurement noise knows the RPM** (`measurementNoise()`).
+    RPM = K/period, so a fixed timing error costs RPM²/K of RPM error —
+    QUADRATIC. A flat R was right at ~4000 RPM and far too confident
+    above 8000. It also takes `revsPerPulse`: a twin's shorter periods
+    are genuinely noisier at the same RPM.
+  - **Process noise is a RATE** (RPM²/s, `processNoise()`), multiplied by
+    the **engine time the batch spans** — `TACH_LOOP()` passes the sum of
+    the periods it just consumed, never wall clock. Charging a fixed Q
+    per update made the filter 4x looser at 12 000 RPM than at 3000, and
+    looser again whenever an SD stall batched pulses together.
+  The **first measurement after a reset is adopted whole**: with no prior
+  there is nothing to filter against, and a slow climb out of 0 RPM would
+  arm the gate partway up and get the engine's own speed rejected.
+- **`tach_filter` setting — the track-side A/B switch** (default
+  `smooth`). `smooth` is everything above; `legacy` reproduces the
+  pre-0009 filter bit for bit (fixed Q/R, no gate) so new sessions
+  compare against logs already collected; `raw` bypasses the estimator
+  entirely, publishing what the periods say, spikes included — which is
+  how you tell a dirty pickup from a bad filter. Read once at boot into
+  `tachFilterMode` and applied inside `TACH_LOOP()`, so there is still
+  exactly ONE RPM number in the firmware. Anything unrecognised means
+  `smooth`.
 - Time-based debounce only. Old volatile flag gate removed — ISR
   body is trivially fast (<1 µs) and cannot cause interrupt storms.
-- **True RPM, one correction, one place.** The pickup counts ignition
-  pulses; the tach reports revolutions, and those differ on anything but a
-  single-cylinder engine firing every rev.
-  `pulses_per_rev = cylinder_count × (spark_mode == wasted ? 1.0 : 0.5)`,
-  and the reciprocal (`tachRevsPerPulse`, set once at boot) is applied at
-  the period→RPM conversion in `TACH_LOOP()` — **before the Kalman
-  filter**, because the filter's tuning is in true-RPM units (Q = 800 RPM²
-  models crank inertia), so correcting afterwards would filter each engine
-  type differently. Defaults (1 cylinder, wasted) give 1.0 — byte-identical
-  to the old hardcoded behaviour.
+- **One correction, one place, and cylinder count is NOT in it** (plan
+  0014). There is one sense wire and one clamp, and it goes around one
+  spark plug wire — so the pickup sees ONE cylinder's ignition whatever
+  the engine has. The whole geometry is the spark mode:
+  `revs_per_pulse = (spark_mode == wasted ? 1.0 : 2.0)`. `tachRevsPerPulse`
+  is set once at boot and applied at the period→RPM conversion in
+  `TACH_LOOP()` — **before the Kalman filter**, because the filter's tuning
+  is in RPM units (Q = 800 RPM² models crank inertia), so correcting
+  afterwards would filter each engine type differently.
   **No consumer may re-derive or re-apply this**: display, DOVEX rows, the
   camera FSM and auto-race all read the already-corrected
   `tachLastReported`. Any new consumer must too.
-- Because RPM is now true RPM, the **thresholds mean what they say on every
-  engine** — auto-race (>500), camera wake/record/stop (500/1500/300) no
-  longer fire at half the real RPM on a twin.
+- **Why the cylinder term is gone.** Plan 0003 shipped
+  `pulses_per_rev = cylinder_count × sparkFactor`, which is only right for
+  a clamp on a shared coil/king lead. On this hardware it divided RPM by
+  the cylinder count: a V8 on a traditional magneto, configured honestly
+  as 8 cylinders + single fire, read **an eighth** of its crank speed. The
+  plan papered over it by redefining the setting as "cylinders the pickup
+  *sees*" — a field named Cylinders that must not hold the engine's
+  cylinder count. `cylinder_count` is now the engine's actual count, and
+  it is descriptive: `tach_filter::rpmIsInferred()` uses it for the
+  warning, nothing else reads it.
+- **The accepted consequence, stated to the user.** Above one cylinder the
+  crank speed is INFERRED from one cylinder's firing rate — between
+  firings it is an assumption, and a cylinder that stops firing reads as a
+  stopped engine. That is how every clamp-on inductive tach works; the
+  settings UI, the README table and the boot debug line say so rather than
+  leaving it to be discovered from a trace.
+- Thresholds mean what they say on any engine whose clamped plug fires
+  every rev — auto-race (>500), camera wake/record/stop (500/1500/300).
 - `tachLastReported` updates every main-loop call (~250 Hz). Consumers
   (display at 3 Hz, logging at 25 Hz) rate-limit themselves.
 - 500 ms timeout sets RPM to 0 (engine stopped), resets Kalman state.
@@ -438,7 +514,10 @@ loop()  ~250 Hz
   - Boot/menu: `PAGE_BOOT` (999), `PAGE_GPS_STATUS` (900, satellite status
     page every boot lands on — driven by `gpsStatusPageLoop()`, buttons
     deliberately no-op'd in `displayLoop()`), `PAGE_MAIN_MENU` (-1).
-  - Racing: `GPS_DEBUG` (3, GPS pipeline counters + lap debug) and
+  - Racing: `GPS_PROFILE` (2, LOOP PROFILE — **only exists on a
+    profiling build**, subsystem 18; being below `GPS_DEBUG` in a
+    contiguous rotation, it drags the two diagnostic pages in too),
+    `GPS_DEBUG` (3, GPS pipeline counters + lap debug) and
     `GPS_STATS` (4, battery/sats/SD/track status) through `LOGGING_STOP`.
     The two diagnostic pages are **hidden by default at runtime**: the
     `debug_pages` setting (default `hide`) leaves `runningPageStart` at
@@ -451,10 +530,20 @@ loop()  ~250 Hz
     master/release default) the block closes up behind the tach page and
     `LOGGING_STOP` is 12 instead of 14, same reshuffle idea as
     `ENDURANCE_MODE`. Page ids are internal — nothing external sees them.
-  - Replay: `PAGE_REPLAY_FILE_SELECT` (-3), `PAGE_REPLAY_RESULTS` (-8),
-    `PAGE_REPLAY_EXIT` (-9).
-  - Transfer: `PAGE_TRANSFER_MENU` (-4) Bluetooth/USB submenu,
+  - Replay: `PAGE_REPLAY_FILE_SELECT` (-3, sessions + a trailing `Back`
+    row — see `replayItemCount()` in `replay.h`, the single source of that
+    layout for the renderer, the menu limit and the select handler),
+    `PAGE_REPLAY_RESULTS` (-8), `PAGE_REPLAY_EXIT` (-9).
+  - Transfer: `PAGE_TRANSFER_MENU` (-4) Bluetooth/USB/Back submenu,
     `PAGE_USB_STORAGE` (-5) USB drive active.
+  - **Every menu page carries a Back/Cancel row.** Both transfer modes and
+    the replay browser leave by rebooting or by walking forward, and the
+    idle-shutdown timer only runs on the main menu (and the fault page), so
+    a menu without one is a hard trap: the only escape is the unlabelled
+    Select+side 5 s reboot combo. The deliberate exceptions are
+    `PAGE_INTERNAL_FAULT` (buttons disabled, own idle shutdown),
+    `PAGE_SD_FORMAT` (nothing to go back to) and the race rotation (leaves
+    via `LOGGING_STOP`, speed-gated).
   - BLE: `PAGE_BLUETOOTH` (-2).
   - Camera: `PAGE_PAIR_CAMERA` (-6) pairing / paired-status management,
     `PAGE_CAMERA_SERIAL_ENTRY` (-7) manual 6-char serial entry fallback,
@@ -522,7 +611,42 @@ loop()  ~250 Hz
     download directly. `FIRMWARE_VARIANT` is set by the per-FQBN build flag
     `-DBIRDSEYE_BOARD_SENSE` / `-DBIRDSEYE_BOARD_NONSENSE` (defaults to
     `sense`).
-- MTU negotiation (requests 247, default 23).
+- **Download throughput — three levers, all verified after the fact**
+  (plan 0008). The connect callback fires the three asks (MTU 247, 2M PHY,
+  Data Length Extension) and then **checks them**, because firing is not
+  the same as landing: the SoftDevice runs one link-layer control procedure
+  at a time, so the DLE ask queued right behind the PHY ask can come back
+  `NRF_ERROR_BUSY` into a return value nobody reads. `bleTuneLink()` runs on
+  the main loop at +500 ms (read + correct) and +1500 ms (final readback):
+  - **DLE.** `getDataLength()` still at the 27-byte default means every
+    244-byte notify fragments into ten link-layer packets — the single
+    biggest tax on a download. Re-request it with nothing else in flight.
+  - **Connection interval.** The advertised preference stays
+    `setConnInterval(6, 12)` (7.5–15 ms) because desktop/Android honour it
+    and must not be slowed. **iOS is required to reject anything under
+    15 ms** (Apple accessory rules), so it silently keeps its own choice —
+    commonly 30 ms, i.e. half the connection events. Only when the measured
+    interval is slower than the target does the device make a second,
+    Apple-compliant `requestConnectionParameter(12)` ask. Never lower an
+    already-fast interval.
+  - **SD off the radio's critical path.** Chunks stream from a 4 KB
+    read-ahead (`ble_stream::ReadAhead` + `bleStreamBuf`), refilled with one
+    aligned multi-sector read, instead of a `FatFile::read()` between every
+    notify. Refills are **compacting** so every notify but the file's last
+    carries a full chunk. A failed notify simply does not `consume()` — with
+    the bytes in RAM there is no file position to rewind, so the old
+    `seekCur()` hole-punching hazard is structurally gone.
+  Burst sending is bounded by **wall clock** (`kBurstBudgetMs`, 20 ms), not
+  a packet count: the bound exists to keep the exit button and WDT serviced,
+  and a fixed count is a wildly different amount of time on a fast link vs a
+  slow one. A blocked `notify()` is the flow control and is *desirable* — it
+  means the radio is saturated.
+- **The transfer page reports what it got**: live KB/s, the SD clock actually
+  in force (`sdActiveSpiHz()` — the 8 MHz parked bump falls back to 2 MHz
+  silently), the negotiated link-layer PDU, and the ATT payload. Accessors
+  `bleTransferRateBps()` / `bleLinkDataLength()` / `bleLinkChunkSize()`. This
+  exists because a 4x download regression was only noticeable as "the
+  percentage is creeping".
 - **No SdFat in the callback task — ever.** Every SD-touching command
   (`LIST`, `GET:`, `DELETE:`, `TLIST`, `TGET:` via the deferred
   `fileCmdBuffer`; settings, `TPUT:`/`TDEL:`, and `FW*` via their own
@@ -574,11 +698,20 @@ loop()  ~250 Hz
   raw image chunks to `fwReceiveChunk()` while `fwReceiving()`. The request
   characteristic max length was raised from 64 to **244** so ~240-byte image
   chunks fit. `BLUETOOTH_LOOP()` calls `FW_OTA_LOOP()` each iteration.
-- **Auto-reboot on BLE disconnect**: `bleDisconnectCallback()` flags a
-  deferred teardown that `BLUETOOTH_LOOP()` runs on the main loop —
-  `NVIC_SystemReset()` after a 100 ms delay so new settings take effect
-  without a manual power cycle, plus `fwReset()` to abort any in-flight OTA
-  and free the staging file + SD access. **Exception — OTA apply**: if an
+- **Leaving transfer mode always reboots** — both ways out:
+  - *Peer disconnect*: `bleDisconnectCallback()` flags a deferred teardown
+    that `BLUETOOTH_LOOP()` runs on the main loop — `NVIC_SystemReset()`
+    after a 100 ms delay so new settings take effect without a manual power
+    cycle, plus `fwReset()` to abort any in-flight OTA and free the staging
+    file + SD access.
+  - *Manual Exit* (`bleExitTransferMode()`): the parked-loop Exit button
+    runs `BLE_STOP()` then the same 100 ms-delay reboot. Before 4.1.0 a
+    manual exit dropped back to the menu without rebooting, so settings
+    written over BLE silently didn't apply until the next power cycle. The
+    SIM stub returns after stopping (no reboot) so the golden menu walk can
+    exit the Bluetooth page; `display_ui.ino`'s `PAGE_BLUETOOTH` handler is
+    that sim-only path (on hardware the `bleActive` parked branch owns the
+    button). **Exception — OTA apply**: if an
   apply has been requested (`fwApplyRequested()`), the teardown skips *both*
   the abort and the reboot. After `FWAPPLY` the web app disconnects on purpose
   to let the device self-flash; rebooting here would discard the staged image
@@ -607,9 +740,30 @@ loop()  ~250 Hz
   Always reads fresh from disk (no cache).
 - `setSetting(key, value)` does read-modify-write to update a single key.
 - Uses `SD_ACCESS_TRACK_PARSE` mode for brief SD access.
-- Separate `StaticJsonDocument<512>` — does not share the track parser's
+- Separate `StaticJsonDocument<1024>` — does not share the track parser's
   `JSON_BUFFER_SIZE` buffer.
-- Total RAM cost: ~1 KB (512-byte file buffer + 512-byte JSON document).
+- Total RAM cost: ~2 KB (1024-byte file buffer + 1024-byte JSON document).
+- **There are TWO parsers of this file, and both are sized by
+  `SETTINGS_JSON_CAPACITY` (`settings.h`).** `settings.ino` owns
+  `getSetting()`/`setSetting()`; `bluetooth.ino`'s `SLIST` handler has its
+  own buffer + document to enumerate the file for the companion app. They
+  drifted once — plan 0010 raised settings.ino's pair 512 → 1024 and
+  missed the BLE copy, so `SLIST` read 511 B of a 538 B file and answered
+  `SERR:PARSE` on every device while `SGET`/`SSET` still worked. The
+  shared constant is what makes that impossible now; if you add a third
+  parser, size it from the same macro.
+- **The two 1024s must stay equal, and adding keys is not free.** Every
+  read path caps at `sizeof(settingsFileBuffer) - 1`, so a file bigger
+  than the buffer parses as `IncompleteInput` and *every* key read
+  fails — which `SETTINGS_SETUP()` reads as corruption, quarantines, and
+  regenerates, whereupon `ensureDefaultSettings()` grows it back over the
+  cap and the device loses its settings on a **boot loop**. Both were
+  512 until plan 0010: the 18-key file was already 436 B and four new
+  keys put it at 543, over the 511-byte read cap *and* past the old
+  document's capacity (a `<512>` doc returns `NoMemory` at 22 string
+  pairs). `setSettingInner()` now refuses any write whose
+  `measureJson()` exceeds the buffer or whose document `overflowed()`,
+  so the failure is a loud refused write rather than a silent brick.
 
 ### 9. CourseManager Integration
 
@@ -708,9 +862,18 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   System OFF with the conn LED still driven; GPIO state is retained
   there, hence the "blue light stays on after sleep" field report) →
   `DISPLAY_SLEEP()` → `GPS_SLEEP()` (u-blox software backup, µA, config
-  retained while powered; TIMER3 stopped) → IMU power rail off. The
-  charging-loop soft resume (`softResumeFromCharging()`) restarts the
-  egg scanner via `SENSOREGG_WAKE()`; BLE/camera stay lazy.
+  retained while powered; TIMER3 stopped) → IMU power rail off →
+  `NEOPIXEL_SLEEP()` (blank while 5 V is up, data LOW, then boost EN
+  LOW — before the charging branch, so the strip is dark on the cable
+  too). **`NEOPIXEL_SLEEP()` is not a no-op on a flag-OFF build**: it
+  still drives boost EN low when `UICR->NFCPINS` shows the pads were
+  already converted by an earlier beta build, because the driven level
+  is what survives System OFF and a floating EN leaves the rail up (the
+  same retention as the conn-LED report above). An unconverted board is
+  never touched. The charging-loop soft resume
+  (`softResumeFromCharging()`) restarts the egg scanner via
+  `SENSOREGG_WAKE()` and re-raises the strip via `NEOPIXEL_WAKE()`;
+  BLE/camera stay lazy.
 - **System OFF entry** (`shutdownSystemOff()`, no return): wait for the
   entry combo's buttons to release (a held button = SENSE satisfied =
   instant wake-reset), **sample the tach line's parked idle level**
@@ -839,8 +1002,11 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   `msc_flush_cb` → `syncDevice()` + `SD.cacheClear()`. These run on the
   USBD task, not the main loop.
 - **UI flow**: main-menu **Transfer** → `PAGE_TRANSFER_MENU` (Bluetooth /
-  USB). **Bluetooth** keeps the existing `BLE_SETUP()` + `PAGE_BLUETOOTH`
-  path untouched. **USB** → `PAGE_USB_STORAGE` + `USB_MSC_ENABLE()`.
+  USB / Back). **Bluetooth** keeps the existing `BLE_SETUP()` +
+  `PAGE_BLUETOOTH` path untouched. **USB** → `PAGE_USB_STORAGE` +
+  `USB_MSC_ENABLE()`. **Back** returns to the main menu — both transfer
+  modes exit by rebooting, so without it this page could only be left by
+  starting a transfer.
 - **Opt-in enumeration**: `USB_MSC_SETUP()` (called from `setup()` after a
   successful `SD_SETUP()`) only registers the callbacks — no drive is
   presented at boot, so charging/plug-in behaves as before.
@@ -861,13 +1027,18 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   page, and watches VBUS: if the cable is unplugged it calls
   `USB_MSC_DISABLE()` so the SD lock and fast SPI clock can't leak past the
   session.
-- **Exit = reboot**: `USB_MSC_DISABLE()` drops media-ready, **quiesces** (waits
-  up to 1 s for the write block callback to go quiet — `setUnitReady(false)`
-  only blocks *new* SCSI commands, so an in-flight `WRITE10` keeps calling
-  `msc_write_cb` on the USBD task, and resetting mid-write would truncate a
-  file / corrupt the FAT), `syncDevice()`s
-  the card, then calls `NVIC_SystemReset()` (mirrors the BLE auto-reboot on
-  disconnect). The reboot drops the MSC interface and remounts a clean
+- **Exit = reboot**: `USB_MSC_DISABLE()` drops media-ready, **detaches USB**
+  (`TinyUSBDevice.detach()` — `setUnitReady(false)` only blocks *new* SCSI
+  commands, so without the detach the host keeps issuing traffic and an
+  in-flight `READ10`/`WRITE10` keeps calling the block callbacks on the USBD
+  task), then **drains**: waits (WDT-fed, up to 4 s — SD garbage collection
+  can stall one `writeSectors()` 100 ms–2 s) until no block callback is
+  executing and none has finished for 100 ms, tracked by
+  `mscIoInFlight`/`mscLastIoMs` around all three callbacks — reads and flush
+  included. Only then `syncDevice()` + `NVIC_SystemReset()` (mirrors the BLE
+  transfer-mode exit reboot). The 4.0.0 exit tracked only write *entry*
+  times, so a callback still on the SPI bus raced the main-loop sync and the
+  wedge came back via the watchdog instead of the clean reset. The reboot drops the MSC interface and remounts a clean
   filesystem, so host edits are picked up without any SdFat cache-coherency
   dance. Triggered by the on-device Exit button or a cable unplug.
 - **Mutex**: the whole session holds `SD_ACCESS_USB_MSC`, so logging,
@@ -1051,8 +1222,14 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   (`display_pages.ino` + the page-constant block in `BirdsEye.ino`), and
   returns BLE to lazy init. `1` (passed by `beta.yml`, and by
   `compile-sketch.yml` for PRs targeting `BETA`) is everything described
-  below. The DOVEX `Temp1`/`Junction1` columns are written either way —
-  `nan` when the POC is off — so the log format never forks by channel.
+  below. **Plan 0013 closed the three leaks**: the DOVEX
+  `Temp1`/`Junction1`/`Temp2` columns, the `temp1_alert_c` setting, and
+  the status LED that was hardwired to Temp1 are all now behind the flag
+  too — so the log format DOES fork by channel (13 stock columns vs 16),
+  reversing the earlier uniform-shape rule, and a stock logger no longer
+  shows a permanent solid-blue "no probe signal" pixel all race. The
+  `egt` status mode still parses and round-trips on any build; only its
+  rendering is gated (`led_status::Inputs.eggSupported`).
   Keep any new egg code behind the flag.
 - **What (POC)**: a wireless thermocouple pod (DovesSensorEgg repo) reads a
   K-type EGT probe via MCP9600 and broadcasts EGT + cold junction in BLE
@@ -1135,7 +1312,10 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   range) → type picker → line menu → per-line Point A/B → the capture hold.
   Input rides the sketch's existing `menuSelectionIndex`/`menuLimit`
   machinery; `rowCount()` supplies the limit, which changes with course
-  type (sprint grows a Finish row).
+  type (sprint grows a Finish row). **Every screen ends in a Cancel/Back
+  row**, the two entry screens included — the type picker's is the only way
+  out of the creator for a user with no track in range, since that entry
+  path skips the prompt.
 - **Point capture averages, it does not snapshot**: a 3 s hold folds every
   fresh PVT into a mean. Under `kCaptureMinFixes` (8) usable fixes the hold
   **fails** rather than averaging noise into a timing line; fixes worse
@@ -1186,6 +1366,330 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
 - **Sim**: fully exercised — five golden fixtures walk the real menus,
   inject real PVT, run a real averaging hold, and lock the rendered pixels.
 
+### 16. NeoPixel Strip (`neopixel.{h,ino}`, `led_frame/led_modes/led_animations/sector_purple.{h,cpp}`)
+
+- **BUILD FLAG — `BIRDSEYE_ENABLE_NEOPIXEL` (`project.h`)**: `1` on
+  **every** channel as of 4.1.0 — master, beta and release — so the strip
+  is a core feature rather than a special build. Everything below is in
+  every image. The cost is charged fleet-wide and cannot be taken back:
+  the first boot after updating performs the ONE-WAY UICR NFC→GPIO
+  conversion and self-resets once, on every device, LEDs wired or not.
+  `0` (no shipped channel sets it) compiles the subsystem out — no
+  Adafruit NeoPixel dependency, and no UICR write on a board that has not
+  already been converted; on one that HAS, the `#else` stubs still hold
+  boost EN low, because a floating EN leaves the 5 V rail up through
+  System OFF.
+- **Hardware**: 11 WS2812 pixels fed by an Adafruit 5 V boost converter.
+  Pixels 0 and 10 are status indicators; pixels 1–9 are the strip with
+  pixel 5 the centerline. Pin 30 (P0.09/NFC1) drives the boost EN
+  (HIGH = 5 V rail on), pin 31 (P0.10/NFC2) is the data line — both
+  `#define`s in `neopixel.h`, swap to match wiring. **The chain is
+  wired data-in on the physical RIGHT** (chain px 0 = rightmost LED):
+  everything renders in logical left-to-right space and
+  `led_frame::physicalIndex()` mirrors the whole chain — status LEDs
+  included — once at push time (`kChainReversed`, true for this build).
+- **NFC→GPIO is a one-time runtime UICR write** (`NEOPIXEL_SETUP()`):
+  if `UICR->NFCPINS` still has the PROTECT bit, unlock NVMC, program
+  `0xFFFFFFFE`, relock, `NVIC_SystemReset()` — NFCPINS latches only at
+  reset. **ONE-WAY** (undo = full chip erase / bootloader reflash;
+  accepted, NFC is never used). Deliberately NOT the
+  `-DCONFIG_NFCT_PINS_AS_GPIOS` core flag: that's consumed by the
+  core's `system_nrf52840.c` (a `.c` file `compiler.cpp.extra_flags`
+  can't reach) and would silently not apply to IDE builds. Direct NVMC
+  access is illegal under the SoftDevice, so `NEOPIXEL_SETUP()` runs
+  **before `CAMERA_SETUP()`/`SENSOREGG_SETUP()`** (which
+  `bleCoreEnsureInit()` on beta) and before `wdtSetup()` arms the
+  watchdog. Every later boot skips the branch.
+- **The global brightness cap is THE invariant**: modes and animations
+  author colors in full 0–255; `led_frame::applyCap()` scales every
+  channel by cap/255 exactly once, at push time, in `npxPushFrame()`.
+  After it, no channel exceeds the cap — host-tested as a
+  post-condition. Never use `strip.setBrightness()` (lossy buffer
+  rewrite, spreads the invariant). **Which** cap is
+  `npxEffectiveBrightness()`: `led_brightness` by day,
+  `led_brightness_night` inside the local night window (subsystem 17).
+  `led_brightness` 0 = LEDs disabled: the boost rail is never even
+  enabled — **a night cap of 0 is NOT the same thing** (blank frames,
+  rail stays up; power-cycling the boost converter at 19:00 mid-session
+  is not a brightness change).
+- **Frame loop** (`NEOPIXEL_LOOP()`, self-throttled 30 Hz, called after
+  `CAMERA_LOOP()` AND inside both parked branches so the strip blanks
+  rather than freezes): snapshot inputs → step the `sector_purple`
+  monitor → compose by priority — **boot animation > overrev
+  whole-chain red flash > purple animation > (parked ‖ !raceActive ‖
+  brightness 0 → off) > race rendering** — → `applyCap` → show.
+- **Strip policy** (plan 0007 order + the 0013 speed arm): the 9-px bar
+  is off outside a race session (driving aid, not menu bling); the two
+  status LEDs follow their own rule below. In race, first match wins:
+  1. **Engine stopped** (`raceEngineStopped()`: tach-proven session —
+     `raceEntryCause == RACE_ENTRY_TACH`, which manual/speed promote
+     to — at 0 RPM) → bar OFF; status LEDs stay live (a hot engine
+     cooling after a stall is when the temp alert matters). The OLED
+     pace page shows `STOPPED` on the same condition. Self-clears on
+     restart; no-tach devices can never trip it.
+  2. **No GPS lock** (`!(gpsData.fix && gpsData.timeValid)` — the
+     log-file-creation gate) → green **search pip** bouncing end-to-end
+     (`renderSearchPip`, 1.6 s round-trip triangle wave).
+  3. **Pace valid** (`activeTimerRaceStarted() && laps >= 1 && !(sprint
+     && between-runs)`, mirroring the OLED pace page) → the **pace
+     pip**: `activeTimerPaceDifference()` is **ms per meter**, positive
+     = slower; full deflection ±1.0 ms/m (`kPaceFullScaleMsPerM`,
+     0.25/pixel), ±0.125 deadband = dim-white centerline only. Slower =
+     LEFT of center in red, faster = RIGHT in green.
+  4. **Tach session** (`raceEntryCause == RACE_ENTRY_TACH`) → **RPM
+     scale** (green filling left→right, red past halfway, ceiling =
+     `target_rpm`).
+  5. Else → **SPEED scale** (plan 0013), ceiling = `target_speed_mph`,
+     **green all the way up** (`kSpeedRedFrac = 1.0`). Without a tach
+     the RPM scale was nine dark pixels until the first lap landed.
+     `RACE_ENTRY_TACH` is the gate rather than a live `rpm > 0` test
+     because manual/speed sessions promote to it at >500 rpm
+     (`idle_policy::tachProven`), so it means "has never seen an
+     engine" and cannot flicker between two scales at every stall. The
+     RPM bar's red band means "approaching the limiter"; there is no
+     equivalent hazard in reaching a target speed, so painting it red
+     would invert the meaning of the same nine pixels.
+- **Status LEDs are USER-ASSIGNED** (plan 0013, `led_status`): pixel 0
+  from `led_status_left`, pixel 10 from `led_status_right`, each one of
+  eight modes — `off` / `rpm` (red flash ≥ `target_rpm`, clears at 97%,
+  100 ms) / `speed` (red flash ≥ `target_speed_mph`, clears 2 mph
+  below, dark with no fix) / `gps` (steady red no sats · yellow sats but
+  no fix · blue fix but no time lock · green locked) / `camera` (dark
+  unpaired · yellow session up but camera not · **flashing** blue linked
+  yet not ce82-subscribed, i.e. we cannot command it · steady blue ready
+  · red recording) / `lap` / `sector` (steady green–red–purple verdicts,
+  below) / `egt` (Temp1 tri-state: red flash ≥ `temp1_alert_c`, clears
+  20 °C below, OFF when good, **solid blue** when the probe signal is
+  NaN/stale — a dropout is information).
+  - `rpm`/`speed`/`egt` build a `StatusAction` on the stack and delegate
+    to `led_modes::evalStatus` — hysteresis, latch-release-on-invalid
+    and flash phase have exactly one implementation, with the
+    regression tests they already had. **Never re-implement them.**
+  - A NaN/stale source (checked with `isNanF()`, NEVER `isnan()` —
+    `-Ofast`) always releases the latch. So does leaving race mode, and
+    so does a pixel whose mode is not currently being rendered —
+    a latch left set would flash the instant the next session starts.
+  - **`egt` is dark on a build without `BIRDSEYE_ENABLE_SENSOREGG`**
+    (`led_status::Inputs.eggSupported`), because there is no probe there
+    to lose. Before plan 0013 pixel 10 was hardwired to this mode, so a
+    stock logger showed the blue no-signal state for the whole of every
+    race. The setting still parses and round-trips either way — only the
+    rendering is gated.
+  - **`gps` and `camera` stay lit on the main menu**
+    (`led_status::activeOutsideRace()`); every other mode, and the bar,
+    is race-only.
+  - **Overrev** is not a status mode — it reuses `StatusAction` as a
+    whole-chain action: ≥ `overrev_limit` (setting, 0 = disabled)
+    flashes ALL 11 px red at 100 ms until RPM falls below
+    `target_rpm × 0.97`, the engine-is-broken signal, ranked above the
+    purple celebration.
+- **Lap/sector close-edge monitor** (`sector_purple`, host-tested — the
+  filename predates half its job): the library updates best-sector times
+  **at the start/finish crossing**, not at sector lines, so the monitor
+  snapshots each sector's best when the sector OPENS, closes S1/S2 on
+  `getCurrentSector()` transitions, and derives S3 on the lap edge as
+  `lastLapTime − s1 − s2` — immune to the lap-line race. `bestLapAtOpen`
+  is the same trick one level up, because `getBestLapTime()` is folded at
+  the crossing too. Sprint-first wrappers feed it:
+  `activeTimerCurrentSector()`, `activeTimerLapSectorTime(n)`,
+  `activeTimerBestSectorTime(n)` (WaypointLapTimer → 0, sector half
+  stays idle) plus `activeTimerBestLapTime()`.
+  - **Two outputs.** Purple flags → `neopixelNotifyPurpleSector()` /
+    `neopixelNotifyPurpleLap()`. And a **verdict** per close edge, held
+    by the glue until the next one, driving the `lap` / `sector` status
+    modes: green faster than the LAST recorded one, red slower, purple a
+    session best, **dark when there is nothing to compare against**.
+  - **Verdicts compare the last recorded time, NOT the best** — against
+    the best you only ever get purple or red, which says nothing about
+    whether you are improving. Purple still requires beating a nonzero
+    prior best, so lap 1 is dark everywhere.
+  - **Lap tracking does not need sector lines.** Only the sector half is
+    gated on `sectorsConfigured`; a Lap Anything session still reports
+    lap verdicts. Equal times read as "slower" (strict improvement), and
+    a sector that never closed emits no event at all rather than a bogus
+    verdict.
+- **Animations** (`led_animations`): pure functions of `(tMs, seed)` —
+  sparkles hash `(seed, timeSlot, pixel)`, no `rand()`/`millis()`
+  inside, so frames are golden-testable. Boot: 2.6 s hue comet circling
+  the 11 px + fade-out + white sparkles, plays over the GPS status
+  page. Seeds come from `micros()` (house entropy rule).
+- **Sleep/wake**: `NEOPIXEL_SLEEP()` (in `enterShutdown()` with the IMU
+  rail-off, before the charging branch — so the strip is dark while
+  charging too) blanks the strip while 5 V is up, then data LOW, then
+  boost EN LOW — driven-LOW is retained through System OFF (the "blue
+  LED stays on" precedent). `NEOPIXEL_WAKE()` (charging soft-resume)
+  re-raises EN, waits the 5 ms settle, re-inits the strip.
+- **Radio/timing safety**: Adafruit_NeoPixel's nRF52 `show()` grabs a
+  FREE PWM instance (EasyDMA, interrupts ON, ~0.4 ms for 11 px ≈ 1%
+  CPU at 30 Hz). This sketch uses no `tone()`/`analogWrite()`, so
+  PWM0–2 are always free; TIMER3's GPS drain and the tach ISR are
+  unaffected. If all PWMs were ever occupied the library bit-bangs
+  **with interrupts off** — never create that path. `show()` also
+  mallocs/frees a ~560 B pattern buffer per call: same-size alloc/free
+  is fragmentation-benign, it is NOT a leak.
+- **Sim**: `neopixel.ino` excluded from the sim TU (BLE-module
+  precedent), surface no-op'd in `module_stubs.cpp`; the four pure
+  units build into the sim via `SIM_CORE_SOURCES`.
+- **Still not built**: per-mode threshold/colour customisation (today a
+  mode's colours and hysteresis are the unit's, only the assignment is
+  the user's), temp scales through the same `ScaleSpec`, a C/F display
+  preference, and a strip-mode (bar) selector to match the status-LED
+  one.
+
+### 17. Local Time (`local_time.{h,cpp}`)
+
+- **What**: UTC plus a fixed signed minute offset (`utc_offset_min`),
+  giving the device a local wall clock. Its ONE consumer today is the
+  NeoPixel day/night brightness swap, which needs "7am" to mean the
+  driver's 7am (plan 0010).
+- **NOTHING LOGGED GOES THROUGH THIS.** DOVEX row timestamps are Unix
+  epoch ms (UTC by definition), and the header `datetime`, the log
+  filenames and the generated course names are all still UTC. That is
+  deliberate, not an oversight: a log is routinely *viewed* somewhere
+  other than where it was recorded, so the conversion belongs to the
+  viewing app, which knows the reader's preference. Do not wire
+  `local_time` into the logging pipeline.
+- **No DST, on purpose.** A fixed offset walks the boundary an hour
+  twice a year, which is beneath the resolution of a dim-after-dark
+  gate. Rule tables are a standing correctness liability (legislatures
+  keep moving the dates) and tzdata is ~100 KB shipped to a sealed
+  device. `local_time` is where rules would go if that changes — which
+  is why `DateTime` carries a **4-digit year** (the sketch's
+  `gpsData.year` is 2-digit; callers add 2000) and why the leap rule is
+  `gps_time::isLeapYear` reused rather than re-derived.
+- **Minutes, not hours** — India +330, Newfoundland −210, Chatham
+  +765. An out-of-band offset (beyond ±840) is **ignored, not clamped**:
+  a corrupt setting must not be able to walk the calendar, so it falls
+  back to 0 = UTC = the pre-0010 behaviour.
+- **`isNight(m, dayStart, nightStart)`** tests the window
+  `[nightStart, dayStart)` **modulo the day**, so the ordinary wrapped
+  case (19:00 → 07:00) needs no special casing at the call site. Equal
+  bounds = empty window = never night, which is how the swap is disabled
+  without a separate enable flag.
+- **No clock means DAY.** `gpsData.timeValid` needs the module's
+  `fullyResolved` (~12.5 min worst case from a cold start);
+  `npxEffectiveBrightness()` renders at the day cap until it lands.
+  Guessing night would bring the strip up dark and read as dead hardware.
+
+### 18. Loop CPU Profiling (`profiling.{h,ino}`, `loop_profile.{h,cpp}`)
+
+- **BUILD FLAG — `BIRDSEYE_ENABLE_PROFILING` (`project.h`)**: `0` in
+  master/release (the whole subsystem vanishes — the section brackets
+  are macros that expand to the bare call, so the loop dispatch is
+  byte-identical to what it always was), `1` on the beta channel
+  (`beta.yml`, and `compile-sketch.yml` for PRs targeting `BETA`).
+  Keep any new profiling code behind the flag.
+- **What it is for.** Two board questions gate the commercial design —
+  nRF52840 or nRF5340 (a dedicated network core would take the BLE
+  stack off this CPU), and whether leaving the Arduino core for the
+  Nordic SDK is worth the one-way effort. Both are answerable by
+  measurement, and nothing in the firmware measured anything finer than
+  a `HAS_DEBUG` millisecond-resolution "SLOW LOOP" print. Plan 0011.
+- **Idle is MEASURED, not assumed.** The first version of this
+  subsystem asserted that `loop()` runs back to back so the duty cycle
+  is 100% by construction and a duty cycle should never be added. That
+  assumption got baked into the measurement and produced a wrong first
+  reading (see the two-clocks note below). The rollup now computes
+  `busyPermille` — wall time actually spent executing `loop()` — and
+  reports the balance as the `SLP` slot: scheduler dispatch, other
+  FreeRTOS tasks, and CPU sleep. Alongside it, what always carried the
+  information: the SHAPE of an iteration — mean and **worst-case**
+  length (an SD garbage-collection stall of 100 ms–2 s never shows in a
+  mean), the per-subsystem split, and how much no subsystem accounts
+  for.
+- **Two instruments, and the second exists to check the first**:
+  - **The pin.** Pin 30 goes HIGH for the span being profiled and LOW
+    outside it — loop period off the rising edges, span cost off the
+    high time, no software in the measurement path.
+    `PROFILING_PIN_SECTION` picks the span: whole loop body by default,
+    or `-DPROFILING_PIN_SECTION=PROF_SEC_GPS` (and friends — a
+    preprocessor mirror of `loop_profile::Section`, `static_assert`ed
+    against it, because `#if` cannot evaluate a scoped C++ name).
+  - **The rollup.** The same sections timed in software and rolled up
+    once a second onto the `GPS_PROFILE` page.
+- **THE PIN COSTS THE 5 V RAIL — this is the whole trade.** Pin 30 is
+  the NeoPixel boost converter's EN line and cannot be both. The
+  profiler takes it, so a profiling build never drives EN (setup, sleep
+  and the charging-loop resume all no-op via `npxBoost*()` in
+  `neopixel.ino`) and the regulator sits at its hardware default
+  (EN pulled up = rail on). That works because the rail does not need
+  firmware control, only switchability — and switching it is a
+  requirement of **use**, not of **testing**. Two accepted consequences:
+  the rail stays up through System OFF (levels are retained there and
+  the driven LOW was the only thing holding it down — the "blue conn LED
+  stays on after sleep" precedent), so a beta unit asleep on a battery
+  with a strip wired drains it; and if the EN jumper is still physically
+  connected on the rig the toggling chops the rail at loop rate — pull
+  it or tie EN high.
+- **Timebase: DWT, verified, with a self-announcing fallback.** Most
+  sections are well under a microsecond, so `micros()` alone quantises
+  half of them to zero. `profEnableDwt()` turns on the Cortex-M4 cycle
+  counter (64 ticks/µs at 64 MHz) and then **reads it across a spin to
+  prove it moved** — a debug probe can hold TRCENA off and CYCCNTENA is
+  architecturally optional, so setting the bit is not evidence. On
+  fallback the page prefixes its first row with `*`.
+- **TWO CLOCKS — do not collapse them back into one.** DWT counts CPU
+  CYCLES, so it stops dead when the core halts (WFE/WFI in the FreeRTOS
+  idle task, `sd_app_evt_wait`). It measures DURATIONS; it is not a
+  clock. The rollup window is closed on `millis()` and every share is
+  computed against that wall time. Using DWT to close the window was the
+  first real bug here: a "one second" window was one second of
+  CPU-awake time, so the loop rate came out multiplied by the sleep
+  factor (the first hardware run pegged the display clamp) and every
+  share was a fraction of awake time wearing a wall-time label. The
+  `micros()` fallback never had the bug — it is a real clock. `Report`
+  carries `awakeUs` next to `windowUs` so the discrepancy stays visible.
+- **The pure unit works in TICKS**, taking `ticksPerUs` only at rollup,
+  so shares come out of raw ticks and lose nothing. Accumulators
+  **saturate, never wrap**: a uint32 of DWT ticks is only ~67 s and a
+  rollup can be arbitrarily late behind a stall — a pegged window reads
+  as pegged, a wrapped one reads as near-idle, which is a lie.
+- **`OTH` is reported, not hidden**: loop time no section bracketed. It
+  is the honesty check on the instrumentation — if it is large, work is
+  happening where `loop()` is not looking. **`SLP`** is its counterpart:
+  wall time not inside `loop()` at all. All 14 slots are shares of the
+  same wall-clock second, so they sum to ~1000‰ — an invariant a reader
+  can check on the page at a glance.
+- **A scope guard, not a `*_LOOP()`.** Both parked branches (`bleActive`,
+  `usbMscActive`) return early and `enterShutdown()` never returns, so
+  the whole-iteration timing AND the rollup live in `~ProfLoopScope()`
+  (`PROFILE_LOOP_SCOPE()` at the top of `loop()`). `PROFILING_SLEEP()`
+  parks the pin LOW on the shutdown path the destructor never reaches.
+  This module deliberately has no `PROFILING_LOOP()`.
+- **Overhead is inside the numbers, on purpose — and it is NOT small.**
+  A bracket is two counter reads plus a saturating add (~30 cycles,
+  ~0.5 µs; ~6–8 µs per iteration across all 13). That was written off
+  as "under 0.1%" against the ~4 ms iteration this file assumed for
+  years; the first hardware run measured a mean iteration **under
+  100 µs**, which puts the instrument at order 10% of what it reports
+  and means the un-instrumented loop is faster than the rate shown. A
+  bracket still lands in the section it brackets rather than in `OTH`,
+  because for a subsystem's SHARE that is the honest accounting — but a
+  section reading under ~1% is at its own bracket's noise floor, so do
+  not rank those against each other. The pin edges
+  are `#if`'d rather than compared at runtime: with the default
+  whole-loop setting the comparison is provably false for every section,
+  and a dead branch in the two hottest functions in the firmware is
+  exactly the cost a profiler must not add.
+- **The page** (`GPS_PROFILE` = 2, first of the race rotation on a
+  profiling build; the session still LANDS on the speed page, so it is
+  three Lefts away). Eight rows, no title: a stats line (`14481Hz 61us
+  mx42` — mean in µs below 1 ms and ms above, worst iteration always ms;
+  `*` = degraded timebase, `!` = pin refused) then seven rows of two
+  slots covering all 12 sections plus `OTH` and `SLP`. The stats row's
+  clamps are reciprocal-aware rather than fixed: the first hardware run
+  came back `999Hz av0.0` because both fields had been sized from the
+  stale ~250 Hz assumption, and a clamp that hides the finding is worse
+  than no clamp. **Adding a section means finding it a row** — the grid
+  is exactly full, and `SLP`'s slot came from folding the boot-page
+  state machines (`PGE`) into `DSP`. Because the rotation is
+  a contiguous range and this page sits below `GPS_DEBUG`, a profiling
+  build effectively forces `debug_pages=show`.
+- **Sim**: `profiling.ino` is excluded from the sim TU (BLE-module
+  precedent) and stubbed in `module_stubs.cpp` — there is no pin and
+  host timings of a virtual-clock loop would mean nothing. The pure unit
+  still builds in via `SIM_CORE_SOURCES`.
+
 ---
 
 ## Data Formats
@@ -1214,10 +1718,25 @@ timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x
   egg link is stale (>1 s), the egg reports an invalid probe/divider, or
   (for `Temp2`) the egg is v1 — a dropout must be a visible gap, never a
   held value. These fields never cause a GPS row to be skipped.
+  **THE THREE COLUMNS EXIST ONLY ON A `BIRDSEYE_ENABLE_SENSOREGG` BUILD**
+  (plan 0013), so a stock log has 13 data columns and a beta log 16.
+  Until 0013 they were written on every channel purely so the shape never
+  forked; three dead `nan` columns on every row of every stock log paid
+  for nothing. Readers must key off the CSV header line (all three
+  optional there) rather than assuming a column count — the companion
+  app's `doveParser.ts` already builds a name→index map, which is why
+  this cost no client change.
 - **Crash safety**: file created with pre-filled newlines to 1024 bytes
   before any data. Header written on session end. If header is empty
   (crash), GPS data after 1024 is still valid.
 - **Filename**: `20YYMMDD_HHMM.dovex`
+- **Everything here is UTC and stays that way.** The row `timestamp` is
+  Unix epoch ms, the header `datetime` is the UTC wall clock, and the
+  filename is stamped from the same UTC fields. The device's
+  `utc_offset_min` setting (subsystem 17) is presentation-only and must
+  never be applied on this path — timezone display is the viewing app's
+  job, since a log is often read in a different zone than it was
+  recorded in.
 - 1 KB handles ~100 laps (8 chars per lap time). Extremely unlikely to exceed.
 
 ### Track JSON (`/TRACKS/*.json`)
@@ -1277,10 +1796,22 @@ the one loaded). Sector lines stay optional — zero, one, or two.
   "debug_pages": "hide",
   "spark_mode": "wasted",
   "cylinder_count": "1",
+  "tach_filter": "smooth",
   "driver_name": "Driver",
   "lap_detection_distance": "7",
   "waypoint_detection_distance": "30",
-  "waypoint_speed": "30"
+  "waypoint_speed": "30",
+  "led_brightness": "64",
+  "target_rpm": "15000",
+  "overrev_limit": "0",
+  "target_speed_mph": "60",
+  "led_status_left": "rpm",
+  "led_status_right": "egt",
+  "temp1_alert_c": "650",
+  "utc_offset_min": "0",
+  "led_brightness_night": "16",
+  "led_day_start_hour": "7",
+  "led_night_start_hour": "19"
 }
 ```
 
@@ -1297,8 +1828,20 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | `waypoint_speed` | int | `30` | Speed threshold (mph) for waypoint/detection |
 | `spark_mode` | string | `"wasted"` | Ignition rate: `wasted` = 1 spark/rev (2T, or 4T wasted spark); `single` = 1 spark per 2 revs (4T single-fire). Anything other than an explicit `single` is treated as `wasted` |
 | `display_invert` | string | `"normal"` | Panel colours: `normal` = lit-on-black as shipped, `inverted` = black-on-lit. Anything other than an explicit `inverted` means normal |
-| `debug_pages` | string | `"hide"` | Race-rotation diagnostic pages (`GPS_DEBUG` + `GPS_STATS`): `hide` = rotation starts at the speed page (end-user default), `show` = diagnostics restored at the front. Anything other than an explicit `show` means hide. No-op under `ENDURANCE_MODE` (already starts at speed) |
-| `cylinder_count` | int | `1` | Cylinders the **pickup sees** — a clamp on one plug wire of a twin sees ONE. Only a shared coil / all-cylinder harness sees them all |
+| `debug_pages` | string | `"hide"` | Race-rotation diagnostic pages (`GPS_DEBUG` + `GPS_STATS`): `hide` = rotation starts at the speed page (end-user default), `show` = diagnostics restored at the front. Anything other than an explicit `show` means hide. Also swaps the tachometer page's subtext line for the tach filter diagnostic (`max:NNNNN S rj:NN`, plan 0009). No-op on the rotation under `ENDURANCE_MODE` (already starts at speed) |
+| `cylinder_count` | int | `1` | The engine's **actual** cylinder count. **Does not scale RPM** (plan 0014): one clamp on one plug wire sees one cylinder, so `spark_mode` alone sets the geometry. Above 1 it means crank speed is *inferred* from one cylinder's ignition pulses — standard clamp-on-tach behaviour, warned about in the settings UI. Clamp 1–16 |
+| `tach_filter` | string | `"smooth"` | RPM estimator (plan 0009). `smooth` = outlier gate + RPM-aware noise models; `legacy` = the pre-0009 filter bit for bit, for A/B against older logs; `raw` = no estimator at all, the `rpm` column is exactly what the pickup delivers. Anything else means `smooth`. Diagnostic knob — the intent is one session each at the track, not a permanent tuning dial |
+| `led_brightness` | int | `64` | NeoPixel global brightness cap 0–255 — no LED channel ever exceeds it (`led_frame::applyCap`). `0` disables the LEDs entirely (boost rail never enabled). Written AND parsed on every channel (`ensureDefaultSettings()` + the boot block in `BirdsEye.ino`); only its *use* is compiled out with the flag. A non-numeric value keeps the 64 default — via `setting_parse::parseIntSetting`, never `atoi()`, because `atoi("")` is 0 and 0 here means "LEDs off" |
+| `target_rpm` | int | `15000` | True RPM SHIFT/warning point: RPM-scale ceiling and the `rpm` status-LED flasher threshold. Clamp 1000–20000 (tach filter's ceiling). Was `rev_limit` before plan 0013 — a device carrying the old key has its value migrated into this one on first boot and the old key removed |
+| `overrev_limit` | int | `0` (disabled) | True RPM PROBLEM limit (plan 0007): past it the whole 11-px chain flashes red (outranks the purple celebration) and the tach page shows `*OVER REV*`; latch clears below `target_rpm × 0.97`. 0 = off (no chain flash, no header); else clamp 1000–20000 |
+| `temp1_alert_c` | int | `650` | **SensorEgg builds only** since plan 0013 — a stock image neither writes nor reads it. Temp1 (EGT) alert threshold in **Celsius** for the `egt` status mode: red flash at/above, clears 20 °C below, solid blue when the probe signal is NaN/stale. Clamp 50–1200 |
+| `utc_offset_min` | int | `0` | Minutes east of UTC (US Central standard `-360`, India `330`, Newfoundland `-210`). Clamp ±840; out of band keeps 0 (= UTC). **Presentation only** — nothing logged is converted (subsystem 17) |
+| `led_brightness_night` | int | `16` | NeoPixel cap 0–255 used inside the night window. `0` blanks the strip but leaves the 5 V rail UP — only `led_brightness` 0 cuts the rail |
+| `led_day_start_hour` | int | `7` | **Local** hour the day cap takes over. Clamp 0–23 |
+| `led_night_start_hour` | int | `19` | **Local** hour the night cap takes over. Clamp 0–23. Equal to `led_day_start_hour` = swap disabled (one cap around the clock) |
+| `target_speed_mph` | int | `60` | Ceiling of the LED speed bar on a session with no tachometer, and the `speed` status mode's threshold. **Stored in mph**; the companion app converts for display. Clamp 5–250 — the floor is 5, not 0, because a zero ceiling trips `renderScale`'s span guard and blanks the bar, which is indistinguishable from dead hardware |
+| `led_status_left` | string | `"rpm"` | What the LEFT status pixel shows: `off`/`rpm`/`speed`/`gps`/`camera`/`lap`/`sector`/`egt` (subsystem 16). **Strictly** parsed — anything unrecognised keeps the compiled-in default rather than darkening the LED or picking another mode |
+| `led_status_right` | string | `"egt"` (SensorEgg) / `"lap"` (stock) | Same, for the RIGHT status pixel. `egt` renders dark on a build without SensorEgg support, but still parses and still round-trips over `SGET`/`SLIST` |
 
 - Created automatically on first boot with random BLE values.
 - Missing keys auto-populated on boot via `ensureDefaultSettings()`.
@@ -1348,11 +1891,15 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | Course creator name format | `N{YYMMDD}_{HHMM}` (+ `MMDDHHMM` short name) | `course_creator.h` |
 | Sprint prune order | renamed-in-app first, then oldest `date_created`; confirm only when a device-named course would go | `course_prune.h` |
 | Track JSON coordinate precision | 8 decimals (~1.1 mm) | `track_json.h` |
-| Tach min pulse gap | 3 ms ÷ pulses-per-rev, floor 750 µs | `tach_filter.h` (`minPulseGapUs`) |
-| Tach pulses per rev | `cylinder_count` × (`wasted` ? 1.0 : 0.5); default 1.0 | `tach_filter.h` (`revsPerPulse`) |
+| Tach min pulse gap | 3 ms (`wasted`) / 6 ms (`single`) — same ~20 000 RPM ceiling either way | `tach_filter.h` (`minPulseGapUs`) |
+| Tach revs per pulse | `wasted` ? 1.0 : 2.0 — **no cylinder term** (plan 0014) | `tach_filter.h` (`revsPerPulse`) |
 | Tach ring buffer | 16 entries | `BirdsEye.ino` |
-| Tach Kalman Q | 800 RPM² | `tach_filter.h` |
-| Tach Kalman R_BASE | 2500 RPM² | `tach_filter.h` |
+| Tach Kalman Q (legacy mode) | 800 RPM² per update | `tach_filter.h` |
+| Tach Kalman process noise (smooth) | 80 000 RPM²/s × engine time, clamped 0.5 s | `tach_filter.h` |
+| Tach Kalman R_BASE | 2500 RPM² floor | `tach_filter.h` |
+| Tach measurement noise (smooth) | R_BASE + (80 µs × RPM²/K + 1% × RPM)² | `tach_filter.h` |
+| Tach outlier gate | 5 sigma; 3 consecutive rejects → adopt; armed after 4 updates | `tach_filter.h` |
+| Tach filter mode | `tach_filter` setting: `smooth` (default) / `legacy` / `raw` | `tach_filter.h` |
 | Track manifest scan throttle | 1 Hz | `BirdsEye.ino` |
 | Tach stop timeout | 500 ms | `BirdsEye.ino` |
 | Display refresh | 3 Hz | `display_ui.ino` |
@@ -1361,8 +1908,13 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | SD SPI clock (transfer) | 8 MHz (`SD_SPI_SPEED_FAST`) | `BirdsEye.ino` |
 | Battery check interval | 5 s | `BirdsEye.ino` |
 | BLE default MTU | 23 | `bluetooth.ino` |
+| BLE target conn interval (adaptive 2nd ask) | 12 units = 15 ms, Apple's floor | `bluetooth.ino` |
+| BLE link-layer PDU "extended" floor | 100 B (27 = DLE never happened) | `bluetooth.ino` |
+| BLE transfer read-ahead | 4096 B (`kReadAheadSize`) | `ble_stream.h` |
+| BLE burst budget | 20 ms wall clock (`kBurstBudgetMs`) | `ble_stream.h` |
+| BLE max notify payload | 244 B (`kMaxNotifyLen`) | `ble_stream.h` |
 | JSON buffer (`JSON_BUFFER_SIZE`) | 8192 (SIM builds too) — read buffer + `trackJson` doc | `BirdsEye.ino` |
-| Settings JSON buffer | 512 | `settings.ino` |
+| Settings file buffer / JSON doc | 1024 each (keep equal; see subsystem 8) | `settings.ino` |
 | Settings file path | `/SETTINGS.json` | `settings.ino` |
 | Track upload buffer | `JSON_BUFFER_SIZE` (8192) | `bluetooth.ino` |
 | GPS serial buffer | 4096 | `gps_functions.ino` |
@@ -1389,6 +1941,29 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | SensorEgg scanner self-heal | 30 s no packet → stop+start kick | `sensoregg_protocol.h` |
 | SensorEgg RSSI floor | −90 dBm | `sensoregg_protocol.h` |
 | SensorEgg pairing MAC | `SENSOREGG_MAC` (all-zeros = any egg) | `sensoregg.h` |
+| NeoPixel strip flag | `BIRDSEYE_ENABLE_NEOPIXEL`, default **1** on every channel since 4.1.0 | `project.h` |
+| Loop profiling flag | `BIRDSEYE_ENABLE_PROFILING`, default 0; 1 on the beta channel | `project.h` |
+| Profiling pin / span | 30 (`PROFILING_PIN`, = boost EN) / whole loop (`PROFILING_PIN_SECTION`) | `profiling.h` |
+| Profiling rollup window | 1000 ms (`PROFILING_WINDOW_MS`) | `profiling.h` |
+| Profiling timebase | DWT cycle counter, 64 ticks/us; `micros()` fallback (page shows `*`) | `profiling.ino` |
+| NeoPixel pins | 30 = boost EN, 31 = data (NFC pads, post-UICR) | `neopixel.h` |
+| NeoPixel layout | 11 px: status 0 + strip 1–9 (center px 5) + status 10 | `led_frame.h` |
+| LED frame rate | 30 Hz (`NPX_FRAME_INTERVAL_MS` 33) | `neopixel.ino` |
+| LED brightness default | 64 / 255 (`led_brightness`; 0 = disabled) | `settings.ino` |
+| Pace pip full scale / deadband | ±1.0 ms/m (0.25 per pixel) / ±0.125 | `led_modes.h` |
+| RPM scale red fraction | 0.5 (red past halfway) | `led_modes.h` |
+| Rev flasher clear / EGT clear delta | 97% of `target_rpm` / alert − 20 °C | `led_modes.h` |
+| GPS-search pip bounce period | 1600 ms round trip (`kSearchBouncePeriodMs`) | `led_modes.h` |
+| Overrev latch clear | `target_rpm × 0.97` (same point as the warning flasher) | `neopixel.ino` |
+| Boot / purple animation | 2600 ms / 1600 ms sector, 2600 ms lap (2 waves) | `led_animations.h` |
+| Status LED modes | `off`/`rpm`/`speed`/`gps`/`camera`/`lap`/`sector`/`egt`; `gps`+`camera` also lit on the menu | `led_status.h` |
+| Status LED defaults | left `rpm`; right `egt` on a SensorEgg build, `lap` otherwise | `settings.ino` |
+| Speed bar ceiling / red band | `target_speed_mph` (default 60, clamp 5–250) / none (`kSpeedRedFrac` 1.0) | `settings.ino`, `led_modes.h` |
+| Speed alert clear delta / flash | 2 mph (`kSpeedClearDeltaMph`) / 250 ms half-period | `led_modes.h` |
+| Camera "cannot command" flash | 400 ms half-period (`kCameraFlashHalfPeriodMs`) | `led_status.h` |
+| UTC offset band | ±840 min (±14 h), `kOffsetMinLimit`; out of band = 0 | `local_time.h` |
+| LED day / night window | local 07:00 → 19:00 (`led_day_start_hour` / `led_night_start_hour`); equal = disabled | `settings.ino` |
+| LED night brightness default | 16 / 255 (`led_brightness_night`; 0 = blank, rail stays UP) | `settings.ino` |
 
 ---
 
@@ -1404,6 +1979,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | SdFat | SD card (FAT16/32) |
 | DovesLapTimer | Lap/sector timing (external: TheAngryRaven/DovesLapTimer). CI refs: `BETA`-targeted builds track the library's `BETA` branch; master/release builds pin `v4.3.0` (bump deliberately) |
 | Seeed Arduino LSM6DS3 | Onboard IMU accelerometer/gyro (Sense variant, ±16g) |
+| Adafruit NeoPixel | WS2812 strip driver (subsystem 16). **Only compiled/linked when `BIRDSEYE_ENABLE_NEOPIXEL` is set** — the include sits inside the `#if` in `neopixel.ino`, so a master/release image carries none of it |
 | Bluefruit nRF52 | BLE (built into board package) |
 | Adafruit TinyUSB | USB Mass Storage (`Adafruit_USBD_MSC`); built into board package |
 
@@ -1456,8 +2032,9 @@ This device operates in ignition-noise environments. Three layers of defense:
   `compiler.cpp.extra_flags` property — a second `--build-property` for
   one key replaces the first). Local setup: CONTRIBUTING.md "Local build
   flags".
-- **Feature flags** (`project.h`, both default `0`, both tested with `#if`
-  so an explicit `-DFLAG=0` wins):
+- **Feature flags** (`project.h`, tested with `#if` so an explicit
+  `-DFLAG=0` wins; `BIRDSEYE_ENABLE_NEOPIXEL` defaults to `1`, the rest
+  to `0`):
   - `BIRDSEYE_ENABLE_ONBOARD_CHARGING` — off in **every** channel. See
     subsystem 10: HICHG hold + the USB charging UX. The hardware now has
     an external charging circuit.
@@ -1465,6 +2042,16 @@ This device operates in ignition-noise environments. Three layers of defense:
     (`beta.yml`, plus `compile-sketch.yml` for PRs targeting `BETA` so the
     flag-on build is compile-checked before it reaches the publish
     workflow). See subsystem 14.
+  - `BIRDSEYE_ENABLE_PROFILING` — off in master/release, **on in beta**
+    (`beta.yml`, plus `compile-sketch.yml` for PRs targeting `BETA`).
+    See subsystem 18: it takes pin 30 from the NeoPixel boost EN line,
+    so a beta image can never switch the 5 V rail.
+  - `BIRDSEYE_ENABLE_NEOPIXEL` — **on everywhere since 4.1.0** (the
+    `project.h` default; no workflow needs to pass it). The first boot of
+    any 4.1.0+ image performs the ONE-WAY UICR NFC→GPIO conversion and
+    self-resets once, on every device. This is the one flag whose default
+    is 1 — see subsystem 16 and the upgrade note at the top of
+    CHANGELOG.md's 4.1.0 section.
   When adding a flag: give it a `#ifndef` default in `project.h`, decide
   its per-channel value in the workflows, and document it here + in
   CONTRIBUTING.md's flag table.

@@ -10,6 +10,7 @@
 //   display_pages.ino - All display page rendering functions
 //   display_ui.ino   - Display setup, button handling, menu navigation
 //   gps_functions.ino - GPS setup, loop, time functions, data logging
+//   profiling.ino    - Main-loop CPU profiling (beta channel only)
 //   replay.ino       - Session replay system
 //   sd_functions.ino - SD card setup, track parsing, access management
 //   settings.ino     - Persistent JSON settings on SD (/SETTINGS.json)
@@ -98,6 +99,10 @@
 #include "gps_status_page.h"
 #include "haversine.h"
 #include "idle_policy.h"
+#include "local_time.h"
+#include "setting_parse.h"
+#include "neopixel.h"
+#include "profiling.h"
 #include "replay.h"
 #include "sat_bars.h"
 #include "sd_format_page.h"
@@ -181,6 +186,47 @@ char settingDeviceName[32] = "BirdsEye";
 // sprint track are within detection range (sprint_select::chooseKind).
 // It never overrides what is actually detected.
 bool settingRaceModePrefSprint = false;
+// NeoPixel strip (plan 0006): global brightness cap (0-255, 0 = LEDs
+// disabled entirely) and the target RPM (true RPM) the LED scale/flasher
+// are anchored to. Read at boot only, like every other setting.
+//
+// settingTargetRpm was `settingRevLimit` / the `rev_limit` key until plan
+// 0013. It is the SHIFT point — where the driver wants to know the engine
+// is at its working ceiling — and never was a limiter; settingOverrevLimit
+// below is the real limit. The old name taught the wrong thing to
+// everyone who opened SETTINGS.json, so both the key and the global moved.
+uint8_t settingLedBrightness = 64;
+int settingTargetRpm = 15000;
+// Plan 0007: the PROBLEM limit — an engine at overrev_limit is broken,
+// not just at its ceiling. 0 = disabled. And the Temp1 (EGT) alert
+// threshold in Celsius for the right status LED.
+int settingOverrevLimit = 0;
+int settingTemp1AlertC = 650;
+// Plan 0010: minutes east of UTC. PRESENTATION ONLY — the DOVEX rows,
+// the header datetime and every generated filename stay UTC, and the
+// webapp converts on the viewing side (you might be reading a log from
+// another state). The single consumer is the LED day/night swap, which
+// needs the driver's 7am rather than Greenwich's.
+int16_t settingUtcOffsetMin = 0;
+// Night-time LED cap and the LOCAL hours the swap happens on. Equal
+// hours = no swap. A night cap of 0 blanks the strip but leaves the
+// 5 V rail up — only led_brightness 0 cuts the rail (NEOPIXEL_SETUP).
+uint8_t settingLedBrightnessNight = 16;
+uint8_t settingLedDayStartHour = 7;
+uint8_t settingLedNightStartHour = 19;
+// Plan 0013: the speed the 9-px bar scales against on a session with no
+// tachometer (mph, stored in mph — the companion app converts for
+// display), and what each status LED is assigned to show. The defaults
+// reproduce the pre-0013 hardcoded pair on a SensorEgg build; a stock
+// build gets the lap indicator on the right instead of a Temp1 readout
+// with no probe behind it.
+int settingTargetSpeedMph = 60;
+led_status::Mode settingLedStatusLeft = led_status::Mode::kRpm;
+#if BIRDSEYE_ENABLE_SENSOREGG
+led_status::Mode settingLedStatusRight = led_status::Mode::kEgt;
+#else
+led_status::Mode settingLedStatusRight = led_status::Mode::kLap;
+#endif
 
 // Track manifest for proximity detection
 TrackManifestEntry trackManifest[MAX_LOCATIONS];
@@ -276,9 +322,6 @@ bool bleTransferInProgress = false;
 uint32_t bleFileSize = 0;
 uint32_t bleBytesTransferred = 0;
 uint16_t bleNegotiatedMtu = 23;
-bool bleWaitingForMTU = false;         // Deferred MTU negotiation (avoids delay in callback)
-unsigned long bleMTURequestTime = 0;   // Timestamp when MTU was requested
-uint16_t bleMTUConnHandle = 0;        // Connection handle for deferred MTU read
 // Note: bleCurrentFile is declared after SdFat include
 
 ///////////////////////////////////////////
@@ -327,12 +370,25 @@ volatile uint8_t  tachRingTail = 0;  // Main-loop read index (only TACH_LOOP wri
 volatile bool     tachRingOverflow = false;  // ISR sets on drop; TACH_LOOP clears
 
 // Revolutions per ignition pulse — the single place the engine's geometry
-// enters the RPM path. Set once at boot from spark_mode + cylinder_count;
-// the default (1 cyl, wasted spark) is 1.0, exactly today's behaviour.
+// enters the RPM path. Set once at boot from spark_mode ALONE: one clamp
+// on one plug wire sees one cylinder's ignition, so the engine's cylinder
+// count is not a term (see tach_filter.h "ENGINE GEOMETRY"). Wasted spark
+// / 2-stroke = 1.0, 4-stroke single-fire = 2.0.
 // Applied ONCE, before the Kalman filter, in TACH_LOOP(). No consumer may
 // re-derive or re-apply it — they all read the corrected tachLastReported.
 static float tachRevsPerPulse = 1.0f;
+
+// The engine's cylinder count as configured (clamped). Descriptive only:
+// nothing in the RPM path reads it — it says whether crank speed is being
+// inferred from a single cylinder's firing rate, which is what the
+// settings-UI warning and the boot log report.
+static int tachCylinderCount = 1;
 static const uint32_t tachStopTimeoutUs = 500000;    // 500ms = engine stopped
+
+// Which RPM estimator TACH_LOOP runs (plan 0009). Set once at boot from the
+// `tach_filter` setting; kSmooth is the shipped default and the other two
+// exist so the filter can be A/B'd against a live engine at the track.
+static tach_filter::Mode tachFilterMode = tach_filter::Mode::kSmooth;
 
 ///////////////////////////////////////////
 // ACCELEROMETER GLOBALS
@@ -706,6 +762,15 @@ const int PAGE_COURSE_POINT = -15;   // "Save current pos" averaging hold
 const int PAGE_COURSE_PRUNE = -16;   // "Track full - drop N old runs?"
 
 // running menu (these must be in order)
+#if BIRDSEYE_ENABLE_PROFILING
+// Loop CPU profile (plan 0011). Only exists on a profiling build, and
+// when it does it is the FIRST page of the race rotation — the numbers
+// are only interesting under a real 25 Hz + logging + LED workload, so
+// the rotation is where they belong, and a bench session should not have
+// to arrow past six pages to reach them. Sits below GPS_DEBUG so the
+// diagnostic block stays contiguous.
+const int GPS_PROFILE = 2;
+#endif
 const int GPS_DEBUG = 3;
 const int GPS_STATS = 4;
 
@@ -757,13 +822,24 @@ int lastPage = 0;
 
 // "pageStart" defines where the UI starts, you cannot backup beyond this
 #ifdef ENDURANCE_MODE
+  // ENDURANCE_MODE keeps a const start, so it never picks up the debug or
+  // profile pages — it is a deliberately trimmed rotation.
   const int runningPageStart = GPS_SPEED;
 #else
   // Runtime, not const: the debug_pages setting decides whether the two
   // diagnostic pages (GPS_DEBUG, GPS_STATS) are in the rotation. Default is
   // hidden — the boot settings read raises the start only on an explicit
   // "show", so a blank or garbled value gives an end user the clean rotation.
+  #if BIRDSEYE_ENABLE_PROFILING
+  // A profiling build starts one page lower still, unconditionally: the
+  // page is the reason the build exists, so it must not be reachable only
+  // via a setting on the card. Because the rotation is a contiguous range,
+  // this also pulls GPS_DEBUG and GPS_STATS in — i.e. profiling implies
+  // debug_pages=show, which on a bench build is what you want anyway.
+  int runningPageStart = GPS_PROFILE;
+  #else
   int runningPageStart = GPS_SPEED;
+  #endif
 #endif
 
 int runningPageEnd = LOGGING_STOP; // only changes if sd:/tracks not found
@@ -953,12 +1029,24 @@ void setup() {
     // value) keeps the clean end-user rotation starting at the speed page.
     // ENDURANCE_MODE already starts at GPS_SPEED, so it ignores the setting.
     if (getSetting("debug_pages", buf, sizeof(buf))) {
-      if (strcasecmp(buf, "show") == 0) runningPageStart = GPS_DEBUG;
+      // Lower it only. On a profiling build the start is already below
+      // GPS_DEBUG and an unguarded assignment here would hide the very
+      // page that build exists for.
+      if (strcasecmp(buf, "show") == 0 && runningPageStart > GPS_DEBUG) {
+        runningPageStart = GPS_DEBUG;
+      }
     }
 #endif
     // Engine geometry. Anything other than an explicit "single" is treated as
     // wasted spark, so a blank, garbled or future value degrades to today's
     // behaviour rather than doubling every RPM reading.
+    //
+    // ONLY spark_mode feeds the RPM math. There is one sense wire and one
+    // clamp, so the pickup sees ONE cylinder's ignition however many the
+    // engine has; cylinder_count is read for the inferred-RPM warning and
+    // the debug line, and is deliberately NOT a divider (it used to be,
+    // which read a V8 on a single plug wire at an eighth of its real crank
+    // speed — see tach_filter.h "ENGINE GEOMETRY").
     {
       bool wastedSpark = true;
       int cylinders = 1;
@@ -969,16 +1057,131 @@ void setup() {
         const int n = atoi(buf);
         if (n >= tach_filter::kMinCylinders) cylinders = n;
       }
-      tachRevsPerPulse = tach_filter::revsPerPulse(cylinders, wastedSpark);
-      tachMinPulseGapUs = tach_filter::minPulseGapUs(cylinders, wastedSpark);
+      tachCylinderCount = tach_filter::clampCylinderCount(cylinders);
+      tachRevsPerPulse = tach_filter::revsPerPulse(wastedSpark);
+      tachMinPulseGapUs = tach_filter::minPulseGapUs(wastedSpark);
+      // RPM estimator (plan 0009). A track-side A/B knob, not a tuning
+      // dial: "smooth" is the shipped filter, "legacy" reproduces the
+      // pre-0009 one for comparison against existing logs, and "raw"
+      // turns the estimator off entirely so a session shows exactly what
+      // the pickup is delivering. Anything unrecognised means "smooth".
+      if (getSetting("tach_filter", buf, sizeof(buf))) {
+        tachFilterMode = tach_filter::modeFromSetting(buf);
+      }
       debug(F("Engine: cyl="));
-      debug(cylinders);
+      debug(tachCylinderCount);
+      if (tach_filter::rpmIsInferred(tachCylinderCount)) {
+        // Not a fault — the accepted behaviour of every clamp-on inductive
+        // tach — but it belongs in the boot log, because "RPM looks low
+        // between firings" on a multi-cylinder engine is this line, not a
+        // filter bug.
+        debug(F(" (RPM inferred from 1 cylinder)"));
+      }
       debug(F(" spark="));
       debug(wastedSpark ? F("wasted") : F("single"));
       debug(F(" revsPerPulse="));
       debug(tachRevsPerPulse);
       debug(F(" minGapUs="));
-      debugln((uint32_t)tachMinPulseGapUs);
+      debug((uint32_t)tachMinPulseGapUs);
+      debug(F(" filter="));
+      debugln(tach_filter::modeName(tachFilterMode));
+    }
+    // NeoPixel strip (plan 0006). Both clamp back to the compiled-in
+    // default on a missing or nonsense value, per the house idiom.
+    //
+    // That idiom needs setting_parse::parseIntSetting, not atoi(): atoi
+    // answers 0 for "" and for "garbage", and for every setting below
+    // EXCEPT target_rpm and temp1_alert_c, 0 is inside the accepted range.
+    // led_brightness 0 disables the LEDs and never raises the 5 V boost
+    // rail, so a blank value read as a deliberate "off" and looked exactly
+    // like dead hardware. parseIntSetting rejects a non-integer outright,
+    // the range check then fails, and the compiled-in default stands.
+    int parsedSetting = 0;
+    if (getSetting("led_brightness", buf, sizeof(buf)) &&
+        setting_parse::parseIntSetting(buf, &parsedSetting)) {
+      const int b = parsedSetting;
+      if (b >= 0 && b <= 255) settingLedBrightness = (uint8_t)b;
+    }
+    // The shift/warning point. `rev_limit` before plan 0013 — devices
+    // upgrading get the old value migrated into the new key by
+    // ensureDefaultSettings(), so this only ever reads target_rpm.
+    if (getSetting("target_rpm", buf, sizeof(buf)) &&
+        setting_parse::parseIntSetting(buf, &parsedSetting)) {
+      const int r = parsedSetting;
+      // Floor keeps a garbled value from parking the scale at zero;
+      // ceiling matches the tach filter's ~20k true-RPM limit.
+      if (r >= 1000 && r <= 20000) settingTargetRpm = r;
+    }
+    if (getSetting("overrev_limit", buf, sizeof(buf)) &&
+        setting_parse::parseIntSetting(buf, &parsedSetting)) {
+      const int r = parsedSetting;
+      // 0 (the default) disables the whole-chain overrev flash; any
+      // other value clamps to the same band as target_rpm.
+      if (r == 0) settingOverrevLimit = 0;
+      else if (r >= 1000 && r <= 20000) settingOverrevLimit = r;
+    }
+#if BIRDSEYE_ENABLE_SENSOREGG
+    // SensorEgg builds only (plan 0013). ensureDefaultSettings() writes
+    // the key on the same condition, so on a stock image the key is not
+    // in the file and the compiled-in default stands unused — the `egt`
+    // status mode renders dark there regardless.
+    if (getSetting("temp1_alert_c", buf, sizeof(buf)) &&
+        setting_parse::parseIntSetting(buf, &parsedSetting)) {
+      const int t = parsedSetting;
+      // Celsius. Floor above any plausible ambient so a garbled value
+      // can't latch the alert at power-on; ceiling past any real EGT.
+      if (t >= 50 && t <= 1200) settingTemp1AlertC = t;
+    }
+#endif
+    // Local time (plan 0010). The band is the pure unit's, not a literal
+    // here, so ±14 h has one home. Out of band keeps the 0 default —
+    // i.e. UTC — which is exactly the pre-0010 behaviour.
+    if (getSetting("utc_offset_min", buf, sizeof(buf)) &&
+        setting_parse::parseIntSetting(buf, &parsedSetting)) {
+      const int o = parsedSetting;
+      if (local_time::isValidOffsetMinutes(o)) settingUtcOffsetMin = (int16_t)o;
+    }
+    if (getSetting("led_brightness_night", buf, sizeof(buf)) &&
+        setting_parse::parseIntSetting(buf, &parsedSetting)) {
+      const int b = parsedSetting;
+      if (b >= 0 && b <= 255) settingLedBrightnessNight = (uint8_t)b;
+    }
+    if (getSetting("led_day_start_hour", buf, sizeof(buf)) &&
+        setting_parse::parseIntSetting(buf, &parsedSetting)) {
+      const int h = parsedSetting;
+      if (h >= 0 && h <= 23) settingLedDayStartHour = (uint8_t)h;
+    }
+    if (getSetting("led_night_start_hour", buf, sizeof(buf)) &&
+        setting_parse::parseIntSetting(buf, &parsedSetting)) {
+      const int h = parsedSetting;
+      if (h >= 0 && h <= 23) settingLedNightStartHour = (uint8_t)h;
+    }
+    // Plan 0013: the speed the LED bar scales against when a session has
+    // no tachometer, in mph.
+    if (getSetting("target_speed_mph", buf, sizeof(buf)) &&
+        setting_parse::parseIntSetting(buf, &parsedSetting)) {
+      const int v = parsedSetting;
+      // Floor 5, not 0: renderScale()'s span guard blanks the bar on a
+      // zero ceiling, which looks exactly like dead hardware — the same
+      // failure mode parseIntSetting exists to prevent for led_brightness.
+      if (v >= 5 && v <= 250) settingTargetSpeedMph = v;
+    }
+    // Status-LED assignment (plan 0013). STRICT parse on purpose: an
+    // unknown or blank mode keeps the compiled-in default rather than
+    // silently darkening a status LED or picking a different one. A mode
+    // this build cannot render (`egt` with no SensorEgg support) still
+    // parses and still round-trips to the companion app — only the
+    // rendering is gated.
+    {
+      led_status::Mode parsedMode;
+      if (getSetting("led_status_left", buf, sizeof(buf)) &&
+          led_status::parseMode(buf, &parsedMode)) {
+        settingLedStatusLeft = parsedMode;
+      }
+      if (getSetting("led_status_right", buf, sizeof(buf)) &&
+          led_status::parseMode(buf, &parsedMode)) {
+        settingLedStatusRight = parsedMode;
+      }
     }
     crossingThresholdMeters = settingLapDetectionDistance;
     debug(F("Settings loaded: lap_dist="));
@@ -992,6 +1195,23 @@ void setup() {
     debug(F(" device="));
     debugln(settingDeviceName);
   }
+
+  // NeoPixel strip (plan 0006). MUST run before anything that can enable
+  // the SoftDevice (SENSOREGG_SETUP below calls bleCoreEnsureInit on the
+  // beta channel): the one-time UICR NFC->GPIO write needs direct NVMC
+  // access, which is illegal once the SoftDevice is up. Also before
+  // wdtSetup() so the one-time self-reset can't race the watchdog. Needs
+  // SETTINGS_SETUP (led_brightness). Since 4.1.0 this runs on EVERY
+  // channel — BIRDSEYE_ENABLE_NEOPIXEL defaults to 1 — so the first boot
+  // of any 4.1.0+ image is the one that spends the NFC pads and resets
+  // once. See project.h.
+  NEOPIXEL_SETUP();
+
+  // Loop profiling (plan 0011, beta only). MUST run after NEOPIXEL_SETUP:
+  // the profiling pin is one of the NFC pads, and that call is what
+  // converts them to GPIO — and may self-reset the chip doing it. On a
+  // flag-off build this is an empty function.
+  PROFILING_SETUP();
 
   // Camera auto-record: load the persisted Insta360 serial + init the FSM
   CAMERA_SETUP();
@@ -1191,6 +1411,62 @@ bool activeTimerSectorsConfigured() {
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->areSectorLinesConfigured();
   return false;
+}
+
+// Sector accessors for the LED purple-sector monitor (plan 0006).
+// Sprint-first like every sibling; WaypointLapTimer (Lap Anything) has
+// no sectors, so those sessions return 0 and the monitor stays reset.
+int activeTimerCurrentSector() {
+  if (sprintTimer != nullptr) return sprintTimer->getCurrentSector();
+  DovesLapTimer* dlt = getActiveTimerDLT();
+  if (dlt) return dlt->getCurrentSector();
+  return 0;
+}
+
+unsigned long activeTimerLapSectorTime(int sector) {
+  if (sprintTimer != nullptr) {
+    if (sector == 1) return sprintTimer->getCurrentLapSector1Time();
+    if (sector == 2) return sprintTimer->getCurrentLapSector2Time();
+    if (sector == 3) return sprintTimer->getCurrentLapSector3Time();
+    return 0;
+  }
+  DovesLapTimer* dlt = getActiveTimerDLT();
+  if (dlt) {
+    if (sector == 1) return dlt->getCurrentLapSector1Time();
+    if (sector == 2) return dlt->getCurrentLapSector2Time();
+    if (sector == 3) return dlt->getCurrentLapSector3Time();
+  }
+  return 0;
+}
+
+unsigned long activeTimerBestSectorTime(int sector) {
+  if (sprintTimer != nullptr) {
+    if (sector == 1) return sprintTimer->getBestSector1Time();
+    if (sector == 2) return sprintTimer->getBestSector2Time();
+    if (sector == 3) return sprintTimer->getBestSector3Time();
+    return 0;
+  }
+  DovesLapTimer* dlt = getActiveTimerDLT();
+  if (dlt) {
+    if (sector == 1) return dlt->getBestSector1Time();
+    if (sector == 2) return dlt->getBestSector2Time();
+    if (sector == 3) return dlt->getBestSector3Time();
+  }
+  return 0;
+}
+
+/**
+ * @brief The session's engine has proven itself and then died (plan
+ * 0007): a stall/DNF posture, not a lap in progress. RACE_ENTRY_TACH is
+ * exactly "the tach proved itself this session" — manual/speed sessions
+ * promote to it at >500 RPM (idle_policy) — so no-tach devices (RPM
+ * always 0, cause never TACH) can never trip this. Clears by itself the
+ * moment the engine restarts (tach reports nonzero within one loop).
+ * Read by the LED strip (bar off) and the pace page (STOPPED).
+ */
+bool raceEngineStopped() {
+  return raceActive && raceEntryCause == RACE_ENTRY_TACH &&
+         tachLastReported == 0;
 }
 
 /**
@@ -2223,6 +2499,10 @@ static void softResumeFromCharging() {
   // the POC is compiled out — BLE/camera stay lazy either way).
   SENSOREGG_WAKE();
 
+  // Boost rail back up + strip re-init (no-op when compiled out or
+  // brightness 0).
+  NEOPIXEL_WAKE();
+
   DISPLAY_WAKE();
   menuIdleTimerRunning = false;
   if (!sdSetupSuccess && sdCardUnformatted) {
@@ -2276,6 +2556,17 @@ void enterShutdown() {
     pinMode(PIN_LSM6DS3TR_C_POWER, OUTPUT);
     digitalWrite(PIN_LSM6DS3TR_C_POWER, HIGH);
   }
+
+  // LED strip blanked, then its 5 V boost rail off (EN driven LOW —
+  // retained through System OFF, and the charging loop below never
+  // re-enables it, so the strip is dark while charging too).
+  NEOPIXEL_SLEEP();
+  // Park the profiling pin LOW. The loop scope guard's destructor is what
+  // normally lowers it, and this path never returns to it — without this
+  // the pin would sit HIGH for the whole power-down. No-op off the beta
+  // channel. (Note it does NOT drop the 5 V rail: on a profiling build
+  // NEOPIXEL_SLEEP no longer owns EN — see project.h.)
+  PROFILING_SLEEP();
   wdtPet();
 
   // VBUS exception: never System OFF while a cable is present. Powering
@@ -2307,13 +2598,20 @@ void loop() {
   wdtPet();
   #endif
 
+  // Whole-iteration timing + the once-a-second rollup (plan 0011, beta
+  // only). A scope guard rather than a call at the bottom because both
+  // parked branches below return early and enterShutdown() never returns
+  // at all — a profiler that goes quiet exactly when the firmware parks
+  // would be measuring the wrong thing. Compiles to nothing off beta.
+  PROFILE_LOOP_SCOPE();
+
   #ifdef HAS_DEBUG
   unsigned long loopStart = millis();
   #endif
 
   // When BLE is active, skip GPS/tach/lap processing for better throughput
   if (bleActive) {
-    BLUETOOTH_LOOP();
+    PROFILE_SECTION(loop_profile::kBle, BLUETOOTH_LOOP());
 
     // Keep battery voltage fresh for BLE BATT command and display
     if (millis() - lastBatteryCheck > batteryUpdateInterval) {
@@ -2321,11 +2619,12 @@ void loop() {
       lastBatteryVoltage = getBatteryVoltage();
     }
 
-    // Minimal button check for exit
-    readButtons();
+    // Minimal button check for exit. Leaving transfer mode reboots (same
+    // as the phone-disconnect auto-reboot and the USB exit) so changed
+    // settings take effect and no session state leaks.
+    PROFILE_SECTION(loop_profile::kButtons, readButtons());
     if (btn2->pressed) {
-      BLE_STOP();
-      switchToDisplayPage(PAGE_MAIN_MENU);
+      bleExitTransferMode();  // does not return (NVIC_SystemReset)
     }
     resetButtons();
 
@@ -2333,8 +2632,12 @@ void loop() {
     unsigned long displayInterval = bleTransferInProgress ? 5000 : (1000 / displayUpdateRateHz);
     if (millis() - displayLastUpdate > displayInterval) {
       displayLastUpdate = millis();
-      displayPage_bluetooth();
+      PROFILE_SECTION(loop_profile::kDisplay, displayPage_bluetooth());
     }
+
+    // Keep the LED frame ticking so the strip blanks (composition sees
+    // the parked state) instead of freezing mid-pattern.
+    PROFILE_SECTION(loop_profile::kLed, NEOPIXEL_LOOP());
 
     return; // Skip GPS, tach, lap checks while BLE is active
   }
@@ -2354,7 +2657,7 @@ void loop() {
     }
 
     // Minimal button check for the on-device Exit (Select).
-    readButtons();
+    PROFILE_SECTION(loop_profile::kButtons, readButtons());
     if (btn2->pressed) {
       USB_MSC_DISABLE();  // does not return (NVIC_SystemReset)
     }
@@ -2363,24 +2666,36 @@ void loop() {
     // Refresh the status page at the normal rate.
     if (millis() - displayLastUpdate > (1000 / displayUpdateRateHz)) {
       displayLastUpdate = millis();
-      displayPage_usb_storage();
+      PROFILE_SECTION(loop_profile::kDisplay, displayPage_usb_storage());
     }
+
+    // Same as the BLE branch: blank the strip rather than freeze it.
+    PROFILE_SECTION(loop_profile::kLed, NEOPIXEL_LOOP());
 
     return;  // host owns the card — skip GPS/tach/lap/SD entirely
   }
 
-  GPS_LOOP();
-  TACH_LOOP();
-  ACCEL_LOOP();
-  BLUETOOTH_LOOP();
-  SENSOREGG_LOOP();  // drain SensorEgg scan buffer (Temp1 fresh for logging)
+  // Each subsystem call is bracketed for the loop profiler (plan 0011).
+  // PROFILE_SECTION expands to the bare call off the beta channel, so
+  // this is the same sequence it has always been.
+  PROFILE_SECTION(loop_profile::kGps, GPS_LOOP());
+  PROFILE_SECTION(loop_profile::kTach, TACH_LOOP());
+  PROFILE_SECTION(loop_profile::kAccel, ACCEL_LOOP());
+  PROFILE_SECTION(loop_profile::kBle, BLUETOOTH_LOOP());
+  // drain SensorEgg scan buffer (Temp1 fresh for logging)
+  PROFILE_SECTION(loop_profile::kEgg, SENSOREGG_LOOP());
 
-  trackDetectionLoop();
-  checkForNewLapData();
-  checkAutoIdle();
-  autoRaceModeCheck();
-  updateGpsLockHold();
-  CAMERA_LOOP();  // step the Insta360 auto-record FSM (GPS/tach fresh above)
+  PROFILE_SECTION(loop_profile::kTrack, trackDetectionLoop());
+  PROFILE_SECTION(loop_profile::kLap, checkForNewLapData());
+  // One section for the three session-state checks: individually they are
+  // a handful of comparisons, and thirteen slots on a 128x64 page is
+  // already the budget.
+  PROFILE_SECTION(loop_profile::kIdle, checkAutoIdle(); autoRaceModeCheck();
+                  updateGpsLockHold());
+  // step the Insta360 auto-record FSM (GPS/tach fresh above)
+  PROFILE_SECTION(loop_profile::kCamera, CAMERA_LOOP());
+  // LED strip frame (RPM/pace/purple fresh above)
+  PROFILE_SECTION(loop_profile::kLed, NEOPIXEL_LOOP());
 
   // Camera auto-stopped recording (30 s engine-off): end + save the race
   // session and return to the menu — the camera stays connected in WATCHING,
@@ -2399,8 +2714,12 @@ void loop() {
     }
   }
 
-  // Button hold detection for shutdown/reboot combos
-  updateButtonHoldState();
+  // Button hold detection for shutdown/reboot combos. Bracketed into the
+  // same section as readButtons(): it runs the identical multi-sample
+  // debounce on all three pins, so leaving it out would park a
+  // hold-dependent cost (up to ~1 ms per HELD button) in OTH, where it
+  // reads as unexplained overhead rather than as button sampling.
+  PROFILE_SECTION(loop_profile::kButtons, updateButtonHoldState());
 
   // Long-press left+right (5s) on main menu -> shutdown
   if (currentPage == PAGE_MAIN_MENU &&
@@ -2473,11 +2792,15 @@ void loop() {
 
   calculateGPSFrameRate();
 
-  readButtons();
-  gpsStatusPageLoop();  // boot status page: consume presses, hold/auto-close
-  sdFormatPageLoop();   // boot format-confirm page: hold Select 3s to format
-  courseCreatorLoop();  // course creator: feed GPS into an averaging hold
-  displayLoop();
+  PROFILE_SECTION(loop_profile::kButtons, readButtons());
+  // The boot-page state machines share the display section: they are the
+  // same family of work (page logic), and folding them freed the one grid
+  // slot the LOOP PROFILE page needed for SLP — see loop_profile.h.
+  //   gpsStatusPageLoop: consume presses, hold/auto-close
+  //   sdFormatPageLoop:  hold Select 3s to format
+  //   courseCreatorLoop: feed GPS into an averaging hold
+  PROFILE_SECTION(loop_profile::kDisplay, gpsStatusPageLoop();
+                  sdFormatPageLoop(); courseCreatorLoop(); displayLoop());
   resetButtons();
 
   if (tachLastReported > topTachReported) {

@@ -36,8 +36,8 @@ own header first so declaration/definition drift is caught at compile
 time.
 
 The **pure units** (`haversine`, `gps_time`, `gps_validation`,
-`dovex_header`, `filename_validator`, `course_creator`, `track_json`, …)
-deliberately avoid Arduino headers.
+`dovex_header`, `filename_validator`, `course_creator`, `track_json`,
+`local_time`, …) deliberately avoid Arduino headers.
 The *same* `.cpp` is compiled into both the firmware (Arduino picks up
 `.cpp` files in the sketch folder) and the host test binary (CMake). There
 is no copy-paste — the tests exercise the exact code that ships.
@@ -61,9 +61,14 @@ loop()
  ├─ checkAutoIdle()              60 s < 2 mph -> end session
  ├─ autoRaceModeCheck()          RPM/speed on menu -> enter race
  ├─ CAMERA_LOOP()                step the Insta360 auto-record FSM
+ ├─ NEOPIXEL_LOOP()              LED strip frame (30 Hz, self-throttled)
  ├─ button hold combos           shutdown / reboot; menu idle -> shutdown
  ├─ readButtons() / gpsStatusPageLoop() / displayLoop() / resetButtons()
 ```
+
+On the beta channel each of those calls is bracketed by the loop
+profiler (see *Subsystems* below); off beta the brackets are macros that
+expand to the bare call, so the dispatch above is literally unchanged.
 
 Each subsystem exposes `*_SETUP()` (called once from `setup()`) and
 `*_LOOP()` (called each iteration). ISRs stay trivially short and hand off
@@ -76,7 +81,16 @@ to the matching `*_LOOP()`.
   rows stream to the DOVEX log.
 - **Tachometer** (`tachometer`) — falling-edge ISR timestamps pulses into a
   ring buffer; the loop computes mean inter-pulse period and runs it
-  through a 1-D Kalman filter.
+  through a 1-D Kalman filter (`tach_filter`). The filter sees one number
+  per pulse, so its defining feature is an **outlier gate**: a single
+  ignition ring or missed spark is a several-thousand-RPM measurement and
+  must be coasted past, not averaged in. Three consecutive rejections
+  mean the estimate is the wrong one and the measurement is adopted. Both
+  noise models scale with engine speed, because RPM = K/period makes a
+  fixed timing error worth quadratically more RPM the faster the engine
+  turns. The `tach_filter` setting switches between this, the pre-0009
+  filter, and no filter at all, so the pickup can be characterised at the
+  track (plan 0009).
 - **Accelerometer** (`accelerometer`) — onboard LSM6DS3, ±16 g, raw
   g-force. Degrades gracefully if absent (non-Sense board).
 - **SD + tracks** (`sd_functions`) — SdFat (FAT16/32), track JSON parsing
@@ -87,10 +101,19 @@ to the matching `*_LOOP()`.
   (`sd_format_page` pure unit) rather than a dead-end fault screen.
 - **Display/UI** (`display_ui`, `display_pages`) — OLED driver abstraction,
   multi-sample debounced buttons, page routing.
-- **Bluetooth** (`bluetooth`) — BLE service for file transfer, settings,
-  and track sync, plus buttonless Secure DFU (`BLEDfu`) for OTA firmware
-  updates and a Device Information Service (`BLEDis`) that reports
-  `FIRMWARE_VERSION` for the update check.
+- **Bluetooth** (`bluetooth` + the `ble_stream` pure unit) — BLE service for
+  file transfer, settings, and track sync, plus buttonless Secure DFU
+  (`BLEDfu`) for OTA firmware updates and a Device Information Service
+  (`BLEDis`) that reports `FIRMWARE_VERSION` for the update check.
+  Download throughput is treated as something to *verify*, not request:
+  the connect callback asks for MTU 247, 2M PHY and Data Length Extension,
+  and `bleTuneLink()` then reads back what actually negotiated and corrects
+  it — re-asking for DLE if the request was lost to a busy link-layer, and
+  making a second Apple-compliant connection-interval request only when the
+  link is slower than 15 ms. Chunks stream from a compacting 4 KB read-ahead
+  so an SD read never sits in the radio's critical path. Plan 0008 has the
+  reasoning; the transfer page reports live KB/s so the next regression is
+  visible on the device.
 - **Camera** (`camera_ble` + the `camera_fsm` / `insta360_protocol` pure
   units) — hands-free Insta360 X4 auto-record: the device emulates the
   Insta360 GPS Remote as a pure BLE peripheral, wakes the paired camera on
@@ -110,6 +133,34 @@ to the matching `*_LOOP()`.
   pages are compiled out, BLE returns to lazy init, and the DOVEX
   `Temp1`/`Junction1`/`Temp2` columns are written as `nan` so the log
   format stays identical across channels.
+- **NeoPixel strip** (`neopixel` + the `led_frame` / `led_modes` /
+  `led_status` / `led_animations` / `sector_purple` pure units) — 11
+  WS2812 pixels on the NFC pads (converted to GPIO by a one-time,
+  one-way UICR write on first flag-on boot): two status LEDs flanking a
+  9-px strip. The strip shows a scale until pace is meaningful and then
+  a pace pip (slower = left of center in red, faster = right in green);
+  the scale is RPM on a session with a tachometer and target *speed* on
+  one without, because an RPM bar on a tach-less car is nine dark
+  pixels until the first lap lands. The two status LEDs are **assigned
+  by the user** from the companion app — target RPM, target speed, GPS
+  lock, camera sync, last lap, last sector, EGT, or off — with the GPS
+  and camera modes staying lit on the main menu, since "am I ready to
+  drive" is a paddock question. The lap and sector indicators compare
+  against the *previous* lap or sector rather than the session best; a
+  best-based one only ever answers purple or red. There is also a boot
+  animation, and a two-stage purple celebration for a session-best
+  sector or lap (both detected race-free against the lap timer's
+  lap-line best-update by snapshotting bests at sector and lap open).
+  One rule everything obeys: a
+  global brightness cap applied at a single choke point — no LED channel
+  ever exceeds it. Which cap is in force is a local-time decision:
+  `led_brightness` by day, `led_brightness_night` after dark (see
+  *Local time* below). The strip's 5 V boost
+  converter has its EN pin driven low in sleep, so System OFF really
+  powers the LEDs down. `BIRDSEYE_ENABLE_NEOPIXEL` is on in **every**
+  channel as of 4.1.0, which is what makes the strip a core feature — at
+  the price of a one-way, fleet-wide UICR NFC→GPIO conversion on the
+  first boot after updating.
 - **Course creator** (`course_creator` + `track_json` pure units, glued
   into the menu/pages/SD modules) — authors a track course on the device
   by walking to each cone and holding for a 3 s GPS average. Autocross
@@ -117,6 +168,19 @@ to the matching `*_LOOP()`.
   in a paddock. No text is ever entered on-device: names come from the GPS
   clock and are renamed later in the web app. This is also the firmware's
   only track-JSON *writer* — everywhere else the format is read-only.
+- **Local time** (`local_time` pure unit) — UTC plus a fixed signed
+  minute offset (`utc_offset_min`), giving the device a local wall clock.
+  Its only consumer is the LED day/night brightness swap, which needs
+  "7am" to mean the driver's 7am. No DST, and **nothing logged goes
+  through it** — see *Local time is presentation-only* below.
+- **Loop profiling** (`profiling` + the `loop_profile` pure unit,
+  beta channel only) — times every subsystem call in `loop()`, rolls the
+  result up once a second onto a LOOP PROFILE race page, and drives
+  pin 30 as a scope-readable profiling output. Built to answer two board
+  questions with measurement instead of argument: nRF52840 or nRF5340,
+  and is the Arduino core costing enough to be worth leaving. It takes
+  pin 30 from the NeoPixel boost EN line to do it — see *Profiling costs
+  the 5 V rail* below.
 - **Replay** (`replay`) — instant DOVEX header replay.
 - **Settings** (`settings`) — JSON key/value store on the SD card.
 - **CourseManager** (external library) — owns course detection, sector
@@ -328,10 +392,121 @@ response, the ce82 button frames, the ce82 GPS/RMC frame, and the `0x10`
 record-timer parse are all captured from a genuine remote (the wake advert
 was even replayed to wake a sleeping X4).
 
+### Local time is presentation-only
+
+The GPS delivers UTC and that is what the device *logs*. DOVEX row
+timestamps are Unix epoch milliseconds, and the header `datetime`, the log
+filenames and the generated course names are all UTC too. The
+`utc_offset_min` setting (a fixed signed minute offset — `local_time`) buys
+the device a local wall clock for exactly one purpose: deciding when to
+swap the LED strip to its night brightness, where "7am" has to mean the
+driver's 7am. A US Central driver at 07:30 local is at 12:30 UTC, which a
+naive UTC gate calls the middle of the night.
+
+Nothing in the logging pipeline may call into `local_time`. A log is
+routinely *viewed* somewhere other than where it was recorded, so timezone
+presentation belongs to the app doing the viewing, which knows the reader's
+preference; baking a recording-side offset into the data would just move
+the guess earlier and make it unrecoverable.
+
+There is deliberately **no DST**. A fixed offset walks the boundary an hour
+twice a year, which is beneath the resolution of a dim-after-dark gate,
+whereas rule tables are a standing correctness liability (legislatures keep
+moving the dates) and tzdata is ~100 KB shipped to a sealed device.
+`local_time` is where rules would go if that ever changes — which is why its
+`DateTime` carries a 4-digit year even though the sketch's `gpsData.year`
+is 2-digit.
+
+### The settings file has a hard size ceiling
+
+Every settings read path caps at `sizeof(settingsFileBuffer) - 1`. A file
+larger than that parses as `IncompleteInput`, so *every* key read fails —
+which `SETTINGS_SETUP()` correctly interprets as corruption, quarantines to
+`SETTINGS.json.bad`, and regenerates (losing the BLE name, PIN and
+pairing), whereupon `ensureDefaultSettings()` grows the file back over the
+cap and it happens again on the next boot. A settings key is therefore not
+free: an innocuous four-key addition in plan 0010 took an 18-key, 436-byte
+file to 543 bytes and would have shipped that loop.
+
+Both the file buffer and the `StaticJsonDocument` are 1024 bytes (raised
+from 512) and **must stay equal** — the invariant is that the buffer can
+always hold what the document serializes. `setSettingInner()` also refuses
+any write whose document `overflowed()` or whose `measureJson()` exceeds
+the buffer, so the failure mode is one loudly refused write with the
+previous file intact, rather than a silent unreadable one.
+
+### Profiling costs the 5 V rail
+
+A profiling build (`BIRDSEYE_ENABLE_PROFILING`, beta only) drives pin 30
+HIGH for the span being profiled and LOW outside it, so a scope reads the
+loop period off the rising edges with no software in the measurement
+path. Pin 30 is also the NeoPixel boost converter's EN line, and it
+cannot be both.
+
+The profiler takes it. A profiling build therefore never drives EN — not
+at setup, not at sleep, not on the charging-loop resume — and the
+regulator sits at its hardware default (EN pulled up = rail on). That is
+what makes the trade work at all: the rail does not need firmware
+control, it needs to be *switchable*, and switching it is a requirement
+of **use**, not of **testing**.
+
+Two consequences, both deliberate:
+
+- The rail stays up through System OFF. GPIO levels are retained there
+  and the driven LOW was the only thing holding it down (same retention
+  as the "blue conn LED stays on after sleep" report above). A profiling
+  unit left asleep on a battery with a strip wired to it goes flat.
+- If the EN jumper is still physically connected on the rig, the
+  toggling chops the rail at loop rate. Pull it or tie EN high before
+  profiling.
+
+Master and release are untouched: the flag defaults to 0, the section
+brackets are macros that expand to the bare call, and pin 30 goes on
+being EN.
+
+### The profiler reports the shape of an iteration — and measures idle rather than assuming it
+
+`loop()` runs back to back with nothing rate-limiting it, so the first
+version of this subsystem asserted there was no idle time and that a
+duty cycle would be meaningless. That was an assumption, it was baked
+into the measurement, and it produced a wrong first reading — see *Two
+clocks* below. The profiler now **measures** how much wall time the CPU
+spends executing `loop()` and reports the balance as `SLP` (scheduler
+dispatch, other FreeRTOS tasks, sleep). If that number is large, the
+loop rate is not what limits this firmware.
+
+Alongside it, the **shape of an iteration**: how long one takes (mean
+*and* worst case — an SD garbage-collection stall of 100 ms–2 s is
+invisible in a mean), how that time divides between subsystems, and how
+much of it no subsystem accounts for. `OTH` — loop time no section
+bracketed — is reported rather than hidden, because it is the honesty
+check on the instrumentation. Every slot is a share of the same
+wall-clock second, so all fourteen sum to ~100%.
+
+### Two clocks, and why mixing them was a real bug
+
+Durations are measured with the Cortex-M4 DWT cycle counter (64 ticks/µs):
+most sections are well under a microsecond and `micros()` would quantise
+half of them to zero. DWT is *verified* to be counting at setup rather
+than assumed — a debug probe can hold TRCENA off — and the page marks
+the `micros()` fallback with a leading `*`.
+
+But DWT counts **cycles, not time**. It stops whenever the core halts.
+The first implementation also used it to close the one-second rollup
+window, which meant the window was one second of *CPU-awake* time: the
+loop rate came out multiplied by the sleep factor, and every share was a
+fraction of awake time wearing a wall-time label. The window is now
+closed on `millis()` and all shares are computed against wall time. The
+pure unit still accumulates ticks and is handed `ticksPerUs` at rollup,
+so per-call resolution is preserved; its accumulators saturate rather
+than wrap, since a uint32 of DWT ticks is only ~67 s and a pegged window
+reads as pegged where a wrapped one would read as near-idle.
+
 ## Data formats
 
 - **`.dovex`** — 1 KB reserved header (metadata + lap times) then streaming
-  CSV GPS rows after byte 1024. Default and only logging format.
+  CSV GPS rows after byte 1024. Default and only logging format. Every
+  timestamp in it is UTC and stays that way (see *Local time* above).
 - **Track JSON** (`/TRACKS/*.json`) — new object format with `courses[]`
   and `lengthFt`, or an older bare-array format (parsed, but falls back to
   Lap Anything since it has no length to rank courses by).

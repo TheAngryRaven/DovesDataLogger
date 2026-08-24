@@ -18,7 +18,9 @@
 //   LINE MENU    one row per timing line, plus Save / Cancel
 //   LINE DETAIL  Point A / Point B / Save / Back for one line
 //   POINT        "Save current pos" — a timed averaging hold
-// preceded by the track prompt (here / new) and the type picker.
+// preceded by the track prompt (here / new) and the type picker. Every
+// screen, those two included, ends in a Cancel/Back row: entering the
+// creator by mistake must never be a one-way door.
 //
 // This unit owns the MODEL — which rows exist, what is captured, whether
 // the course may be saved, and the point-averaging math. Navigation
@@ -127,8 +129,8 @@ enum class CaptureResult : uint8_t {
 };
 
 enum class Screen : uint8_t {
-  kTrackPrompt,   // "Are you at X?"  Here / New Track
-  kTypeSelect,    // Circuit / Sprint
+  kTrackPrompt,   // "Are you at X?"  Here / New Track / Cancel
+  kTypeSelect,    // Circuit / Sprint / Cancel
   kLineMenu,      // one row per line + Save + Cancel
   kLineDetail,    // Point A / Point B / Save / Back
   kPointCapture,  // Save current pos / Back

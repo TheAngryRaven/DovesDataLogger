@@ -41,4 +41,13 @@ jobs:
             BirdsEye/lap_format.cpp \
             BirdsEye/tach_filter.cpp \
             BirdsEye/camera_fsm.cpp \
-            BirdsEye/insta360_protocol.cpp
+            BirdsEye/insta360_protocol.cpp \
+            BirdsEye/led_frame.cpp \
+            BirdsEye/led_modes.cpp \
+            BirdsEye/led_status.cpp \
+            BirdsEye/led_animations.cpp \
+            BirdsEye/sector_purple.cpp \
+            BirdsEye/local_time.cpp \
+            BirdsEye/setting_parse.cpp \
+            BirdsEye/ble_stream.cpp \
+            BirdsEye/loop_profile.cpp

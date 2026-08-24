@@ -61,6 +61,13 @@ void BLE_SETUP();
 // transfer file, release SD access, and drop bleOwner back to NONE.
 void BLE_STOP();
 
+// Manual exit from the Bluetooth transfer page: BLE_STOP() then reboot
+// (NVIC_SystemReset), so a manual exit applies changed settings and clears
+// session state exactly like the phone-disconnect auto-reboot and the USB
+// mass-storage exit. Does not return on hardware; the SIM stub returns
+// after stopping the radio.
+void bleExitTransferMode();
+
 // Force the Bluefruit connection LED off (autoConnLed disarm + park the
 // pin high). Shared by BLE_STOP() and the shutdown quiesce.
 void bleConnLedOff();
@@ -73,6 +80,33 @@ void bleConnLedOff();
 void bleShutdownQuiesce();
 
 // Service deferred commands from the BLE callback task: settings
-// commands, track upload/delete, MTU negotiation tail-read, and the
+// commands, track upload/delete, post-connect link tuning, and the
 // burst-send chunk pipeline for any active file transfer.
 void BLUETOOTH_LOOP();
+
+// --- Transfer diagnostics (read by the Bluetooth page) ---------------------
+// These exist so a download-speed regression is visible on the device instead
+// of being inferred from a progress bar. See
+// docs/plans/0008-ble-download-throughput.md.
+
+// Live transfer rate in bytes/sec, 0 when nothing is streaming.
+uint32_t bleTransferRateBps();
+
+// Negotiated link-layer PDU in bytes. 27 means Data Length Extension never
+// happened, which fragments every notification into ten packets — by far the
+// largest throughput tax on this link.
+uint16_t bleLinkDataLength();
+
+// Payload carried by one notification at the negotiated ATT MTU.
+uint16_t bleLinkChunkSize();
+
+// Connection interval in 1.25 ms units, live from the connection object
+// (0 = no peer). The central owns this number — the device only requests —
+// and 24 units (30 ms) instead of 12 (15 ms) is a silent 2x on every
+// download, so it belongs on the page (plan 0012).
+uint16_t bleLinkIntervalUnits();
+
+// Radio PHY, live from the connection object: 1 = 1M, 2 = 2M, 4 = Coded,
+// 0 = no peer. A link that ignored the 2M request pays double airtime per
+// packet (plan 0012).
+uint8_t bleLinkPhy();

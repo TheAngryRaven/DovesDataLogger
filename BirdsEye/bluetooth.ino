@@ -4,9 +4,52 @@
 ///////////////////////////////////////////
 
 #include "bluetooth.h"
+#include "ble_stream.h"
 #include "camera_ble.h"
 #include "filename_validator.h"
 #include "firmware_ota.h"
+// For SENSOREGG_SLEEP() — BLE_SETUP() quiesces the egg scanner so the
+// transfer link never shares the radio with a scan window (plan 0012).
+#include "sensoregg.h"
+// For SETTINGS_JSON_CAPACITY and getSetting/setSetting. This module used
+// them via Arduino's concatenation of BirdsEye.ino's includes; naming the
+// dependency follows camera_ble.ino and keeps the SLIST buffer sizes tied
+// to the settings module that owns them.
+#include "settings.h"
+
+// Target connection interval in 1.25 ms units: 12 = 15 ms, the fastest an
+// Apple central is permitted to accept from an accessory. See bleTuneLink().
+#define BLE_TARGET_INTERVAL_UNITS 12
+// Any negotiated link-layer PDU at or above this counts as "DLE took". The
+// un-extended default is 27; a successful extension lands at 251 (or whatever
+// the peer allows), so the exact value matters less than clearing the floor.
+#define BLE_DATA_LENGTH_MIN_EXTENDED 100
+
+// Two-stage post-connect link tuning: 0 = idle, 1 = read + correct at
+// +500 ms, 2 = final readback at +1500 ms. Written by the connect callback,
+// consumed by the main loop; the stages themselves only ever run on the loop.
+static volatile uint8_t bleLinkTuneStage = 0;
+static volatile uint32_t bleLinkTuneStartMs = 0;
+static volatile uint16_t bleLinkTuneConnHandle = 0;
+// Negotiated link-layer PDU (bytes). 27 means DLE never happened, which is
+// the single biggest download-throughput tax there is — surfaced on the
+// transfer page so it is visible instead of inferred.
+static volatile uint16_t bleLinkDataLen = 27;
+
+// File-transfer read-ahead. Notifying straight out of SdFat put a disk read
+// in the radio's critical path and cost one single-block SD command per
+// 512 bytes (a chunk is not a sector). One aligned 4 KB read is a single
+// multi-block transfer, and the notifications then stream out of RAM. The
+// index arithmetic lives in the host-tested ble_stream unit; the bytes and
+// the file live here. See docs/plans/0008-ble-download-throughput.md.
+static uint8_t bleStreamBuf[ble_stream::kReadAheadSize];
+static ble_stream::ReadAhead bleStream(ble_stream::kReadAheadSize);
+
+// Live transfer rate, recomputed as chunks go out so the device can show
+// KB/s instead of only a percentage — the whole reason this regression took
+// a session to notice.
+static uint32_t bleTransferStartMs = 0;
+static uint32_t bleTransferRate = 0;
 
 // Deferred settings command buffer (BLE callback -> main loop)
 static volatile bool settingsCmdPending = false;
@@ -101,17 +144,88 @@ void bleConnectCallback(uint16_t conn_handle) {
 
   // Request 2M PHY for double raw throughput (BLE 5.0, both sides must support)
   connection->requestPHY(BLE_GAP_PHY_2MBPS);
-  // Request Data Length Extension (max PDU size, reduces L2CAP overhead)
+  // Request Data Length Extension (251-byte link-layer PDU). Without it every
+  // 244-byte notification fragments into ten 27-byte packets, each paying its
+  // own header/CRC/inter-frame space — a 3-4x tax on exactly this transfer.
+  //
+  // This ask is best-effort and NOT trusted: the SoftDevice runs one
+  // link-layer control procedure at a time, so firing it immediately behind
+  // the PHY update above can come straight back as NRF_ERROR_BUSY, which
+  // Bluefruit swallows into a false return. bleTuneLink() below verifies the
+  // result once the link has settled and re-asks if it did not take.
   connection->requestDataLengthUpdate();
 
-  // Defer MTU read to main loop instead of blocking here with delay(500)
-  bleWaitingForMTU = true;
-  bleMTURequestTime = millis();
-  bleMTUConnHandle = conn_handle;
+  // Link tuning (MTU / DLE / interval readback and retry) is deferred to the
+  // main loop rather than blocking this callback with a delay(500).
+  bleLinkTuneStartMs = millis();
+  bleLinkTuneConnHandle = conn_handle;
+  bleLinkTuneStage = 1;
+  bleLinkDataLen = 27;  // pre-DLE default; corrected at stage 1
 
   debug(F("BLE: Connection interval: "));
   debug(connection->getConnectionInterval() * 1.25);
   debugln(F("ms"));
+}
+
+// Re-check what the link actually negotiated and fix what did not take.
+// Called from BLUETOOTH_LOOP() on a two-stage timer after connect: stage 1
+// (+500 ms) reads the settled parameters and issues corrections, stage 2
+// (+1500 ms) records the final numbers for the display. Both stages run on
+// the main loop, so the SoftDevice calls here never race a callback.
+//
+// Takes the connection HANDLE, not a BLEConnection* — a Bluefruit type in a
+// parameter list would need <bluefruit.h> visible where Arduino inserts its
+// generated prototypes, and silently degrades to `int` when it is not (see
+// the auto-prototype note in CLAUDE.md's conventions). Returns false when the
+// peer is gone.
+static bool bleTuneLink(uint16_t conn_handle) {
+  BLEConnection* connection = Bluefruit.Connection(conn_handle);
+  // Bluefruit keeps the connection object around after a drop, so check the
+  // link is actually up before tuning it — otherwise a peer that leaves
+  // between stages gets requests sent into a dead handle.
+  if (!connection || !connection->connected()) return false;
+
+  bleNegotiatedMtu = connection->getMtu();
+  bleLinkDataLen = connection->getDataLength();
+  uint16_t intervalUnits = connection->getConnectionInterval();
+
+  debug(F("BLE: MTU "));
+  debug(bleNegotiatedMtu);
+  debug(F(", data length "));
+  debug(bleLinkDataLen);
+  debug(F(", PHY "));
+  debug(connection->getPHY());
+  debug(F(", interval "));
+  debug(intervalUnits * 1.25);
+  debugln(F("ms"));
+
+  if (bleLinkTuneStage != 1) return true;  // stage 2 is readback only
+
+  // DLE did not take (still the 27-byte default). The likeliest cause is the
+  // connect-time ask colliding with the PHY update, so ask again now that
+  // nothing else is in flight.
+  if (bleLinkDataLen < BLE_DATA_LENGTH_MIN_EXTENDED) {
+    debugln(F("BLE: data length still default — re-requesting DLE"));
+    connection->requestDataLengthUpdate();
+  }
+
+  // Connection interval. The advertised preference (setConnInterval(6, 12) =
+  // 7.5-15 ms) is deliberately aggressive and desktop/Android centrals honour
+  // it — those are already fast and must not be slowed down, so the
+  // preference itself stays put. iOS is the problem: Apple's accessory
+  // guidelines require a requested Interval Min of at least 15 ms, so a
+  // 7.5 ms preference is rejected outright and the link stays on whatever
+  // iOS chose at connect (commonly 30 ms) — half the connection events, half
+  // the throughput. Only when we find ourselves slower than the target do we
+  // make a second, Apple-compliant ask that the central is allowed to accept.
+  if (intervalUnits > BLE_TARGET_INTERVAL_UNITS) {
+    debug(F("BLE: interval slower than target — requesting "));
+    debug(BLE_TARGET_INTERVAL_UNITS * 1.25);
+    debugln(F("ms"));
+    connection->requestConnectionParameter(BLE_TARGET_INTERVAL_UNITS);
+  }
+
+  return true;
 }
 
 void bleDisconnectCallback(uint16_t conn_handle, uint8_t reason) {
@@ -132,6 +246,8 @@ void bleDisconnectCallback(uint16_t conn_handle, uint8_t reason) {
   debugln(F("BLE: Disconnected!"));
   bleConnected = false;
   bleNegotiatedMtu = 23; // Reset to default
+  bleLinkTuneStage = 0;  // abandon any pending link tuning for this peer
+  bleLinkDataLen = 27;   // pre-DLE default
 
   // Pure in-RAM flag resets are safe from this callback (Bluefruit) task.
   bleTransferInProgress = false;
@@ -403,6 +519,11 @@ void bleStartFileTransfer(const char* filename) {
 
   bleFileSize = bleCurrentFile.size();
   bleBytesTransferred = 0;
+  // Drop anything the previous transfer left buffered — a stale tail would
+  // be prepended to this file.
+  bleStream.reset();
+  bleTransferStartMs = millis();
+  bleTransferRate = 0;
   bleTransferInProgress = true;
 
   debug(F("BLE: File size: "));
@@ -723,6 +844,16 @@ void BLE_SETUP() {
   // in BLE_STOP() (and by the auto-reboot on phone disconnect).
   sdSetTransferSpeed(true);
 
+  // Quiesce the SensorEgg scanner for the whole transfer session (plan
+  // 0012). The scanner is race-gated and the transfer page is only
+  // reachable from the menu (race over, scan already down), so this is
+  // belt-and-suspenders — but the 44% scan duty was measured throttling
+  // downloads to ~33 KB/s by denying connection-event extension, so the
+  // transfer link gets an explicit guarantee, not an inference. No wake
+  // path needed: every exit from transfer mode reboots. No-op on
+  // flag-off builds.
+  SENSOREGG_SLEEP();
+
   debugln(F("BLE: Starting transfer mode..."));
 
   bleCoreEnsureInit();
@@ -804,6 +935,23 @@ void BLE_STOP() {
   sdSetTransferSpeed(false);
 
   debugln(F("BLE: Bluetooth stopped"));
+}
+
+// Manual exit from the Bluetooth transfer page (the on-device Exit button).
+// Leaving transfer mode ALWAYS reboots, matching the phone-disconnect
+// auto-reboot and the USB mass-storage exit: a reboot is what guarantees
+// settings changed over BLE take effect and that no radio/advert/SD state
+// leaks from the transfer session into the next driving session. Before
+// this, only a peer disconnect rebooted — a manual exit dropped back to the
+// menu on the old settings. BLE_STOP() first so the teardown (file close,
+// SD release, OTA abort, advert stop) runs cleanly on the main loop before
+// the reset. Does not return on hardware; the SIM stub stops the radio and
+// returns so the sim's menu walk can continue.
+void bleExitTransferMode() {
+  BLE_STOP();
+  debugln(F("BLE: Transfer mode exited — rebooting..."));
+  delay(100);  // let debug output flush (mirrors the disconnect auto-reboot)
+  NVIC_SystemReset();
 }
 
 // Force the Bluefruit connection LED off and keep it off. Bluefruit drives
@@ -910,7 +1058,13 @@ void processSettingsCommand() {
       return;
     }
 
-    char fileBuf[512];
+    // The SECOND parser of /SETTINGS.json (settings.ino has the other).
+    // Both are sized by SETTINGS_JSON_CAPACITY so they can never drift
+    // again — see the comment on it in settings.h for what happened when
+    // they did. static, not stack: 2 KB in one frame is more than the loop
+    // task's budget wants, and it matches the house idiom in
+    // sd_functions.ino ("keeps JSON_BUFFER_SIZE off the stack").
+    static char fileBuf[SETTINGS_JSON_CAPACITY];
     int bytesRead = settingsFile.read(fileBuf, sizeof(fileBuf) - 1);
     settingsFile.close();
     releaseSDAccess(SD_ACCESS_TRACK_PARSE);
@@ -926,7 +1080,8 @@ void processSettingsCommand() {
     }
     fileBuf[bytesRead] = '\0';
 
-    StaticJsonDocument<512> doc;
+    static StaticJsonDocument<SETTINGS_JSON_CAPACITY> doc;
+    doc.clear();
     DeserializationError err = deserializeJson(doc, fileBuf);
     if (err != DeserializationError::Ok) {
       debug(F("BLE: SLIST - JSON parse error: "));
@@ -1189,51 +1344,124 @@ void BLUETOOTH_LOOP() {
   // apply sequence).
   FW_OTA_LOOP();
 
-  // Deferred MTU negotiation - read result 500ms after request
-  if (bleWaitingForMTU && millis() - bleMTURequestTime >= 500) {
-    bleWaitingForMTU = false;
-    BLEConnection* connection = Bluefruit.Connection(bleMTUConnHandle);
-    if (connection) {
-      bleNegotiatedMtu = connection->getMtu();
-      debug(F("BLE: Negotiated MTU: "));
-      debugln(bleNegotiatedMtu);
+  // Deferred link tuning — see bleTuneLink(). Stage 1 reads what actually
+  // negotiated and corrects it, stage 2 records the settled result.
+  if (bleLinkTuneStage > 0) {
+    uint32_t due = (bleLinkTuneStage == 1) ? 500 : 1500;
+    if (millis() - bleLinkTuneStartMs >= due) {
+      uint8_t stage = bleLinkTuneStage;
+      // Abandon on a peer that went away mid-tune, so a dropped connection
+      // can't leave the stage timer re-firing every loop iteration.
+      bleLinkTuneStage = bleTuneLink(bleLinkTuneConnHandle)
+                             ? ((stage == 1) ? 2 : 0)
+                             : 0;
     }
   }
 
   if (bleTransferInProgress && bleCurrentFile && Bluefruit.connected()) {
-    // Use actual negotiated MTU
-    uint16_t maxChunk = bleNegotiatedMtu - 3;
-    uint8_t buffer[524];
-    size_t chunkSize = min(maxChunk, (uint16_t)244);
+    const uint16_t chunk = ble_stream::chunkSize(bleNegotiatedMtu);
+    const uint32_t burstStart = millis();
 
-    // Burst send: read + notify multiple chunks per loop iteration.
+    // Burst send: keep notifying until the wall-clock budget is spent.
     // notify() blocks via semaphore when the SoftDevice TX queue is full,
-    // providing natural flow control. This keeps the pipeline fed instead
-    // of sending 1 lonely chunk then wasting time on button checks.
-    for (int burst = 0; burst < 10 && bleTransferInProgress; burst++) {
-      size_t bytesRead = bleCurrentFile.read(buffer, chunkSize);
+    // which is the flow control — a blocked notify means the radio is
+    // saturated, which is exactly where we want to be. The budget is in
+    // milliseconds rather than packets because a fixed packet count is a
+    // very different amount of time on a fast link than on a slow one, and
+    // the only thing it protects is loop responsiveness (exit button, WDT).
+    while (bleTransferInProgress &&
+           (millis() - burstStart) < ble_stream::kBurstBudgetMs) {
+      bool readFailed = false;
 
-      if (bytesRead > 0) {
-        if (!fileDataChar.notify(buffer, bytesRead)) {
-          // Failed notify (HVN pool starved >100 ms, or disconnect). The
-          // read already advanced the file position, so REWIND before
-          // bailing — dropping the chunk and reading the next one on the
-          // following iteration silently punched a hole in the delivered
-          // file while the transfer carried on to a clean-looking DONE.
-          bleCurrentFile.seekCur(-(int32_t)bytesRead);
-          break;
+      if (bleStream.needsRefill(chunk)) {
+        // Compacting refill: the unsent tail slides to the front so every
+        // notify but the file's last one carries a full chunk (without it,
+        // 4096 mod 244 = 192 bytes of runt packet at every buffer boundary).
+        ble_stream::Move m = bleStream.compact();
+        if (m.length) {
+          memmove(bleStreamBuf, bleStreamBuf + m.srcOffset, m.length);
         }
-        bleBytesTransferred += bytesRead;
-      } else {
-        // Transfer complete
+        int bytesRead = bleCurrentFile.read(bleStreamBuf + bleStream.fillOffset(),
+                                            bleStream.fillSpace());
+        if (bytesRead > 0) {
+          bleStream.commitFill((uint32_t)bytesRead);
+        } else if (bytesRead < 0) {
+          // SdFat read error, as distinct from end of file. Both used to fall
+          // into the same "no bytes" branch and report DONE, handing the app a
+          // truncated session file with a clean status on it.
+          readFailed = true;
+        }
+      }
+
+      if (readFailed) {
         bleCurrentFile.close();
         bleTransferInProgress = false;
         releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
 
-        debugln(F("BLE: Transfer complete!"));
+        debugln(F("BLE: SD read failed mid-transfer"));
+        fileStatusChar.notify((uint8_t*)"ERROR", 5);
+        break;
+      }
+
+      uint32_t offset = 0;
+      uint16_t slice = bleStream.nextSlice(chunk, &offset);
+
+      if (slice == 0) {
+        // Buffer drained and the file had nothing left to give — done.
+        bleCurrentFile.close();
+        bleTransferInProgress = false;
+        releaseSDAccess(SD_ACCESS_BLE_TRANSFER);
+
+        // Recompute before printing: the update at the bottom of the block
+        // has not run for this final burst yet.
+        bleTransferRate = ble_stream::rateBytesPerSec(
+            bleBytesTransferred, millis() - bleTransferStartMs);
+        debug(F("BLE: Transfer complete! "));
+        debug(bleTransferRate / 1024);
+        debugln(F(" KB/s"));
         fileStatusChar.notify((uint8_t*)"DONE", 4);
         break;
       }
+
+      if (!fileDataChar.notify(bleStreamBuf + offset, slice)) {
+        // Failed notify (HVN pool starved >100 ms, or disconnect). Nothing to
+        // undo: the bytes are still in RAM and the buffer head has not moved,
+        // so the identical slice goes out on the next pass. The old
+        // read-straight-from-SdFat path had to seekCur() backwards here, and
+        // getting that wrong punched a silent hole in a file that still
+        // reported DONE.
+        break;
+      }
+
+      bleStream.consume(slice);
+      bleBytesTransferred += slice;
     }
+
+    bleTransferRate = ble_stream::rateBytesPerSec(bleBytesTransferred,
+                                                  millis() - bleTransferStartMs);
   }
+}
+
+uint32_t bleTransferRateBps() { return bleTransferRate; }
+uint16_t bleLinkDataLength() { return bleLinkDataLen; }
+uint16_t bleLinkChunkSize() { return ble_stream::chunkSize(bleNegotiatedMtu); }
+
+// Live connection interval / PHY for the transfer page's second diagnostic
+// line (plan 0012). These read the BLEConnection object's cached values —
+// plain RAM updated by GAP events, safe from the display path on the main
+// loop — rather than a snapshot from bleTuneLink(), so a central that
+// renegotiates mid-transfer shows its real numbers. 0 when no peer is
+// connected.
+uint16_t bleLinkIntervalUnits() {
+  if (!bleInitialized || !Bluefruit.connected()) return 0;
+  BLEConnection* connection = Bluefruit.Connection(Bluefruit.connHandle());
+  return (connection && connection->connected())
+             ? connection->getConnectionInterval()
+             : 0;
+}
+
+uint8_t bleLinkPhy() {
+  if (!bleInitialized || !Bluefruit.connected()) return 0;
+  BLEConnection* connection = Bluefruit.Connection(Bluefruit.connHandle());
+  return (connection && connection->connected()) ? connection->getPHY() : 0;
 }

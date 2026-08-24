@@ -12,6 +12,12 @@
 // error. Mean of ~3 periods per 25Hz window further reduces noise. The
 // Kalman filter smooths mechanical variation while tracking real RPM changes
 // bounded by crankshaft inertia.
+//
+// The filter sees ONE number per pulse, so a single bad edge is a spike
+// rather than a wobble — see tach_filter.h for the outlier gate that keeps
+// ignition ringing and missed sparks out of the logged trace (plan 0009),
+// and for the `tach_filter` setting that switches the estimator off for a
+// track-side A/B against the raw pickup.
 ///////////////////////////////////////////
 
 #include "tachometer.h"
@@ -136,7 +142,17 @@ void TACH_LOOP() {
       float meanPeriodUs = (float)periodSum / (float)periodCount;
       float rpmMeasured =
           tach_filter::rpmFromMeanPeriodUs(meanPeriodUs, tachRevsPerPulse);
-      tach_filter::update(tachKalman, rpmMeasured, periodCount);
+      // The predict step advances by the ENGINE time this batch spans —
+      // the sum of the periods themselves — not by wall clock since the
+      // last TACH_LOOP call. At 1500 RPM those differ by 40x (a 40 ms
+      // period vs a 4 ms loop), and charging process noise for time the
+      // crank did not turn is exactly the per-update-Q mistake this
+      // replaces. It is also free: periodSum is already computed, needs
+      // no clock read, and makes the filter's behaviour a pure function
+      // of the pulse train — which is what the host tests exercise.
+      const float dtSeconds = (float)periodSum / 1.0e6f;
+      tach_filter::update(tachKalman, tachFilterMode, rpmMeasured, periodCount,
+                          dtSeconds, tachRevsPerPulse);
     }
   }
 
@@ -163,4 +179,18 @@ void TACH_LOOP() {
 
   // ---- Step 5: Update reported value ----
   tachLastReported = (int)(tachKalman.x + 0.5f);
+}
+
+/**
+ * Periods the outlier gate has thrown away this power-cycle.
+ *
+ * Diagnostic only — nothing behaves differently on the count. It is the
+ * one number that says whether the pickup is clean: a session that ends
+ * with single digits saw a clean signal, and a count climbing with RPM
+ * is ignition ringing or missed sparks reaching the ISR. Deliberately
+ * NOT cleared by the engine-stop reset, so it accumulates across a whole
+ * session rather than resetting at every corner.
+ */
+uint16_t tachRejectedPeriods() {
+  return tachKalman.rejected;
 }

@@ -148,9 +148,17 @@ set(SIM_CORE_SOURCES
   ${BIRDSEYE_DIR}/haversine.cpp
   ${BIRDSEYE_DIR}/idle_policy.cpp
   ${BIRDSEYE_DIR}/lap_format.cpp
+  ${BIRDSEYE_DIR}/local_time.cpp
+  ${BIRDSEYE_DIR}/loop_profile.cpp
+  ${BIRDSEYE_DIR}/setting_parse.cpp
+  ${BIRDSEYE_DIR}/led_animations.cpp
+  ${BIRDSEYE_DIR}/led_frame.cpp
+  ${BIRDSEYE_DIR}/led_modes.cpp
+  ${BIRDSEYE_DIR}/led_status.cpp
   ${BIRDSEYE_DIR}/sat_bars.cpp
   ${BIRDSEYE_DIR}/sd_access_policy.cpp
   ${BIRDSEYE_DIR}/sd_format_page.cpp
+  ${BIRDSEYE_DIR}/sector_purple.cpp
   ${BIRDSEYE_DIR}/sensoregg_protocol.cpp
   ${BIRDSEYE_DIR}/sprint_select.cpp
   ${BIRDSEYE_DIR}/tach_filter.cpp

@@ -20,6 +20,8 @@ add_executable(birdseye_tests
   crc32_test.cpp
   sd_access_policy_test.cpp
   lap_format_test.cpp
+  local_time_test.cpp
+  setting_parse_test.cpp
   tach_filter_test.cpp
   camera_fsm_test.cpp
   idle_policy_test.cpp
@@ -34,6 +36,13 @@ add_executable(birdseye_tests
   course_creator_test.cpp
   track_json_test.cpp
   course_prune_test.cpp
+  led_frame_test.cpp
+  led_modes_test.cpp
+  led_status_test.cpp
+  led_animations_test.cpp
+  sector_purple_test.cpp
+  ble_stream_test.cpp
+  loop_profile_test.cpp
   ${BIRDSEYE_DIR}/haversine.cpp
   ${BIRDSEYE_DIR}/gps_stats.cpp
   ${BIRDSEYE_DIR}/gps_time.cpp
@@ -43,6 +52,8 @@ add_executable(birdseye_tests
   ${BIRDSEYE_DIR}/crc32.cpp
   ${BIRDSEYE_DIR}/sd_access_policy.cpp
   ${BIRDSEYE_DIR}/lap_format.cpp
+  ${BIRDSEYE_DIR}/local_time.cpp
+  ${BIRDSEYE_DIR}/setting_parse.cpp
   ${BIRDSEYE_DIR}/tach_filter.cpp
   ${BIRDSEYE_DIR}/camera_fsm.cpp
   ${BIRDSEYE_DIR}/idle_policy.cpp
@@ -57,6 +68,13 @@ add_executable(birdseye_tests
   ${BIRDSEYE_DIR}/crossing_pattern.cpp
   ${BIRDSEYE_DIR}/course_creator.cpp
   ${BIRDSEYE_DIR}/track_json.cpp
+  ${BIRDSEYE_DIR}/led_frame.cpp
+  ${BIRDSEYE_DIR}/led_modes.cpp
+  ${BIRDSEYE_DIR}/led_status.cpp
+  ${BIRDSEYE_DIR}/led_animations.cpp
+  ${BIRDSEYE_DIR}/sector_purple.cpp
+  ${BIRDSEYE_DIR}/ble_stream.cpp
+  ${BIRDSEYE_DIR}/loop_profile.cpp
 )
 
 target_include_directories(birdseye_tests PRIVATE
