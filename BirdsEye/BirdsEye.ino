@@ -187,10 +187,16 @@ char settingDeviceName[32] = "BirdsEye";
 // It never overrides what is actually detected.
 bool settingRaceModePrefSprint = false;
 // NeoPixel strip (plan 0006): global brightness cap (0-255, 0 = LEDs
-// disabled entirely) and the rev limit (true RPM) the LED scale/flasher
+// disabled entirely) and the target RPM (true RPM) the LED scale/flasher
 // are anchored to. Read at boot only, like every other setting.
+//
+// settingTargetRpm was `settingRevLimit` / the `rev_limit` key until plan
+// 0012. It is the SHIFT point — where the driver wants to know the engine
+// is at its working ceiling — and never was a limiter; settingOverrevLimit
+// below is the real limit. The old name taught the wrong thing to
+// everyone who opened SETTINGS.json, so both the key and the global moved.
 uint8_t settingLedBrightness = 64;
-int settingRevLimit = 15000;
+int settingTargetRpm = 15000;
 // Plan 0007: the PROBLEM limit — an engine at overrev_limit is broken,
 // not just at its ceiling. 0 = disabled. And the Temp1 (EGT) alert
 // threshold in Celsius for the right status LED.
@@ -208,6 +214,19 @@ int16_t settingUtcOffsetMin = 0;
 uint8_t settingLedBrightnessNight = 16;
 uint8_t settingLedDayStartHour = 7;
 uint8_t settingLedNightStartHour = 19;
+// Plan 0012: the speed the 9-px bar scales against on a session with no
+// tachometer (mph, stored in mph — the companion app converts for
+// display), and what each status LED is assigned to show. The defaults
+// reproduce the pre-0012 hardcoded pair on a SensorEgg build; a stock
+// build gets the lap indicator on the right instead of a Temp1 readout
+// with no probe behind it.
+int settingTargetSpeedMph = 60;
+led_status::Mode settingLedStatusLeft = led_status::Mode::kRpm;
+#if BIRDSEYE_ENABLE_SENSOREGG
+led_status::Mode settingLedStatusRight = led_status::Mode::kEgt;
+#else
+led_status::Mode settingLedStatusRight = led_status::Mode::kLap;
+#endif
 
 // Track manifest for proximity detection
 TrackManifestEntry trackManifest[MAX_LOCATIONS];
@@ -1049,7 +1068,7 @@ void setup() {
     //
     // That idiom needs setting_parse::parseIntSetting, not atoi(): atoi
     // answers 0 for "" and for "garbage", and for every setting below
-    // EXCEPT rev_limit and temp1_alert_c, 0 is inside the accepted range.
+    // EXCEPT target_rpm and temp1_alert_c, 0 is inside the accepted range.
     // led_brightness 0 disables the LEDs and never raises the 5 V boost
     // rail, so a blank value read as a deliberate "off" and looked exactly
     // like dead hardware. parseIntSetting rejects a non-integer outright,
@@ -1060,21 +1079,29 @@ void setup() {
       const int b = parsedSetting;
       if (b >= 0 && b <= 255) settingLedBrightness = (uint8_t)b;
     }
-    if (getSetting("rev_limit", buf, sizeof(buf)) &&
+    // The shift/warning point. `rev_limit` before plan 0012 — devices
+    // upgrading get the old value migrated into the new key by
+    // ensureDefaultSettings(), so this only ever reads target_rpm.
+    if (getSetting("target_rpm", buf, sizeof(buf)) &&
         setting_parse::parseIntSetting(buf, &parsedSetting)) {
       const int r = parsedSetting;
       // Floor keeps a garbled value from parking the scale at zero;
       // ceiling matches the tach filter's ~20k true-RPM limit.
-      if (r >= 1000 && r <= 20000) settingRevLimit = r;
+      if (r >= 1000 && r <= 20000) settingTargetRpm = r;
     }
     if (getSetting("overrev_limit", buf, sizeof(buf)) &&
         setting_parse::parseIntSetting(buf, &parsedSetting)) {
       const int r = parsedSetting;
       // 0 (the default) disables the whole-chain overrev flash; any
-      // other value clamps to the same band as rev_limit.
+      // other value clamps to the same band as target_rpm.
       if (r == 0) settingOverrevLimit = 0;
       else if (r >= 1000 && r <= 20000) settingOverrevLimit = r;
     }
+#if BIRDSEYE_ENABLE_SENSOREGG
+    // SensorEgg builds only (plan 0012). ensureDefaultSettings() writes
+    // the key on the same condition, so on a stock image the key is not
+    // in the file and the compiled-in default stands unused — the `egt`
+    // status mode renders dark there regardless.
     if (getSetting("temp1_alert_c", buf, sizeof(buf)) &&
         setting_parse::parseIntSetting(buf, &parsedSetting)) {
       const int t = parsedSetting;
@@ -1082,6 +1109,7 @@ void setup() {
       // can't latch the alert at power-on; ceiling past any real EGT.
       if (t >= 50 && t <= 1200) settingTemp1AlertC = t;
     }
+#endif
     // Local time (plan 0010). The band is the pure unit's, not a literal
     // here, so ±14 h has one home. Out of band keeps the 0 default —
     // i.e. UTC — which is exactly the pre-0010 behaviour.
@@ -1104,6 +1132,33 @@ void setup() {
         setting_parse::parseIntSetting(buf, &parsedSetting)) {
       const int h = parsedSetting;
       if (h >= 0 && h <= 23) settingLedNightStartHour = (uint8_t)h;
+    }
+    // Plan 0012: the speed the LED bar scales against when a session has
+    // no tachometer, in mph.
+    if (getSetting("target_speed_mph", buf, sizeof(buf)) &&
+        setting_parse::parseIntSetting(buf, &parsedSetting)) {
+      const int v = parsedSetting;
+      // Floor 5, not 0: renderScale()'s span guard blanks the bar on a
+      // zero ceiling, which looks exactly like dead hardware — the same
+      // failure mode parseIntSetting exists to prevent for led_brightness.
+      if (v >= 5 && v <= 250) settingTargetSpeedMph = v;
+    }
+    // Status-LED assignment (plan 0012). STRICT parse on purpose: an
+    // unknown or blank mode keeps the compiled-in default rather than
+    // silently darkening a status LED or picking a different one. A mode
+    // this build cannot render (`egt` with no SensorEgg support) still
+    // parses and still round-trips to the companion app — only the
+    // rendering is gated.
+    {
+      led_status::Mode parsedMode;
+      if (getSetting("led_status_left", buf, sizeof(buf)) &&
+          led_status::parseMode(buf, &parsedMode)) {
+        settingLedStatusLeft = parsedMode;
+      }
+      if (getSetting("led_status_right", buf, sizeof(buf)) &&
+          led_status::parseMode(buf, &parsedMode)) {
+        settingLedStatusRight = parsedMode;
+      }
     }
     crossingThresholdMeters = settingLapDetectionDistance;
     debug(F("Settings loaded: lap_dist="));

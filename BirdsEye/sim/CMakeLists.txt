@@ -154,6 +154,7 @@ set(SIM_CORE_SOURCES
   ${BIRDSEYE_DIR}/led_animations.cpp
   ${BIRDSEYE_DIR}/led_frame.cpp
   ${BIRDSEYE_DIR}/led_modes.cpp
+  ${BIRDSEYE_DIR}/led_status.cpp
   ${BIRDSEYE_DIR}/sat_bars.cpp
   ${BIRDSEYE_DIR}/sd_access_policy.cpp
   ${BIRDSEYE_DIR}/sd_format_page.cpp

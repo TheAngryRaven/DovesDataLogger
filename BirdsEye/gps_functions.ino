@@ -540,6 +540,7 @@ void GPS_LOOP() {
         dtostrf(accelY, 1, 3, accelYStr);
         dtostrf(accelZ, 1, 3, accelZStr);
 
+#if BIRDSEYE_ENABLE_SENSOREGG
         // SensorEgg wireless EGT (Temp1) + cold junction (Junction1) +
         // aux intake-air temp (Temp2, v2 eggs), degC. Stale link or
         // egg-reported invalid -> literal "nan" so a dropout is a
@@ -551,6 +552,14 @@ void GPS_LOOP() {
         // columns previously survived that only because dtostrf(NaN)
         // emits "nan" and isNumericString rejects it into the same
         // fallback - luck, not design.)
+        //
+        // SENSOREGG BUILDS ONLY since plan 0012. Until then these three
+        // columns were written on every channel, as the literal "nan"
+        // on a stock image, so that the log shape never forked. That
+        // rule is deliberately retired: three dead columns on every row
+        // of every stock log paid for nothing. Readers key the data
+        // section off its own CSV header line, where all three are
+        // optional, so both shapes parse.
         char temp1Str[12], junc1Str[12], temp2Str[12];
         const float snapEgtC = sensoreggEgtC();
         const float snapJuncC = sensoreggJunctionC();
@@ -579,6 +588,7 @@ void GPS_LOOP() {
             strcpy(temp2Str, "nan");
           }
         }
+#endif  // BIRDSEYE_ENABLE_SENSOREGG
 
         // dtostrf() can produce garbage (empty, too-long, non-numeric) on
         // some BSPs when given NaN/Inf even though the sample passed
@@ -602,11 +612,21 @@ void GPS_LOOP() {
           gps_time::u64ToDecimalString(getGpsUnixTimestampMillis(),
                                         timestampStr, sizeof(timestampStr));
 
+          // The two row shapes. Keep them adjacent: they and the CSV
+          // header below are the only three places the column list
+          // exists, and they have to agree.
+#if BIRDSEYE_ENABLE_SENSOREGG
           snprintf(csvLine, sizeof(csvLine), "%s,%d,%s,%s,%s,%s,%s,%s,%s,%d,%s,%s,%s,%s,%s,%s",
                    timestampStr, snapSats, hdopStr, latStr, lngStr,
                    speedStr, altStr, headingStr, hAccStr,
                    tachLastReported, accelXStr, accelYStr, accelZStr,
                    temp1Str, junc1Str, temp2Str);
+#else
+          snprintf(csvLine, sizeof(csvLine), "%s,%d,%s,%s,%s,%s,%s,%s,%s,%d,%s,%s,%s",
+                   timestampStr, snapSats, hdopStr, latStr, lngStr,
+                   speedStr, altStr, headingStr, hAccStr,
+                   tachLastReported, accelXStr, accelYStr, accelZStr);
+#endif
 
           size_t written = dataFile.println(csvLine);
           if (written == 0) {
@@ -690,8 +710,15 @@ void GPS_LOOP() {
             dataFile.close();
             releaseSDAccess(SD_ACCESS_LOGGING);
           } else {
-            // Cursor is now at exactly DOVEX_HEADER_SIZE
+            // Cursor is now at exactly DOVEX_HEADER_SIZE.
+            // The trailing Temp1/Junction1/Temp2 columns exist only on a
+            // SensorEgg build (plan 0012) — must match the two row
+            // shapes in the write path above.
+#if BIRDSEYE_ENABLE_SENSOREGG
             dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z,Temp1,Junction1,Temp2"));
+#else
+            dataFile.println(F("timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x,accel_y,accel_z"));
+#endif
             debugln(F("CSV header written"));
             sdDataLogInitComplete = true;
           }

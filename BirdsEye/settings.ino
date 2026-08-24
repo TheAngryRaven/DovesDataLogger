@@ -114,6 +114,26 @@ bool createDefaultSettings() {
  * Called when settings file already exists to handle firmware upgrades that add new keys.
  */
 static void ensureDefaultSettings() {
+  // Plan 0012 renamed `rev_limit` to `target_rpm`. Migrate BEFORE the
+  // defaults table runs: the table only writes a key that is missing, so
+  // once target_rpm exists it is left alone — but if we let the table go
+  // first it would stamp the 15000 default over a user's tuned 7550 and
+  // the old value would be gone. The old key is only dropped once the
+  // new one is confirmed written, so a failed or refused write leaves the
+  // device exactly as it was rather than silently resetting its shift
+  // point.
+  {
+    char legacyBuf[48];
+    if (!getSetting("target_rpm", legacyBuf, sizeof(legacyBuf)) &&
+        getSetting("rev_limit", legacyBuf, sizeof(legacyBuf))) {
+      debug(F("Settings: migrating rev_limit -> target_rpm = "));
+      debugln(legacyBuf);
+      if (setSetting("target_rpm", legacyBuf)) {
+        removeSetting("rev_limit");
+      }
+    }
+  }
+
   // Table of all expected settings with their defaults
   static const struct { const char* key; const char* defaultValue; } defaults[] = {
     { "driver_name", "Driver" },
@@ -143,11 +163,33 @@ static void ensureDefaultSettings() {
     // BIRDSEYE_ENABLE_NEOPIXEL defaults to 1, so these are live
     // settings on a stock logger, not beta-only bookkeeping.
     { "led_brightness", "64" },  // global cap 0-255; 0 = LEDs disabled
-    { "rev_limit", "15000" },    // true RPM: LED scale ceiling + rev flasher + OVER REV header
+    // The SHIFT/warning point, not a limiter (plan 0012 renamed it from
+    // "rev_limit", which taught every new user the wrong thing —
+    // overrev_limit below is the actual problem limit). LED scale
+    // ceiling + the `rpm` status-LED flasher.
+    { "target_rpm", "15000" },
     // Plan 0007: the PROBLEM limit (0 = disabled) — whole LED chain
-    // flashes red past it; and the Temp1 alert threshold in Celsius.
+    // flashes red past it, and the tach page's OVER REV header.
     { "overrev_limit", "0" },
+#if BIRDSEYE_ENABLE_SENSOREGG
+    // Temp1 alert threshold in Celsius. SensorEgg builds only (plan
+    // 0012): with the POC compiled out there is no probe to have a
+    // threshold for, and the key would just spend settings-file bytes
+    // on every stock device.
     { "temp1_alert_c", "650" },
+#endif
+    // Plan 0012: what each status LED shows, and the speed the 9-px bar
+    // scales against on a session with no tachometer. Mode tokens are
+    // led_status::modeName(): off / rpm / speed / gps / camera / lap /
+    // sector / egt. `egt` renders dark on a build without SensorEgg
+    // support — the setting still round-trips to the companion app.
+    { "led_status_left", "rpm" },
+#if BIRDSEYE_ENABLE_SENSOREGG
+    { "led_status_right", "egt" },
+#else
+    { "led_status_right", "lap" },
+#endif
+    { "target_speed_mph", "60" },  // mph on device; the app converts
     // Plan 0010: minutes east of UTC (US Central standard = -360, India
     // = 330). PRESENTATION ONLY — logged timestamps stay UTC. The only
     // consumer today is the LED day/night brightness swap below, which
@@ -439,4 +481,58 @@ static bool setSettingInner(const char* key, const char* value, bool healCorrupt
 
 bool setSetting(const char* key, const char* value) {
   return setSettingInner(key, value, /*healCorrupt=*/true);
+}
+
+bool removeSetting(const char* key) {
+  if (!sdSetupSuccess) return false;
+
+  if (!acquireSDAccess(SD_ACCESS_TRACK_PARSE)) {
+    debugln(F("Settings: Cannot acquire SD for remove"));
+    return false;
+  }
+
+  settingsJson.clear();
+
+  File settingsFile;
+  settingsFile.open(SETTINGS_FILE_PATH, O_READ);
+  if (!settingsFile) {
+    releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+    return false;  // nothing to remove from
+  }
+  int bytesRead = settingsFile.read(settingsFileBuffer, sizeof(settingsFileBuffer) - 1);
+  settingsFile.close();
+  if (bytesRead <= 0) {
+    releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+    return false;
+  }
+  settingsFileBuffer[bytesRead] = '\0';
+  DeserializationError err = deserializeJson(settingsJson, settingsFileBuffer);
+  if (err != DeserializationError::Ok) {
+    debug(F("Settings: Parse error on remove: "));
+    debugln(err.c_str());
+    releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+    return false;  // deliberately NOT healed here — see the header note
+  }
+
+  if (!settingsJson.containsKey(key)) {
+    releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+    return true;  // already gone: the caller's post-condition holds
+  }
+  settingsJson.remove(key);
+
+  // No size guard needed: a removal can only shrink the file, so it can
+  // never cross the read cap that setSettingInner() has to defend.
+  settingsFile.open(SETTINGS_FILE_PATH, O_WRITE | O_CREAT | O_TRUNC);
+  if (!settingsFile) {
+    debugln(F("Settings: Failed to open file for remove"));
+    releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+    return false;
+  }
+  serializeJson(settingsJson, settingsFile);
+  settingsFile.close();
+  releaseSDAccess(SD_ACCESS_TRACK_PARSE);
+
+  debug(F("Settings: Removed "));
+  debugln(key);
+  return true;
 }

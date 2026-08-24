@@ -134,14 +134,24 @@ to the matching `*_LOOP()`.
   `Temp1`/`Junction1`/`Temp2` columns are written as `nan` so the log
   format stays identical across channels.
 - **NeoPixel strip** (`neopixel` + the `led_frame` / `led_modes` /
-  `led_animations` / `sector_purple` pure units) — 11 WS2812 pixels on
-  the NFC pads (converted to GPIO by a one-time, one-way UICR write on
-  first flag-on boot): two status alert LEDs flanking a 9-px strip that
-  shows an RPM scale until pace is meaningful and then a pace pip
-  (slower = left of center in red, faster = right in green), plus a
-  boot animation and a purple celebration when a session-best sector is
-  set (detected race-free against the lap timer's lap-line best-update
-  by snapshotting bests at sector open). One rule everything obeys: a
+  `led_status` / `led_animations` / `sector_purple` pure units) — 11
+  WS2812 pixels on the NFC pads (converted to GPIO by a one-time,
+  one-way UICR write on first flag-on boot): two status LEDs flanking a
+  9-px strip. The strip shows a scale until pace is meaningful and then
+  a pace pip (slower = left of center in red, faster = right in green);
+  the scale is RPM on a session with a tachometer and target *speed* on
+  one without, because an RPM bar on a tach-less car is nine dark
+  pixels until the first lap lands. The two status LEDs are **assigned
+  by the user** from the companion app — target RPM, target speed, GPS
+  lock, camera sync, last lap, last sector, EGT, or off — with the GPS
+  and camera modes staying lit on the main menu, since "am I ready to
+  drive" is a paddock question. The lap and sector indicators compare
+  against the *previous* lap or sector rather than the session best; a
+  best-based one only ever answers purple or red. There is also a boot
+  animation, and a two-stage purple celebration for a session-best
+  sector or lap (both detected race-free against the lap timer's
+  lap-line best-update by snapshotting bests at sector and lap open).
+  One rule everything obeys: a
   global brightness cap applied at a single choke point — no LED channel
   ever exceeds it. Which cap is in force is a local-time decision:
   `led_brightness` by day, `led_brightness_night` after dark (see

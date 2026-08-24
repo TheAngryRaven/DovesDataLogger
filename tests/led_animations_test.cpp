@@ -157,3 +157,70 @@ TEST_CASE("golden frames: fixed (t, seed) triplets stay stable") {
   }
   CHECK(base >= kPixelCount / 2);
 }
+
+///////////////////////////////////////////
+// Plan 0012: the session-best-LAP celebration. Two wave passes and a
+// longer run, sharing one renderer with the sector version.
+///////////////////////////////////////////
+
+TEST_CASE("renderPurpleLap: lifecycle, determinism, and it outlasts the sector one") {
+  led_frame::Frame a, b;
+  for (uint32_t t : {0u, 200u, 399u, 500u, 1000u, 1800u, 2300u, 2599u}) {
+    CHECK(led_animations::renderPurpleLap(t, 0xBEEF, a));
+    CHECK(led_animations::renderPurpleLap(t, 0xBEEF, b));
+    for (int i = 0; i < led_frame::kPixelCount; i++) {
+      CHECK(a.px[i].r == b.px[i].r);
+      CHECK(a.px[i].g == b.px[i].g);
+      CHECK(a.px[i].b == b.px[i].b);
+    }
+  }
+
+  // Runs past where the sector animation has already finished — that is
+  // the whole point of having two.
+  CHECK(led_animations::renderPurpleLap(led_animations::kPurpleDurationMs,
+                                        0xBEEF, a));
+  // ...and stops at its own duration, with the frame cleared.
+  CHECK_FALSE(led_animations::renderPurpleLap(
+      led_animations::kPurpleLapDurationMs, 0xBEEF, a));
+  for (int i = 0; i < led_frame::kPixelCount; i++) {
+    CHECK(a.px[i].r == 0);
+    CHECK(a.px[i].g == 0);
+    CHECK(a.px[i].b == 0);
+  }
+  CHECK_FALSE(led_animations::renderPurpleLap(999999, 0xBEEF, a));
+}
+
+TEST_CASE("renderPurpleLap: the second wave really is a second pass") {
+  // Early in a pass the chain ends are dark (the wave has not reached
+  // them); late in a pass they are lit. If the lap version collapsed
+  // into a single long sweep, the end pixel would light once and stay
+  // lit — this catches that.
+  led_frame::Frame f;
+  led_animations::renderPurpleLap(0, 0xBEEF, f);
+  const bool endDarkPass1 = (f.px[0].r == 0 && f.px[0].b == 0);
+  led_animations::renderPurpleLap(led_animations::kPurpleLapWaveMs - 1, 0xBEEF, f);
+  const bool endLitPass1 = (f.px[0].r != 0 || f.px[0].b != 0);
+  led_animations::renderPurpleLap(led_animations::kPurpleLapWaveMs, 0xBEEF, f);
+  const bool endDarkPass2 = (f.px[0].r == 0 && f.px[0].b == 0);
+
+  CHECK(endDarkPass1);
+  CHECK(endLitPass1);
+  CHECK(endDarkPass2);  // the sweep restarted
+}
+
+TEST_CASE("both purple animations share one core for the first wave") {
+  // renderPurple() must be untouched by the lap variant's arrival — the
+  // golden case above pins its exact frames, and this pins that the lap
+  // version is genuinely the same renderer rather than a fork that can
+  // drift.
+  for (uint32_t t : {0u, 100u, 250u, 399u}) {
+    led_frame::Frame sector, lap;
+    led_animations::renderPurple(t, 0x1234, sector);
+    led_animations::renderPurpleLap(t, 0x1234, lap);
+    for (int i = 0; i < led_frame::kPixelCount; i++) {
+      CHECK(sector.px[i].r == lap.px[i].r);
+      CHECK(sector.px[i].g == lap.px[i].g);
+      CHECK(sector.px[i].b == lap.px[i].b);
+    }
+  }
+}

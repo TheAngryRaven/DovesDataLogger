@@ -132,6 +132,7 @@ void NEOPIXEL_LOOP() {}
 void NEOPIXEL_SLEEP() {}
 void NEOPIXEL_WAKE() {}
 void neopixelNotifyPurpleSector() {}
+void neopixelNotifyPurpleLap() {}
 
 // ---- profiling.ino surface ----
 

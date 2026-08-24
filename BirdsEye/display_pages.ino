@@ -823,7 +823,7 @@ void displayPage_tachometer() {
 
   // OVER REV header means ACTUAL overrev (plan 0007): it trips only at
   // the PROBLEM limit, and only when that limit is enabled — the
-  // rev_limit warning flag is the left LED's job, not the header's.
+  // target_rpm warning flag is a status LED's job, not the header's.
   // (Was hardcoded >9999, which a 7600-limiter engine could never reach.)
   if (settingOverrevLimit > 0 && tachLastReported >= settingOverrevLimit) {
     display.println(F("Engine RPM *OVER REV*"));

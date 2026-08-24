@@ -313,3 +313,69 @@ TEST_CASE("search pip: one green pixel, bounces to both ends, deterministic") {
   uint32_t const q = led_modes::kSearchBouncePeriodMs / 4;
   CHECK(litIndex(q) == litIndex(led_modes::kSearchBouncePeriodMs - q));
 }
+
+///////////////////////////////////////////
+// Plan 0012: the speed bar's no-red contract, flashOn(), and the new
+// Source tag.
+///////////////////////////////////////////
+
+TEST_CASE("kSpeedRedFrac lights no red pixel at any fill") {
+  // The RPM bar's red half means "approaching the limiter". Reaching a
+  // TARGET speed is the goal, not a hazard, so the speed bar is green
+  // all the way up — redFrom lands at kStripCount, which no lit index
+  // can reach. If someone lowers kSpeedRedFrac this fails loudly.
+  const led_modes::ScaleSpec spec = {0.0f, 60.0f, led_modes::kSpeedRedFrac,
+                                     led_frame::kGreen, led_frame::kRed};
+  for (float v = 0.0f; v <= 70.0f; v += 1.0f) {
+    led_frame::Rgb out[led_frame::kStripCount];
+    led_modes::renderScale(v, spec, out);
+    for (int i = 0; i < led_frame::kStripCount; i++) {
+      const bool lit = !(out[i].r == 0 && out[i].g == 0 && out[i].b == 0);
+      if (lit) {
+        CHECK(out[i].g == led_frame::kGreen.g);
+        CHECK(out[i].r == 0);
+      }
+    }
+  }
+  // ...and a full bar really is full, not one pixel short.
+  led_frame::Rgb full[led_frame::kStripCount];
+  led_modes::renderScale(60.0f, spec, full);
+  for (int i = 0; i < led_frame::kStripCount; i++) {
+    CHECK(full[i].g == led_frame::kGreen.g);
+  }
+}
+
+TEST_CASE("flashOn: zero half-period is solid, not a divide by zero") {
+  CHECK(led_modes::flashOn(0, 0));
+  CHECK(led_modes::flashOn(999999, 0));
+}
+
+TEST_CASE("flashOn: phase flips at every half-period boundary") {
+  CHECK(led_modes::flashOn(0, 100));
+  CHECK(led_modes::flashOn(99, 100));
+  CHECK_FALSE(led_modes::flashOn(100, 100));
+  CHECK_FALSE(led_modes::flashOn(199, 100));
+  CHECK(led_modes::flashOn(200, 100));
+  // A different rate is a different phase at the same instant — this is
+  // what lets two LEDs flashing for different reasons be told apart.
+  CHECK(led_modes::flashOn(400, 400) == false);
+  CHECK(led_modes::flashOn(400, 100) == true);
+}
+
+TEST_CASE("evalStatus treats a new Source tag like any other non-kNone") {
+  // Source is a self-description tag: only kNone is special-cased.
+  // Adding kSpeedMph must not change evaluation at all.
+  led_modes::StatusAction rpmA = {led_modes::Source::kRpm, 60.0f, 58.0f,
+                                  led_frame::kRed, 0, led_frame::kOff};
+  led_modes::StatusAction spdA = {led_modes::Source::kSpeedMph, 60.0f, 58.0f,
+                                  led_frame::kRed, 0, led_frame::kOff};
+  led_modes::StatusState s1, s2;
+  for (float v : {50.0f, 60.0f, 59.0f, 57.0f, 61.0f}) {
+    const led_frame::Rgb a = led_modes::evalStatus(rpmA, s1, v, true, 0);
+    const led_frame::Rgb b = led_modes::evalStatus(spdA, s2, v, true, 0);
+    CHECK(a.r == b.r);
+    CHECK(a.g == b.g);
+    CHECK(a.b == b.b);
+    CHECK(s1.active == s2.active);
+  }
+}

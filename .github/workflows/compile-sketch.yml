@@ -199,3 +199,53 @@ jobs:
           name: size-deltas-${{ matrix.board.name }}
           path: sketches-reports
           if-no-files-found: ignore
+
+  # Flag-OFF compile, for BETA-targeted work only.
+  #
+  # The `compile` job above picks ONE flag set per PR: BETA-targeted work
+  # builds with SensorEgg + profiling ON, everything else with them off.
+  # That means code inside a `#else` arm of one of those flags reaches
+  # master having never been through a compiler — and plan 0012 added
+  # several (the DOVEX row/header shapes and the settings defaults now
+  # differ by channel). This job closes that hole from the BETA side.
+  #
+  # One board is enough: the two arms here differ only in feature flags,
+  # and the sense/non-sense split is already covered above.
+  # LAPTIMER_REF deliberately stays BETA so the flags are the ONLY
+  # variable — pinning the release tag as well would fail on BETA-era
+  # library APIs and tell us nothing about the flags.
+  compile-stock-arm:
+    name: xiao-nrf52840-sense (flags off)
+    if: >-
+      github.base_ref == 'BETA' || github.head_ref == 'BETA' ||
+      github.ref_name == 'BETA'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install adafruit-nrfutil
+        run: pip install --user adafruit-nrfutil
+
+      - name: Compile sketch with the feature flags off
+        uses: arduino/compile-sketches@v1
+        with:
+          fqbn: Seeeduino:nrf52:xiaonRF52840Sense
+          platforms: |
+            - name: Seeeduino:nrf52
+              source-url: https://files.seeedstudio.com/arduino/package_seeeduino_boards_index.json
+          libraries: |
+            - name: ArduinoJson
+            - name: SdFat - Adafruit Fork
+            - name: Adafruit GFX Library
+            - name: Adafruit SH110X
+            - name: Adafruit SSD1306
+            - name: SparkFun u-blox GNSS v3
+            - name: Seeed Arduino LSM6DS3
+            - name: ArxTypeTraits
+            - name: Adafruit NeoPixel
+            - source-url: https://github.com/TheAngryRaven/DovesLapTimer.git
+              version: BETA
+          cli-compile-flags: |
+            - --build-property
+            - compiler.cpp.extra_flags=-DBIRDSEYE_BOARD_SENSE -DSERIAL_BUFFER_SIZE=256 -DDOVES_DISABLE_DEBUG

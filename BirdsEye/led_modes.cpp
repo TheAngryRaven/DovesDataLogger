@@ -79,7 +79,7 @@ led_frame::Rgb evalStatus(const StatusAction& a, StatusState& s, float value,
     return a.invalidColor;
   }
   // A caller can hand us clearBelow ABOVE threshold — overrev_limit and
-  // rev_limit clamp independently, so overrev_limit <= rev_limit *
+  // target_rpm clamp independently, so overrev_limit <= target_rpm *
   // kRevClearFrac makes the overrev action's release point sit above its
   // own trip point. Left alone, a value in that inverted band sets the
   // latch on one frame and clears it on the next: a 15 Hz strobe of the
@@ -96,11 +96,14 @@ led_frame::Rgb evalStatus(const StatusAction& a, StatusState& s, float value,
   if (!s.active) {
     return led_frame::kOff;
   }
-  uint16_t const half = a.flashHalfPeriodMs;
-  if (half == 0) {
-    return a.color;  // no flash configured: solid
+  return flashOn(nowMs, a.flashHalfPeriodMs) ? a.color : led_frame::kOff;
+}
+
+bool flashOn(uint32_t nowMs, uint16_t halfPeriodMs) {
+  if (halfPeriodMs == 0) {
+    return true;  // no flash configured: solid
   }
-  return ((nowMs / half) & 1U) == 0 ? a.color : led_frame::kOff;
+  return ((nowMs / halfPeriodMs) & 1U) == 0;
 }
 
 void renderSearchPip(uint32_t tMs, Rgb out[kStripCount]) {
