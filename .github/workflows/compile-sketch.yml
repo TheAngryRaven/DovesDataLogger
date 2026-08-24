@@ -246,6 +246,8 @@ jobs:
             - name: Adafruit NeoPixel
             - source-url: https://github.com/TheAngryRaven/DovesLapTimer.git
               version: BETA
+          sketch-paths: |
+            - BirdsEye
           cli-compile-flags: |
             - --build-property
             - compiler.cpp.extra_flags=-DBIRDSEYE_BOARD_SENSE -DSERIAL_BUFFER_SIZE=256 -DDOVES_DISABLE_DEBUG
