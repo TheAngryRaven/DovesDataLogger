@@ -624,7 +624,10 @@ loop()  ~250 Hz
   means the radio is saturated.
 - **The transfer page reports what it got**: live KB/s, the SD clock actually
   in force (`sdActiveSpiHz()` — the 8 MHz parked bump falls back to 2 MHz
-  silently), the negotiated link-layer PDU, and the ATT payload. Accessors
+  silently), the negotiated link-layer PDU, and the ATT payload, plus a
+  second line (plan 0012) with the **connection interval and PHY** live from
+  the connection object (`bleLinkIntervalUnits()` / `bleLinkPhy()`) — the
+  two levers the central decides and the device can only request. Accessors
   `bleTransferRateBps()` / `bleLinkDataLength()` / `bleLinkChunkSize()`. This
   exists because a 4x download regression was only noticeable as "the
   percentage is creeping".
@@ -1220,6 +1223,19 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   egg accepts no connections. **The camera link wins every tradeoff** —
   and scan duty is capped (test-enforced ≤45%) because SoftDevice
   scan-window ISRs defer the TIMER3 GPS drain (see subsystem 1).
+- **The scanner is RACE-GATED (plan 0012)**: `SENSOREGG_SETUP()` only
+  configures it; `SENSOREGG_LOOP()`'s reconcile starts the scan when
+  `raceActive` goes true (1 s throttle retries a refused start — the
+  reconcile replaced the self-heal as the start-retry path) and stops it
+  when the session ends. The always-on scan denied connection-event
+  extension and throttled BLE downloads to ~33 KB/s, and the EGT feed
+  only has race-time consumers anyway. `BLE_SETUP()` also calls
+  `SENSOREGG_SLEEP()` so a transfer session is guaranteed scan-free (no
+  wake needed — transfer exits reboot). The scan-callback `resume()` and
+  the self-heal kick are both gated on the same wanted condition so a
+  deferred callback can never resurrect a deliberately stopped scanner.
+  `SENSOREGG_WAKE()` now only clears the sleep gate (charging resume
+  lands on the menu — nothing to start).
 - **Scanner robustness (bench-proven, do not remove)**: (1)
   `Scanner.filterMSD(0xFFFF)` rejects ambient packets INLINE — Bluefruit
   self-resumes filtered reports, while an accepted report pauses scanning
@@ -1851,7 +1867,8 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | Camera pairing timeout | 120 s | `camera_fsm.h` |
 | SensorEgg staleness | 1000 ms (older → NaN/`---`) | `sensoregg_protocol.h` |
 | SensorEgg scan interval / window | 90 ms / 40 ms (≈44% duty, test-capped ≤45%), passive | `sensoregg_protocol.h` |
-| SensorEgg scanner self-heal | 30 s no packet → stop+start kick | `sensoregg_protocol.h` |
+| SensorEgg scanner lifetime | race sessions only (`raceActive`-gated; 1 s start-retry) | `sensoregg.ino` |
+| SensorEgg scanner self-heal | 30 s no packet → stop+start kick (while running) | `sensoregg_protocol.h` |
 | SensorEgg RSSI floor | −90 dBm | `sensoregg_protocol.h` |
 | SensorEgg pairing MAC | `SENSOREGG_MAC` (all-zeros = any egg) | `sensoregg.h` |
 | NeoPixel strip flag | `BIRDSEYE_ENABLE_NEOPIXEL`, default **1** on every channel since 4.1.0 | `project.h` |
