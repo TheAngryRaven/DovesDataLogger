@@ -121,7 +121,7 @@ CamLevel cameraLevel(bool paired, bool sessionActive, bool linkUp,
 led_frame::Rgb evalMode(Mode m, const Inputs& in, State& s, uint32_t nowMs) {
   switch (m) {
     case Mode::kRpm:
-      // Byte-for-byte the pre-0012 left status LED.
+      // Byte-for-byte the pre-0013 left status LED.
       return evalThreshold(led_modes::Source::kRpm, in.targetRpm,
                            in.targetRpm * led_modes::kRevClearFrac,
                            led_frame::kRed, led_modes::kRevFlashHalfPeriodMs,

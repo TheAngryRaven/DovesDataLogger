@@ -114,7 +114,7 @@ bool createDefaultSettings() {
  * Called when settings file already exists to handle firmware upgrades that add new keys.
  */
 static void ensureDefaultSettings() {
-  // Plan 0012 renamed `rev_limit` to `target_rpm`. Migrate BEFORE the
+  // Plan 0013 renamed `rev_limit` to `target_rpm`. Migrate BEFORE the
   // defaults table runs: the table only writes a key that is missing, so
   // once target_rpm exists it is left alone — but if we let the table go
   // first it would stamp the 15000 default over a user's tuned 7550 and
@@ -142,12 +142,12 @@ static void ensureDefaultSettings() {
     { "waypoint_speed", "30" },
     { "camera_serial", "" },  // empty = no Insta360 paired
     { "race_mode", "circuit" },  // tiebreak pref when circuit AND sprint tracks are in range
-    // Engine geometry for true RPM (plans 0003, 0012). spark_mode is the ONLY
+    // Engine geometry for true RPM (plans 0003, 0014). spark_mode is the ONLY
     // one of these two that reaches the RPM math — one clamp on one plug wire
     // sees one cylinder's ignition regardless of what the engine has.
     { "spark_mode", "wasted" },   // "wasted" = 1 spark/rev (2T or 4T wasted); "single" = 1 per 2 revs
     // The engine's ACTUAL cylinder count — no pickup-placement mind game, and
-    // no longer a divider (plan 0012). Descriptive: >1 means crank speed is
+    // no longer a divider (plan 0014). Descriptive: >1 means crank speed is
     // inferred from one cylinder's firing rate, which is what the settings UI
     // warns about.
     { "cylinder_count", "1" },
@@ -167,7 +167,7 @@ static void ensureDefaultSettings() {
     // BIRDSEYE_ENABLE_NEOPIXEL defaults to 1, so these are live
     // settings on a stock logger, not beta-only bookkeeping.
     { "led_brightness", "64" },  // global cap 0-255; 0 = LEDs disabled
-    // The SHIFT/warning point, not a limiter (plan 0012 renamed it from
+    // The SHIFT/warning point, not a limiter (plan 0013 renamed it from
     // "rev_limit", which taught every new user the wrong thing —
     // overrev_limit below is the actual problem limit). LED scale
     // ceiling + the `rpm` status-LED flasher.
@@ -177,12 +177,12 @@ static void ensureDefaultSettings() {
     { "overrev_limit", "0" },
 #if BIRDSEYE_ENABLE_SENSOREGG
     // Temp1 alert threshold in Celsius. SensorEgg builds only (plan
-    // 0012): with the POC compiled out there is no probe to have a
+    // 0013): with the POC compiled out there is no probe to have a
     // threshold for, and the key would just spend settings-file bytes
     // on every stock device.
     { "temp1_alert_c", "650" },
 #endif
-    // Plan 0012: what each status LED shows, and the speed the 9-px bar
+    // Plan 0013: what each status LED shows, and the speed the 9-px bar
     // scales against on a session with no tachometer. Mode tokens are
     // led_status::modeName(): off / rpm / speed / gps / camera / lap /
     // sector / egt. `egt` renders dark on a build without SensorEgg

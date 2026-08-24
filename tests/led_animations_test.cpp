@@ -159,7 +159,7 @@ TEST_CASE("golden frames: fixed (t, seed) triplets stay stable") {
 }
 
 ///////////////////////////////////////////
-// Plan 0012: the session-best-LAP celebration. Two wave passes and a
+// Plan 0013: the session-best-LAP celebration. Two wave passes and a
 // longer run, sharing one renderer with the sector version.
 ///////////////////////////////////////////
 

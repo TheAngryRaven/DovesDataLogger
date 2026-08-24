@@ -32,7 +32,7 @@
 // document returns NoMemory at 22 pairs regardless of how much was read).
 //
 // Adding settings keys is not free — see the measureJson() guard in
-// setSettingInner(), and subsystem 8 in CLAUDE.md. As of plan 0012 the
+// setSettingInner(), and subsystem 8 in CLAUDE.md. As of plan 0013 the
 // default file measures 570 bytes on a stock build (23 keys) and 592 on
 // a SensorEgg one (24), rising to 599/621 with the longest values every
 // key accepts, against a 1023-byte read cap. That is roughly sixteen

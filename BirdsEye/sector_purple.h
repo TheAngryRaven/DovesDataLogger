@@ -11,7 +11,7 @@
 // events into the celebration animation.
 //
 // NOTE ON THE NAME: this unit started life as purple-sector detection
-// only (plan 0006) and kept its filename through plan 0012, which added
+// only (plan 0006) and kept its filename through plan 0013, which added
 // the lap edge and the better/worse verdicts. Purple is now one of its
 // outputs, not its whole job. A rename is a clean standalone follow-up;
 // it was not worth burying the behaviour diff under file churn.
