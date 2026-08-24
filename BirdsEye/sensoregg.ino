@@ -57,7 +57,7 @@ static bool     eggHaveReading = false;
 static sensoregg_protocol::SeqMonitor eggSeqMon;  // zombie-egg detection
 
 static bool eggScannerRunning = false;
-static bool eggSetupDone = false;   // scanner configured — self-heal may (re)start it
+static bool eggSetupDone = false;   // scanner configured — SENSOREGG_LOOP may (re)start it
 // Sleep gate, read by the scan callback (BLE task): a report accepted just
 // before SENSOREGG_SLEEP() has its rx callback deferred, and the callback's
 // mandatory Scanner.resume() would restart the scan AFTER the stop (the
@@ -65,7 +65,26 @@ static bool eggSetupDone = false;   // scanner configured — self-heal may (re)
 // through the entire charging park. volatile: written on the main loop,
 // read in BLE task context.
 static volatile bool eggSleeping = false;
-static uint32_t eggLastKickMs = 0;  // last scanner self-heal kick (main loop)
+static uint32_t eggLastKickMs = 0;      // last scanner self-heal kick (main loop)
+static uint32_t eggLastStartTryMs = 0;  // last start attempt (retry throttle)
+
+// Throttle for retrying a start() the SoftDevice refused, so a persistent
+// refusal costs one SVC per second instead of one per ~4 ms loop iteration.
+static constexpr uint32_t kEggStartRetryMs = 1000;
+
+// RACE-GATED SCANNER (plan 0012). The scanner's 40-of-every-90 ms radio
+// claim is only paid while a race session is running — the one time the EGT
+// feed is actually consumed (DOVEX rows + the Temp pages are race-only).
+// Outside race mode the radio belongs to whoever needs it clean: the
+// always-on scan was measured throttling BLE file downloads to ~33 KB/s by
+// denying the transfer link's connection-event extension. raceActive is the
+// BirdsEye.ino session flag, visible via the .ino concatenation (same as
+// Bluefruit above). Read from the scan callback (BLE task) too — a plain
+// bool read is atomic on this core, and a stale read only delays the
+// stop/start by one report (the main-loop reconcile owns the real state).
+static bool eggScanWanted() {
+  return raceActive && !eggSleeping;
+}
 
 ///////////////////////////////////////////
 // SCAN CALLBACK (Bluefruit task context — copy bytes, resume, return)
@@ -116,11 +135,11 @@ static void sensoreggScanCallback(ble_gap_evt_adv_report_t* report) {
 
   // MANDATORY: without resume() the scanner halts after the first report
   // — symptom is exactly one reading then permanent silence,
-  // indistinguishable from a dead egg. Skipped while sleeping: this
-  // deferred callback may run AFTER SENSOREGG_SLEEP()'s stop, and resume()
-  // restarts the scan unconditionally — resurrecting the scanner the sleep
-  // just killed.
-  if (!eggSleeping) {
+  // indistinguishable from a dead egg. Skipped while the scan is not
+  // wanted (sleeping, or race over): this deferred callback may run AFTER
+  // a Scanner.stop(), and resume() restarts the scan unconditionally —
+  // resurrecting the scanner the stop just killed.
+  if (eggScanWanted()) {
     Bluefruit.Scanner.resume();
   }
 }
@@ -152,17 +171,16 @@ void SENSOREGG_SETUP() {
   // be magic-rejected in our callback, collapsing scan duty in bursts.
   Bluefruit.Scanner.filterMSD(sensoregg_protocol::kCompanyId);
   eggSetupDone = true;
-  eggScannerRunning = Bluefruit.Scanner.start(0);  // 0 = forever
 
-  if (eggScannerRunning) {
-    debugln(F("SensorEgg: passive scanner started"));
-  } else {
-    // Known unblock if the installed core refuses an observer without a
-    // central slot: Bluefruit.begin(1, 1) in bleCoreEnsureInit() (costs
-    // one unused central connection slot). Not taken by default — do not
-    // change the shared begin() without re-soaking the camera link.
-    debugln(F("SensorEgg: scanner FAILED to start (see begin(1,1) note)"));
-  }
+  // Deliberately NOT started here (plan 0012). The scanner used to run
+  // forever from boot; SENSOREGG_LOOP()'s reconcile now starts it when a
+  // race session begins and stops it when the session ends, so the menu,
+  // replay and (critically) BLE transfer mode never pay the 44% radio
+  // duty. If the SoftDevice ever refuses the race-time start, the known
+  // unblock is Bluefruit.begin(1, 1) in bleCoreEnsureInit() (costs one
+  // unused central connection slot) — do not change the shared begin()
+  // without re-soaking the camera link.
+  debugln(F("SensorEgg: passive scanner armed (race-gated)"));
 }
 
 void SENSOREGG_SLEEP() {
@@ -182,12 +200,11 @@ void SENSOREGG_SLEEP() {
 }
 
 void SENSOREGG_WAKE() {
-  // Charging-loop soft resume: the scanner config (callback, interval,
-  // filters) survives a stop, so a bare start() restores reception.
+  // Charging-loop soft resume: just clear the sleep gate. The scanner is
+  // race-gated (plan 0012) and a charging resume lands on the menu, so
+  // there is nothing to start here — SENSOREGG_LOOP()'s reconcile brings
+  // the scan up if a race session begins (the config survives a stop).
   eggSleeping = false;
-  if (eggSetupDone && !eggScannerRunning) {
-    eggScannerRunning = Bluefruit.Scanner.start(0);  // 0 = forever
-  }
 }
 
 void SENSOREGG_LOOP() {
@@ -209,19 +226,43 @@ void SENSOREGG_LOOP() {
     }
   }
 
+  // Race-gate reconcile (plan 0012): the scanner runs only while a race
+  // session is active. Runs every iteration so the scan comes up within
+  // one loop of race entry and goes down within one loop of the session
+  // ending. A start() the SoftDevice refuses (boot race, radio busy)
+  // leaves eggScannerRunning false and is retried on the 1 s throttle —
+  // this reconcile is now the start-retry path the self-heal below used
+  // to be. eggLastKickMs is stamped on every start so a fresh scan gets a
+  // full self-heal interval before its first kick.
+  if (eggSetupDone) {
+    const uint32_t now = millis();
+    if (eggScanWanted() && !eggScannerRunning) {
+      if (eggLastStartTryMs == 0 ||
+          (uint32_t)(now - eggLastStartTryMs) >= kEggStartRetryMs) {
+        eggLastStartTryMs = now;
+        eggLastKickMs = now;
+        eggScannerRunning = Bluefruit.Scanner.start(0);  // 0 = forever
+        debugln(eggScannerRunning ? F("SensorEgg: scanner started (race)")
+                                  : F("SensorEgg: scanner start refused"));
+      }
+    } else if (!eggScanWanted() && eggScannerRunning) {
+      Bluefruit.Scanner.stop();
+      eggScannerRunning = false;
+      eggLastStartTryMs = 0;
+      debugln(F("SensorEgg: scanner stopped (race over)"));
+    }
+  }
+
   // Scanner self-heal. The rx path only resumes scanning when our
   // deferred callback actually runs; a dropped callback would halt the
   // scanner silently and forever. If nothing has been accepted for
   // kScannerSelfHealMs, kick stop+start — harmless when the egg is just
   // off, curative when the scanner wedged. Throttled by its own stamp so
-  // an absent egg costs one kick per interval, not one per loop.
-  // Gated on eggSetupDone, NOT eggScannerRunning: a start() the SoftDevice
-  // rejected (boot race, charging-loop resume) leaves the scanner down, and
-  // this kick is the only retry path — gating on "running" made that state
-  // permanent until reboot. (SENSOREGG_LOOP never runs after
-  // SENSOREGG_SLEEP — shutdown parks or powers off — so the kick cannot
-  // resurrect a deliberately stopped scanner.)
-  if (eggSetupDone) {
+  // an absent egg costs one kick per interval, not one per loop. Gated on
+  // eggScannerRunning: with the scanner race-gated, "not running" outside
+  // a race is the intended state, and a refused race-time start is retried
+  // by the reconcile above — this kick only cures a wedge while running.
+  if (eggSetupDone && eggScannerRunning && eggScanWanted()) {
     const uint32_t now = millis();
     const uint32_t lastAlive = eggHaveReading ? eggRxMs : 0;
     if ((uint32_t)(now - lastAlive) >= sensoregg_protocol::kScannerSelfHealMs &&
