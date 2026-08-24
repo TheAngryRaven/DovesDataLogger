@@ -430,100 +430,86 @@ TEST_CASE("legacy - ignores dt entirely") {
 }
 
 // ---------------------------------------------------------------------------
-// revsPerPulse — engine geometry (plan 0003)
+// revsPerPulse — engine geometry (plans 0003, 0012)
+//
+// One sense wire, one clamp, one cylinder's ignition. The cylinder count is
+// NOT a term — it was, and on the shipped hardware that divided a V8's RPM
+// by eight.
 // ---------------------------------------------------------------------------
 
-TEST_CASE("revsPerPulse - the defaults reproduce the old hardcoded behaviour") {
-    // The single most important case: a device that has never been configured
-    // must read exactly as it did before these settings existed.
-    CHECK(revsPerPulse(1, true) == doctest::Approx(1.0f));
-}
-
-TEST_CASE("revsPerPulse - more cylinders means fewer revs per pulse") {
-    CHECK(revsPerPulse(2, true) == doctest::Approx(0.5f));
-    CHECK(revsPerPulse(4, true) == doctest::Approx(0.25f));
+TEST_CASE("revsPerPulse - a plug firing every rev is one rev per pulse") {
+    // 2-stroke, or 4-stroke wasted spark: unchanged from the original
+    // hardcoded behaviour, which is what an unconfigured device must read.
+    CHECK(revsPerPulse(true) == doctest::Approx(1.0f));
 }
 
 TEST_CASE("revsPerPulse - single-fire sees one spark per two revolutions") {
-    // A 4-stroke without wasted spark fires half as often, so each pulse
-    // accounts for two revolutions rather than one.
-    CHECK(revsPerPulse(1, false) == doctest::Approx(2.0f));
-    CHECK(revsPerPulse(2, false) == doctest::Approx(1.0f));
-    CHECK(revsPerPulse(4, false) == doctest::Approx(0.5f));
+    // A 4-stroke without wasted spark (traditional distributor/magneto) fires
+    // half as often, so each pulse accounts for two revolutions.
+    CHECK(revsPerPulse(false) == doctest::Approx(2.0f));
 }
 
-TEST_CASE("revsPerPulse - a nonsensical cylinder count degrades, never divides by zero") {
-    // A corrupt or hand-edited SETTINGS.json must not produce inf/NaN RPM.
-    CHECK(revsPerPulse(0, true) == doctest::Approx(1.0f));
-    CHECK(revsPerPulse(-3, true) == doctest::Approx(1.0f));
-    CHECK(revsPerPulse(9999, true) == doctest::Approx(1.0f / (float)kMaxCylinders));
-    CHECK(std::isfinite(revsPerPulse(0, false)));
+TEST_CASE("revsPerPulse - the V8 case the cylinder divider used to break") {
+    // THE regression this exists for. A V8 on a traditional magneto, clamped
+    // on ONE plug wire: that plug fires once per two crank revolutions, so
+    // 1500 pulses/min is 3000 RPM — on a V8 exactly as on a single. The old
+    // `pulses_per_rev = cylinders x sparkFactor` answered 375.
+    const float periodUs = 60.0e6f / 1500.0f;  // 1500 pulses per minute
+    CHECK(rpmFromMeanPeriodUs(periodUs, revsPerPulse(false)) == doctest::Approx(3000.0f));
 }
 
-TEST_CASE("revsPerPulse - end to end, a twin reads half a single's RPM") {
-    // 6000 pulse-RPM measured at the pickup: on a single that IS 6000 rev/min,
-    // on a wasted-spark twin the crank is only turning 3000.
-    const float periodUs = 60.0e6f / 6000.0f;
-    CHECK(rpmFromMeanPeriodUs(periodUs, revsPerPulse(1, true)) == doctest::Approx(6000.0f));
-    CHECK(rpmFromMeanPeriodUs(periodUs, revsPerPulse(2, true)) == doctest::Approx(3000.0f));
-    // …and a 4-stroke single-fire is turning twice as fast as the pulses suggest.
-    CHECK(rpmFromMeanPeriodUs(periodUs, revsPerPulse(1, false)) == doctest::Approx(12000.0f));
+TEST_CASE("revsPerPulse - cylinder count cannot reach the RPM math at all") {
+    // Enforced by the signature, asserted here so re-introducing a cylinder
+    // term has to delete a test that says why it was removed: the pickup sees
+    // ONE wire, so 500 pulses/min is 500 RPM on a single and on a twin alike.
+    const float periodUs = 60.0e6f / 500.0f;
+    CHECK(rpmFromMeanPeriodUs(periodUs, revsPerPulse(true)) == doctest::Approx(500.0f));
 }
 
 // ---------------------------------------------------------------------------
-// minPulseGapUs — debounce that keeps the true-RPM ceiling constant
+// cylinder_count — descriptive only, drives the inferred-RPM warning
 // ---------------------------------------------------------------------------
 
-TEST_CASE("minPulseGapUs - unchanged for the historical single-cylinder case") {
-    CHECK(minPulseGapUs(1, true) == kBasePulseGapUs);
+TEST_CASE("clampCylinderCount - a corrupt setting is bounded, never trusted") {
+    CHECK(clampCylinderCount(0) == kMinCylinders);
+    CHECK(clampCylinderCount(-3) == kMinCylinders);
+    CHECK(clampCylinderCount(9999) == kMaxCylinders);
+    CHECK(clampCylinderCount(8) == 8);
 }
 
-TEST_CASE("minPulseGapUs - tightens as pulses per rev rise") {
-    // A twin firing every rev produces twice the pulses, so the gap has to
-    // halve or the debounce itself becomes the RPM ceiling.
-    CHECK(minPulseGapUs(2, true) == 1500u);
-    CHECK(minPulseGapUs(3, true) == 1000u);
-    CHECK(minPulseGapUs(4, true) == kMinPulseGapFloorUs);
+TEST_CASE("rpmIsInferred - true on anything but a single") {
+    // A single's every firing IS the crank turning; on anything else the
+    // crank speed between firings is an assumption, which is what the user
+    // is warned about.
+    CHECK_FALSE(rpmIsInferred(1));
+    CHECK(rpmIsInferred(2));
+    CHECK(rpmIsInferred(8));
+    // A garbage value must not silently claim to be a single.
+    CHECK_FALSE(rpmIsInferred(0));
+    CHECK(rpmIsInferred(9999));
 }
 
-TEST_CASE("minPulseGapUs - never goes below the floor") {
-    CHECK(minPulseGapUs(8, true) == kMinPulseGapFloorUs);
-    CHECK(minPulseGapUs(16, true) == kMinPulseGapFloorUs);
+// ---------------------------------------------------------------------------
+// minPulseGapUs — debounce holding the same ceiling in both spark modes
+// ---------------------------------------------------------------------------
+
+TEST_CASE("minPulseGapUs - unchanged historical gap for a plug firing every rev") {
+    CHECK(minPulseGapUs(true) == kBasePulseGapUs);
 }
 
 TEST_CASE("minPulseGapUs - widens when the engine fires less often") {
-    // Fewer edges to catch, so the extra margin is free ringing rejection.
-    CHECK(minPulseGapUs(1, false) == 6000u);
+    // Half the edges to catch, so the extra margin is free ringing rejection.
+    CHECK(minPulseGapUs(false) == 2u * kBasePulseGapUs);
 }
 
-TEST_CASE("minPulseGapUs - holds the old true-RPM ceiling up to four cylinders") {
-    // The old fixed 3 ms allowed 20,000 pulses/min, which on a single IS
-    // 20,000 RPM. Deriving the gap is what keeps that ceiling meaningful on
-    // every engine instead of quietly halving it per added cylinder.
-    const float oldCeilingRpm = 60.0e6f / (float)kBasePulseGapUs;  // 20,000
-    struct { int cyl; bool wasted; } cases[] = {
-        {1, true}, {2, true}, {3, true}, {4, true},
-        {1, false}, {2, false}, {4, false}, {8, false},
-    };
-    for (const auto& c : cases) {
-        const float gap = (float)minPulseGapUs(c.cyl, c.wasted);
-        const float ceiling = rpmFromMeanPeriodUs(gap, revsPerPulse(c.cyl, c.wasted));
-        CHECK(ceiling >= oldCeilingRpm);
+TEST_CASE("minPulseGapUs - the same ~20,000 RPM ceiling in both spark modes") {
+    // The historical 3 ms allowed 20,000 pulses/min, which on a plug firing
+    // every rev IS 20,000 RPM. Doubling the gap for a plug firing half as
+    // often keeps the ceiling where it has always been.
+    const float ceilingRpm = 60.0e6f / (float)kBasePulseGapUs;  // 20,000
+    const bool modes[] = {true, false};
+    for (bool wasted : modes) {
+        const float gap = (float)minPulseGapUs(wasted);
+        CHECK(rpmFromMeanPeriodUs(gap, revsPerPulse(wasted)) == doctest::Approx(ceilingRpm));
     }
-}
-
-TEST_CASE("minPulseGapUs - past four cylinders the floor binds, and that is fine") {
-    // Documented consequence, asserted so it can't drift silently: the gap
-    // stops shrinking, so the ceiling falls. It stays far above anything this
-    // logger is pointed at.
-    const float ceiling8 =
-        rpmFromMeanPeriodUs((float)minPulseGapUs(8, true), revsPerPulse(8, true));
-    CHECK(ceiling8 == doctest::Approx(10000.0f));
-    CHECK(ceiling8 < 60.0e6f / (float)kBasePulseGapUs);
-}
-
-TEST_CASE("minPulseGapUs - a clamped cylinder count still yields a usable gap") {
-    CHECK(minPulseGapUs(0, true) == kBasePulseGapUs);
-    CHECK(minPulseGapUs(-1, true) == kBasePulseGapUs);
-    CHECK(minPulseGapUs(9999, true) >= kMinPulseGapFloorUs);
 }

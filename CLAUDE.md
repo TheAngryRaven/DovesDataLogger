@@ -136,7 +136,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `led_modes.{h,cpp}` | Strip modes + status actions: pace pip math (ms/m, slower = left/red), generic `ScaleSpec` left-fill (RPM red past halfway; temps later), and the `StatusAction` threshold/hysteresis/flash table — the phase-2 assignability hook |
 | `led_animations.{h,cpp}` | Boot + purple-sector animations as pure functions of `(tMs, seed)` — hash-based sparkles, no rand()/millis(), golden-testable |
 | `sector_purple.{h,cpp}` | Session-best ("purple") sector detection: open-time best snapshots + a derived S3 defeat the library's lap-line `updateBestSectors()` race; no purple on lap 1 |
-| `tach_filter.{h,cpp}` | Tachometer 1-D Kalman filter — predict/update math, the RPM-aware noise models, the **outlier gate** that keeps one bad ignition edge out of the trace (plan 0009), the `tach_filter` mode parser — **and the engine geometry**: `revsPerPulse` / `minPulseGapUs` from `spark_mode` + `cylinder_count` |
+| `tach_filter.{h,cpp}` | Tachometer 1-D Kalman filter — predict/update math, the RPM-aware noise models, the **outlier gate** that keeps one bad ignition edge out of the trace (plan 0009), the `tach_filter` mode parser — **and the engine geometry**: `revsPerPulse` / `minPulseGapUs` from `spark_mode` ALONE (plan 0012 — one clamp on one plug wire sees one cylinder, so `cylinder_count` is descriptive, not a divider) |
 | `camera_fsm.{h,cpp}` | Insta360 auto-record lifecycle FSM (8 states, all debounce/retry/timeout timing + tunables); board-portable core shared with the nRF54 "Falcon" target |
 | `insta360_protocol.{h,cpp}` | Insta360 X4 BLE frame builders/parsers (wake advert, remote scan response, ce82 buttons, ce82 GPS/RMC frame, ce81 serial parsing, ce81 `0x10` record-timer state parse) with golden-byte tests |
 | `sensoregg_protocol.{h,cpp}` | SensorEgg `PW-ADV` v1+v2 advertising payload parser (magic filter, int16 deci-°C decode with `0x8000`→NaN sentinel, flags, sequence, v2 aux thermistor + battery) + wrap-safe 1 s staleness rule + passive-scan tuning constants |
@@ -324,9 +324,11 @@ loop()  ~250 Hz
 ### 2. Tachometer (`tachometer.ino`)
 
 - ISR `TACH_COUNT_PULSE()` fires on falling edge of D0.
-- Minimum pulse gap is **derived**, not fixed: `tach_filter::minPulseGapUs()`
-  returns 3 ms ÷ pulses-per-rev with a 750 µs floor, so the ~20 000 true-RPM
-  ceiling holds up to four cylinders instead of halving with each one added.
+- Minimum pulse gap comes from the spark mode only: `tach_filter::minPulseGapUs()`
+  returns 3 ms for a plug firing every rev and 6 ms for a 4-stroke single-fire
+  plug, so the ~20 000 RPM ceiling is the same in both modes. Cylinder count is
+  not a term (plan 0012) — one clamped wire never delivers pulses faster than
+  the cylinder it is wrapped around fires.
 - **Ring buffer architecture**: ISR timestamps every valid pulse into a
   16-entry ring buffer (`tachRingBuf`). The ISR checks full before
   publishing (SPSC, one slot sacrificed) and drops + sets
@@ -375,22 +377,36 @@ loop()  ~250 Hz
   `smooth`.
 - Time-based debounce only. Old volatile flag gate removed — ISR
   body is trivially fast (<1 µs) and cannot cause interrupt storms.
-- **True RPM, one correction, one place.** The pickup counts ignition
-  pulses; the tach reports revolutions, and those differ on anything but a
-  single-cylinder engine firing every rev.
-  `pulses_per_rev = cylinder_count × (spark_mode == wasted ? 1.0 : 0.5)`,
-  and the reciprocal (`tachRevsPerPulse`, set once at boot) is applied at
-  the period→RPM conversion in `TACH_LOOP()` — **before the Kalman
-  filter**, because the filter's tuning is in true-RPM units (Q = 800 RPM²
-  models crank inertia), so correcting afterwards would filter each engine
-  type differently. Defaults (1 cylinder, wasted) give 1.0 — byte-identical
-  to the old hardcoded behaviour.
+- **One correction, one place, and cylinder count is NOT in it** (plan
+  0012). There is one sense wire and one clamp, and it goes around one
+  spark plug wire — so the pickup sees ONE cylinder's ignition whatever
+  the engine has. The whole geometry is the spark mode:
+  `revs_per_pulse = (spark_mode == wasted ? 1.0 : 2.0)`. `tachRevsPerPulse`
+  is set once at boot and applied at the period→RPM conversion in
+  `TACH_LOOP()` — **before the Kalman filter**, because the filter's tuning
+  is in RPM units (Q = 800 RPM² models crank inertia), so correcting
+  afterwards would filter each engine type differently.
   **No consumer may re-derive or re-apply this**: display, DOVEX rows, the
   camera FSM and auto-race all read the already-corrected
   `tachLastReported`. Any new consumer must too.
-- Because RPM is now true RPM, the **thresholds mean what they say on every
-  engine** — auto-race (>500), camera wake/record/stop (500/1500/300) no
-  longer fire at half the real RPM on a twin.
+- **Why the cylinder term is gone.** Plan 0003 shipped
+  `pulses_per_rev = cylinder_count × sparkFactor`, which is only right for
+  a clamp on a shared coil/king lead. On this hardware it divided RPM by
+  the cylinder count: a V8 on a traditional magneto, configured honestly
+  as 8 cylinders + single fire, read **an eighth** of its crank speed. The
+  plan papered over it by redefining the setting as "cylinders the pickup
+  *sees*" — a field named Cylinders that must not hold the engine's
+  cylinder count. `cylinder_count` is now the engine's actual count, and
+  it is descriptive: `tach_filter::rpmIsInferred()` uses it for the
+  warning, nothing else reads it.
+- **The accepted consequence, stated to the user.** Above one cylinder the
+  crank speed is INFERRED from one cylinder's firing rate — between
+  firings it is an assumption, and a cylinder that stops firing reads as a
+  stopped engine. That is how every clamp-on inductive tach works; the
+  settings UI, the README table and the boot debug line say so rather than
+  leaving it to be discovered from a trace.
+- Thresholds mean what they say on any engine whose clamped plug fires
+  every rev — auto-race (>500), camera wake/record/stop (500/1500/300).
 - `tachLastReported` updates every main-loop call (~250 Hz). Consumers
   (display at 3 Hz, logging at 25 Hz) rate-limit themselves.
 - 500 ms timeout sets RPM to 0 (engine stopped), resets Kalman state.
@@ -1745,7 +1761,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | `spark_mode` | string | `"wasted"` | Ignition rate: `wasted` = 1 spark/rev (2T, or 4T wasted spark); `single` = 1 spark per 2 revs (4T single-fire). Anything other than an explicit `single` is treated as `wasted` |
 | `display_invert` | string | `"normal"` | Panel colours: `normal` = lit-on-black as shipped, `inverted` = black-on-lit. Anything other than an explicit `inverted` means normal |
 | `debug_pages` | string | `"hide"` | Race-rotation diagnostic pages (`GPS_DEBUG` + `GPS_STATS`): `hide` = rotation starts at the speed page (end-user default), `show` = diagnostics restored at the front. Anything other than an explicit `show` means hide. Also swaps the tachometer page's subtext line for the tach filter diagnostic (`max:NNNNN S rj:NN`, plan 0009). No-op on the rotation under `ENDURANCE_MODE` (already starts at speed) |
-| `cylinder_count` | int | `1` | Cylinders the **pickup sees** — a clamp on one plug wire of a twin sees ONE. Only a shared coil / all-cylinder harness sees them all |
+| `cylinder_count` | int | `1` | The engine's **actual** cylinder count. **Does not scale RPM** (plan 0012): one clamp on one plug wire sees one cylinder, so `spark_mode` alone sets the geometry. Above 1 it means crank speed is *inferred* from one cylinder's ignition pulses — standard clamp-on-tach behaviour, warned about in the settings UI. Clamp 1–16 |
 | `tach_filter` | string | `"smooth"` | RPM estimator (plan 0009). `smooth` = outlier gate + RPM-aware noise models; `legacy` = the pre-0009 filter bit for bit, for A/B against older logs; `raw` = no estimator at all, the `rpm` column is exactly what the pickup delivers. Anything else means `smooth`. Diagnostic knob — the intent is one session each at the track, not a permanent tuning dial |
 | `led_brightness` | int | `64` | NeoPixel global brightness cap 0–255 — no LED channel ever exceeds it (`led_frame::applyCap`). `0` disables the LEDs entirely (boost rail never enabled). Written AND parsed on every channel (`ensureDefaultSettings()` + the boot block in `BirdsEye.ino`); only its *use* is compiled out with the flag. A non-numeric value keeps the 64 default — via `setting_parse::parseIntSetting`, never `atoi()`, because `atoi("")` is 0 and 0 here means "LEDs off" |
 | `rev_limit` | int | `15000` | True RPM WARNING limit: RPM-scale ceiling and the left status LED flasher threshold. Clamp 1000–20000 (tach filter's ceiling) |
@@ -1804,8 +1820,8 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | Course creator name format | `N{YYMMDD}_{HHMM}` (+ `MMDDHHMM` short name) | `course_creator.h` |
 | Sprint prune order | renamed-in-app first, then oldest `date_created`; confirm only when a device-named course would go | `course_prune.h` |
 | Track JSON coordinate precision | 8 decimals (~1.1 mm) | `track_json.h` |
-| Tach min pulse gap | 3 ms ÷ pulses-per-rev, floor 750 µs | `tach_filter.h` (`minPulseGapUs`) |
-| Tach pulses per rev | `cylinder_count` × (`wasted` ? 1.0 : 0.5); default 1.0 | `tach_filter.h` (`revsPerPulse`) |
+| Tach min pulse gap | 3 ms (`wasted`) / 6 ms (`single`) — same ~20 000 RPM ceiling either way | `tach_filter.h` (`minPulseGapUs`) |
+| Tach revs per pulse | `wasted` ? 1.0 : 2.0 — **no cylinder term** (plan 0012) | `tach_filter.h` (`revsPerPulse`) |
 | Tach ring buffer | 16 entries | `BirdsEye.ino` |
 | Tach Kalman Q (legacy mode) | 800 RPM² per update | `tach_filter.h` |
 | Tach Kalman process noise (smooth) | 80 000 RPM²/s × engine time, clamped 0.5 s | `tach_filter.h` |

@@ -161,40 +161,26 @@ float rpmFromMeanPeriodUs(float meanPeriodUs, float revsPerPulse) {
   return (60.0e6f * revsPerPulse) / meanPeriodUs;
 }
 
-namespace {
-
-// Shared by both public helpers so they can never disagree about the
-// geometry — a mismatch would scale RPM by one factor and the debounce by
-// another.
-int clampCylinders(int cylinderCount) {
+int clampCylinderCount(int cylinderCount) {
   if (cylinderCount < kMinCylinders) return kMinCylinders;
   if (cylinderCount > kMaxCylinders) return kMaxCylinders;
   return cylinderCount;
 }
 
-}  // namespace
-
-float revsPerPulse(int cylinderCount, bool wastedSpark) {
-  const float pulsesPerRev = (float)clampCylinders(cylinderCount) *
-                             (wastedSpark ? kPulsesPerRevWasted : kPulsesPerRevSingle);
-  return 1.0f / pulsesPerRev;
+bool rpmIsInferred(int cylinderCount) {
+  return clampCylinderCount(cylinderCount) > 1;
 }
 
-uint32_t minPulseGapUs(int cylinderCount, bool wastedSpark) {
-  const uint32_t cyl = (uint32_t)clampCylinders(cylinderCount);
+float revsPerPulse(bool wastedSpark) {
+  return wastedSpark ? kRevsPerPulseWasted : kRevsPerPulseSingle;
+}
 
-  // Integer division, deliberately: pulses-per-rev is either `cyl` (wasted
-  // spark) or `cyl / 2` (single-fire), so dividing the base gap by it is
-  // exact in both cases once the single-fire case is expressed as a
-  // doubled numerator. Keeps the float rounding — and the rounding-cast
-  // bug class that goes with it — out of a value the ISR compares against.
-  const uint32_t gap = wastedSpark ? (kBasePulseGapUs / cyl)
-                                   : ((kBasePulseGapUs * 2u) / cyl);
-
-  // Fewer pulses per rev (4-stroke single-fire) widens the gap, which is
-  // free: there are genuinely fewer edges to catch, so the extra margin
-  // only buys more ringing rejection at the same true-RPM ceiling.
-  return gap < kMinPulseGapFloorUs ? kMinPulseGapFloorUs : gap;
+uint32_t minPulseGapUs(bool wastedSpark) {
+  // A single-fire plug fires half as often, so doubling its gap keeps the
+  // same true-RPM ceiling in both modes. Integer math, deliberately: this
+  // value is compared against in the ISR, so the rounding-cast bug class
+  // stays out of it.
+  return wastedSpark ? kBasePulseGapUs : (kBasePulseGapUs * 2u);
 }
 
 }  // namespace tach_filter

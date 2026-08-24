@@ -122,11 +122,15 @@ static void ensureDefaultSettings() {
     { "waypoint_speed", "30" },
     { "camera_serial", "" },  // empty = no Insta360 paired
     { "race_mode", "circuit" },  // tiebreak pref when circuit AND sprint tracks are in range
-    // Engine geometry for true RPM (plan 0003). These defaults are exactly the
-    // old hardcoded behaviour, so auto-populating them on an existing device
-    // changes nothing until the user says otherwise.
+    // Engine geometry for true RPM (plans 0003, 0012). spark_mode is the ONLY
+    // one of these two that reaches the RPM math — one clamp on one plug wire
+    // sees one cylinder's ignition regardless of what the engine has.
     { "spark_mode", "wasted" },   // "wasted" = 1 spark/rev (2T or 4T wasted); "single" = 1 per 2 revs
-    { "cylinder_count", "1" },    // cylinders the PICKUP SEES, not the engine's
+    // The engine's ACTUAL cylinder count — no pickup-placement mind game, and
+    // no longer a divider (plan 0012). Descriptive: >1 means crank speed is
+    // inferred from one cylinder's firing rate, which is what the settings UI
+    // warns about.
+    { "cylinder_count", "1" },
     // RPM estimator (plan 0009). "smooth" = outlier gate + RPM-aware noise
     // model; "legacy" = the pre-0009 filter for A/B against older logs;
     // "raw" = no filtering at all, so a track session shows exactly what the

@@ -1,5 +1,13 @@
 # RPM Accuracy — Spark Type & Cylinder Count Settings
 
+> **SUPERSEDED IN PART by [0012](0012-tach-rpm-single-pickup.md).**
+> The `pulses_per_rev = cylinder_count × sparkFactor` geometry below is
+> WRONG for this hardware: there is one sense wire and one clamp, on one
+> plug wire, so the pickup never sees more than one cylinder and the
+> cylinder term divided RPM (a V8 read an eighth of its crank speed).
+> `spark_mode` and everything else here still stand; `cylinder_count`
+> remains a setting but no longer reaches the math.
+
 > Status: **SHIPPED.** Split out of plan 0002 (sprint mode); independent of
 > it. Prompted by the same autocross-kart user group: unknown engine, "kart
 > kart or some wacky 2cyl monster", so the logger can no longer assume one
