@@ -61,6 +61,8 @@ void BLUETOOTH_LOOP() {}
 uint32_t bleTransferRateBps() { return 0; }
 uint16_t bleLinkDataLength() { return 27; }
 uint16_t bleLinkChunkSize() { return 20; }
+uint16_t bleLinkIntervalUnits() { return 0; }
+uint8_t bleLinkPhy() { return 0; }
 
 // ---- camera_ble.ino surface ----
 
@@ -132,6 +134,7 @@ void NEOPIXEL_LOOP() {}
 void NEOPIXEL_SLEEP() {}
 void NEOPIXEL_WAKE() {}
 void neopixelNotifyPurpleSector() {}
+void neopixelNotifyPurpleLap() {}
 
 // ---- profiling.ino surface ----
 

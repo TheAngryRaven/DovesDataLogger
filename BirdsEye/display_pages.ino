@@ -180,9 +180,10 @@ void displayPage_bluetooth() {
   }
 
   display.setTextSize(1);
-  display.println();
 
   if (bleTransferInProgress) {
+    // The spacer row the else-branch keeps is spent on the second
+    // diagnostic line below — with it the page is exactly 8 rows.
     display.print(F("Transfer: "));
     // bleFileSize is 0 for a zero-byte file — print 100% rather than divide
     // by zero.
@@ -202,7 +203,22 @@ void displayPage_bluetooth() {
     display.print(bleLinkDataLength());
     display.print(F(" "));
     display.println(bleLinkChunkSize());
+
+    // Second diagnostic line (plan 0012): the two levers the line above
+    // cannot show. The connection interval is the CENTRAL's choice — the
+    // device only requests, and 30 ms instead of 15 ms is a silent 2x on
+    // every download. The PHY doubles per-packet airtime if the 2M request
+    // was ignored. A slow transfer with a healthy first line is one of
+    // these two, or radio contention.
+    display.print(bleLinkIntervalUnits() * 1.25, 1);
+    display.print(F("ms "));
+    const uint8_t phy = bleLinkPhy();
+    display.println(phy == 2 ? F("2M")
+                    : phy == 1 ? F("1M")
+                    : phy == 4 ? F("Coded")
+                               : F("?"));
   } else {
+    display.println();
     display.println();
     display.println();
   }
@@ -823,7 +839,7 @@ void displayPage_tachometer() {
 
   // OVER REV header means ACTUAL overrev (plan 0007): it trips only at
   // the PROBLEM limit, and only when that limit is enabled — the
-  // rev_limit warning flag is the left LED's job, not the header's.
+  // target_rpm warning flag is a status LED's job, not the header's.
   // (Was hardcoded >9999, which a 7600-limiter engine could never reach.)
   if (settingOverrevLimit > 0 && tachLastReported >= settingOverrevLimit) {
     display.println(F("Engine RPM *OVER REV*"));

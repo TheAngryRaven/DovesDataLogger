@@ -99,3 +99,14 @@ uint16_t bleLinkDataLength();
 
 // Payload carried by one notification at the negotiated ATT MTU.
 uint16_t bleLinkChunkSize();
+
+// Connection interval in 1.25 ms units, live from the connection object
+// (0 = no peer). The central owns this number — the device only requests —
+// and 24 units (30 ms) instead of 12 (15 ms) is a silent 2x on every
+// download, so it belongs on the page (plan 0012).
+uint16_t bleLinkIntervalUnits();
+
+// Radio PHY, live from the connection object: 1 = 1M, 2 = 2M, 4 = Coded,
+// 0 = no peer. A link that ignored the 2M request pays double airtime per
+// packet (plan 0012).
+uint8_t bleLinkPhy();

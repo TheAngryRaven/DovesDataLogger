@@ -38,6 +38,16 @@ constexpr uint32_t kPurpleDurationMs = 1600;
 constexpr uint32_t kPurpleWaveMs = 400;      // center-out expansion
 constexpr uint32_t kPurpleFadeStartMs = 1200;
 
+// A session-best LAP is the bigger moment, so it gets its own longer
+// version (plan 0012): TWO center-out wave passes and 2600 ms total —
+// the same length as the boot flourish, already proven not to overstay.
+// Two stages, one look: a driver can tell a purple sector from a purple
+// lap without counting pixels.
+constexpr uint32_t kPurpleLapDurationMs = 2600;
+constexpr uint32_t kPurpleLapWaveMs = 400;
+constexpr int kPurpleLapWaves = 2;
+constexpr uint32_t kPurpleLapFadeStartMs = 2100;
+
 // Sparkle time-slot length: each (slot, pixel) pair rolls the hash once,
 // so glints pop and die at a readable rate instead of shimmering at the
 // frame rate.
@@ -55,5 +65,12 @@ led_frame::Rgb hueToRgb(uint8_t hue);
 // normal composition.
 bool renderBoot(uint32_t tMs, uint32_t seed, led_frame::Frame& out);
 bool renderPurple(uint32_t tMs, uint32_t seed, led_frame::Frame& out);
+
+// The session-best-LAP celebration. Same wave/hold/fade core as
+// renderPurple() (they share one static renderer), just longer and with
+// a second wave pass. renderPurple()'s output is deliberately unchanged
+// by this addition — its golden frames still pin the shipped sector
+// animation byte for byte.
+bool renderPurpleLap(uint32_t tMs, uint32_t seed, led_frame::Frame& out);
 
 }  // namespace led_animations

@@ -58,23 +58,33 @@
 
 // ---- lifecycle (called from BirdsEye.ino) ----
 
-// Bring up the BLE core (idempotent) and start the passive scanner.
+// Bring up the BLE core (idempotent) and CONFIGURE the passive scanner —
+// it is not started here. The scanner is race-gated (plan 0012):
+// SENSOREGG_LOOP()'s reconcile starts it when a race session begins and
+// stops it when the session ends, so the 44% scan duty is never paid on
+// the menu or during a BLE transfer (where it throttled downloads).
 // Call from setup() after CAMERA_SETUP(). NOTE: this makes the SoftDevice
 // come up at boot — previously BLE was lazy (first camera/transfer use).
 void SENSOREGG_SETUP();
 
-// Drain the scan double-buffer and parse the newest payload. Call from
-// the normal main-loop path. Not called in the bleActive / usbMscActive
-// parking branches — a stale reading correctly goes NaN there.
+// Drain the scan double-buffer, parse the newest payload, and reconcile
+// the scanner against the race gate (start on race entry with a 1 s
+// retry throttle, stop when the session ends). Call from the normal
+// main-loop path. Not called in the bleActive / usbMscActive parking
+// branches — a stale reading correctly goes NaN there, and the scanner
+// is already down (race over) before either mode can be entered.
 void SENSOREGG_LOOP();
 
-// Stop the passive scanner (shutdown path — the forever-scan must not run
-// into System OFF / the charging park). Idempotent; no-op when the POC is
-// compiled out.
+// Stop the passive scanner and hold it stopped (shutdown path — a scan
+// must not run into System OFF / the charging park — and BLE_SETUP(),
+// which guarantees a transfer session is scan-free). Idempotent; no-op
+// when the POC is compiled out.
 void SENSOREGG_SLEEP();
 
-// Restart the scanner after a charging-loop soft resume
-// (softResumeFromCharging). The scanner config survives a stop.
+// Clear the sleep gate after a charging-loop soft resume
+// (softResumeFromCharging). Does not start the scanner — the resume
+// lands on the menu, and the race gate brings the scan up if a session
+// begins. The scanner config survives a stop.
 void SENSOREGG_WAKE();
 
 // ---- data surface (display_pages.ino / gps_functions.ino) ----

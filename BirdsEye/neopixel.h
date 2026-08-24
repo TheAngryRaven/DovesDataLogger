@@ -9,7 +9,12 @@
 // generated prototype fails to parse. Pure stdint header, safe
 // everywhere. (See CLAUDE.md "Development Conventions" on the
 // auto-prototype include-order trap.)
+//
+// led_status.h is here for the same reason: settingLedStatusLeft/Right
+// below are typed led_status::Mode, so the type has to be visible before
+// Arduino generates prototypes for anything that touches them.
 #include "led_frame.h"
+#include "led_status.h"
 
 ///////////////////////////////////////////
 // NEOPIXEL STRIP MODULE (plan 0006)
@@ -55,7 +60,14 @@
 
 // Runtime settings, read at boot in BirdsEye.ino's settings block.
 extern uint8_t settingLedBrightness;  // global cap 0-255; 0 = LEDs disabled
-extern int settingRevLimit;           // true RPM: scale ceiling + rev flasher
+extern int settingTargetRpm;          // true RPM: scale ceiling + rpm flasher
+// The bar's ceiling on a session with no tachometer, and the `speed`
+// status mode's threshold. mph — the companion app converts for display.
+extern int settingTargetSpeedMph;
+// What each status pixel shows (plan 0012). Both default to what the
+// pre-0012 hardcoded pair did on a SensorEgg build.
+extern led_status::Mode settingLedStatusLeft;
+extern led_status::Mode settingLedStatusRight;
 // Day/night swap (plan 0010). settingUtcOffsetMin is device-wide rather
 // than LED-specific — it is extern'd here because the LED strip is its
 // only consumer today; move it if a second one appears. The two hours
@@ -86,3 +98,9 @@ void NEOPIXEL_WAKE();
 // Fire (or restart) the purple-sector celebration. The module also
 // self-detects via sector_purple; this is the external hook.
 void neopixelNotifyPurpleSector();
+
+// Fire the session-best-LAP celebration — the longer, two-wave version
+// (plan 0012). A purple lap OUTRANKS a purple sector: they land on the
+// same frame whenever the last sector of a purple lap is also purple,
+// and re-arming the shorter sector animation there would stomp it.
+void neopixelNotifyPurpleLap();
