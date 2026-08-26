@@ -136,7 +136,7 @@ void displayPage_main_menu() {
   // a size-1 scroll-hint line. Four full size-2 rows fill the panel's
   // nominal 64 px exactly, but the last row is cut off on real hardware
   // — so the window follows the selection instead.
-  static const char* const kMenuItems[] = {"Race", "Review", "Transfer", "Create", "Camera"};
+  static const char* const kMenuItems[] = {"Race", "Drag", "Review", "Transfer", "Create", "Camera"};
   const int itemCount = (int)(sizeof(kMenuItems) / sizeof(kMenuItems[0]));
   const int visibleRows = 3;
 
@@ -163,6 +163,63 @@ void displayPage_main_menu() {
   }
 
   safeDisplayUpdate();
+}
+
+void displayPage_drag_distance() {
+  resetDisplay();
+
+  // Same scrolling 3-row window as the main menu, plus a title line
+  // (title 8 px + 3 size-2 rows 48 px + hint line 8 px = the panel).
+  display.setTextSize(1);
+  display.println(F("    Drag Distance"));
+
+  const int itemCount = drag_timer::kDistanceCount + 1;  // + Back
+  const int visibleRows = 3;
+  int first = menuSelectionIndex - 1;
+  if (first < 0) first = 0;
+  if (first > itemCount - visibleRows) first = itemCount - visibleRows;
+
+  display.setTextSize(2);
+  for (int i = first; i < first + visibleRows; i++) {
+    display.print(menuSelectionIndex == i ? "->" : "  ");
+    display.println(i < drag_timer::kDistanceCount ? drag_timer::label(i)
+                                                   : "Back");
+  }
+
+  display.setTextSize(1);
+  if (first > 0) {
+    display.print(F("^"));
+  } else {
+    display.print(F(" "));
+  }
+  if (first + visibleRows < itemCount) {
+    display.print(F(" v more"));
+  }
+
+  safeDisplayUpdate();
+}
+
+// The ONE seconds.hundredths renderer for drag splits — both the results
+// subtext and the pace page's live 0-60 readout go through it, so the
+// format can't diverge between the two.
+void displayPrintSplitSeconds(unsigned long ms) {
+  display.print(ms / 1000);
+  display.print(F("."));
+  unsigned long hundredths = (ms % 1000) / 10;
+  if (hundredths < 10) display.print(F("0"));
+  display.print(hundredths);
+}
+
+// Trap-speed + 0-60 subtext shared by the drag results renderings below.
+// The ET itself always goes through lap_format like every other time; the
+// split is seconds to two decimals, "0-60" omitted if never reached.
+void displayPrintDragStats(float trapMph, unsigned long split60Ms) {
+  display.print(F("trap "));
+  display.print(trapMph, 1);
+  if (split60Ms > 0) {
+    display.print(F("  0-60 "));
+    displayPrintSplitSeconds(split60Ms);
+  }
 }
 
 void displayPage_bluetooth() {
@@ -699,7 +756,12 @@ void displayPage_gps_speed() {
 void displayPage_gps_lap_time() {
   resetDisplay();
 
-  display.println(F("  Current Lap Time"));
+  if (dragModeIsActive()) {
+    display.print(F("  Drag "));
+    display.println(dragDistanceLabel());
+  } else {
+    display.println(F("  Current Lap Time"));
+  }
 
   display.print(F("\n\n"));
   display.setTextSize(3);
@@ -707,7 +769,23 @@ void displayPage_gps_lap_time() {
   bool raceStarted = activeTimerRaceStarted();
   unsigned long currentLapTimeMs = activeTimerCurrentLapTime();
 
-  if (sprintModeIsActive() && !activeTimerRunActive()) {
+  if (dragModeIsActive() && !activeTimerRunActive()) {
+    if (activeTimerLaps() > 0) {
+      // Between runs with a result: show the last ET big, trap + 0-60
+      // under it — the "what did I just run" glance at the top end.
+      char lapStr[lap_format::kLapTimeStrLen];
+      lap_format::formatLapTime(activeTimerLastLapTime(), lap_format::kSpace,
+                                lapStr, sizeof(lapStr));
+      display.print(lapStr);
+      display.setTextSize(1);
+      display.print(F("\n\n "));
+      displayPrintDragStats(dragLastTrapMph(), dragLast0to60Ms());
+    } else {
+      // No run yet: staged = clock armed, launch when ready.
+      display.setTextSize(2);
+      display.print(dragIsStaged() ? F(" *staged*") : F(" *waiting*"));
+    }
+  } else if (sprintModeIsActive() && !activeTimerRunActive()) {
     // Sprint mode, between runs: the session stays live (all pages work),
     // but there is no lap ticking — say so instead of a dead 0:00.
     display.setTextSize(2);
@@ -726,7 +804,13 @@ void displayPage_gps_lap_time() {
 void displayPage_gps_pace() {
   resetDisplay();
 
-  display.println(F("  Current Lap Pace"));
+  // Drag mode has no reference lap to pace against — this page becomes
+  // the live 0-60 readout during a run instead.
+  if (dragModeIsActive()) {
+    display.println(F("     0-60 Split"));
+  } else {
+    display.println(F("  Current Lap Pace"));
+  }
 
   int paceLaps = activeTimerLaps();
   float paceDiff = activeTimerPaceDifference();
@@ -763,11 +847,25 @@ void displayPage_gps_pace() {
     display.setCursor(1, lineHeight);
     display.setTextSize(3);
     display.print(F("STOPPED"));
-  } else if (sprintModeIsActive() && !activeTimerRunActive()) {
-    // Sprint mode, between runs — no live pace to compare (see lap page).
+  } else if ((sprintModeIsActive() || dragModeIsActive()) &&
+             !activeTimerRunActive()) {
+    // Sprint/drag, between runs — no live pace to compare (see lap page).
     display.setCursor(0, lineHeight);
     display.setTextSize(2);
-    display.print(F(" *waiting*"));
+    display.print(dragModeIsActive() && dragIsStaged() ? F(" *staged*")
+                                                       : F(" *waiting*"));
+  } else if (dragModeIsActive()) {
+    // Run in progress: the split once 60 is crossed, dashes until then.
+    display.setCursor(0, lineHeight);
+    display.setTextSize(3);
+    unsigned long split60 = dragCurrent0to60Ms();
+    if (split60 > 0) {
+      display.print(F(" "));
+      displayPrintSplitSeconds(split60);
+      display.print(F("s"));
+    } else {
+      display.print(F(" -.--"));
+    }
   } else if (paceRaceStarted && paceLaps >= 1) {
     display.setCursor(0, lineHeight);
     display.setTextSize(4);
@@ -825,6 +923,13 @@ void displayPage_gps_best_lap() {
     display.print(F("\n\n"));
     display.print(F("Lap: "));
     display.print(bestLapNum);
+
+    if (dragModeIsActive()) {
+      // The best run's own trap + 0-60 (snapshotted with the best ET).
+      display.setTextSize(1);
+      display.print(F("\n\n "));
+      displayPrintDragStats(dragBestTrapMph(), dragBest0to60Ms());
+    }
   } else {
     display.print(F("\n"));
     display.setTextSize(3);

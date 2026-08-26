@@ -95,6 +95,7 @@
 #include "display_pages.h"
 #include "display_ui.h"
 #include "dovex_header.h"
+#include "drag_timer.h"
 #include "gps_functions.h"
 #include "gps_status_page.h"
 #include "haversine.h"
@@ -166,6 +167,14 @@ int detectedTrackIndex = -1;
 SprintTimer* sprintTimer = nullptr;
 char sprintCourseName[MAX_LAYOUT_LENGTH] = "";
 int sprintLastRunCount = 0;  // run-complete edge for lap history capture
+
+// Drag mode (plan 0015): distance runs with no track at all. Same shape
+// as sprint — a non-null dragTimer IS drag mode, courseManager stays
+// null for the session, and runs duck-type as laps everywhere.
+drag_timer::DragTimer* dragTimer = nullptr;
+int dragLastRunCount = 0;    // run-complete edge for lap history capture
+int dragDistanceIdx = -1;    // index into drag_timer's distance table
+bool dragWasStaged = false;  // ARMED->STAGED edge for the idle-grace re-arm
 unsigned long idleStartTime = 0;
 bool idleTimerRunning = false;
 bool raceActive = false;
@@ -501,6 +510,33 @@ unsigned long lapHistory[lapHistoryMaxLaps];
 int lapHistoryCount = 0;
 
 void checkForNewLapData() {
+  // Drag mode: same run-count-edge capture as sprint below (identical
+  // consecutive ETs are normal). Two idle-grace re-arms keep a staging
+  // queue from ending the session on tach-less cars: every completed run
+  // (sprint precedent) and every fresh STAGED latch — queue creep
+  // re-stages every couple of minutes, so an active queue never idles
+  // out, while a genuinely parked car still ends after the grace.
+  if (dragTimer != nullptr) {
+    const bool stagedNow = dragTimer->staged();
+    if (stagedNow && !dragWasStaged) {
+      raceSessionStartedAt = millis();
+    }
+    dragWasStaged = stagedNow;
+
+    int runs = dragTimer->runs();
+    if (runs > dragLastRunCount) {
+      dragLastRunCount = runs;
+      raceSessionStartedAt = millis();
+      if (lapHistoryCount < lapHistoryMaxLaps) {
+        lastLap = dragTimer->lastEtMs();
+        lapHistory[lapHistoryCount] = lastLap;
+        lapHistoryCount++;
+        debugln(F("New drag run added to history..."));
+      }
+    }
+    return;
+  }
+
   // Sprint mode: capture on the RUN-COMPLETE EDGE (run count increment),
   // not on value change — two identical run times in a row are normal at
   // autocross and the value-change dedupe below would silently drop the
@@ -760,6 +796,9 @@ const int PAGE_COURSE_POINT = -15;   // "Save current pos" averaging hold
 // two-row confirm, not one of the model's screens, so it must not be handed
 // to course_creator::rowCount().
 const int PAGE_COURSE_PRUNE = -16;   // "Track full - drop N old runs?"
+// Drag mode (plan 0015): the distance picker between the main menu's
+// Drag row and the race rotation. Five distances + Back.
+const int PAGE_DRAG_DISTANCE = -17;
 
 // running menu (these must be in order)
 #if BIRDSEYE_ENABLE_PROFILING
@@ -1291,12 +1330,48 @@ bool sprintModeIsActive() {
 }
 
 /**
+ * @brief Drag mode (plan 0015) — a non-null dragTimer IS drag mode, the
+ * same construction as sprint. Every activeTimer*() helper below checks
+ * the drag branch first; drag runs duck-type as laps.
+ */
+bool dragModeIsActive() {
+  return dragTimer != nullptr;
+}
+
+// Drag-mode display accessors (null-safe): the trap/0-60 stats have no
+// lap-timer analog, so they don't ride the activeTimer*() surface —
+// display_pages reads these directly, like the sprint pages read
+// sprintModeIsActive().
+bool dragIsStaged() {
+  return dragTimer != nullptr && dragTimer->staged();
+}
+const char* dragDistanceLabel() {
+  return drag_timer::label(dragDistanceIdx);
+}
+float dragLastTrapMph() {
+  return dragTimer != nullptr ? dragTimer->lastTrapMph() : 0.0f;
+}
+unsigned long dragLast0to60Ms() {
+  return dragTimer != nullptr ? dragTimer->last0to60Ms() : 0;
+}
+float dragBestTrapMph() {
+  return dragTimer != nullptr ? dragTimer->bestTrapMph() : 0.0f;
+}
+unsigned long dragBest0to60Ms() {
+  return dragTimer != nullptr ? dragTimer->best0to60Ms() : 0;
+}
+unsigned long dragCurrent0to60Ms() {
+  return dragTimer != nullptr ? dragTimer->current0to60Ms() : 0;
+}
+
+/**
  * @brief True while timing is "live": a sprint run in progress, or (in
  * circuit mode) the race started. Drives the sprint pages' *waiting*
  * state — between runs the device stays in race mode with all pages up,
  * but Current Lap / Pace show *waiting* instead of a dead 0:00.
  */
 bool activeTimerRunActive() {
+  if (dragTimer != nullptr) return dragTimer->runActive();
   if (sprintTimer != nullptr) return sprintTimer->isRunActive();
   return activeTimerRaceStarted();
 }
@@ -1319,6 +1394,7 @@ WaypointLapTimer* getActiveTimerWLT() {
 
 // Unified getter helpers for display pages
 bool activeTimerRaceStarted() {
+  if (dragTimer != nullptr) return dragTimer->runActive() || dragTimer->runs() > 0;
   if (sprintTimer != nullptr) return sprintTimer->getRaceStarted();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getRaceStarted();
@@ -1328,6 +1404,7 @@ bool activeTimerRaceStarted() {
 }
 
 bool activeTimerCrossing() {
+  if (dragTimer != nullptr) return false;  // no lines to cross
   if (sprintTimer != nullptr) return sprintTimer->getCrossing();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getCrossing();
@@ -1337,6 +1414,7 @@ bool activeTimerCrossing() {
 }
 
 int activeTimerLaps() {
+  if (dragTimer != nullptr) return dragTimer->runs();
   if (sprintTimer != nullptr) return sprintTimer->getRuns();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getLaps();
@@ -1346,6 +1424,9 @@ int activeTimerLaps() {
 }
 
 unsigned long activeTimerCurrentLapTime() {
+  // Epoch ms, matching the feed in gps_functions.ino — the time-of-day
+  // clock wraps at UTC midnight and the mismatch would corrupt live ET.
+  if (dragTimer != nullptr) return dragTimer->currentEtMs(getGpsUnixTimestampMillis());
   if (sprintTimer != nullptr) return sprintTimer->getCurrentRunTime();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getCurrentLapTime();
@@ -1355,6 +1436,7 @@ unsigned long activeTimerCurrentLapTime() {
 }
 
 unsigned long activeTimerLastLapTime() {
+  if (dragTimer != nullptr) return dragTimer->lastEtMs();
   if (sprintTimer != nullptr) return sprintTimer->getLastRunTime();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getLastLapTime();
@@ -1364,6 +1446,7 @@ unsigned long activeTimerLastLapTime() {
 }
 
 unsigned long activeTimerBestLapTime() {
+  if (dragTimer != nullptr) return dragTimer->bestEtMs();
   if (sprintTimer != nullptr) return sprintTimer->getBestRunTime();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getBestLapTime();
@@ -1373,6 +1456,7 @@ unsigned long activeTimerBestLapTime() {
 }
 
 int activeTimerBestLapNumber() {
+  if (dragTimer != nullptr) return dragTimer->bestRunNumber();
   if (sprintTimer != nullptr) return sprintTimer->getBestRunNumber();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getBestLapNumber();
@@ -1382,6 +1466,7 @@ int activeTimerBestLapNumber() {
 }
 
 float activeTimerPaceDifference() {
+  if (dragTimer != nullptr) return 0.0f;  // no reference lap to pace against
   if (sprintTimer != nullptr) return sprintTimer->getPaceDifference();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getPaceDifference();
@@ -1391,6 +1476,9 @@ float activeTimerPaceDifference() {
 }
 
 float activeTimerTotalDistance() {
+  // Meters, like every other branch of this accessor — the unit is
+  // feet-native, so convert at the boundary.
+  if (dragTimer != nullptr) return dragTimer->distanceFt() * 0.3048f;
   if (sprintTimer != nullptr) return sprintTimer->getTotalDistanceTraveled();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getTotalDistanceTraveled();
@@ -1400,6 +1488,7 @@ float activeTimerTotalDistance() {
 }
 
 unsigned long activeTimerOptimalLapTime() {
+  if (dragTimer != nullptr) return 0;  // no sectors, no optimal
   if (sprintTimer != nullptr) return sprintTimer->getOptimalLapTime();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getOptimalLapTime();
@@ -1407,6 +1496,7 @@ unsigned long activeTimerOptimalLapTime() {
 }
 
 bool activeTimerSectorsConfigured() {
+  if (dragTimer != nullptr) return false;
   if (sprintTimer != nullptr) return sprintTimer->areSectorLinesConfigured();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->areSectorLinesConfigured();
@@ -1417,6 +1507,7 @@ bool activeTimerSectorsConfigured() {
 // Sprint-first like every sibling; WaypointLapTimer (Lap Anything) has
 // no sectors, so those sessions return 0 and the monitor stays reset.
 int activeTimerCurrentSector() {
+  if (dragTimer != nullptr) return 0;
   if (sprintTimer != nullptr) return sprintTimer->getCurrentSector();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getCurrentSector();
@@ -1424,6 +1515,7 @@ int activeTimerCurrentSector() {
 }
 
 unsigned long activeTimerLapSectorTime(int sector) {
+  if (dragTimer != nullptr) return 0;
   if (sprintTimer != nullptr) {
     if (sector == 1) return sprintTimer->getCurrentLapSector1Time();
     if (sector == 2) return sprintTimer->getCurrentLapSector2Time();
@@ -1440,6 +1532,7 @@ unsigned long activeTimerLapSectorTime(int sector) {
 }
 
 unsigned long activeTimerBestSectorTime(int sector) {
+  if (dragTimer != nullptr) return 0;
   if (sprintTimer != nullptr) {
     if (sector == 1) return sprintTimer->getBestSector1Time();
     if (sector == 2) return sprintTimer->getBestSector2Time();
@@ -1527,6 +1620,39 @@ bool createSprintSession() {
   debug(L.date_created[0] ? L.date_created : "n/a");
   debugln(F(")"));
   return true;
+}
+
+/**
+ * @brief Stand up a drag session (plan 0015): no track, no detection —
+ * just a distance target picked on PAGE_DRAG_DISTANCE. trackDetected is
+ * latched the way sprint latches it, so trackDetectionLoop() can't stand
+ * up a CourseManager when the strip happens to be near a saved track;
+ * dragTimer must exist BEFORE startRaceSession() so its Lap Anything
+ * fallback stays suppressed.
+ */
+void startDragSession(int distanceIdx) {
+  // Defensive mirror of createSprintSession() — nothing can exist when
+  // this is reached from the menu, but the deletes keep that a fact.
+  if (courseManager != nullptr) {
+    delete courseManager;
+    courseManager = nullptr;
+  }
+  if (sprintTimer != nullptr) {
+    delete sprintTimer;
+    sprintTimer = nullptr;
+  }
+  if (dragTimer == nullptr) {
+    dragTimer = new drag_timer::DragTimer();
+  }
+  dragTimer->setTarget(distanceIdx);
+  dragDistanceIdx = dragTimer->targetIdx();  // clamped by the unit
+  dragLastRunCount = 0;
+  dragWasStaged = false;
+  trackDetected = true;
+  startRaceSession(RACE_ENTRY_MANUAL);
+
+  debug(F("Drag session ready — "));
+  debugln(drag_timer::label(dragDistanceIdx));
 }
 
 /**
@@ -1738,6 +1864,14 @@ void endRaceSession() {
   }
   sprintCourseName[0] = '\0';
   sprintLastRunCount = 0;
+  // Clean up drag session (plan 0015)
+  if (dragTimer != nullptr) {
+    delete dragTimer;
+    dragTimer = nullptr;
+  }
+  dragLastRunCount = 0;
+  dragDistanceIdx = -1;
+  dragWasStaged = false;
   trackDetected = false;
   detectedTrackIndex = -1;
   raceActive = false;
@@ -1761,6 +1895,7 @@ void endRaceSession() {
 void createLapAnythingCourseManager() {
   if (courseManager != nullptr) return;  // Already exists
   if (sprintTimer != nullptr) return;    // Sprint session owns timing
+  if (dragTimer != nullptr) return;      // Drag session owns timing
   activeTrackConfig.longName = "Unknown";
   activeTrackConfig.shortName = "";
   activeTrackConfig.courseCount = 0;
@@ -1806,7 +1941,8 @@ void checkAutoIdle() {
       (raceEntryCause == RACE_ENTRY_MANUAL || raceEntryCause == RACE_ENTRY_SPEED);
   pin.cameraRecording = cameraActivelyRecording();
   pin.gpsLockHoldActive = gpsLockHoldActive;
-  pin.sprintEngineRunning = (sprintTimer != nullptr && tachLastReported > 0);
+  pin.sprintEngineRunning =
+      ((sprintTimer != nullptr || dragTimer != nullptr) && tachLastReported > 0);
   pin.speedMph = gps_speed_mph;
   const idle_policy::Decision d = idle_policy::evaluate(pin);
 
@@ -2276,7 +2412,10 @@ void writeDovexHeader() {
 
   const char* courseName = "Lap Anything";
   const char* shortName  = "";
-  if (sprintTimer != nullptr) {
+  if (dragTimer != nullptr) {
+    courseName = drag_timer::dovexName(dragDistanceIdx);
+    shortName = "DRAG";
+  } else if (sprintTimer != nullptr) {
     courseName = sprintCourseName[0] ? sprintCourseName : "Sprint";
     shortName = activeTrackMetadata.shortName;  // from the session's parse
   } else if (courseManager != nullptr) {
@@ -2293,8 +2432,10 @@ void writeDovexHeader() {
       activeTimerBestLapTime(),
       activeTimerOptimalLapTime(),
       settingDeviceName,
-      // Webapp loading helper: with SPRINT the laps line is a runs line.
-      sprintTimer != nullptr ? "SPRINT" : "CIRCUIT",
+      // Webapp loading helper: with SPRINT or DRAG the laps line is a
+      // runs line (drag runs are ETs).
+      dragTimer != nullptr ? "DRAG"
+                           : (sprintTimer != nullptr ? "SPRINT" : "CIRCUIT"),
   };
 
   static char headerBuf[dovex_header::kHeaderSize];

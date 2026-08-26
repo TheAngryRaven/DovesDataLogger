@@ -331,6 +331,10 @@ void handleMenuPageSelection() {
       startRaceSession(RACE_ENTRY_MANUAL);
       switchToDisplayPage(GPS_SPEED);
     } else if (menuSelectionIndex == 1) {
+      // Drag mode (plan 0015) — pick a distance, then straight to racing.
+      debugln(F("Main Menu: Drag selected"));
+      switchToDisplayPage(PAGE_DRAG_DISTANCE);
+    } else if (menuSelectionIndex == 2) {
       // Replay selected
       debugln(F("Main Menu: Replay selected"));
       resetReplayState();
@@ -341,11 +345,11 @@ void handleMenuPageSelection() {
         internalNotification[sizeof(internalNotification) - 1] = '\0';
         switchToDisplayPage(PAGE_INTERNAL_WARNING);
       }
-    } else if (menuSelectionIndex == 2) {
+    } else if (menuSelectionIndex == 3) {
       // Transfer selected — open the Bluetooth-vs-USB submenu
       debugln(F("Main Menu: Transfer selected"));
       switchToDisplayPage(PAGE_TRANSFER_MENU);
-    } else if (menuSelectionIndex == 3) {
+    } else if (menuSelectionIndex == 4) {
       // Create Course — walk the cones and capture the timing lines.
       debugln(F("Main Menu: Create Course selected"));
       if (!courseCreatorEnter()) {
@@ -364,6 +368,16 @@ void handleMenuPageSelection() {
         cameraRequestPair();  // pairing begins as the page comes up
       }
       switchToDisplayPage(PAGE_PAIR_CAMERA);
+    }
+  } else if (currentPage == PAGE_DRAG_DISTANCE) {
+    // Five distances + Back (last row). Selecting a distance starts the
+    // session immediately — staging/launch is the drag timer's job.
+    if (menuSelectionIndex >= drag_timer::kDistanceCount) {
+      debugln(F("Drag: Back selected"));
+      switchToDisplayPage(PAGE_MAIN_MENU);
+    } else {
+      startDragSession(menuSelectionIndex);
+      switchToDisplayPage(GPS_SPEED);
     }
   } else if (currentPage == PAGE_PAIR_CAMERA) {
     // Only a menu while paired (Back / Test / Unpair) — the unpaired
@@ -628,6 +642,8 @@ void displayLoop() {
       displayPage_gps_status();
     } else if (currentPage == PAGE_MAIN_MENU) {
       displayPage_main_menu();
+    } else if (currentPage == PAGE_DRAG_DISTANCE) {
+      displayPage_drag_distance();
     } else if (currentPage == PAGE_BLUETOOTH) {
       displayPage_bluetooth();
     } else if (currentPage == PAGE_TRANSFER_MENU) {
@@ -730,6 +746,7 @@ void displayLoop() {
 
   if (
     currentPage == PAGE_MAIN_MENU ||
+    currentPage == PAGE_DRAG_DISTANCE ||
     currentPage == PAGE_BLUETOOTH ||
     currentPage == PAGE_TRANSFER_MENU ||
     currentPage == PAGE_USB_STORAGE ||
@@ -746,7 +763,9 @@ void displayLoop() {
   ) {
     insideMenu = true;
     if (currentPage == PAGE_MAIN_MENU) {
-      menuLimit = 5; // Race, Review, Transfer, Create Course, Camera
+      menuLimit = 6; // Race, Drag, Review, Transfer, Create Course, Camera
+    } else if (currentPage == PAGE_DRAG_DISTANCE) {
+      menuLimit = drag_timer::kDistanceCount + 1; // distances + Back
     } else if (courseCreatorActive()) {
       // Row count is the model's to decide — it changes with course type
       // (sprint grows a finish row) and with which screen is up.
@@ -795,6 +814,7 @@ void displayLoop() {
     // items the direction was unobservable (either button wrapped to the
     // other row), so it was never noticed. Its third row makes it visible.
     bool reverseDirection = (currentPage == PAGE_MAIN_MENU ||
+                             currentPage == PAGE_DRAG_DISTANCE ||
                              currentPage == PAGE_PAIR_CAMERA ||
                              currentPage == PAGE_CAMERA_TEST ||
                              currentPage == PAGE_COURSE_PRUNE ||

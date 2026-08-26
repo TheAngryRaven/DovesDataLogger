@@ -54,6 +54,9 @@ Core capabilities:
 - 25 Hz GPS lap timing with sector support (DovesLapTimer library)
 - **"Just Drive" auto-detection** via CourseManager: automatic track
   proximity matching, course detection, and Lap Anything fallback
+- **Drag mode**: distance runs (1/8 mi–1 mi) with no track at all —
+  rollout-style launch from a standstill, ET + trap speed + 0-60 split,
+  automatic re-arm between passes (subsystem 9, plan 0015)
 - RPM monitoring via inductive tachometer pickup
 - Accelerometer logging (g-force X/Y/Z) via onboard LSM6DS3 IMU
 - DOVEX data logging with reserved 1 KB header (crash-safe GPS data)
@@ -145,6 +148,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `sensoregg_protocol.{h,cpp}` | SensorEgg `PW-ADV` v1+v2 advertising payload parser (magic filter, int16 deci-°C decode with `0x8000`→NaN sentinel, flags, sequence, v2 aux thermistor + battery) + wrap-safe 1 s staleness rule + passive-scan tuning constants |
 | `crossing_pattern.{h,cpp}` | The two-frame crossing animation as geometry (eight 16x16 cells, odd row bands, alternating phase) instead of 2 KB of stored bitmap; golden-tested byte-identical to the images it replaced |
 | `sprint_select.{h,cpp}` | Sprint mode selection: newest-course-by-`date_created` ordering (sortable ISO strings) + the circuit-vs-sprint tiebreak decision table (`race_mode` pref; circuit yields to a sprint course created today) |
+| `drag_timer.{h,cpp}` | Drag mode (plan 0015): the whole run state machine — re-latching standstill anchor, rollout-style launch (interpolated crossing), cumulative-distance finish with interpolated ET + trap speed, 0-60 split, silent aborts (mid-run standstill, fix gap), automatic re-arm — plus the distance table (targets/labels/DOVEX names) |
 | `course_prune.{h,cpp}` | Which sprint courses to drop when a track file is full (subsystem 15): `N{YYMMDD}_{HHMM}` matcher, and the drop order — **renamed-in-the-app before device-named** (a rename proves the app has a copy), then oldest by `date_created` |
 | `course_creator.{h,cpp}` | On-device course creator model (subsystem 15): screen/row table, required-vs-optional lines, the two webapp-compat save rules, the point-averaging hold (3 s, ≥8 fixes, ≤10 m h_acc), and `N{YYMMDD}_{HHMM}` name generation |
 | `track_json.{h,cpp}` | The firmware's only track-JSON **writer** — course/track object emitters + a fixed-point coordinate formatter (integer math: no working `%f` on this core, and `dtostrf` doesn't exist on the host) |
@@ -173,7 +177,7 @@ handoff spec.
 | `frame_hash.{h,cpp}` | FNV-1a 32 over the 1024-byte framebuffer (golden fixtures, viewer dirty-check, future HIL tap) |
 | `png_dump.{h,cpp}` | Dependency-free PNG writer (stored-deflate + repo crc32) for eyeballing frames |
 | `native_main.cpp` | Phase-1 driver: boot → skip GPS status page → 60 s soak, state prints |
-| `golden_main.cpp` | Phase-2 driver: scripted real-menu walk capturing 8 golden page hashes (`golden/golden_hashes.txt`; regenerate with `--print`, eyeball with `--dump`) |
+| `golden_main.cpp` | Phase-2 driver: scripted real-menu walk capturing golden page hashes (`golden/golden_hashes.txt`; regenerate with `--print`, eyeball with `--dump`) |
 | `oracle_main.cpp` | Phase-3 driver: lap-timing oracle. Default = synthetic constant-speed OKC circle (period exact by construction) through the whole real pipeline (boot page → race entry → proximity detect → CourseDetector "Normal" → laps ±40 ms); `--dovex <file>` replays a hardware log against its own header laps; diagnostic modes: `--dovex-noheader <file>` replays a header-less (crashed-session) log and prints live detection/lap state instead of asserting, `--two-session <file> [break-min]` reproduces a full track day (synthetic session 1 → auto-idle end → parked break with GPS drift → real-log session 2) to test CourseManager state carryover |
 | `fixtures/okc_tillotson_1.dovex` | Hardware-recorded OKC session (13 laps) — the `--dovex` oracle's CI fixture; the sim reproduces its header lap list to the exact millisecond (also the `--two-session` carryover test's session 2) |
 | `API.md` | Canonical WASM API contract (v1): artifact set, method surface, injectPvt schema, deltas from the handoff-spec draft (async `reset()` via module re-instantiation) |
@@ -555,6 +559,9 @@ loop()  ~250 Hz
     is a range test. `PAGE_COURSE_PRUNE` (-16) sits deliberately OUTSIDE that
     range: it is a plain two-row confirm, not one of the model's screens, so it
     must not be handed to `course_creator::rowCount()`.
+  - Drag mode: `PAGE_DRAG_DISTANCE` (-17), the distance picker between the
+    main menu's Drag row and the race rotation (five distances + Back, same
+    scrolling 3-row window as the main menu).
   - Errors: `PAGE_INTERNAL_WARNING` (100), `PAGE_INTERNAL_FAULT` (105),
     `PAGE_SD_FORMAT` (106, card responds but FAT won't mount — driven by
     `sdFormatPageLoop()`, buttons live unlike FAULT).
@@ -835,6 +842,33 @@ loop()  ~250 Hz
   (`sprintModeIsActive() && !activeTimerRunActive()`); everything else
   stays live. The DOVEX header gets `race_mode=SPRINT` and the sprint
   course name.
+- **Drag mode (plan 0015)**: main menu → **Drag** → `PAGE_DRAG_DISTANCE`
+  picker (1/8 Mile, 1000 ft, 1/4 Mile, 1/2 Mile, 1 Mile) → the session
+  starts immediately via `startDragSession()` → `startRaceSession(MANUAL)`.
+  **No track, no detection**: `trackDetected` is latched true (the sprint
+  latch) so `trackDetectionLoop()` never stands up a CourseManager, and
+  `dragTimer != nullptr` IS drag mode — the same construction as sprint,
+  drag branch FIRST in every `activeTimer*()` helper, runs duck-typing as
+  laps. The whole run state machine is the host-tested `drag_timer` unit:
+  stage at a standstill (≤1 mph held 1 s; the anchor is a **re-latching
+  running mean** of standstill fixes so GPS drift in a staging lane can't
+  fake a launch), launch rollout-style (11.25 in displacement + ≥2 mph,
+  ET start interpolated between the straddling 25 Hz fixes), accumulate
+  chord distance to the target, finish with interpolated ET + trap speed
+  and a 0-60 split (0 if never reached). Mid-run standstill (3 s) or a
+  ≥2 s fix gap abandons the run **silently** — which is also how a
+  queue-creep phantom launch self-cancels — then the timer re-arms on the
+  next standstill, so a whole day of passes is one DOVEX session
+  (`race_mode=DRAG`, course `DRAG 1/4 MILE` etc., laps line = run ETs;
+  trap/0-60 deliberately NOT in the header — the 25 Hz rows carry speed).
+  Run capture rides `checkForNewLapData()`'s run-count edge; each
+  completed run AND each fresh STAGED latch re-arms the auto-idle grace
+  (an active staging queue never idles out; manual 5 min/5 mph rules
+  otherwise apply, with the usual tach promotion). Display: no new
+  rotation pages — the Current Lap page shows live ET / last ET +
+  `trap`/`0-60` subtext / `*staged*`; the Pace page becomes the live 0-60
+  readout; the Best Lap page adds the best run's trap/0-60; the LED pace
+  pip is suppressed between runs like sprint.
 
 ### 10. Shutdown (System OFF)
 
@@ -1710,8 +1744,9 @@ timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x
   (after `optimal_ms`, in that order). Appending keeps old logs
   readable (parsed as empty) and lets older readers ignore the extra
   columns — backwards compatible by design. `race_mode` is `CIRCUIT` /
-  `SPRINT` (empty = circuit): a webapp loading helper — with `SPRINT`,
-  the laps line is a runs line. Nothing on-device reads it back.
+  `SPRINT` / `DRAG` (empty = circuit): a webapp loading helper — with
+  `SPRINT` or `DRAG`, the laps line is a runs line (drag runs are ETs).
+  Nothing on-device reads it back.
 - **GPS data** (byte 1024+): CSV column header then streaming GPS rows.
 - **`Temp1` / `Junction1` / `Temp2`** (trailing columns): SensorEgg EGT +
   cold junction + v2 aux intake-air temp, all °C. Literal `nan` when the
@@ -1890,6 +1925,11 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | Course creator h_acc gate | drop >10 m, warn >5 m | `course_creator.h` |
 | Course creator name format | `N{YYMMDD}_{HHMM}` (+ `MMDDHHMM` short name) | `course_creator.h` |
 | Sprint prune order | renamed-in-app first, then oldest `date_created`; confirm only when a device-named course would go | `course_prune.h` |
+| Drag rollout | 0.9375 ft (11.25 in), ET start interpolated | `drag_timer.h` |
+| Drag stage / launch / abort | ≤1 mph held 1 s / ≥2 mph + rollout / ≤2 mph held 3 s or ≥2 s fix gap (silent) | `drag_timer.h` |
+| Drag prove-out | launch must reach 15 mph within 5 s of ET start, else silently abandoned | `drag_timer.h` |
+| Drag time base | Unix epoch ms (`getGpsUnixTimestampMillis()`) — never time-of-day ms (wraps at UTC midnight) | `gps_functions.ino` |
+| Drag distances | 660 / 1000 / 1320 / 2640 / 5280 ft (picker order) | `drag_timer.cpp` |
 | Track JSON coordinate precision | 8 decimals (~1.1 mm) | `track_json.h` |
 | Tach min pulse gap | 3 ms (`wasted`) / 6 ms (`single`) — same ~20 000 RPM ceiling either way | `tach_filter.h` (`minPulseGapUs`) |
 | Tach revs per pulse | `wasted` ? 1.0 : 2.0 — **no cylinder term** (plan 0014) | `tach_filter.h` (`revsPerPulse`) |

@@ -74,6 +74,7 @@ void capture(const char* name, int expectPage) {
 // outside the firmware TU). The golden test breaks loudly if they drift.
 constexpr int kPageGpsStatus = 900;
 constexpr int kPageMainMenu = -1;
+constexpr int kPageDragDistance = -17;
 constexpr int kPageTransferMenu = -4;
 constexpr int kPageBluetooth = -2;
 constexpr int kPagePairCamera = -6;
@@ -131,7 +132,18 @@ void runScript() {
   press(1);
   capture("main_menu_race", kPageMainMenu);
 
+  // Down to Drag (index 1), select -> the distance picker (plan 0015).
+  press(2);
+  press(1);
+  capture("drag_distance_picker", kPageDragDistance);
+
+  // Leave via Back: one visual UP from the top row wraps to the Back
+  // row (reversed statically-rendered menu), select -> main menu.
+  press(0);
+  press(1);
+
   // Main menu renders top-to-bottom; btn3 walks down the list.
+  press(2);
   press(2);
   press(2);
   capture("main_menu_transfer", kPageMainMenu);
@@ -144,18 +156,20 @@ void runScript() {
   press(1);
   capture("bluetooth_waiting", kPageBluetooth);
 
-  // Exit BLE page -> menu; walk down once -> Replay; select -> the VFS
-  // has no .dovex files, so the firmware shows the warning page.
+  // Exit BLE page -> menu; walk down to Replay (index 2); select -> the
+  // VFS has no .dovex files, so the firmware shows the warning page.
   press(1);
+  press(2);
   press(2);
   press(1);
   capture("warning_no_dovex", kPageWarning);
 
   // Any button dismisses the warning back to the menu; walk to Create
-  // Course (index 3) and select. With no fix injected yet, the creator
+  // Course (index 4) and select. With no fix injected yet, the creator
   // refuses up front rather than letting the user walk a course it could
   // neither capture nor name.
   press(1);
+  press(2);
   press(2);
   press(2);
   press(2);
@@ -167,6 +181,7 @@ void runScript() {
   // prompt is skipped and the type picker comes up first.
   press(1);
   injectFix(60, kOpenGroundLat, kOpenGroundLon);
+  press(2);
   press(2);
   press(2);
   press(2);
@@ -231,6 +246,7 @@ void runScript() {
   injectFix(120, kOkcStartLat, kOkcStartLon);
   capture("main_menu_parked_on_line", kPageMainMenu);
 
+  press(2);
   press(2);
   press(2);
   press(2);
