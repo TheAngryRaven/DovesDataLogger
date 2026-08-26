@@ -199,6 +199,17 @@ void displayPage_drag_distance() {
   safeDisplayUpdate();
 }
 
+// The ONE seconds.hundredths renderer for drag splits — both the results
+// subtext and the pace page's live 0-60 readout go through it, so the
+// format can't diverge between the two.
+void displayPrintSplitSeconds(unsigned long ms) {
+  display.print(ms / 1000);
+  display.print(F("."));
+  unsigned long hundredths = (ms % 1000) / 10;
+  if (hundredths < 10) display.print(F("0"));
+  display.print(hundredths);
+}
+
 // Trap-speed + 0-60 subtext shared by the drag results renderings below.
 // The ET itself always goes through lap_format like every other time; the
 // split is seconds to two decimals, "0-60" omitted if never reached.
@@ -207,11 +218,7 @@ void displayPrintDragStats(float trapMph, unsigned long split60Ms) {
   display.print(trapMph, 1);
   if (split60Ms > 0) {
     display.print(F("  0-60 "));
-    display.print(split60Ms / 1000);
-    display.print(F("."));
-    unsigned long hundredths = (split60Ms % 1000) / 10;
-    if (hundredths < 10) display.print(F("0"));
-    display.print(hundredths);
+    displayPrintSplitSeconds(split60Ms);
   }
 }
 
@@ -854,11 +861,7 @@ void displayPage_gps_pace() {
     unsigned long split60 = dragCurrent0to60Ms();
     if (split60 > 0) {
       display.print(F(" "));
-      display.print(split60 / 1000);
-      display.print(F("."));
-      unsigned long hundredths = (split60 % 1000) / 10;
-      if (hundredths < 10) display.print(F("0"));
-      display.print(hundredths);
+      displayPrintSplitSeconds(split60);
       display.print(F("s"));
     } else {
       display.print(F(" -.--"));

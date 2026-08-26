@@ -489,10 +489,13 @@ void GPS_LOOP() {
     } else if (gpsData.fix && dragTimer != nullptr) {
       // Drag mode (plan 0015): the run state machine lives in the
       // host-tested drag_timer unit; run completion is captured on the
-      // run-count edge in checkForNewLapData() like sprint.
+      // run-count edge in checkForNewLapData() like sprint. EPOCH ms,
+      // not getGpsTimeInMilliseconds() — that clock wraps to zero at
+      // UTC midnight (evening sessions, US time zones) and a wrap
+      // aborts whatever run is in flight.
       dragTimer->onFix(gpsData.latitudeDegrees, gpsData.longitudeDegrees,
                        (float)(gpsData.speed * 1.15078),  // knots -> mph
-                       getGpsTimeInMilliseconds());
+                       getGpsUnixTimestampMillis());
     }
 
   #ifdef SD_CARD_LOGGING_ENABLED

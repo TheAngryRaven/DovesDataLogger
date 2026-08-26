@@ -49,7 +49,12 @@ as a timestamp gap.
 
 - **ARMED** (initial, post-run, post-abort): speed ≤ 1 mph held 1 s →
   STAGED. Standstill fixes feed the anchor mean the whole time.
-- **STAGED**: the anchor is a running mean of standstill fixes and it
+- **STAGED**: a fix gap ≥ 2 s **re-stages** instead of evaluating the
+  launch condition — a launch that happened inside a GPS dropout would
+  otherwise interpolate its ET start back to a parked-car fix from
+  before the gap, inflating the ET by up to the gap length (a car still
+  parked simply stages again one second later). The anchor is a running
+  mean of standstill fixes and it
   **keeps re-latching** while the car is stopped. This is the load-bearing
   detail: GPS drift over a multi-minute staging-lane wait would otherwise
   walk the fix past the 11.25 in rollout radius and fake a launch. With a
@@ -60,29 +65,45 @@ as a timestamp gap.
   linearly interpolated on the displacement curve between the two straddling
   fixes, and the run's distance is seeded with the overshoot past rollout.
 - **LAUNCHED**: per fix, add the chord distance (drag runs are straight —
-  chord ≈ path at 25 Hz). `dt ≤ 0` → fix ignored (GPS time-step guard).
+  chord ≈ path at 25 Hz). A duplicate timestamp is dropped whole; a
+  backwards one resyncs (see below).
   Gap ≥ 2 s → run abandoned (distance across the gap is untrustworthy at
   speed). 0–60: first fix pair with `v_prev < 60 ≤ v`, interpolated on
   speed; 0 if never reached (short cars on the 1/8). Finish: cumulative
   distance crosses the target → ET and trap both interpolated between the
   straddling fixes; run recorded (count, last/best ET, best-run trap and
   0–60 snapshot); back to ARMED. There is no FINISHED phase — "re-arm"
-  IS "wait for standstill", which is ARMED. Abort: ≤ 2 mph held 3 s before
-  the target → abandoned silently.
+  IS "wait for standstill", which is ARMED. Two aborts, both silent:
+  ≤ 2 mph held 3 s before the target (this also self-cancels queue-creep
+  phantom launches), and the **prove-out gate** — a launch that fails to
+  reach 15 mph within 5 s of the ET start is not a pass, it is a wave-off
+  driven to the pits at 4 mph, which never holds the sub-2 mph standstill
+  the first abort needs and would otherwise record 660 ft of pit road as
+  a ~90 s "run".
+
+A **backwards time step** (receiver clock correction) aborts whatever is
+in flight and resyncs the stream — the first-cut guard just dropped the
+fix without updating its reference, so one backwards step rejected every
+later fix and wedged the timer for the rest of the session.
 
 Tunables (all `constexpr` in `drag_timer.h`): rollout 0.9375 ft (11.25 in,
 the drag-strip standard), staged ≤ 1 mph held 1000 ms, launch ≥ 2 mph,
-abort ≤ 2 mph held 3000 ms, fix-gap abort 2000 ms, split target 60 mph.
+prove-out ≥ 15 mph within 5000 ms, abort ≤ 2 mph held 3000 ms, fix-gap
+abort 2000 ms (mid-run AND on the staged launch edge), split target
+60 mph.
 
 ### Units at the boundary
 
 The unit speaks **mph** (glue converts once: `gpsData.speed × 1.15078`,
 knots→mph, the same constant the logging row uses), **feet** (targets are
-exact integers: 660 / 1000 / 1320 / 2640 / 5280; the unit carries its own
-haversine returning feet, R = 20 902 464 ft — self-contained rather than
-`haversineDistanceMiles() × 5280` per fix), and **uint64 GPS ms** from
-`getGpsTimeInMilliseconds()` — no `millis()` inside the unit, sprint-timer
-precedent.
+exact integers: 660 / 1000 / 1320 / 2640 / 5280; `distanceFeet()`
+delegates to the existing `haversine` unit × 5280, so track detection and
+drag distance can never disagree on the Earth), and **Unix epoch
+milliseconds** from `getGpsUnixTimestampMillis()` — NOT
+`getGpsTimeInMilliseconds()`, which is time-of-day and wraps to zero at
+UTC midnight: prime evening test-and-tune hours across the US, and the
+wrap would look like a backwards step every night. No `millis()` inside
+the unit, sprint-timer precedent.
 
 ## Accuracy — what's honest to claim
 

@@ -29,10 +29,12 @@ void displayPage_sd_format_progress(const __FlashStringHelper* line1,
                                     const __FlashStringHelper* line2);
 void displayPage_sleep_charging();
 
-// Drag mode (plan 0015) — the distance picker + the shared trap/0-60
-// results subtext used by the lap-time and best-lap pages.
+// Drag mode (plan 0015) — the distance picker, the shared trap/0-60
+// results subtext used by the lap-time and best-lap pages, and the one
+// seconds.hundredths split renderer both 0-60 readouts share.
 void displayPage_drag_distance();
 void displayPrintDragStats(float trapMph, unsigned long split60Ms);
+void displayPrintSplitSeconds(unsigned long ms);
 
 // Replay flow (DOVEX instant replay).
 void displayPage_replay_file_select();

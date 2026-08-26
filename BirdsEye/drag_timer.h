@@ -13,8 +13,12 @@
 // The sketch keeps only the glue (sprint-timer precedent): every
 // transition here edges on a GPS fix passed to onFix(), the glue gates
 // on gpsData.fix, and a dropout reaches this unit purely as a timestamp
-// gap. Units at the boundary: mph, feet, GPS epoch milliseconds — no
-// millis(), no Arduino headers, host-tested.
+// gap. Units at the boundary: mph, feet, and **Unix epoch milliseconds**
+// (getGpsUnixTimestampMillis()) — NOT time-of-day ms, which wraps to
+// zero at UTC midnight, i.e. prime evening test-and-tune hours across
+// the US. A backwards time step (receiver clock correction) aborts any
+// in-flight measurement and resyncs, so a step can never wedge the
+// stream. No millis(), no Arduino headers, host-tested.
 //
 // The load-bearing detail is the STAGED anchor: it is a running mean of
 // standstill fixes that keeps re-latching while the car is stopped, so
@@ -67,8 +71,19 @@ constexpr uint32_t kAbortHoldMs   = 3000;
 
 // A fix gap this long mid-run aborts the run: the chord across the gap
 // is untrustworthy distance at speed. Gaps below it are tolerated (the
-// chord ~ the path; drag runs are straight).
+// chord ~ the path; drag runs are straight). The same threshold guards
+// the STAGED launch edge — a launch that happened INSIDE a gap would
+// interpolate its ET start back to a parked-car fix, so the gap
+// re-stages instead (costs one second if the car is in fact parked).
 constexpr uint32_t kFixGapAbortMs = 2000;
+
+// A launch must prove itself: reach kProveOutMph within kProveOutMs of
+// the ET start or the run is abandoned silently. This is what separates
+// a pass from being waved off and driving to the pits at 4 mph — that
+// never holds a sub-2 mph standstill, so the abort rule alone would let
+// 660 ft of pit road record as a ~90 s "run".
+constexpr float    kProveOutMph = 15.0f;
+constexpr uint32_t kProveOutMs  = 5000;
 
 // STAGED car that drifts this far from its anchor WITHOUT launching
 // (speed stayed under kLaunchMinMph) has moved to a new spot — drop
@@ -94,9 +109,10 @@ class DragTimer {
   void setTarget(int idx);
 
   // One valid GPS fix (glue gates on gpsData.fix). speedMph is ground
-  // speed in mph, gpsTimeMs is GPS epoch milliseconds. Returns true
-  // exactly when this fix COMPLETED a run (the glue's run-count edge
-  // fires off runs() anyway; the bool is a convenience).
+  // speed in mph, gpsTimeMs is Unix epoch milliseconds (see the header
+  // comment — never a wrapping time-of-day clock). Returns true exactly
+  // when this fix COMPLETED a run (the glue's run-count edge fires off
+  // runs() anyway; the bool is a convenience).
   bool onFix(double lat, double lng, float speedMph, uint64_t gpsTimeMs);
 
   Phase phase() const { return phase_; }
@@ -157,6 +173,7 @@ class DragTimer {
   // Live run.
   double   runStartMs_ = 0.0;   // interpolated -> fractional ms internally
   float    runDistFt_ = 0.0f;
+  bool     provenOut_ = false;  // reached kProveOutMph since the launch
   bool     sixtyCrossed_ = false;
   unsigned long run0to60Ms_ = 0;
   bool     slowTracking_ = false;
@@ -173,8 +190,9 @@ class DragTimer {
   unsigned long best0to60Ms_ = 0;
 };
 
-// Great-circle distance in FEET (spherical Earth, R matching
-// haversine.cpp's 3958.8 mi). Exposed for the tests' synthetic tracks.
+// Great-circle distance in FEET — delegates to the haversine unit's
+// haversineDistanceMiles() (ONE formula, one Earth radius, shared with
+// track detection). Exposed for the tests' synthetic tracks.
 double distanceFeet(double lat1, double lng1, double lat2, double lng2);
 
 }  // namespace drag_timer

@@ -1,13 +1,11 @@
 #include "drag_timer.h"
 
-#include <math.h>
+#include "haversine.h"
 
 namespace drag_timer {
 
 namespace {
-constexpr double kDegToRad = 0.017453292519943295;  // M_PI / 180.0
-// 3958.8 mi (haversine.cpp's radius) in feet — targets are feet-native.
-constexpr double kEarthRadiusFeet = 20902464.0;
+constexpr double kFeetPerMile = 5280.0;
 
 constexpr float kTargetsFt[kDistanceCount] = {
     660.0f,   // 1/8 mile
@@ -44,13 +42,9 @@ const char* dovexName(int idx) {
 }
 
 double distanceFeet(double lat1, double lng1, double lat2, double lng2) {
-  const double dLat = (lat2 - lat1) * kDegToRad;
-  const double dLng = (lng2 - lng1) * kDegToRad;
-  const double a = sin(dLat / 2) * sin(dLat / 2) +
-                   cos(lat1 * kDegToRad) * cos(lat2 * kDegToRad) *
-                   sin(dLng / 2) * sin(dLng / 2);
-  const double c = 2 * atan2(sqrt(a), sqrt(1 - a));
-  return kEarthRadiusFeet * c;
+  // The ONE haversine in the codebase (track detection uses it too) —
+  // two copies of the formula/radius would be free to drift apart.
+  return haversineDistanceMiles(lat1, lng1, lat2, lng2) * kFeetPerMile;
 }
 
 void DragTimer::setTarget(int idx) {
@@ -75,6 +69,7 @@ void DragTimer::resetToArmed() {
   anchorCount_ = 0;
   stillTracking_ = false;
   runDistFt_ = 0.0f;
+  provenOut_ = false;
   sixtyCrossed_ = false;
   run0to60Ms_ = 0;
   slowTracking_ = false;
@@ -95,9 +90,18 @@ void DragTimer::foldAnchor(double lat, double lng) {
 
 bool DragTimer::onFix(double lat, double lng, float speedMph,
                       uint64_t gpsTimeMs) {
-  // Non-monotonic GPS time (a time step mid-lock) — drop the fix whole
-  // rather than let a negative/zero dt into any of the math below.
-  if (havePrev_ && gpsTimeMs <= prevTimeMs_) return false;
+  // Non-monotonic GPS time. A duplicate timestamp is dropped whole; a
+  // BACKWARDS step (receiver clock correction mid-lock) means the
+  // timebase under any in-flight measurement is gone — abandon it and
+  // RESYNC by treating this as the first fix of a fresh stream. The
+  // pre-fix guard only returned, which never updated prevTimeMs_, so
+  // one backwards step rejected every later fix and wedged the timer
+  // for the rest of the session.
+  if (havePrev_ && gpsTimeMs <= prevTimeMs_) {
+    if (gpsTimeMs == prevTimeMs_) return false;
+    resetToArmed();
+    havePrev_ = false;
+  }
 
   bool completed = false;
 
@@ -121,6 +125,16 @@ bool DragTimer::onFix(double lat, double lng, float speedMph,
     }
 
     case Phase::kStaged: {
+      // A fix gap while staged: the launch may have happened INSIDE the
+      // gap, and interpolating the ET start across it would anchor the
+      // clock to a parked-car fix from before the dropout. Re-stage
+      // instead — a car that is in fact still parked is staged again
+      // one second later.
+      if (havePrev_ && gpsTimeMs - prevTimeMs_ >= kFixGapAbortMs) {
+        resetToArmed();
+        break;
+      }
+
       // Re-latching anchor: the mean follows the parked car's drifting
       // fix, so only real motion can open the rollout gap (plan 0015).
       if (speedMph <= kStagedMaxMph) foldAnchor(lat, lng);
@@ -142,6 +156,7 @@ bool DragTimer::onFix(double lat, double lng, float speedMph,
         }
         phase_ = Phase::kLaunched;
         runDistFt_ = (float)(d - kRolloutFt);  // overshoot past rollout
+        provenOut_ = speedMph >= kProveOutMph;
         sixtyCrossed_ = false;
         run0to60Ms_ = 0;
         slowTracking_ = false;
@@ -164,6 +179,20 @@ bool DragTimer::onFix(double lat, double lng, float speedMph,
         // stand behind. Abandon silently; nothing recorded.
         resetToArmed();
         break;
+      }
+
+      // Prove-out: a real pass reaches kProveOutMph within seconds of
+      // the ET start. A wave-off driven to the pits at 4 mph does not,
+      // and it never holds the sub-2 mph standstill the abort below
+      // needs — without this gate it would record 660 ft of pit road
+      // as a run.
+      if (!provenOut_) {
+        if (speedMph >= kProveOutMph) {
+          provenOut_ = true;
+        } else if ((double)gpsTimeMs - runStartMs_ >= (double)kProveOutMs) {
+          resetToArmed();
+          break;
+        }
       }
 
       const double stepFt = distanceFeet(prevLat_, prevLng_, lat, lng);

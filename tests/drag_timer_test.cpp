@@ -284,7 +284,30 @@ TEST_CASE("fix gap under threshold accumulates the chord and continues") {
   CHECK(fabs((double)s.t.lastEtMs() - etMs) <= kDtMs);
 }
 
-TEST_CASE("non-monotonic timestamps are ignored") {
+TEST_CASE("duplicate timestamp is dropped without disturbing the run") {
+  Strip s(0);
+  s.standstill(0.0, 2000);
+  const double v = 60.0;
+  double x = 0.0;
+  for (; x < 200.0; x += v * 0.04) {
+    s.fix(x, v * kFtPerSecToMph);
+  }
+  REQUIRE(s.t.runActive());
+  const float distBefore = s.t.distanceFt();
+  // Same timestamp as the last accepted fix: dropped whole.
+  CHECK_FALSE(s.t.onFix((x + 50.0) * degPerFoot(), 0.0,
+                        (float)(v * kFtPerSecToMph), s.now - kDtMs));
+  CHECK(s.t.runActive());
+  CHECK(s.t.distanceFt() == doctest::Approx(distBefore));
+}
+
+TEST_CASE("backwards time step aborts the run and the timer recovers") {
+  // Regression for the session-wedge bug: the old guard rejected a
+  // backwards fix without resyncing its reference, so ONE backwards
+  // step (e.g. a wrapping time-of-day clock at UTC midnight, or a
+  // receiver clock correction) rejected every later fix for the rest
+  // of the session. A backwards step must abandon the in-flight run
+  // AND leave the timer fully functional on the new timebase.
   Strip s(0);
   s.standstill(0.0, 2000);
   const double v = 60.0;
@@ -292,12 +315,62 @@ TEST_CASE("non-monotonic timestamps are ignored") {
     s.fix(x, v * kFtPerSecToMph);
   }
   REQUIRE(s.t.runActive());
-  const float distBefore = s.t.distanceFt();
-  // A fix from the past must not double-count distance or abort.
-  CHECK_FALSE(s.t.onFix(300.0 * degPerFoot(), 0.0, (float)(v * kFtPerSecToMph),
-                        s.now - 5000));
-  CHECK(s.t.runActive());
-  CHECK(s.t.distanceFt() == doctest::Approx(distBefore));
+
+  s.now = 1000;  // the clock "wrapped" — far in the past
+  s.fix(200.0, 0.0);
+  CHECK_FALSE(s.t.runActive());
+  CHECK(s.t.runs() == 0);
+
+  // The stream continues on the new timebase — a full stage + run works.
+  s.standstill(200.0, 2000);
+  CHECK(s.t.phase() == Phase::kStaged);
+  REQUIRE(s.cruise(200.0, v, 60000));
+  CHECK(s.t.runs() == 1);
+}
+
+TEST_CASE("fix gap while staged re-stages instead of timing across it") {
+  // A launch that happens INSIDE a GPS dropout must not be timed by
+  // interpolating across the gap — that anchors the ET start to a
+  // parked-car fix from before the dropout and inflates the ET by the
+  // gap length.
+  Strip s(0);
+  s.standstill(0.0, 2000);
+  REQUIRE(s.t.phase() == Phase::kStaged);
+
+  s.now += 5000;  // dropout; the car launched somewhere inside it
+  const double v = 60.0;
+  for (double x = 100.0; x < 400.0; x += v * 0.04) {
+    s.fix(x, v * kFtPerSecToMph);
+  }
+  CHECK(s.t.runs() == 0);  // nothing recorded off the gap
+
+  // Parked again after the pass -> stages normally.
+  s.standstill(400.0, 2000);
+  CHECK(s.t.phase() == Phase::kStaged);
+}
+
+TEST_CASE("wave-off drive to the pits never records a run") {
+  // Waved off and driven away at a steady 4-5 mph: above the launch
+  // threshold, never below the abort threshold — without the prove-out
+  // gate this recorded 660 ft of pit road as a ~90 s "run".
+  Strip s(0);
+  s.standstill(0.0, 2000);
+  REQUIRE(s.t.phase() == Phase::kStaged);
+  const double v = 7.33;  // ft/s = 5 mph
+  for (double x = 0.0; x < 700.0; x += v * 0.04) {
+    s.fix(x, v * kFtPerSecToMph);
+  }
+  CHECK(s.t.runs() == 0);
+  CHECK_FALSE(s.t.runActive());  // abandoned by the prove-out gate
+}
+
+TEST_CASE("a slow but real pass proves out and records") {
+  // Gentle launch (~6 ft/s^2): 15 mph arrives well inside the prove-out
+  // window, so the gate never fires and the run completes normally.
+  Strip s(0);
+  s.standstill(0.0, 2000);
+  REQUIRE(s.launchConstAccel(0.0, 6.0, 60000));
+  CHECK(s.t.runs() == 1);
 }
 
 // ---------------------------------------------------------------------------

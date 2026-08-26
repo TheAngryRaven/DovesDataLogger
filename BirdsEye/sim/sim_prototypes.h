@@ -102,6 +102,7 @@ void displayPage_gps_status();
 void displayPage_main_menu();
 void displayPage_drag_distance();
 void displayPrintDragStats(float trapMph, unsigned long split60Ms);
+void displayPrintSplitSeconds(unsigned long ms);
 void displayPage_bluetooth();
 void displayPage_transfer_menu();
 void displayPage_usb_storage();

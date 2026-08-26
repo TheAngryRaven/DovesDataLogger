@@ -1927,6 +1927,8 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | Sprint prune order | renamed-in-app first, then oldest `date_created`; confirm only when a device-named course would go | `course_prune.h` |
 | Drag rollout | 0.9375 ft (11.25 in), ET start interpolated | `drag_timer.h` |
 | Drag stage / launch / abort | ≤1 mph held 1 s / ≥2 mph + rollout / ≤2 mph held 3 s or ≥2 s fix gap (silent) | `drag_timer.h` |
+| Drag prove-out | launch must reach 15 mph within 5 s of ET start, else silently abandoned | `drag_timer.h` |
+| Drag time base | Unix epoch ms (`getGpsUnixTimestampMillis()`) — never time-of-day ms (wraps at UTC midnight) | `gps_functions.ino` |
 | Drag distances | 660 / 1000 / 1320 / 2640 / 5280 ft (picker order) | `drag_timer.cpp` |
 | Track JSON coordinate precision | 8 decimals (~1.1 mm) | `track_json.h` |
 | Tach min pulse gap | 3 ms (`wasted`) / 6 ms (`single`) — same ~20 000 RPM ceiling either way | `tach_filter.h` (`minPulseGapUs`) |

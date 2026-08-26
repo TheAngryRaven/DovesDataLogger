@@ -1424,7 +1424,9 @@ int activeTimerLaps() {
 }
 
 unsigned long activeTimerCurrentLapTime() {
-  if (dragTimer != nullptr) return dragTimer->currentEtMs(getGpsTimeInMilliseconds());
+  // Epoch ms, matching the feed in gps_functions.ino — the time-of-day
+  // clock wraps at UTC midnight and the mismatch would corrupt live ET.
+  if (dragTimer != nullptr) return dragTimer->currentEtMs(getGpsUnixTimestampMillis());
   if (sprintTimer != nullptr) return sprintTimer->getCurrentRunTime();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getCurrentLapTime();
@@ -1474,7 +1476,9 @@ float activeTimerPaceDifference() {
 }
 
 float activeTimerTotalDistance() {
-  if (dragTimer != nullptr) return dragTimer->distanceFt();  // NB: feet, not meters
+  // Meters, like every other branch of this accessor — the unit is
+  // feet-native, so convert at the boundary.
+  if (dragTimer != nullptr) return dragTimer->distanceFt() * 0.3048f;
   if (sprintTimer != nullptr) return sprintTimer->getTotalDistanceTraveled();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getTotalDistanceTraveled();
