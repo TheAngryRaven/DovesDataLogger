@@ -121,6 +121,18 @@ class DragTimer {
   int   targetIdx() const { return targetIdx_; }
   float targetFt() const { return targetFt_; }
 
+  // Manual staging tree (plan 0016): while disabled, STAGED never
+  // promotes to LAUNCHED — a rollout-at-speed re-arms instead, because
+  // a pre-green move is the tree's foul, never a run. Defaults to true
+  // so automatic mode is byte-identical.
+  void setLaunchEnabled(bool en) { launchEnabled_ = en; }
+  bool launchEnabled() const { return launchEnabled_; }
+
+  // Interpolated rollout-crossing time of the current/last launched run
+  // in Unix epoch ms (0 before the first launch). The manual tree's
+  // reaction time is this minus the green-light epoch.
+  uint64_t runStartEpochMs() const { return (uint64_t)(runStartMs_ + 0.5); }
+
   int runs() const { return runs_; }
 
   // Live ET while a run is on, 0 otherwise. nowGpsMs lets the display
@@ -154,6 +166,7 @@ class DragTimer {
 
   int   targetIdx_ = 0;
   float targetFt_ = 0.0f;
+  bool  launchEnabled_ = true;
 
   Phase phase_ = Phase::kArmed;
 

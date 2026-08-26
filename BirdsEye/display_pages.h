@@ -33,6 +33,8 @@ void displayPage_sleep_charging();
 // results subtext used by the lap-time and best-lap pages, and the one
 // seconds.hundredths split renderer both 0-60 readouts share.
 void displayPage_drag_distance();
+void displayPage_drag_mode();     // Automatic / Manual / Back (plan 0016)
+void displayPage_drag_staging();  // the pinned manual-staging screen
 void displayPrintDragStats(float trapMph, unsigned long split60Ms);
 void displayPrintSplitSeconds(unsigned long ms);
 

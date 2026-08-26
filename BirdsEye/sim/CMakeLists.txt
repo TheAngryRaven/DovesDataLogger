@@ -142,6 +142,7 @@ set(SIM_CORE_SOURCES
   ${BIRDSEYE_DIR}/crossing_pattern.cpp
   ${BIRDSEYE_DIR}/dovex_header.cpp
   ${BIRDSEYE_DIR}/drag_timer.cpp
+  ${BIRDSEYE_DIR}/drag_tree.cpp
   ${BIRDSEYE_DIR}/gps_stats.cpp
   ${BIRDSEYE_DIR}/gps_status_page.cpp
   ${BIRDSEYE_DIR}/gps_time.cpp

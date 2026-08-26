@@ -388,12 +388,29 @@ void NEOPIXEL_LOOP() {
       bool stripOff = raceEngineStopped();
       if (!stripOff) {
         if (!gpsData.fix || !gpsData.timeValid) {
+          // Wins over the staging tree too: physics can't stage without
+          // a fix (the tree sits in kWaitStop) and the familiar green
+          // pip is the correct "GPS searching" signal; the pinned
+          // staging screen's WAITING FOR GPS line agrees.
           led_modes::renderSearchPip(now, stripPx);
+        } else if (dragTreeStripActive()) {
+          // Manual drag staging tree (plan 0016): white pip -> yellows
+          // -> green, plus the foul red flash. Strip-only, so the two
+          // status LEDs stay live and boot/overrev/purple keep their
+          // priority above this whole branch. Inactive during the run
+          // itself (stripActive is false for kRunning), so the normal
+          // RPM/speed arms below take over for the pass.
+          drag_tree::renderStrip(dragTreeStage(), now, stripPx);
         } else {
           const bool paceValid =
               activeTimerRaceStarted() && activeTimerLaps() >= 1 &&
               !((sprintModeIsActive() || dragModeIsActive()) &&
-                !activeTimerRunActive());
+                !activeTimerRunActive()) &&
+              // Manual drag has no reference to pace against (the pace
+              // accessor is hardwired 0.0) — suppress the centered pip
+              // so runs 2+ get the RPM/speed scale like run 1. Constant
+              // false for auto drag/sprint/circuit, so nothing changes.
+              !dragManualActive();
           if (paceValid) {
             led_modes::renderPace(activeTimerPaceDifference(), stripPx);
           } else if (raceEntryCause == RACE_ENTRY_TACH) {

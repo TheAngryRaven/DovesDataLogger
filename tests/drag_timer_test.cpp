@@ -374,6 +374,49 @@ TEST_CASE("a slow but real pass proves out and records") {
 }
 
 // ---------------------------------------------------------------------------
+// Launch gate (manual staging tree, plan 0016)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("launch disabled: rollout at speed re-arms instead of running") {
+  Strip s(0);
+  s.t.setLaunchEnabled(false);
+  s.standstill(0.0, 2000);
+  REQUIRE(s.t.phase() == Phase::kStaged);
+  // A full pass worth of motion while the tree holds the clock — the
+  // pre-green move is the tree's foul, never a run.
+  const double v = 60.0;
+  for (double x = 0.0; x < 700.0; x += v * 0.04) {
+    s.fix(x, v * kFtPerSecToMph);
+  }
+  CHECK(s.t.runs() == 0);
+  CHECK_FALSE(s.t.runActive());
+  CHECK(s.t.phase() == Phase::kArmed);
+}
+
+TEST_CASE("re-enabling the launch gate restores a normal run") {
+  Strip s(0);
+  s.t.setLaunchEnabled(false);
+  s.standstill(0.0, 2000);
+  REQUIRE(s.t.phase() == Phase::kStaged);
+  s.t.setLaunchEnabled(true);  // the tree went green
+  REQUIRE(s.cruise(0.0, 60.0, 60000));
+  CHECK(s.t.runs() == 1);
+}
+
+TEST_CASE("runStartEpochMs is the interpolated rollout crossing") {
+  Strip s(0);
+  s.standstill(0.0, 2000);
+  REQUIRE(s.t.phase() == Phase::kStaged);
+  const uint64_t t0 = s.now;  // timestamp of the cruise's first fix
+  const double v = 60.0;      // ft/s
+  REQUIRE(s.cruise(0.0, v, 60000));
+  // Constant speed from the anchor: the rollout crossing is at exactly
+  // kRolloutFt / v seconds after the first moving fix.
+  const double expected = (double)t0 + drag_timer::kRolloutFt / v * 1000.0;
+  CHECK(fabs((double)s.t.runStartEpochMs() - expected) <= 1.0);
+}
+
+// ---------------------------------------------------------------------------
 // Live ET + distance table
 // ---------------------------------------------------------------------------
 
