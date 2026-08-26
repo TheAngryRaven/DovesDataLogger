@@ -173,6 +173,83 @@ Then:
 - **`OTH` is large** → the instrumentation is incomplete; bracket more
   before drawing any conclusion.
 
+## Second hardware run — the answer (2026-08-24, wall-clocked build)
+
+GPS locked, logging, camera recording. This is the real reading:
+
+```
+9134Hz 96us mx37
+GPS 20.1   TCH  3.0
+ACC  0.7   BLE  0.8
+EGG  3.5   TRK  1.4
+LAP  1.9   IDL  4.6
+CAM  7.7   LED  3.0
+BTN  8.9   DSP 15.7
+OTH 16.5   SLP 12.0
+```
+
+Observed mean drifted up to ~130 µs across samples; worst iteration 37 ms.
+
+**The instrument checks out.** 9134 Hz × 96 µs = 87.7% of the second spent
+executing `loop()`, and `SLP` — computed independently — reads 12.0%.
+Two fields derived by different routes agree, and all fourteen slots sum
+to ~99.8. That is the wall-clock fix confirming itself.
+
+**`SLP` 12% settles the open question**: the CPU is not sleeping through
+most of the second, so the loop genuinely runs at ~9 kHz. The previous
+build's pegged rate was the display clamp, not the timebase bug — but
+there was no way to know that until the window was wall-clocked.
+
+### The headroom, stated properly
+
+88% "busy" reads like a firmware with nothing left, and that is the wrong
+way to read it. The loop is busy *polling*, not working. The real
+constraint is iteration latency against the 25 Hz PVT stream: one
+iteration must complete per 40 ms.
+
+| | Measured | Budget | Margin |
+|---|---|---|---|
+| Mean iteration | 96 µs (peak ~130) | 40 ms (PVT interval) | **~420x** |
+| Worst iteration | 37 ms | 1600 ms (4 KB GPS ring) | **43x** |
+| Worst iteration | 37 ms | 4000 ms (watchdog) | **108x** |
+
+### Where the 88% actually goes
+
+Almost none of it is work. At 9134 iterations per second:
+
+- **`GPS` 20.1%** — ~22 µs per call, but PVT arrives 25 times a second.
+  Nearly all of those calls find an empty buffer.
+- **`DSP` 15.7%** — three renders a second (37 ms each, which is `mx`);
+  the rest is ~9000 calls that early-return on the 3 Hz gate.
+- **`OTH` 16.5%** — ~18 µs per iteration of unbracketed glue, dominated
+  by `millis()` calls (each reads the RTC under a critical section).
+- **`BTN` 8.9%** — six `digitalRead()` calls per iteration, with nobody
+  touching a button.
+
+So the CPU spends roughly four fifths of its time asking whether there is
+anything to do. If CPU is ever needed, rate-limiting those polls reclaims
+most of it — no silicon involved.
+
+### Read on the board questions
+
+- **nRF52840 vs nRF5340, on throughput: not close.** ~420x margin on the
+  binding constraint. Nothing here justifies the part. If the 5340 is
+  bought it is for BLE reliability, which this page cannot measure (see
+  below) and which stands or falls on its own evidence.
+- **Leaving the Arduino core:** `SLP` 12% is scheduler dispatch and other
+  FreeRTOS tasks — the ceiling on what a port could reclaim in this
+  dimension. Not a bottleneck either.
+
+### Caveats that survive
+
+- **The profiler is ~6% of what it reports.** 12 brackets at ~0.5 µs is
+  ~6 µs of the 96 µs mean, so the un-instrumented loop is nearer 90 µs
+  and ~9.7 kHz. Sections reading under ~1% sit at their bracket's noise
+  floor and must not be ranked against each other.
+- **BLE stack cost is still not directly measurable** — FreeRTOS
+  preemption smears SoftDevice and Bluefruit time across whichever
+  section was running.
+
 ## First hardware run (bench, 2026-08-24)
 
 Not a track session — treat these as a bench baseline, not the answer:
@@ -221,16 +298,14 @@ caveat below).
 
 ## Still outstanding
 
-- **A re-run on the fixed build.** The absolute rate and every absolute
-  share from the run above are suspect until the window is wall-clocked.
-  The first thing to read on the new build is `SLP`: near zero means the
-  loop genuinely is that fast and the old numbers were only clamped;
-  large means the CPU sleeps and the old numbers were inflated by
-  exactly that factor.
-- **A session under real load.** The run above did have a GPS lock and
-  did trigger camera recording, so it was not idle — but a full track
-  session with sustained logging is still the number that decides
-  things.
+- **A full track session.** The run above was locked, logging and
+  recording, but stationary. A session with sustained SD writes and real
+  ignition EMI is the last thing that could move `mx` — and `mx` has
+  43x of margin to give before anything is at risk.
+- **The BLE question.** Nothing here bears on whether the nRF5340's
+  dedicated network core is worth it for link reliability. That case has
+  to be made from connection-drop and throughput evidence, not from this
+  page.
 - **The BLE question.** Neither instrument separates SoftDevice /
   Bluefruit task time from the section it preempted — FreeRTOS preemption
   smears it across whatever was running. Watching how section *variance*
