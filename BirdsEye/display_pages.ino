@@ -199,6 +199,178 @@ void displayPage_drag_distance() {
   safeDisplayUpdate();
 }
 
+void displayPage_drag_mode() {
+  resetDisplay();
+
+  // Title carries the distance picked one page back, so the choice being
+  // confirmed is visible while picking how to run it.
+  display.setTextSize(1);
+  display.print(F("  Drag "));
+  display.println(drag_timer::label(dragPendingDistanceIdx));
+  display.println();
+
+  // Three static size-2 rows (title 8 + blank 8 + 3x16 = the panel).
+  static const char* const kRows[] = {"Auto", "Manual", "Back"};
+  display.setTextSize(2);
+  for (int i = 0; i < 3; i++) {
+    display.print(menuSelectionIndex == i ? "->" : "  ");
+    display.println(kRows[i]);
+  }
+
+  safeDisplayUpdate();
+}
+
+/**
+ * @brief The pinned manual-staging screen (plan 0016): tree countdown,
+ * live run, results, fouls — every glyph and flash decision comes from
+ * the drag_tree unit (same state, same flash clock as the LED strip),
+ * this function only lays it out.
+ */
+void displayPage_drag_staging() {
+  resetDisplay();
+
+  const drag_tree::Stage st = dragTreeStage();
+  const uint32_t nowMs = millis();
+
+  switch (st) {
+    case drag_tree::Stage::kAwaitArm:
+      display.setTextSize(1);
+      display.print(F("  MANUAL "));
+      display.println(dragDistanceLabel());
+      display.println();
+      display.setTextSize(2);
+      display.println(F("  READY"));
+      display.setTextSize(1);
+      display.println();
+      display.println(F("  press any button"));
+      display.println(F("  hold SEL 2s: exit"));
+      break;
+
+    case drag_tree::Stage::kWaitStop:
+      display.setTextSize(1);
+      display.print(F("  MANUAL "));
+      display.println(dragDistanceLabel());
+      display.println();
+      display.setTextSize(2);
+      if (!gpsData.fix || !gpsData.timeValid) {
+        display.println(F(" WAITING"));
+        display.println(F(" FOR GPS"));
+      } else if (gps_speed_mph >= drag_timer::kLaunchMinMph) {
+        display.println(F(" STOP TO"));
+        display.println(F("  STAGE"));
+      } else {
+        display.println(F("STAGING.."));
+      }
+      display.setTextSize(1);
+      display.println(F("  hold SEL 2s: exit"));
+      break;
+
+    case drag_tree::Stage::kPreStage:
+      display.setTextSize(1);
+      display.println(F("  MANUAL STAGING"));
+      display.println();
+      display.setTextSize(2);
+      display.println(F("  STAGED"));
+      display.setTextSize(1);
+      display.println();
+      display.println(F("  hold still..."));
+      break;
+
+    case drag_tree::Stage::kYellow1:
+    case drag_tree::Stage::kYellow2:
+    case drag_tree::Stage::kYellow3:
+      // One huge digit, the speed page's single-glyph placement.
+      display.setCursor(43, 5);
+      display.setTextSize(7);
+      display.print(drag_tree::countdownDigit(st));
+      break;
+
+    case drag_tree::Stage::kGreen:
+      // Flashes on the SAME phase as the strip (drag_tree::flashPhase),
+      // so screen and LEDs agree; blank half-phases stay blank.
+      if (drag_tree::flashPhase(nowMs)) {
+        display.setCursor(22, 5);
+        display.setTextSize(7);
+        display.print(F("GO"));
+      }
+      break;
+
+    case drag_tree::Stage::kRunning: {
+      display.setTextSize(1);
+      display.print(F("  Drag "));
+      display.println(dragDistanceLabel());
+      display.print(F("\n"));
+      display.setTextSize(3);
+      char lapStr[lap_format::kLapTimeStrLen];
+      lap_format::formatLapTime(activeTimerCurrentLapTime(),
+                                lap_format::kSpace, lapStr, sizeof(lapStr));
+      display.print(lapStr);
+      // Size-3 newline clears the ET's glyph row (see the lap page).
+      display.print(F("\n"));
+      display.setTextSize(1);
+      display.print(F(" "));
+      {
+        unsigned long split60 = dragCurrent0to60Ms();
+        if (split60 > 0) {
+          display.print(F("0-60 "));
+          displayPrintSplitSeconds(split60);
+        }
+      }
+      break;
+    }
+
+    case drag_tree::Stage::kResults: {
+      display.setTextSize(1);
+      display.print(F("  RUN "));
+      display.println(activeTimerLaps());
+      display.setTextSize(3);
+      char lapStr[lap_format::kLapTimeStrLen];
+      lap_format::formatLapTime(activeTimerLastLapTime(),
+                                lap_format::kSpace, lapStr, sizeof(lapStr));
+      display.print(lapStr);
+      // Size-3 newline clears the ET's glyph row (see the lap page).
+      display.print(F("\n"));
+      display.setTextSize(1);
+      display.print(F(" "));
+      displayPrintDragStats(dragLastTrapMph(), dragLast0to60Ms());
+      if (dragLastReactionMs() > 0) {
+        display.print(F("\n RT "));
+        displayPrintSplitSeconds(dragLastReactionMs());
+      }
+      display.println();
+      display.println(F(" press any button"));
+      break;
+    }
+
+    case drag_tree::Stage::kRedLight:
+    case drag_tree::Stage::kFailedLaunch:
+    case drag_tree::Stage::kAborted:
+      display.setTextSize(1);
+      display.println();
+      display.setTextSize(2);
+      if (drag_tree::flashPhase(nowMs)) {
+        if (st == drag_tree::Stage::kRedLight) {
+          display.println(F("RED LIGHT"));
+        } else if (st == drag_tree::Stage::kFailedLaunch) {
+          display.println(F("FAILED TO"));
+          display.println(F("  LAUNCH"));
+        } else {
+          display.println(F("   RUN"));
+          display.println(F(" ABORTED"));
+        }
+      } else {
+        display.println();
+        display.println();
+      }
+      display.setTextSize(1);
+      display.println();
+      display.println(F("  press any button"));
+      break;
+  }
+
+  safeDisplayUpdate();
+}
+
 // The ONE seconds.hundredths renderer for drag splits — both the results
 // subtext and the pace page's live 0-60 readout go through it, so the
 // format can't diverge between the two.
@@ -777,8 +949,11 @@ void displayPage_gps_lap_time() {
       lap_format::formatLapTime(activeTimerLastLapTime(), lap_format::kSpace,
                                 lapStr, sizeof(lapStr));
       display.print(lapStr);
+      // First newline at size 3 so the advance clears the 24 px glyph
+      // row — size-1 newlines (8 px) would put the subtext ON the ET.
+      display.print(F("\n"));
       display.setTextSize(1);
-      display.print(F("\n\n "));
+      display.print(F(" "));
       displayPrintDragStats(dragLastTrapMph(), dragLast0to60Ms());
     } else {
       // No run yet: staged = clock armed, launch when ready.

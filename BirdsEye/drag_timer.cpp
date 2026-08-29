@@ -141,6 +141,13 @@ bool DragTimer::onFix(double lat, double lng, float speedMph,
 
       const double d = distanceFeet(anchorLat_, anchorLng_, lat, lng);
       if (d >= kRolloutFt && speedMph >= kLaunchMinMph) {
+        if (!launchEnabled_) {
+          // Manual tree holds the clock until the green light: movement
+          // now is the tree's red-light foul, never a run. Re-arm so
+          // the phantom motion can't leave a stale staged anchor.
+          resetToArmed();
+          break;
+        }
         // Launch. ET starts at the interpolated rollout crossing on the
         // displacement curve between the previous fix and this one.
         double f = 1.0;

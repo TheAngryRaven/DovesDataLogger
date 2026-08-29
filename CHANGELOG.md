@@ -13,6 +13,17 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **Manual drag mode — the christmas tree** (plan 0016): Drag now asks
+  **Automatic or Manual** after the distance. Manual stages like a strip:
+  stop, and the LED bar lights a white staging pip, then three yellows at
+  the sportsman-tree 500 ms cadence, then green — mirrored on the screen
+  as STOP TO STAGE, a big 3…2…1 countdown, and a flashing GO. Moving
+  during the yellows is a RED LIGHT foul; sitting still 5 s after green
+  is FAILED TO LAUNCH; both flash red and wait for a button, and every
+  run ends on a results screen (ET, trap, 0-60, and a new **reaction
+  time**) that re-arms on any button. The screen stays pinned to staging
+  info for the whole manual session; hold Select 2 s to end it.
+  Automatic mode is unchanged.
 - **Drag mode** (plan 0015): main menu → **Drag** → pick a distance
   (1/8 Mile, 1000 ft, 1/4 Mile, 1/2 Mile, 1 Mile) and the session starts
   — no track file, no detection. The device stages at a standstill,

@@ -30,6 +30,7 @@
 #include "SdFat.h"
 
 #include "course_creator.h"
+#include "drag_tree.h"
 #include "gps_status_page.h"
 #include "sd_format_page.h"
 #include "wake_cause.h"
@@ -71,7 +72,13 @@ unsigned long dragBest0to60Ms();
 unsigned long dragCurrent0to60Ms();
 bool activeTimerRunActive();
 bool createSprintSession();
-void startDragSession(int distanceIdx);
+void startDragSession(int distanceIdx, bool manualStaging);
+void dragStagingLoop();
+bool dragManualActive();
+bool dragStagingPinActive();
+bool dragTreeStripActive();
+drag_tree::Stage dragTreeStage();
+unsigned long dragLastReactionMs();
 void trackDetectionLoop();
 void startRaceSession(RaceEntryCause cause);
 void endRaceSession();
@@ -101,6 +108,8 @@ void displayPage_boot();
 void displayPage_gps_status();
 void displayPage_main_menu();
 void displayPage_drag_distance();
+void displayPage_drag_mode();
+void displayPage_drag_staging();
 void displayPrintDragStats(float trapMph, unsigned long split60Ms);
 void displayPrintSplitSeconds(unsigned long ms);
 void displayPage_bluetooth();

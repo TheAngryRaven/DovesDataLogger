@@ -75,6 +75,8 @@ void capture(const char* name, int expectPage) {
 constexpr int kPageGpsStatus = 900;
 constexpr int kPageMainMenu = -1;
 constexpr int kPageDragDistance = -17;
+constexpr int kPageDragMode = -18;
+constexpr int kPageDragStaging = -19;
 constexpr int kPageTransferMenu = -4;
 constexpr int kPageBluetooth = -2;
 constexpr int kPagePairCamera = -6;
@@ -121,6 +123,37 @@ void injectFix(int frames, double lat, double lon, double hAccM = 1.2,
   }
 }
 
+// Drag-run fix stream (plan 0016 fixtures): unlike injectFix, timestamps
+// and position are CONTINUOUS across calls — drag_timer treats a
+// backwards time step as a resync and aborts the run, so a second call
+// restarting at the base timestamp would kill the pass being staged.
+// Starts safely AFTER every injectFix timestamp so the whole session's
+// epoch stream stays monotonic (2026-08-03T14:43Z).
+uint64_t g_dragTsMs = 1785077000000ull;
+double g_dragFt = 0.0;  // feet advanced along the meridian
+
+void injectDragFix(int frames, double baseLat, double lon, double speedMph,
+                   double ftPerS) {
+  constexpr double kDegPerFoot = 1.0 / 364812.6;  // spherical, R=3958.8mi
+  for (int i = 0; i < frames; i++) {
+    SimPvt p{};
+    p.timestamp_ms = g_dragTsMs;
+    g_dragTsMs += 40;
+    g_dragFt += ftPerS * 0.04;
+    p.lat = baseLat + g_dragFt * kDegPerFoot;
+    p.lng = lon;
+    p.altitude_m = 100.0;
+    p.speed_mph = speedMph;
+    p.heading_deg = 0.0;
+    p.h_acc_m = 1.2;
+    p.hdop = 0.8;
+    p.sats = 12;
+    p.fix = 1;
+    sim_inject_pvt(&p);
+    sim_step_millis(40);
+  }
+}
+
 void runScript() {
   sim_init();
 
@@ -137,8 +170,36 @@ void runScript() {
   press(1);
   capture("drag_distance_picker", kPageDragDistance);
 
-  // Leave via Back: one visual UP from the top row wraps to the Back
-  // row (reversed statically-rendered menu), select -> main menu.
+  // Select 1/8 Mile -> the Automatic/Manual mode page (plan 0016).
+  press(1);
+  capture("drag_mode_page", kPageDragMode);
+
+  // Down to Manual, select -> the pinned staging page, awaiting arm.
+  press(2);
+  press(1);
+  capture("drag_staging_await_arm", kPageDragStaging);
+
+  // Any button arms staging. No fix was ever injected, so the page
+  // shows the WAITING FOR GPS state (and the pin holds it there).
+  press(1);
+  capture("drag_staging_wait_gps", kPageDragStaging);
+
+  // Hold Select ~2.6 s: the tree's exit hold ends the session and
+  // releases the pin back to the main menu (isButtonHeld reads live
+  // levels via updateButtonHoldState, which the sim loop services).
+  // (The FULL manual pass is exercised later in the walk — it logs a
+  // .dovex and needs a fix, which would break the no-replay-files and
+  // create-needs-GPS fixtures below if run this early.)
+  sim_button_down(1);
+  sim_step_millis(2600);
+  sim_button_up(1);
+  sim_step_millis(400);  // refire lockout before the next press
+  capture("main_menu_after_drag_exit", kPageMainMenu);
+
+  // Back into the picker to leave the way the pre-0016 walk did: Drag,
+  // then Back off the picker via the wrap-up press.
+  press(2);
+  press(1);
   press(0);
   press(1);
 
@@ -245,6 +306,39 @@ void runScript() {
   // gate itself is argued from the page-id ranges, not proven here.
   injectFix(120, kOkcStartLat, kOkcStartLon);
   capture("main_menu_parked_on_line", kPageMainMenu);
+
+  // A FULL manual pass through the real pipeline (plan 0016), now that
+  // every fixture depending on a clean VFS / no fix is behind us:
+  // Drag -> 1/8 Mile -> Manual -> arm.
+  press(2);
+  press(1);
+  press(1);
+  press(2);
+  press(1);
+  press(1);  // arm -> kWaitStop
+  // Park on open ground: physics stages after 1 s, the tree pre-stages
+  // 2 s and runs the three yellows (1.5 s), so ~5.2 s of parked fixes
+  // reaches green with ~0.7 s to spare before moving.
+  injectDragFix(130, kOpenGroundLat, kOpenGroundLon, 0.0, 0.0);
+  // Launch at a constant 70 mph (102.7 ft/s): the rollout is crossed on
+  // the first moving fix pair (RT = green -> that crossing), 0-60 falls
+  // inside the same pair, and 660 ft takes ~6.4 s.
+  injectDragFix(50, kOpenGroundLat, kOpenGroundLon, 70.0, 102.667);
+  capture("drag_staging_running", kPageDragStaging);
+  injectDragFix(125, kOpenGroundLat, kOpenGroundLon, 70.0, 102.667);
+  capture("drag_staging_results", kPageDragStaging);
+
+  // Coast to a stop before leaving (the latched 70 mph would trip
+  // auto-race from the main menu — the existing walk's precedent).
+  injectDragFix(25, kOpenGroundLat, kOpenGroundLon, 0.0, 0.0);
+
+  // Any button re-arms toward the next pass; the Select hold ends the
+  // session instead and drops back to the menu.
+  press(1);
+  sim_button_down(1);
+  sim_step_millis(2600);
+  sim_button_up(1);
+  sim_step_millis(400);
 
   press(2);
   press(2);

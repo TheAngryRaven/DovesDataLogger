@@ -96,6 +96,7 @@
 #include "display_ui.h"
 #include "dovex_header.h"
 #include "drag_timer.h"
+#include "drag_tree.h"
 #include "gps_functions.h"
 #include "gps_status_page.h"
 #include "haversine.h"
@@ -175,6 +176,17 @@ drag_timer::DragTimer* dragTimer = nullptr;
 int dragLastRunCount = 0;    // run-complete edge for lap history capture
 int dragDistanceIdx = -1;    // index into drag_timer's distance table
 bool dragWasStaged = false;  // ARMED->STAGED edge for the idle-grace re-arm
+
+// Manual drag mode (plan 0016): the christmas-tree staging sequence.
+// dragManualMode is latched by startDragSession and cleared ONLY by
+// endRaceSession — it is the display pin's whole gate, so every session
+// ender releases the pinned screen by construction.
+bool dragManualMode = false;
+drag_tree::State dragTreeState;
+unsigned long dragLastRtMs = 0;   // reaction time of the last manual run
+uint64_t dragGreenEpochMs = 0;    // green-light instant, Unix epoch ms
+int dragPendingDistanceIdx = 0;   // carried from the distance picker to
+                                  // the mode page
 unsigned long idleStartTime = 0;
 bool idleTimerRunning = false;
 bool raceActive = false;
@@ -799,6 +811,12 @@ const int PAGE_COURSE_PRUNE = -16;   // "Track full - drop N old runs?"
 // Drag mode (plan 0015): the distance picker between the main menu's
 // Drag row and the race rotation. Five distances + Back.
 const int PAGE_DRAG_DISTANCE = -17;
+// Drag mode picker + the manual staging screen (plan 0016). The staging
+// page is PINNED for the whole manual session (gpsLockHold precedent):
+// negative ids sit outside the arrow rotation and onRacingPage by
+// construction, which is exactly what a pinned page needs.
+const int PAGE_DRAG_MODE = -18;     // Automatic / Manual / Back
+const int PAGE_DRAG_STAGING = -19;  // tree countdown / run / results
 
 // running menu (these must be in order)
 #if BIRDSEYE_ENABLE_PROFILING
@@ -1345,6 +1363,25 @@ bool dragModeIsActive() {
 bool dragIsStaged() {
   return dragTimer != nullptr && dragTimer->staged();
 }
+
+// Manual drag mode (plan 0016) — the staging-tree surface the display
+// and LED code read. The pin predicate gates BOTH the page pin and the
+// button kill in display_ui.ino.
+bool dragManualActive() {
+  return dragTimer != nullptr && dragManualMode;
+}
+bool dragStagingPinActive() {
+  return raceActive && dragManualActive();
+}
+bool dragTreeStripActive() {
+  return dragStagingPinActive() && drag_tree::stripActive(dragTreeState.stage);
+}
+drag_tree::Stage dragTreeStage() {
+  return dragTreeState.stage;
+}
+unsigned long dragLastReactionMs() {
+  return dragLastRtMs;
+}
 const char* dragDistanceLabel() {
   return drag_timer::label(dragDistanceIdx);
 }
@@ -1629,8 +1666,14 @@ bool createSprintSession() {
  * up a CourseManager when the strip happens to be near a saved track;
  * dragTimer must exist BEFORE startRaceSession() so its Lap Anything
  * fallback stays suppressed.
+ *
+ * manualStaging (plan 0016) runs the christmas-tree flow: the physics
+ * launch gate starts CLOSED (opened only while the tree shows green)
+ * and the display pins to PAGE_DRAG_STAGING for the whole session. No
+ * default argument — Arduino's prototype generator is unreliable with
+ * them, so both call sites pass it explicitly.
  */
-void startDragSession(int distanceIdx) {
+void startDragSession(int distanceIdx, bool manualStaging) {
   // Defensive mirror of createSprintSession() — nothing can exist when
   // this is reached from the menu, but the deletes keep that a fact.
   if (courseManager != nullptr) {
@@ -1648,11 +1691,67 @@ void startDragSession(int distanceIdx) {
   dragDistanceIdx = dragTimer->targetIdx();  // clamped by the unit
   dragLastRunCount = 0;
   dragWasStaged = false;
+  dragManualMode = manualStaging;
+  dragLastRtMs = 0;
+  dragGreenEpochMs = 0;
+  if (manualStaging) {
+    drag_tree::begin(dragTreeState, millis());
+    dragTimer->setLaunchEnabled(false);  // opened only on the green light
+  }
   trackDetected = true;
   startRaceSession(RACE_ENTRY_MANUAL);
 
   debug(F("Drag session ready — "));
-  debugln(drag_timer::label(dragDistanceIdx));
+  debug(drag_timer::label(dragDistanceIdx));
+  debugln(manualStaging ? F(" (manual tree)") : F(" (automatic)"));
+}
+
+/**
+ * @brief Manual drag staging loop (plan 0016): builds the tree's input
+ * snapshot, steps the host-tested drag_tree unit, and executes its
+ * one-shot effects. Runs after readButtons() and before displayLoop()
+ * (the gps_status_page slot) so a consumed press never leaks into the
+ * page below the pin. The physics launch gate is re-asserted every
+ * iteration: open exactly while the tree shows green.
+ */
+void dragStagingLoop() {
+  if (!raceActive || dragTimer == nullptr || !dragManualMode) return;
+
+  drag_tree::Inputs in;
+  in.nowMs = millis();
+  in.fix = gpsData.fix;
+  in.speedMph = gps_speed_mph;
+  in.timerStaged = dragTimer->staged();
+  in.runActive = dragTimer->runActive();
+  in.runs = dragTimer->runs();
+  in.buttonPressed = btn1->pressed || btn2->pressed || btn3->pressed;
+  in.selectHeld = isButtonHeld(2, 0);  // live level (updateButtonHoldState)
+  in.otherButtonHeld = isButtonHeld(1, 0) || isButtonHeld(3, 0);
+
+  const drag_tree::Effects fx = drag_tree::step(dragTreeState, in);
+
+  dragTimer->setLaunchEnabled(dragTreeState.stage ==
+                              drag_tree::Stage::kGreen);
+
+  if (fx.greenEdge) {
+    // EPOCH ms, the same clock as runStartEpochMs() — RT is the
+    // difference of the two, so they must never mix time bases.
+    dragGreenEpochMs = getGpsUnixTimestampMillis();
+    dragLastRtMs = 0;
+  }
+  if (fx.runStartEdge) {
+    const uint64_t s = dragTimer->runStartEpochMs();
+    dragLastRtMs =
+        (s > dragGreenEpochMs) ? (unsigned long)(s - dragGreenEpochMs) : 0;
+  }
+  if (fx.consumedButton) {
+    resetButtons();  // the press must not also drive displayLoop()
+  }
+  if (fx.exitSession) {
+    endRaceSession();  // clears dragManualMode -> releases the pin
+    switchToDisplayPage(PAGE_MAIN_MENU);
+    resetButtons();
+  }
 }
 
 /**
@@ -1864,7 +1963,10 @@ void endRaceSession() {
   }
   sprintCourseName[0] = '\0';
   sprintLastRunCount = 0;
-  // Clean up drag session (plan 0015)
+  // Clean up drag session (plan 0015). dragManualMode is the staging
+  // pin's whole gate (plan 0016), so clearing it HERE means every
+  // session ender — the tree's Select-hold exit, auto-idle, shutdown —
+  // releases the pinned screen by construction.
   if (dragTimer != nullptr) {
     delete dragTimer;
     dragTimer = nullptr;
@@ -1872,6 +1974,9 @@ void endRaceSession() {
   dragLastRunCount = 0;
   dragDistanceIdx = -1;
   dragWasStaged = false;
+  dragManualMode = false;
+  dragLastRtMs = 0;
+  dragGreenEpochMs = 0;
   trackDetected = false;
   detectedTrackIndex = -1;
   raceActive = false;
@@ -2941,7 +3046,8 @@ void loop() {
   //   sdFormatPageLoop:  hold Select 3s to format
   //   courseCreatorLoop: feed GPS into an averaging hold
   PROFILE_SECTION(loop_profile::kDisplay, gpsStatusPageLoop();
-                  sdFormatPageLoop(); courseCreatorLoop(); displayLoop());
+                  sdFormatPageLoop(); courseCreatorLoop();
+                  dragStagingLoop(); displayLoop());
   resetButtons();
 
   if (tachLastReported > topTachReported) {

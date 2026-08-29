@@ -370,14 +370,29 @@ void handleMenuPageSelection() {
       switchToDisplayPage(PAGE_PAIR_CAMERA);
     }
   } else if (currentPage == PAGE_DRAG_DISTANCE) {
-    // Five distances + Back (last row). Selecting a distance starts the
-    // session immediately — staging/launch is the drag timer's job.
+    // Five distances + Back (last row). A distance opens the mode page
+    // (Automatic / Manual, plan 0016) — the session starts from there.
     if (menuSelectionIndex >= drag_timer::kDistanceCount) {
       debugln(F("Drag: Back selected"));
       switchToDisplayPage(PAGE_MAIN_MENU);
     } else {
-      startDragSession(menuSelectionIndex);
+      dragPendingDistanceIdx = menuSelectionIndex;
+      switchToDisplayPage(PAGE_DRAG_MODE);
+    }
+  } else if (currentPage == PAGE_DRAG_MODE) {
+    // Automatic keeps today's behavior exactly (same landing page);
+    // Manual runs the christmas-tree flow on the pinned staging page.
+    if (menuSelectionIndex == 0) {
+      debugln(F("Drag: Automatic selected"));
+      startDragSession(dragPendingDistanceIdx, false);
       switchToDisplayPage(GPS_SPEED);
+    } else if (menuSelectionIndex == 1) {
+      debugln(F("Drag: Manual selected"));
+      startDragSession(dragPendingDistanceIdx, true);
+      switchToDisplayPage(PAGE_DRAG_STAGING);
+    } else {
+      debugln(F("Drag: mode Back selected"));
+      switchToDisplayPage(PAGE_DRAG_DISTANCE);
     }
   } else if (currentPage == PAGE_PAIR_CAMERA) {
     // Only a menu while paired (Back / Test / Unpair) — the unpaired
@@ -598,6 +613,17 @@ void displayLoop() {
     currentPage = TACHOMETER;
   }
 
+  // Manual drag staging (plan 0016): the whole manual session lives on
+  // the staging page — tree, run, results. Applied AFTER the GPS-lock
+  // hold so this pin wins (the staging page carries its own GPS-wait
+  // line). Direct assignment like the hold above, not
+  // switchToDisplayPage(), which would stamp/refresh every frame. The
+  // pin's only gate is dragManualMode, cleared by endRaceSession() —
+  // every session ender releases it by construction.
+  if (dragStagingPinActive()) {
+    currentPage = PAGE_DRAG_STAGING;
+  }
+
   // Check if I2C recovery was flagged by a previous slow display update
   if (i2cRecoveryNeeded) {
     i2cRecoveryNeeded = false;
@@ -644,6 +670,10 @@ void displayLoop() {
       displayPage_main_menu();
     } else if (currentPage == PAGE_DRAG_DISTANCE) {
       displayPage_drag_distance();
+    } else if (currentPage == PAGE_DRAG_MODE) {
+      displayPage_drag_mode();
+    } else if (currentPage == PAGE_DRAG_STAGING) {
+      displayPage_drag_staging();
     } else if (currentPage == PAGE_BLUETOOTH) {
       displayPage_bluetooth();
     } else if (currentPage == PAGE_TRANSFER_MENU) {
@@ -747,6 +777,7 @@ void displayLoop() {
   if (
     currentPage == PAGE_MAIN_MENU ||
     currentPage == PAGE_DRAG_DISTANCE ||
+    currentPage == PAGE_DRAG_MODE ||
     currentPage == PAGE_BLUETOOTH ||
     currentPage == PAGE_TRANSFER_MENU ||
     currentPage == PAGE_USB_STORAGE ||
@@ -766,6 +797,8 @@ void displayLoop() {
       menuLimit = 6; // Race, Drag, Review, Transfer, Create Course, Camera
     } else if (currentPage == PAGE_DRAG_DISTANCE) {
       menuLimit = drag_timer::kDistanceCount + 1; // distances + Back
+    } else if (currentPage == PAGE_DRAG_MODE) {
+      menuLimit = 3; // Automatic, Manual, Back
     } else if (courseCreatorActive()) {
       // Row count is the model's to decide — it changes with course type
       // (sprint grows a finish row) and with which screen is up.
@@ -800,6 +833,12 @@ void displayLoop() {
     buttonsDisabled = true;
   }
 
+  // Pinned manual drag staging: every press belongs to dragStagingLoop()
+  // (arm / re-arm / the Select-hold exit) — navigation is dead here.
+  if (dragStagingPinActive()) {
+    buttonsDisabled = true;
+  }
+
   // menu operator
   if (insideMenu && !buttonsDisabled) {
     // we are in a menu do weird menu things
@@ -815,6 +854,7 @@ void displayLoop() {
     // other row), so it was never noticed. Its third row makes it visible.
     bool reverseDirection = (currentPage == PAGE_MAIN_MENU ||
                              currentPage == PAGE_DRAG_DISTANCE ||
+                             currentPage == PAGE_DRAG_MODE ||
                              currentPage == PAGE_PAIR_CAMERA ||
                              currentPage == PAGE_CAMERA_TEST ||
                              currentPage == PAGE_COURSE_PRUNE ||
@@ -866,6 +906,11 @@ void displayLoop() {
       debugln(menuSelectionIndex);
       forceDisplayRefresh();
     }
+  } else if (currentPage == PAGE_DRAG_STAGING) {
+    // Manual drag staging (plan 0016): presses are consumed by
+    // dragStagingLoop() BEFORE displayLoop() runs — nothing to do here.
+    // The branch exists so the generic navigation below can't grab the
+    // pinned page (same construction as PAGE_GPS_STATUS below).
   } else if (currentPage == PAGE_GPS_STATUS) {
     // Boot GPS status page: presses are consumed by gpsStatusPageLoop()
     // (BirdsEye.ino) BEFORE displayLoop() runs — nothing to do here. This
