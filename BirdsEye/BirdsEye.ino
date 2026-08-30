@@ -817,6 +817,12 @@ const int PAGE_DRAG_DISTANCE = -17;
 // construction, which is exactly what a pinned page needs.
 const int PAGE_DRAG_MODE = -18;     // Automatic / Manual / Back
 const int PAGE_DRAG_STAGING = -19;  // tree countdown / run / results
+// SensorEgg pairing UI (plan 0017). Ids defined unconditionally like
+// PAGE_CAMERA_TEST; the pages are only reachable on a
+// BIRDSEYE_ENABLE_SENSOREGG build (menu row, renderers and wiring are
+// all gated).
+const int PAGE_PAIR_EGG = -20;  // egg pairing / paired-status screen
+const int PAGE_EGG_TEST = -21;  // egg bench/live-data page (never idle-sleeps)
 
 // running menu (these must be in order)
 #if BIRDSEYE_ENABLE_PROFILING

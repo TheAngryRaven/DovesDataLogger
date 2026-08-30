@@ -361,13 +361,25 @@ void handleMenuPageSelection() {
         internalNotification[sizeof(internalNotification) - 1] = '\0';
         switchToDisplayPage(PAGE_INTERNAL_WARNING);
       }
-    } else {
+    } else if (menuSelectionIndex == 5) {
       // Camera selected — paired shows status/unpair, unpaired starts pairing
       debugln(F("Main Menu: Camera selected"));
       if (!cameraIsPaired()) {
         cameraRequestPair();  // pairing begins as the page comes up
       }
       switchToDisplayPage(PAGE_PAIR_CAMERA);
+#if BIRDSEYE_ENABLE_SENSOREGG
+    } else {
+      // Egg selected (index 6, plan 0017) — paired shows status/unpair,
+      // unpaired opens the capture window as the page comes up (camera
+      // pattern). On a stock build menuLimit caps the index at 5, so the
+      // flag-gated else is unreachable there and compiled out entirely.
+      debugln(F("Main Menu: Egg selected"));
+      if (!sensoreggIsPaired()) {
+        sensoreggRequestPair();
+      }
+      switchToDisplayPage(PAGE_PAIR_EGG);
+#endif
     }
   } else if (currentPage == PAGE_DRAG_DISTANCE) {
     // Five distances + Back (last row). A distance opens the mode page
@@ -405,6 +417,10 @@ void handleMenuPageSelection() {
     } else if (menuSelectionIndex == 1) {
       debugln(F("Camera: Test selected"));
       cameraTestEnterMode();
+      // Latch the egg bench scan too (no-op on stock builds): this page's
+      // egg soak line was dead on a desk since plan 0012 race-gated the
+      // scanner — see the comment at the readout in display_pages.ino.
+      sensoreggTestEnterMode();
       switchToDisplayPage(PAGE_CAMERA_TEST);
     } else {
       debugln(F("Camera: Unpair selected"));
@@ -452,14 +468,50 @@ void handleMenuPageSelection() {
         // mode first or cameraTestActive would stay latched (FSM
         // suppressed) with no way back to this menu's Back action.
         cameraTestExitMode();
+        sensoreggTestExitMode();  // drop the egg soak latch with it
         switchToDisplayPage(PAGE_INTERNAL_WARNING);
       }
     } else {
       debugln(F("Camera Test: Back"));
       cameraTestExitMode();
+      sensoreggTestExitMode();  // drop the egg soak latch with it
       switchToDisplayPage(PAGE_PAIR_CAMERA);
     }
     forceDisplayRefresh();
+#if BIRDSEYE_ENABLE_SENSOREGG
+  } else if (currentPage == PAGE_PAIR_EGG) {
+    // Menu only while paired (Back / Test / Unpair) — the unpaired
+    // capture screen handles its buttons in the custom branch in
+    // displayLoop(). Back is index 0 so a late "Cancel" press right
+    // after a capture can't land on Test or Unpair (camera precedent).
+    if (menuSelectionIndex == 0) {
+      debugln(F("Egg: Back selected"));
+      switchToDisplayPage(PAGE_MAIN_MENU);
+    } else if (menuSelectionIndex == 1) {
+      debugln(F("Egg: Test selected"));
+      sensoreggTestEnterMode();  // latch the scanner on outside races
+      switchToDisplayPage(PAGE_EGG_TEST);
+    } else {
+      debugln(F("Egg: Unpair selected"));
+      if (sensoreggUnpair()) {
+        switchToDisplayPage(PAGE_MAIN_MENU);
+      } else {
+        // Persist-first refused: the settings write failed (SD trouble)
+        // and nothing changed — warn instead of silently diverging.
+        strncpy(internalNotification, "Settings write\nfailed!",
+                sizeof(internalNotification) - 1);
+        internalNotification[sizeof(internalNotification) - 1] = '\0';
+        switchToDisplayPage(PAGE_INTERNAL_WARNING);
+      }
+    }
+  } else if (currentPage == PAGE_EGG_TEST) {
+    // Single row: Back. Drop the bench latch so the race gate owns the
+    // scanner again.
+    debugln(F("Egg Test: Back"));
+    sensoreggTestExitMode();
+    switchToDisplayPage(PAGE_PAIR_EGG);
+    forceDisplayRefresh();
+#endif
   } else if (currentPage == PAGE_TRANSFER_MENU) {
     if (menuSelectionIndex == 2) {
       // Back — the only non-rebooting way off this page.
@@ -684,6 +736,12 @@ void displayLoop() {
       displayPage_pair_camera();
     } else if (currentPage == PAGE_CAMERA_TEST) {
       displayPage_camera_test();
+#if BIRDSEYE_ENABLE_SENSOREGG
+    } else if (currentPage == PAGE_PAIR_EGG) {
+      displayPage_pair_egg();
+    } else if (currentPage == PAGE_EGG_TEST) {
+      displayPage_egg_test();
+#endif
     } else if (currentPage == PAGE_COURSE_TRACK) {
       displayPage_course_track();
     } else if (currentPage == PAGE_COURSE_TYPE) {
@@ -790,11 +848,21 @@ void displayLoop() {
     // flips the page into menu mode the moment a serial is captured.
     (currentPage == PAGE_PAIR_CAMERA && cameraIsPaired()) ||
     currentPage == PAGE_CAMERA_TEST ||
+#if BIRDSEYE_ENABLE_SENSOREGG
+    // Egg page mirrors the camera page: menu only while paired; the
+    // unpaired capture screen uses the custom branch below (plan 0017).
+    (currentPage == PAGE_PAIR_EGG && sensoreggIsPaired()) ||
+    currentPage == PAGE_EGG_TEST ||
+#endif
     courseCreatorActive()
   ) {
     insideMenu = true;
     if (currentPage == PAGE_MAIN_MENU) {
+#if BIRDSEYE_ENABLE_SENSOREGG
+      menuLimit = 7; // Race, Drag, Review, Transfer, Create Course, Camera, Egg
+#else
       menuLimit = 6; // Race, Drag, Review, Transfer, Create Course, Camera
+#endif
     } else if (currentPage == PAGE_DRAG_DISTANCE) {
       menuLimit = drag_timer::kDistanceCount + 1; // distances + Back
     } else if (currentPage == PAGE_DRAG_MODE) {
@@ -813,6 +881,12 @@ void displayLoop() {
       menuLimit = 3; // Back, Test, Unpair
     } else if (currentPage == PAGE_CAMERA_TEST) {
       menuLimit = 4; // Wake, Record, Power Off, Back
+#if BIRDSEYE_ENABLE_SENSOREGG
+    } else if (currentPage == PAGE_PAIR_EGG) {
+      menuLimit = 3; // Back, Test, Unpair
+    } else if (currentPage == PAGE_EGG_TEST) {
+      menuLimit = 1; // Back
+#endif
     } else if (
       currentPage == LOGGING_STOP_CONFIRM ||
       currentPage == PAGE_COURSE_PRUNE ||
@@ -857,6 +931,12 @@ void displayLoop() {
                              currentPage == PAGE_DRAG_MODE ||
                              currentPage == PAGE_PAIR_CAMERA ||
                              currentPage == PAGE_CAMERA_TEST ||
+#if BIRDSEYE_ENABLE_SENSOREGG
+                             // Statically rendered top-to-bottom, exactly
+                             // like the camera pages (bug #7 class).
+                             currentPage == PAGE_PAIR_EGG ||
+                             currentPage == PAGE_EGG_TEST ||
+#endif
                              currentPage == PAGE_COURSE_PRUNE ||
                              currentPage == PAGE_TRANSFER_MENU ||
                              courseCreatorActive());
@@ -940,6 +1020,17 @@ void displayLoop() {
       cameraCancelPair();
       switchToDisplayPage(PAGE_MAIN_MENU);
     }
+#if BIRDSEYE_ENABLE_SENSOREGG
+  } else if (currentPage == PAGE_PAIR_EGG) {
+    // Unpaired capture screen only (the paired variant is a menu above).
+    // B2 (Select) = cancel. B1 stays deliberately unbound — reserved for
+    // a future manual MAC entry page (plan 0017 deferred it).
+    if (btn2->pressed) {
+      debugln(F("Pair Egg: cancel"));
+      sensoreggCancelPair();
+      switchToDisplayPage(PAGE_MAIN_MENU);
+    }
+#endif
   } else if (currentPage == PAGE_CAMERA_SERIAL_ENTRY) {
     // Manual serial entry button map:
     //   B1 (Left)   = cycle char backward (cursor 0-5) / toggle OK-CANCEL
