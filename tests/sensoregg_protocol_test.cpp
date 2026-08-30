@@ -2,7 +2,9 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
+#include <string>
 
 #include "sensoregg_protocol.h"
 
@@ -315,4 +317,83 @@ TEST_CASE("sensoregg_protocol - scan tuning: invariants") {
                         ? kScanIntervalUnits - kEggAdvUnits
                         : kEggAdvUnits - kScanIntervalUnits;
     CHECK(diff >= 8);  // >= 5 ms of per-cycle phase sweep
+}
+
+// ---------------------------------------------------------------------------
+// MAC helpers (plan 0017 — runtime pairing filter)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("sensoregg_protocol - parseMac accepts and round-trips") {
+    uint8_t mac[6];
+    CHECK(parseMac("AA:BB:CC:DD:EE:FF", mac));
+    CHECK(mac[0] == 0xAA);
+    CHECK(mac[5] == 0xFF);
+    CHECK(parseMac("aa:bb:cc:dd:ee:0f", mac));  // case-insensitive
+    CHECK(mac[0] == 0xAA);
+    CHECK(mac[5] == 0x0F);
+
+    // Round trip: parse -> format yields the canonical uppercase form.
+    char out[kMacStrLen];
+    CHECK(parseMac("f4:12:fa:7d:0b:1c", mac));
+    formatMac(mac, out);
+    CHECK(std::string(out) == "F4:12:FA:7D:0B:1C");
+    CHECK(out[17] == '\0');
+}
+
+TEST_CASE("sensoregg_protocol - parseMac rejects malformed strings") {
+    uint8_t mac[6] = {1, 2, 3, 4, 5, 6};
+    const uint8_t before[6] = {1, 2, 3, 4, 5, 6};
+    CHECK(!parseMac(nullptr, mac));
+    CHECK(!parseMac("", mac));
+    CHECK(!parseMac("AA:BB:CC:DD:EE", mac));       // one byte short
+    CHECK(!parseMac("AA:BB:CC:DD:EE:F", mac));     // 16 chars
+    CHECK(!parseMac("AA:BB:CC:DD:EE:FF:", mac));   // trailing separator
+    CHECK(!parseMac("AA:BB:CC:DD:EE:FF00", mac));  // over-length
+    CHECK(!parseMac("AA-BB-CC-DD-EE-FF", mac));    // wrong separator
+    CHECK(!parseMac("AG:BB:CC:DD:EE:FF", mac));    // non-hex digit
+    // out untouched on every failure above.
+    CHECK(memcmp(mac, before, 6) == 0);
+}
+
+TEST_CASE("sensoregg_protocol - macReverse is an involution") {
+    const uint8_t human[6] = {0xF4, 0x12, 0xFA, 0x7D, 0x0B, 0x1C};
+    uint8_t lsb[6];
+    uint8_t back[6];
+    macReverse(human, lsb);
+    CHECK(lsb[0] == 0x1C);
+    CHECK(lsb[5] == 0xF4);
+    macReverse(lsb, back);
+    CHECK(memcmp(back, human, 6) == 0);
+
+    // Aliasing-safe: in-place reversal works.
+    uint8_t inPlace[6] = {0xF4, 0x12, 0xFA, 0x7D, 0x0B, 0x1C};
+    macReverse(inPlace, inPlace);
+    CHECK(memcmp(inPlace, lsb, 6) == 0);
+}
+
+TEST_CASE("sensoregg_protocol - wildcard semantics") {
+    const uint8_t zeros[6] = {0, 0, 0, 0, 0, 0};
+    const uint8_t one[6] = {0, 0, 0, 0, 0, 1};
+    CHECK(macIsWildcard(zeros));
+    CHECK(!macIsWildcard(one));
+
+    // The all-zeros STRING parses fine but yields the wildcard — the
+    // module must treat that as unpaired, same as an empty setting.
+    uint8_t parsed[6];
+    CHECK(parseMac("00:00:00:00:00:00", parsed));
+    CHECK(macIsWildcard(parsed));
+}
+
+TEST_CASE("sensoregg_protocol - macAccepts pins the LSB-first convention") {
+    const uint8_t zeros[6] = {0, 0, 0, 0, 0, 0};
+    const uint8_t filterHuman[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};
+    // The radio reports the same device's address LSB-first.
+    const uint8_t peerLsb[6] = {0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA};
+    const uint8_t wrongPeer[6] = {0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAB};
+    CHECK(macAccepts(zeros, peerLsb));  // wildcard accepts anyone
+    CHECK(macAccepts(filterHuman, peerLsb));
+    CHECK(!macAccepts(filterHuman, wrongPeer));
+    // A same-order (human vs human) compare must REJECT — this is the
+    // exact bug class the reversal exists to prevent.
+    CHECK(!macAccepts(filterHuman, filterHuman));
 }

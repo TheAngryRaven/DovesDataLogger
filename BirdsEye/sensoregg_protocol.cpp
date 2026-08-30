@@ -1,6 +1,7 @@
 #include "sensoregg_protocol.h"
 
 #include <math.h>
+#include <string.h>
 
 namespace sensoregg_protocol {
 
@@ -15,6 +16,13 @@ float decodeDeciC(uint8_t lo, uint8_t hi) {
     return NAN;
   }
   return (float)raw / 10.0f;
+}
+
+int hexNibble(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  return -1;
 }
 
 }  // namespace
@@ -81,6 +89,63 @@ void seqMonitorFeed(SeqMonitor& m, uint16_t seq, uint32_t nowMs) {
 
 bool seqMonitorLive(const SeqMonitor& m, uint32_t nowMs) {
   return m.haveSeq && isFresh(m.lastChangeMs, nowMs);
+}
+
+bool parseMac(const char* s, uint8_t outHuman[6]) {
+  if (s == nullptr) {
+    return false;
+  }
+  uint8_t tmp[6];
+  size_t i = 0;
+  for (int b = 0; b < 6; b++) {
+    // A NUL at s[i] fails the first nibble, so s[i+1] is never read past
+    // the terminator.
+    const int hi = hexNibble(s[i]);
+    if (hi < 0) return false;
+    const int lo = hexNibble(s[i + 1]);
+    if (lo < 0) return false;
+    tmp[b] = (uint8_t)((hi << 4) | lo);
+    i += 2;
+    if (b < 5) {
+      if (s[i] != ':') return false;
+      i++;
+    }
+  }
+  if (s[i] != '\0') return false;  // trailing garbage / over-length
+  memcpy(outHuman, tmp, 6);
+  return true;
+}
+
+void formatMac(const uint8_t human[6], char out[kMacStrLen]) {
+  static const char kHex[] = "0123456789ABCDEF";
+  size_t o = 0;
+  for (int b = 0; b < 6; b++) {
+    out[o++] = kHex[human[b] >> 4];
+    out[o++] = kHex[human[b] & 0x0F];
+    if (b < 5) out[o++] = ':';
+  }
+  out[o] = '\0';
+}
+
+void macReverse(const uint8_t in[6], uint8_t out[6]) {
+  uint8_t tmp[6];
+  for (int i = 0; i < 6; i++) tmp[i] = in[5 - i];
+  memcpy(out, tmp, 6);
+}
+
+bool macIsWildcard(const uint8_t mac[6]) {
+  for (int i = 0; i < 6; i++) {
+    if (mac[i] != 0x00) return false;
+  }
+  return true;
+}
+
+bool macAccepts(const uint8_t filterHuman[6], const uint8_t peerLsbFirst[6]) {
+  if (macIsWildcard(filterHuman)) return true;
+  for (int i = 0; i < 6; i++) {
+    if (peerLsbFirst[i] != filterHuman[5 - i]) return false;
+  }
+  return true;
 }
 
 }  // namespace sensoregg_protocol
