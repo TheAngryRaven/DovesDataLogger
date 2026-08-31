@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 ///////////////////////////////////////////
@@ -26,9 +27,15 @@
 // broadcaster and accepts no connections. Do not "improve" this into a
 // connection — the camera link wins every tradeoff.
 //
-// PAIRING (POC): hardcoded MAC via SENSOREGG_MAC below. All-zeros (the
-// default) = accept any advertiser whose payload matches the PW magic —
-// fine while exactly one egg exists.
+// PAIRING (plan 0017): runtime MAC filter, persisted as the
+// "sensoregg_mac" setting ("AA:BB:CC:DD:EE:FF"; empty = unpaired =
+// accept any advertiser whose payload matches the PW magic).
+// SENSOREGG_MAC below is only the fallback when the setting is unset or
+// unparsable. Capture is window-gated: the Egg menu opens a 2-minute
+// listen window, and the first egg heard with ITS pairing-window flag
+// set (egg-side long-press, payload flags bit0) is persisted — physical
+// possession is the authorization. Applied live on pair/unpair (no
+// reboot), like the camera serial.
 //
 // THREADING (mirrors camera_ble.ino): the Bluefruit scan callback runs in
 // BLE task context and only filters, copies bytes into a RAM double
@@ -50,9 +57,10 @@
 // value draws a flat line indistinguishable from real data.
 ///////////////////////////////////////////
 
-// Hardcoded egg MAC, in the human-readable order the egg prints at boot
+// FALLBACK egg MAC (used only when the "sensoregg_mac" setting is unset
+// or unparsable), in the human-readable order the egg prints at boot
 // (AA:BB:CC:DD:EE:FF -> {0xAA,0xBB,...}). All-zeros = magic-match any
-// PW-ADV-1 broadcaster. (nRF ble_gap_addr_t stores bytes LSB-first; the
+// PW-ADV broadcaster. (nRF ble_gap_addr_t stores bytes LSB-first; the
 // match helper handles the reversal — keep this define human-ordered.)
 #define SENSOREGG_MAC {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 
@@ -118,3 +126,53 @@ bool sensoreggTcFault();
 
 // Free-running egg sequence counter from the latest payload (debug).
 uint16_t sensoreggSequence();
+
+// ---- pairing surface (plan 0017; display_ui.ino / display_pages.ino) ----
+
+// True while a specific egg MAC is stored (runtime filter non-wildcard).
+bool sensoreggIsPaired();
+
+// Open the 2-minute capture window (kPairingTimeoutMs): the scanner is
+// forced on and EVERY magic-matching egg is observed — the first frame
+// carrying the egg's own pairing-window flag wins and is persisted.
+// Idempotent; re-requesting restarts the timeout clock.
+void sensoreggRequestPair();
+
+// Close the capture window without pairing (user cancel; the timeout
+// closes it on its own otherwise).
+void sensoreggCancelPair();
+
+// True while the capture window is open.
+bool sensoreggPairingInProgress();
+
+// Forget the paired egg. PERSISTS FIRST: returns false when the settings
+// write fails (SD trouble) and changes nothing, so the UI can warn
+// instead of silently diverging from disk. True = unpaired, back to
+// accept-any.
+bool sensoreggUnpair();
+
+// Paired MAC as "AA:BB:CC:DD:EE:FF". Returns false (buf = "") when
+// unpaired or bufSize < sensoregg_protocol::kMacStrLen (18).
+bool sensoreggPairedMac(char* buf, size_t bufSize);
+
+// ---- bench test page (mirrors cameraTestEnterMode/ExitMode) ----
+
+// Latch the passive scanner on outside races so the EGG TEST page (and
+// the camera test page's coexistence soak) stream live data on a desk.
+// Exit drops the latch; the race gate then owns the scanner again.
+void sensoreggTestEnterMode();
+void sensoreggTestExitMode();
+
+// ---- test-page telemetry ----
+
+// Protocol version byte of the latest frame (1/2); 0 when stale or no
+// egg was ever heard.
+uint8_t sensoreggProtoVersion();
+
+// The egg's own pairing-window flag (payload flags bit0), gated fresh &&
+// !hung like tcFault so a frozen payload can't show a live window.
+bool sensoreggPairingFlag();
+
+// Measured accepted-parse rate over a 1 s tumbling window (~9-10 Hz on a
+// healthy bench at the egg's 111.875 ms advertising interval).
+float sensoreggPacketHz();

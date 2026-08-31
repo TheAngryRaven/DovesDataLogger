@@ -114,7 +114,7 @@ All sketch sources live in `BirdsEye/` so the folder name matches the
 | `profiling.{h,ino}` | Main-loop CPU profiling glue (subsystem 18, beta only): DWT/micros timebase probe, section brackets, the pin-30 scope output, once-a-second rollup. Also the reason a beta build never drives the 5 V boost EN |
 | `replay.{h,ino}` | Instant DOVEX header replay |
 | `sd_functions.{h,ino}` | SD init, track list/JSON parsing (dual format), track manifest, SD access arbitration |
-| `sensoregg.{h,ino}` | SensorEgg wireless EGT: passive BLE scan (observer), scan-callback→loop double buffer, `SENSOREGG_MAC` pairing, Temp1/Junction1 data surface (see subsystem 14) |
+| `sensoregg.{h,ino}` | SensorEgg wireless EGT: passive BLE scan (observer), scan-callback→loop double buffer, settings-backed MAC pairing + bench latch (plan 0017), Temp1/Junction1 data surface (see subsystem 14) |
 | `settings.{h,ino}` | Persistent JSON settings on SD (`/SETTINGS.json`), `getSetting()`/`setSetting()` |
 | `tachometer.{h,ino}` | Falling-edge ISR on D0, Kalman-filtered RPM calculation |
 | `usb_msc.{h,ino}` | USB Mass Storage (TinyUSB MSC): SD card as a drag-and-drop drive (see subsystem 12) |
@@ -558,6 +558,14 @@ loop()  ~250 Hz
   - Camera: `PAGE_PAIR_CAMERA` (-6) pairing / paired-status management,
     `PAGE_CAMERA_SERIAL_ENTRY` (-7) manual 6-char serial entry fallback,
     `PAGE_CAMERA_TEST` (-10) bench test menu (paired-only manual controls).
+  - Egg (plan 0017, `BIRDSEYE_ENABLE_SENSOREGG` builds only):
+    `PAGE_PAIR_EGG` (-20) pairing / paired-status management (the `Egg`
+    main-menu row is appended after Camera and gated, so stock menus keep
+    6 rows and existing golden fixtures are untouched), `PAGE_EGG_TEST`
+    (-21) bench live-data page. Both latch the race-gated scanner on
+    while open (the pairing window / bench mode are OR-ed into
+    `eggScanWanted()`), and both carry their Back/Cancel row per the rule
+    above.
   - Course creator (subsystem 15): `PAGE_COURSE_TRACK` (-11) track prompt,
     `PAGE_COURSE_TYPE` (-12) circuit/sprint, `PAGE_COURSE_LINES` (-13) line
     menu, `PAGE_COURSE_LINE` (-14) per-line points, `PAGE_COURSE_POINT`
@@ -1300,12 +1308,16 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   `egt` status mode still parses and round-trips on any build; only its
   rendering is gated (`led_status::Inputs.eggSupported`).
   Keep any new egg code behind the flag.
-- **What (POC)**: a wireless thermocouple pod (DovesSensorEgg repo) reads a
-  K-type EGT probe via MCP9600 and broadcasts EGT + cold junction in BLE
-  **advertising packets** — protocol `PW-ADV-1`: 14-byte Manufacturer
-  Specific Data (`FF FF` company ID + `50 57` magic *inside* the array,
-  version, flags, int16 LE deci-°C ×2 with `0x8000` = invalid sentinel,
-  raw MCP9600 STATUS, battery stub, uint16 sequence), ~10 Hz.
+- **What**: a wireless thermocouple pod (DovesSensorEgg repo) reads a
+  K-type EGT probe via MCP9600 and broadcasts its readings in BLE
+  **advertising packets** — protocol `PW-ADV` v1 (14 bytes) and v2
+  (16 bytes): `FF FF` company ID + `50 57` magic *inside* the array,
+  version byte (0x01/0x02), flags (bit0 = egg pairing window, bit1 = TC
+  fault), int16 LE deci-°C EGT + cold junction with `0x8000` = invalid
+  sentinel, raw MCP9600 STATUS, battery percent (real on v2; 0xFF =
+  unknown), uint16 sequence, and on v2 an aux intake-air thermistor
+  (int16 LE deci-°C, "Temp2"), ~10 Hz. v1 eggs still parse — their aux
+  reads NaN — so a mixed-age fleet never blinds the logger.
 - **Radio role — do not "improve" this**: the logger is a pure passive
   OBSERVER (`Bluefruit.Scanner`, `useActiveScan(false)`, 90 ms interval /
   40 ms window ≈ 44% duty, RSSI ≥ −90). No SCAN_REQ, no connection, no
@@ -1328,16 +1340,39 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   the spec's 40 ms.) (3) `SENSOREGG_LOOP()` kicks stop+start after 30 s
   with no accepted packet — a lost deferred callback otherwise halts the
   scanner silently forever.
-- **Pairing (POC)**: `SENSOREGG_MAC` #define in `sensoregg.h`, human byte
-  order; all-zeros (default) = accept any advertiser matching the payload
-  magic. The scan callback filters length + magic + MAC, copies the raw 14
-  bytes into a double buffer (camera ce81 idiom), stamps `millis()`, and
-  calls `Scanner.resume()` — **mandatory**, or the scanner halts after one
-  report. No Serial/SD/display in the callback (BLE task context).
+- **Pairing (plan 0017)**: runtime MAC filter persisted as the
+  `sensoregg_mac` setting (`"AA:BB:CC:DD:EE:FF"`; empty = unpaired =
+  accept any advertiser matching the payload magic), loaded in
+  `SENSOREGG_SETUP()`; the `SENSOREGG_MAC` #define in `sensoregg.h`
+  (human byte order) is only the fallback for unset/invalid. Capture is
+  **window-gated** from the Egg menu: the 2-minute window
+  (`kPairingTimeoutMs`) forces the scanner on and bypasses the MAC
+  filter (so a different egg can be captured while one is paired), and
+  the first parsed frame advertising the egg's OWN pairing-window flag
+  (egg-side long-press, flags bit0) wins — persist-first (a failed SD
+  write keeps the window open to retry), then the RAM filter, then the
+  window closes. Unpair = persist-first `""` → accept-any. Applied LIVE
+  on pair/unpair — no reboot, same exception as `camera_serial`. The
+  scan callback filters length + magic + MAC, copies **up to the
+  largest known layout** (`kPayloadLenMax` — the old fixed-14 copy
+  silently truncated v2 frames) plus the advertiser address into a
+  double buffer (camera ce81 idiom), stamps `millis()`, and calls
+  `Scanner.resume()` — **mandatory**, or the scanner halts after one
+  report. No Serial/SD/display in the callback (BLE task context); the
+  capture decision runs in the main-loop drain on host-tested logic
+  (`macAccepts` and friends in `sensoregg_protocol`).
 - **Consumption**: `SENSOREGG_LOOP()` (main loop) drains + parses via the
   host-tested `sensoregg_protocol` unit. Accessors: `sensoreggEgtC()` /
-  `sensoreggJunctionC()` (NaN when stale, egg-invalid, or app-hung),
-  `sensoreggLinkUp()`, `sensoreggTcFault()`, `sensoreggAppHung()`.
+  `sensoreggJunctionC()` / `sensoreggAuxC()` (NaN when stale,
+  egg-invalid, or app-hung), `sensoreggBatteryPct()`,
+  `sensoreggLinkUp()`, `sensoreggTcFault()`, `sensoreggAppHung()`; plus
+  the plan-0017 pairing/bench surface — `sensoreggIsPaired` /
+  `RequestPair` / `CancelPair` / `PairingInProgress` / `Unpair` /
+  `PairedMac`, `sensoreggTestEnterMode/ExitMode` (the bench latch that
+  joins `raceActive` and the pairing window in `eggScanWanted()`, also
+  latched by the camera test page for the desk soak), and
+  `sensoreggProtoVersion` / `PairingFlag` / `PacketHz` / `Sequence` for
+  the EGG TEST page.
 - **Zombie-egg detection**: BLE radios rebroadcast the last-set advert
   buffer autonomously, so an egg whose *application* hangs (suspected
   blocking MCP9600 I2C read under ignition EMI; 2026-07-19 field incident,
@@ -1360,7 +1395,10 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   fallback note (spec §7.2.3) rather than touching the shared `begin(1, 0)`.
 - **Sim**: `sensoregg.ino` is excluded from the sim TU like the other BLE
   modules; `module_stubs.cpp` returns NaN/false so the page renders `---`
-  and rows log `nan`.
+  and rows log `nan` (the pairing-surface stubs mirror the compiled-out
+  twins: never paired, nothing heard). The sim builds flag-0, so the Egg
+  menu row and pages don't exist there — golden hashes double as the
+  gating-leak check: if a hash moves after egg work, a `#if` escaped.
 
 ### 15. On-device Course Creator (`course_creator.{h,cpp}`, `track_json.{h,cpp}`)
 
@@ -1878,6 +1916,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
   "led_status_left": "rpm",
   "led_status_right": "egt",
   "temp1_alert_c": "650",
+  "sensoregg_mac": "",
   "utc_offset_min": "0",
   "led_brightness_night": "16",
   "led_day_start_hour": "7",
@@ -1905,6 +1944,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | `target_rpm` | int | `15000` | True RPM SHIFT/warning point: RPM-scale ceiling and the `rpm` status-LED flasher threshold. Clamp 1000–20000 (tach filter's ceiling). Was `rev_limit` before plan 0013 — a device carrying the old key has its value migrated into this one on first boot and the old key removed |
 | `overrev_limit` | int | `0` (disabled) | True RPM PROBLEM limit (plan 0007): past it the whole 11-px chain flashes red (outranks the purple celebration) and the tach page shows `*OVER REV*`; latch clears below `target_rpm × 0.97`. 0 = off (no chain flash, no header); else clamp 1000–20000 |
 | `temp1_alert_c` | int | `650` | **SensorEgg builds only** since plan 0013 — a stock image neither writes nor reads it. Temp1 (EGT) alert threshold in **Celsius** for the `egt` status mode: red flash at/above, clears 20 °C below, solid blue when the probe signal is NaN/stale. Clamp 50–1200 |
+| `sensoregg_mac` | string | `""` (empty = unpaired) | **SensorEgg builds only** (plan 0017). Paired egg MAC `"AA:BB:CC:DD:EE:FF"`, written by the Egg menu's window-gated capture (persist-first); empty or unparsable = accept any PW-ADV egg (the `SENSOREGG_MAC` fallback). **Applied LIVE on pair/unpair** — an exception to the next-boot rule below, like the camera serial |
 | `utc_offset_min` | int | `0` | Minutes east of UTC (US Central standard `-360`, India `330`, Newfoundland `-210`). Clamp ±840; out of band keeps 0 (= UTC). **Presentation only** — nothing logged is converted (subsystem 17) |
 | `led_brightness_night` | int | `16` | NeoPixel cap 0–255 used inside the night window. `0` blanks the strip but leaves the 5 V rail UP — only `led_brightness` 0 cuts the rail |
 | `led_day_start_hour` | int | `7` | **Local** hour the day cap takes over. Clamp 0–23 |
@@ -1922,7 +1962,9 @@ the one loaded). Sector lines stay optional — zero, one, or two.
   error (single retry against the regenerated file). An *empty* file is
   not corrupt — the default-population paths rebuild it in place.
 - Editable on a computer or via BLE `SSET` command — changes take effect
-  on next reboot (BLE disconnect triggers auto-reboot).
+  on next reboot (BLE disconnect triggers auto-reboot). Exceptions:
+  `camera_serial` and `sensoregg_mac` are applied live by their pairing
+  flows (both persist first, then update RAM state).
 - Read on-demand via `getSetting()`, written via `setSetting()`.
 
 ---
@@ -2018,7 +2060,8 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | SensorEgg scan interval / window | 90 ms / 40 ms (≈44% duty, test-capped ≤45%), passive | `sensoregg_protocol.h` |
 | SensorEgg scanner self-heal | 30 s no packet → stop+start kick | `sensoregg_protocol.h` |
 | SensorEgg RSSI floor | −90 dBm | `sensoregg_protocol.h` |
-| SensorEgg pairing MAC | `SENSOREGG_MAC` (all-zeros = any egg) | `sensoregg.h` |
+| SensorEgg pairing MAC | `sensoregg_mac` setting (plan 0017); `SENSOREGG_MAC` is the fallback (all-zeros = any egg) | `sensoregg.h` / `settings.ino` |
+| SensorEgg pairing timeout | 120 s capture window (`kPairingTimeoutMs`, camera parity) | `sensoregg_protocol.h` |
 | NeoPixel strip flag | `BIRDSEYE_ENABLE_NEOPIXEL`, default **1** on every channel since 4.1.0 | `project.h` |
 | Loop profiling flag | `BIRDSEYE_ENABLE_PROFILING`, default 0; 1 on the beta channel | `project.h` |
 | Profiling pin / span | 30 (`PROFILING_PIN`, = boost EN) / whole loop (`PROFILING_PIN_SECTION`) | `profiling.h` |

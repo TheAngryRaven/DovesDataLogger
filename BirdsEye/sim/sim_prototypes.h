@@ -134,6 +134,8 @@ void displayPage_gps_best_lap();
 void displayPage_tachometer();
 void displayPage_sensorTemp();
 void displayPage_sensorTemp2();
+void displayPage_pair_egg();  // plan 0017 (flag-gated in the firmware)
+void displayPage_egg_test();  // plan 0017
 void displayPage_optimal_lap();
 void displayPage_gps_lap_list();
 void displayPage_stop_logging();

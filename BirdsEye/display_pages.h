@@ -22,6 +22,10 @@ void displayPage_usb_storage();
 void displayPage_pair_camera();
 void displayPage_camera_test();
 void displayPage_camera_serial_entry();
+#if BIRDSEYE_ENABLE_SENSOREGG
+void displayPage_pair_egg();  // egg pairing / paired-status (plan 0017)
+void displayPage_egg_test();  // egg bench/live-data page (plan 0017)
+#endif
 void displayPage_internal_fault();
 void displayPage_internal_warning();
 void displayPage_sd_format();

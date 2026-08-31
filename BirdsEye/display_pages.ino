@@ -136,7 +136,11 @@ void displayPage_main_menu() {
   // a size-1 scroll-hint line. Four full size-2 rows fill the panel's
   // nominal 64 px exactly, but the last row is cut off on real hardware
   // — so the window follows the selection instead.
-  static const char* const kMenuItems[] = {"Race", "Drag", "Review", "Transfer", "Create", "Camera"};
+  static const char* const kMenuItems[] = {"Race", "Drag", "Review", "Transfer", "Create", "Camera"
+#if BIRDSEYE_ENABLE_SENSOREGG
+    , "Egg"  // pairing + bench test for the wireless EGT pod (plan 0017)
+#endif
+  };
   const int itemCount = (int)(sizeof(kMenuItems) / sizeof(kMenuItems[0]));
   const int visibleRows = 3;
 
@@ -610,10 +614,15 @@ void displayPage_camera_test() {
 
 #if BIRDSEYE_ENABLE_SENSOREGG
   // SensorEgg readout (bottom line): live Temp1 or NA when the egg is
-  // silent (>1 s) / faulted. Makes this page the coexistence soak-test
-  // harness: camera linked above + egg streaming here, and the page never
-  // idle-sleeps (the idle-shutdown and USB-charging entries are
-  // main-menu-only), so it can sit on a desk indefinitely.
+  // silent (>1 s) / faulted. Entering this page latches the egg bench
+  // mode (sensoreggTestEnterMode, plan 0017) so the race-gated scanner
+  // actually runs here — the plan-0012 gate had silently broken the
+  // desk-soak behavior this line was built for (it read NA off-track).
+  // With the latch, this page is again the camera+egg coexistence soak
+  // harness: camera linked above + egg streaming here, and the page
+  // never idle-sleeps (idle-shutdown and USB-charging entries are
+  // main-menu-only), so it can sit on a desk indefinitely. The EGG TEST
+  // page (plan 0017) shows the full egg picture.
   display.print(F("egg: "));
   const float soakEgtF = sensoregg_protocol::celsiusToFahrenheit(sensoreggEgtC());
   if (isNanF(soakEgtF)) {   // isNanF: plain isnan() folds to false under -Ofast
@@ -626,6 +635,167 @@ void displayPage_camera_test() {
 
   safeDisplayUpdate();
 }
+
+#if BIRDSEYE_ENABLE_SENSOREGG
+
+void displayPage_pair_egg() {
+  resetDisplay();
+
+  if (sensoreggIsPaired()) {
+    // Paired: stored MAC + Back/Test/Unpair. This branch also takes over
+    // the frame after a capture (insideMenu is derived per frame). Back
+    // first (index 0): a "Cancel" press landing one frame late must not
+    // hit Unpair and erase the just-captured MAC (camera precedent).
+    display.setTextSize(1);
+    display.println(F("        EGG"));
+
+    char mac[sensoregg_protocol::kMacStrLen];
+    sensoreggPairedMac(mac, sizeof(mac));
+    display.println(mac);  // 17 chars — a "Paired: " prefix would not fit
+
+    display.setTextSize(2);
+    display.print(menuSelectionIndex == 0 ? "->" : "  ");
+    display.println(F("Back"));
+    display.print(menuSelectionIndex == 1 ? "->" : "  ");
+    display.println(F("Test"));
+    display.print(menuSelectionIndex == 2 ? "->" : "  ");
+    display.println(F("Unpair"));
+  } else {
+    // Unpaired: window-gated capture status. The scanner is forced on
+    // while the window is open and observes EVERY egg in range; capture
+    // waits for one advertising ITS OWN pairing window (the egg-side
+    // long-press) — physical possession is the authorization.
+    display.setTextSize(1);
+    display.println(F("      PAIR EGG"));
+    display.println();
+
+    if (sensoreggPairingInProgress()) {
+      display.println(F("Hold button on egg"));
+      display.println(F("to start pairing..."));
+      display.print(F("Egg: "));
+      if (sensoreggLinkUp()) {
+        display.print(F("heard v"));
+        display.println(sensoreggProtoVersion());
+      } else {
+        display.println(F("---"));
+      }
+      display.print(F("Window: "));
+      display.println(sensoreggPairingFlag() ? F("OPEN") : F("--"));
+    } else {
+      // Window closed without a capture (2-min timeout or a cancel that
+      // landed while the page was still up).
+      display.println(F("Pairing stopped"));
+      display.println();
+      display.println();
+      display.println();
+    }
+
+    display.println();
+    display.println(F("B2:Cancel"));
+  }
+
+  safeDisplayUpdate();
+}
+
+void displayPage_egg_test() {
+  resetDisplay();
+
+  // Eight size-1 rows, 21 chars each. Entering this page latched the
+  // bench scan (sensoreggTestEnterMode), so everything below is live on
+  // a desk — this is the egg's soak/diagnostic harness, and like the
+  // camera test page it never idle-sleeps.
+  display.setTextSize(1);
+
+  // Row 0: title, link tri-state (HUNG outranks OK — packets arriving
+  // but the sequence frozen means the egg needs a power cycle), and the
+  // protocol version of the latest frame.
+  display.print(F("EGG TEST rf:"));
+  if (sensoreggAppHung()) {
+    display.print(F("HUNG"));
+  } else if (sensoreggLinkUp()) {
+    display.print(F("OK"));
+  } else {
+    display.print(F("--"));
+  }
+  display.print(F(" v"));
+  const uint8_t eggVer = sensoreggProtoVersion();
+  if (eggVer == 0) {
+    display.println(F("-"));
+  } else {
+    display.println(eggVer);
+  }
+
+  // Rows 1-2: temperatures (Fahrenheit at render — house rule; logging
+  // stays Celsius) and battery. Every NaN check is isNanF: plain
+  // isnan() folds to false under -Ofast.
+  const float egtF = sensoregg_protocol::celsiusToFahrenheit(sensoreggEgtC());
+  const float cjF =
+      sensoregg_protocol::celsiusToFahrenheit(sensoreggJunctionC());
+  const float auxF = sensoregg_protocol::celsiusToFahrenheit(sensoreggAuxC());
+  display.print(F("EGT "));
+  if (isNanF(egtF)) {
+    display.print(F("---"));
+  } else {
+    display.print(egtF, 1);
+    display.print(F("F"));
+  }
+  display.print(F(" CJ "));
+  if (isNanF(cjF)) {
+    display.println(F("---"));
+  } else {
+    display.print((int)lroundf(cjF));  // rounded: keeps the row <= 21 chars
+    display.println(F("F"));
+  }
+
+  display.print(F("AUX "));
+  if (isNanF(auxF)) {
+    display.print(F("---"));  // v1 egg, stale link, or divider sentinel
+  } else {
+    display.print(auxF, 1);
+    display.print(F("F"));
+  }
+  display.print(F(" BAT "));
+  const uint8_t eggBatt = sensoreggBatteryPct();
+  if (eggBatt == 0xFF) {
+    display.println(F("--%"));
+  } else {
+    display.print(eggBatt);
+    display.println(F("%"));
+  }
+
+  // Row 3: raw sequence counter (first real consumer of
+  // sensoreggSequence()) + measured packet rate (~9-10 Hz healthy).
+  display.print(F("SEQ "));
+  display.print(sensoreggSequence());
+  display.print(F("  "));
+  display.print(sensoreggPacketHz(), 1);
+  display.println(F("Hz"));
+
+  // Row 4: live flags from the latest frame.
+  display.print(F("FLG"));
+  if (sensoreggPairingFlag()) display.print(F(" PAIR"));
+  if (sensoreggTcFault()) display.print(F(" FAULT"));
+  if (!sensoreggPairingFlag() && !sensoreggTcFault()) display.print(F(" -"));
+  display.println();
+
+  // Row 5: which egg the filter accepts.
+  char eggMac[sensoregg_protocol::kMacStrLen];
+  if (sensoreggPairedMac(eggMac, sizeof(eggMac))) {
+    display.print(F("MAC "));  // 4 + 17 = 21 chars exactly
+    display.println(eggMac);
+  } else {
+    display.println(F("MAC any (unpaired)"));
+  }
+
+  // Rows 6-7: spacer + the single menu row.
+  display.println();
+  display.print(menuSelectionIndex == 0 ? F("->") : F("  "));
+  display.println(F("Back"));
+
+  safeDisplayUpdate();
+}
+
+#endif  // BIRDSEYE_ENABLE_SENSOREGG
 
 void displayPage_camera_serial_entry() {
   resetDisplay();

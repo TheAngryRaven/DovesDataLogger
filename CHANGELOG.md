@@ -13,6 +13,21 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **SensorEgg pairing menu + live-data test page** (plan 0017): a new
+  **Egg** row on the main menu (SensorEgg builds only). Pairing is
+  window-gated: open the logger's 2-minute capture window, long-press
+  the egg's button, and the first egg heard advertising its own pairing
+  window is stored — to the new `sensoregg_mac` setting, applied live,
+  with the paired page offering Back / Test / Unpair (persist-first,
+  exactly like the camera). Unpaired = accept-any, as before. The new
+  **EGG TEST** page latches the race-gated scanner on at the desk and
+  shows the full live picture: rf link tri-state, protocol version,
+  EGT/CJ/AUX/battery, sequence + measured packet rate, PAIR/FAULT
+  flags, and the active MAC filter. The camera test page's egg soak
+  line works on a desk again (it had silently died when plan 0012
+  race-gated the scanner) — entering it latches the egg bench mode too.
+  The MAC parse/format/byte-order helpers live in the host-tested
+  `sensoregg_protocol` unit.
 - **Manual drag mode — the christmas tree** (plan 0016): Drag now asks
   **Automatic or Manual** after the distance. Manual stages like a strip:
   stop, and the LED bar lights a white staging pip, then three yellows at
