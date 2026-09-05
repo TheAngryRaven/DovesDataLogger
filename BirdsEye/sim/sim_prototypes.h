@@ -41,6 +41,7 @@ int getBatteryPercent(float voltage);
 void checkForNewLapData();
 void wdtSetup();
 void wdtPet();
+void wdtBootCheck();
 void setup();
 void loop();
 DovesLapTimer* getActiveTimerDLT();

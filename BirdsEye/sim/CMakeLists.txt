@@ -160,6 +160,7 @@ set(SIM_CORE_SOURCES
   ${BIRDSEYE_DIR}/sat_bars.cpp
   ${BIRDSEYE_DIR}/sd_access_policy.cpp
   ${BIRDSEYE_DIR}/sd_format_page.cpp
+  ${BIRDSEYE_DIR}/sd_probe.cpp
   ${BIRDSEYE_DIR}/sector_purple.cpp
   ${BIRDSEYE_DIR}/sensoregg_protocol.cpp
   ${BIRDSEYE_DIR}/sprint_select.cpp

@@ -9,6 +9,8 @@
 #include "lap_format.h"
 #include "sat_bars.h"
 #include "sd_format_page.h"
+#include "sd_functions.h"
+#include "wake_cause.h"
 #include "nan_bits.h"
 #include "sensoregg_protocol.h"
 
@@ -1763,15 +1765,26 @@ void displayPage_sd_format() {
   display.setTextWrap(true);
   display.setTextColor(DISPLAY_TEXT_WHITE);
   display.setTextSize(1);
-  if (sdFormatLastFailed) {
-    display.println(F("Format FAILED - retry"));
-  } else {
-    display.println(F("Card is not formatted"));
+  // Line 2 (+3): what the last attempt said. Six size-1 rows fit under
+  // the size-2 title, so the MOUNT case spends its spare row on the one
+  // action that actually helps — re-formatting a card that formatted fine
+  // but will not mount only loops.
+  switch (sdFormatFailure) {
+    case SD_FORMAT_FAIL_ERASE:
+      display.println(F("Format FAILED - retry"));
+      break;
+    case SD_FORMAT_FAIL_MOUNT:
+      display.println(F("Formatted: no mount"));
+      display.println(F("Power-cycle the unit"));
+      break;
+    default:
+      display.println(F("Card is not formatted"));
+      break;
   }
 
   uint32_t secondsLeft = sd_format_page::holdSecondsLeft(sdFormatState, millis());
   if (secondsLeft > 0) {
-    display.println(F(""));
+    if (sdFormatFailure != SD_FORMAT_FAIL_MOUNT) display.println(F(""));
     display.print(F("Formatting in "));
     display.print(secondsLeft);
     display.println(F("s..."));
@@ -1780,6 +1793,17 @@ void displayPage_sd_format() {
     display.println(F("Hold SELECT 3s to"));
     display.println(F("format the card"));
     display.println(F("(ERASES EVERYTHING)"));
+  }
+  // Diagnostic line: why this boot happened + SdFat's last card error.
+  // "boot:WDT" here means the watchdog reset the device mid-boot (it
+  // survives a soft reset) — the card is probably fine and mid-command,
+  // and a power cycle, not an erase, is the fix.
+  if (secondsLeft == 0) {
+    display.print(F("boot:"));
+    display.print(wake_cause::shortName(bootWakeCause));
+    display.print(F(" err:"));
+    if (sdLastErrorCode < 0x10) display.print('0');
+    display.println(sdLastErrorCode, HEX);
   }
   safeDisplayUpdate();
 }

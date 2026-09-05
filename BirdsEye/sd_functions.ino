@@ -7,6 +7,7 @@
 
 #include "track_json.h"
 #include "course_prune.h"
+#include "sd_probe.h"
 
 // The SPI clock the last successful SD.begin() ran at. Module-local state
 // behind sdActiveSpiHz(); 0 until the card has come up once.
@@ -78,11 +79,18 @@ void makeFullTrackPath(const char* trackName, char* filepath, uint8_t kind) {
 // init failures. Returns true on success.
 bool sdSetSpiClock(uint32_t maxSck) {
   for (int attempt = 0; attempt < 3; attempt++) {
+    // One failing SD.begin() can take over 2 s (SdFat's ACMD41 init
+    // timeout), and at boot a WDT carried over a soft reset may already
+    // be counting — pet around every attempt, not just the loop.
+    wdtPet();
     if (SD.begin(PIN_SPI_CS, maxSck)) {
       sdActiveSpiClock = maxSck;
       return true;
     }
-    debugln(F("SD init attempt failed, retrying..."));
+    wdtPet();
+    debug(F("SD init attempt failed (err 0x"));
+    debug(SD.sdErrorCode(), HEX);
+    debugln(F("), retrying..."));
     delay(100);  // Brief delay between attempts
   }
   return false;
@@ -114,10 +122,12 @@ void sdSetTransferSpeed(bool fast) {
 
 bool SD_SETUP() {
   sdCardUnformatted = false;
+  sdLastErrorCode = 0;
   if (sdSetSpiClock(SPI_SPEED)) {
     debugln(F("SD Card initialized successfully"));
     return true;
   }
+  sdLastErrorCode = SD.sdErrorCode();
   debugln(F("Card initialization failed after 3 attempts."));
   // SD.begin() = cardBegin() && volumeBegin(). Distinguish "card answers
   // but no FAT volume mounts" (factory-blank or corrupted soldered-in
@@ -127,16 +137,51 @@ bool SD_SETUP() {
   // failed at the CARD layer (EMI, marginal contact) the FAT may be
   // perfectly healthy — offering a format then would invite the user to
   // erase real data. If the volume mounts here, the card just recovered.
-  if (SD.cardBegin(SdSpiConfig(PIN_SPI_CS, SHARED_SPI, SPI_SPEED)) &&
-      SD.card() && SD.card()->sectorCount() > 0) {
-    if (SD.volumeBegin()) {
-      debugln(F("SD recovered on probe (transient card-init failure)"));
-      return true;
+  //
+  // The verdict comes from the host-tested sd_probe rules, and a single
+  // no-volume probe is NOT enough for the format offer: a card left
+  // mid-command by an interrupted previous boot (a WDT reset survives a
+  // soft reset — see wdtBootCheck) answers commands but hands back
+  // garbage for sector 0, which is indistinguishable from blank on one
+  // look. It must fail again after a settle, and if the card layer flaps
+  // in between that is a dead/marginal card, never a blank one.
+  int volumeFailures = 0;
+  for (;;) {
+    wdtPet();
+    sd_probe::Attempt a = {};
+    a.cardOk = SD.cardBegin(SdSpiConfig(PIN_SPI_CS, SHARED_SPI, SPI_SPEED)) &&
+               SD.card() != nullptr;
+    a.hasSectors = a.cardOk && SD.card()->sectorCount() > 0;
+    a.volumeOk = a.hasSectors && SD.volumeBegin();
+    wdtPet();
+    if (!a.volumeOk) sdLastErrorCode = SD.sdErrorCode();
+
+    switch (sd_probe::classify(a, volumeFailures)) {
+      case sd_probe::Verdict::kMounted:
+        sdActiveSpiClock = SPI_SPEED;  // the probe ran at the normal clock
+        sdLastErrorCode = 0;
+        debugln(F("SD recovered on probe (transient card-init failure)"));
+        return true;
+      case sd_probe::Verdict::kUnformatted:
+        sdCardUnformatted = true;
+        debug(F("SD card responds but has no FAT volume (err 0x"));
+        debug(sdLastErrorCode, HEX);
+        debugln(F(") — format candidate"));
+        return false;
+      case sd_probe::Verdict::kDead:
+        debug(F("SD card not answering at the card layer (err 0x"));
+        debug(sdLastErrorCode, HEX);
+        debugln(F(")"));
+        return false;
+      case sd_probe::Verdict::kRetryVolume:
+        volumeFailures++;
+        debug(F("SD volume probe failed (err 0x"));
+        debug(sdLastErrorCode, HEX);
+        debugln(F("), settling and probing again"));
+        delay(sd_probe::kVolumeRetryDelayMs);
+        break;
     }
-    sdCardUnformatted = true;
-    debugln(F("SD card responds but has no FAT volume — format candidate"));
   }
-  return false;
 }
 
 // Make sure /TRACKS and /TRACKS/SPRINT exist (blank soldered-in card;
@@ -219,32 +264,63 @@ void sdPerformFormat() {
   }
 
   if (!formatted) {
+    sdLastErrorCode = SD.sdErrorCode();
     releaseSDAccess(SD_ACCESS_FORMAT);
-    debugln(F("SD format failed"));
+    debug(F("SD format failed (err 0x"));
+    debug(sdLastErrorCode, HEX);
+    debugln(F(")"));
     // Stay on the confirm page rather than the buttons-dead FAULT page: an
     // engine-on EMI failure is transient and retryable, and the confirm
     // page keeps the idle-timeout battery protection FAULT lacks (this
     // sealed device has no power switch to escape a dead-end screen).
     // Re-begin the state machine so a still-held Select can't instantly
     // re-fire — a fresh release + full 3 s hold is required to retry.
-    sdFormatLastFailed = true;
+    sdFormatFailure = SD_FORMAT_FAIL_ERASE;
     sd_format_page::begin(sdFormatState, millis());
     return;
   }
 
-  // Mount the fresh volume and provision /TRACKS now — even though the
-  // fresh boot's buildTrackList() would also create it — so an interrupted
-  // reboot still leaves a usable card.
-  wdtPet();
-  if (SD.begin(PIN_SPI_CS, SPI_SPEED)) {
-    sdEnsureTracksFolder();
+  // Mount the fresh volume — and REQUIRE it. Before this check the page
+  // said "Format OK" and rebooted whatever SD.begin() answered, so a card
+  // that formatted fine but would not mount (marginal wiring; a card
+  // wedged mid-command that only a power cycle can clear) looped straight
+  // back to "Card is not formatted" with nothing on screen to say the
+  // format had actually worked. Re-formatting cannot help that, so a
+  // mount failure stays on the confirm page with its own wording and the
+  // power-cycle advice; the SdFat error code goes on the diagnostic line.
+  bool mounted = false;
+  for (int i = 0; i < sd_probe::kVolumeFailuresToDeclare && !mounted; i++) {
+    wdtPet();
+    mounted = SD.begin(PIN_SPI_CS, SPI_SPEED);
+    wdtPet();
+    if (!mounted) delay(sd_probe::kVolumeRetryDelayMs);
   }
+  if (!mounted) {
+    sdLastErrorCode = SD.sdErrorCode();
+    releaseSDAccess(SD_ACCESS_FORMAT);
+    debug(F("SD format reported OK but the fresh volume won't mount (err 0x"));
+    debug(sdLastErrorCode, HEX);
+    debugln(F(")"));
+    sdFormatFailure = SD_FORMAT_FAIL_MOUNT;
+    sd_format_page::begin(sdFormatState, millis());
+    return;
+  }
+  sdActiveSpiClock = SPI_SPEED;
+  sdLastErrorCode = 0;
 
-  debugln(F("SD format complete, rebooting"));
+  // Provision /TRACKS now — even though the fresh boot's buildTrackList()
+  // would also create it — so an interrupted reboot still leaves a usable
+  // card.
+  wdtPet();
+  sdEnsureTracksFolder();
+
+  debugln(F("SD format complete and mounted, rebooting"));
   displayPage_sd_format_progress(F(" Format OK"), F(" Rebooting..."));
   // Let the "FORMAT OK" frame be seen; WDT stays fed. The reboot re-runs
   // SD_SETUP() (mounts clean) and SETTINGS_SETUP() (creates defaults) —
-  // mirrors the BLE-disconnect / USB-MSC-exit reset precedent.
+  // mirrors the BLE-disconnect / USB-MSC-exit reset precedent. The WDT
+  // keeps running through that reset (see wdtBootCheck), which is why the
+  // next boot pets it from its first instruction.
   for (int i = 0; i < 3; i++) {
     delay(500);
     wdtPet();
