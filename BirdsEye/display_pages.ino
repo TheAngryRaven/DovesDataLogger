@@ -9,6 +9,8 @@
 #include "lap_format.h"
 #include "sat_bars.h"
 #include "sd_format_page.h"
+#include "sd_functions.h"
+#include "wake_cause.h"
 #include "nan_bits.h"
 #include "sensoregg_protocol.h"
 
@@ -136,7 +138,11 @@ void displayPage_main_menu() {
   // a size-1 scroll-hint line. Four full size-2 rows fill the panel's
   // nominal 64 px exactly, but the last row is cut off on real hardware
   // — so the window follows the selection instead.
-  static const char* const kMenuItems[] = {"Race", "Review", "Transfer", "Create", "Camera"};
+  static const char* const kMenuItems[] = {"Race", "Drag", "Review", "Transfer", "Create", "Camera"
+#if BIRDSEYE_ENABLE_SENSOREGG
+    , "Egg"  // pairing + bench test for the wireless EGT pod (plan 0017)
+#endif
+  };
   const int itemCount = (int)(sizeof(kMenuItems) / sizeof(kMenuItems[0]));
   const int visibleRows = 3;
 
@@ -163,6 +169,235 @@ void displayPage_main_menu() {
   }
 
   safeDisplayUpdate();
+}
+
+void displayPage_drag_distance() {
+  resetDisplay();
+
+  // Same scrolling 3-row window as the main menu, plus a title line
+  // (title 8 px + 3 size-2 rows 48 px + hint line 8 px = the panel).
+  display.setTextSize(1);
+  display.println(F("    Drag Distance"));
+
+  const int itemCount = drag_timer::kDistanceCount + 1;  // + Back
+  const int visibleRows = 3;
+  int first = menuSelectionIndex - 1;
+  if (first < 0) first = 0;
+  if (first > itemCount - visibleRows) first = itemCount - visibleRows;
+
+  display.setTextSize(2);
+  for (int i = first; i < first + visibleRows; i++) {
+    display.print(menuSelectionIndex == i ? "->" : "  ");
+    display.println(i < drag_timer::kDistanceCount ? drag_timer::label(i)
+                                                   : "Back");
+  }
+
+  display.setTextSize(1);
+  if (first > 0) {
+    display.print(F("^"));
+  } else {
+    display.print(F(" "));
+  }
+  if (first + visibleRows < itemCount) {
+    display.print(F(" v more"));
+  }
+
+  safeDisplayUpdate();
+}
+
+void displayPage_drag_mode() {
+  resetDisplay();
+
+  // Title carries the distance picked one page back, so the choice being
+  // confirmed is visible while picking how to run it.
+  display.setTextSize(1);
+  display.print(F("  Drag "));
+  display.println(drag_timer::label(dragPendingDistanceIdx));
+  display.println();
+
+  // Three static size-2 rows (title 8 + blank 8 + 3x16 = the panel).
+  static const char* const kRows[] = {"Auto", "Manual", "Back"};
+  display.setTextSize(2);
+  for (int i = 0; i < 3; i++) {
+    display.print(menuSelectionIndex == i ? "->" : "  ");
+    display.println(kRows[i]);
+  }
+
+  safeDisplayUpdate();
+}
+
+/**
+ * @brief The pinned manual-staging screen (plan 0016): tree countdown,
+ * live run, results, fouls — every glyph and flash decision comes from
+ * the drag_tree unit (same state, same flash clock as the LED strip),
+ * this function only lays it out.
+ */
+void displayPage_drag_staging() {
+  resetDisplay();
+
+  const drag_tree::Stage st = dragTreeStage();
+  const uint32_t nowMs = millis();
+
+  switch (st) {
+    case drag_tree::Stage::kAwaitArm:
+      display.setTextSize(1);
+      display.print(F("  MANUAL "));
+      display.println(dragDistanceLabel());
+      display.println();
+      display.setTextSize(2);
+      display.println(F("  READY"));
+      display.setTextSize(1);
+      display.println();
+      display.println(F("  press any button"));
+      display.println(F("  hold SEL 2s: exit"));
+      break;
+
+    case drag_tree::Stage::kWaitStop:
+      display.setTextSize(1);
+      display.print(F("  MANUAL "));
+      display.println(dragDistanceLabel());
+      display.println();
+      display.setTextSize(2);
+      if (!gpsData.fix || !gpsData.timeValid) {
+        display.println(F(" WAITING"));
+        display.println(F(" FOR GPS"));
+      } else if (gps_speed_mph >= drag_timer::kLaunchMinMph) {
+        display.println(F(" STOP TO"));
+        display.println(F("  STAGE"));
+      } else {
+        display.println(F("STAGING.."));
+      }
+      display.setTextSize(1);
+      display.println(F("  hold SEL 2s: exit"));
+      break;
+
+    case drag_tree::Stage::kPreStage:
+      display.setTextSize(1);
+      display.println(F("  MANUAL STAGING"));
+      display.println();
+      display.setTextSize(2);
+      display.println(F("  STAGED"));
+      display.setTextSize(1);
+      display.println();
+      display.println(F("  hold still..."));
+      break;
+
+    case drag_tree::Stage::kYellow1:
+    case drag_tree::Stage::kYellow2:
+    case drag_tree::Stage::kYellow3:
+      // One huge digit, the speed page's single-glyph placement.
+      display.setCursor(43, 5);
+      display.setTextSize(7);
+      display.print(drag_tree::countdownDigit(st));
+      break;
+
+    case drag_tree::Stage::kGreen:
+      // Flashes on the SAME phase as the strip (drag_tree::flashPhase),
+      // so screen and LEDs agree; blank half-phases stay blank.
+      if (drag_tree::flashPhase(nowMs)) {
+        display.setCursor(22, 5);
+        display.setTextSize(7);
+        display.print(F("GO"));
+      }
+      break;
+
+    case drag_tree::Stage::kRunning: {
+      display.setTextSize(1);
+      display.print(F("  Drag "));
+      display.println(dragDistanceLabel());
+      display.print(F("\n"));
+      display.setTextSize(3);
+      char lapStr[lap_format::kLapTimeStrLen];
+      lap_format::formatLapTime(activeTimerCurrentLapTime(),
+                                lap_format::kSpace, lapStr, sizeof(lapStr));
+      display.print(lapStr);
+      // Size-3 newline clears the ET's glyph row (see the lap page).
+      display.print(F("\n"));
+      display.setTextSize(1);
+      display.print(F(" "));
+      {
+        unsigned long split60 = dragCurrent0to60Ms();
+        if (split60 > 0) {
+          display.print(F("0-60 "));
+          displayPrintSplitSeconds(split60);
+        }
+      }
+      break;
+    }
+
+    case drag_tree::Stage::kResults: {
+      display.setTextSize(1);
+      display.print(F("  RUN "));
+      display.println(activeTimerLaps());
+      display.setTextSize(3);
+      char lapStr[lap_format::kLapTimeStrLen];
+      lap_format::formatLapTime(activeTimerLastLapTime(),
+                                lap_format::kSpace, lapStr, sizeof(lapStr));
+      display.print(lapStr);
+      // Size-3 newline clears the ET's glyph row (see the lap page).
+      display.print(F("\n"));
+      display.setTextSize(1);
+      display.print(F(" "));
+      displayPrintDragStats(dragLastTrapMph(), dragLast0to60Ms());
+      if (dragLastReactionMs() > 0) {
+        display.print(F("\n RT "));
+        displayPrintSplitSeconds(dragLastReactionMs());
+      }
+      display.println();
+      display.println(F(" press any button"));
+      break;
+    }
+
+    case drag_tree::Stage::kRedLight:
+    case drag_tree::Stage::kFailedLaunch:
+    case drag_tree::Stage::kAborted:
+      display.setTextSize(1);
+      display.println();
+      display.setTextSize(2);
+      if (drag_tree::flashPhase(nowMs)) {
+        if (st == drag_tree::Stage::kRedLight) {
+          display.println(F("RED LIGHT"));
+        } else if (st == drag_tree::Stage::kFailedLaunch) {
+          display.println(F("FAILED TO"));
+          display.println(F("  LAUNCH"));
+        } else {
+          display.println(F("   RUN"));
+          display.println(F(" ABORTED"));
+        }
+      } else {
+        display.println();
+        display.println();
+      }
+      display.setTextSize(1);
+      display.println();
+      display.println(F("  press any button"));
+      break;
+  }
+
+  safeDisplayUpdate();
+}
+
+// The ONE seconds.hundredths renderer for drag splits — both the results
+// subtext and the pace page's live 0-60 readout go through it, so the
+// format can't diverge between the two.
+void displayPrintSplitSeconds(unsigned long ms) {
+  display.print(ms / 1000);
+  display.print(F("."));
+  unsigned long hundredths = (ms % 1000) / 10;
+  if (hundredths < 10) display.print(F("0"));
+  display.print(hundredths);
+}
+
+// Trap-speed + 0-60 subtext shared by the drag results renderings below.
+// The ET itself always goes through lap_format like every other time; the
+// split is seconds to two decimals, "0-60" omitted if never reached.
+void displayPrintDragStats(float trapMph, unsigned long split60Ms) {
+  display.print(F("trap "));
+  display.print(trapMph, 1);
+  if (split60Ms > 0) {
+    display.print(F("  0-60 "));
+    displayPrintSplitSeconds(split60Ms);
+  }
 }
 
 void displayPage_bluetooth() {
@@ -381,10 +616,15 @@ void displayPage_camera_test() {
 
 #if BIRDSEYE_ENABLE_SENSOREGG
   // SensorEgg readout (bottom line): live Temp1 or NA when the egg is
-  // silent (>1 s) / faulted. Makes this page the coexistence soak-test
-  // harness: camera linked above + egg streaming here, and the page never
-  // idle-sleeps (the idle-shutdown and USB-charging entries are
-  // main-menu-only), so it can sit on a desk indefinitely.
+  // silent (>1 s) / faulted. Entering this page latches the egg bench
+  // mode (sensoreggTestEnterMode, plan 0017) so the race-gated scanner
+  // actually runs here — the plan-0012 gate had silently broken the
+  // desk-soak behavior this line was built for (it read NA off-track).
+  // With the latch, this page is again the camera+egg coexistence soak
+  // harness: camera linked above + egg streaming here, and the page
+  // never idle-sleeps (idle-shutdown and USB-charging entries are
+  // main-menu-only), so it can sit on a desk indefinitely. The EGG TEST
+  // page (plan 0017) shows the full egg picture.
   display.print(F("egg: "));
   const float soakEgtF = sensoregg_protocol::celsiusToFahrenheit(sensoreggEgtC());
   if (isNanF(soakEgtF)) {   // isNanF: plain isnan() folds to false under -Ofast
@@ -397,6 +637,167 @@ void displayPage_camera_test() {
 
   safeDisplayUpdate();
 }
+
+#if BIRDSEYE_ENABLE_SENSOREGG
+
+void displayPage_pair_egg() {
+  resetDisplay();
+
+  if (sensoreggIsPaired()) {
+    // Paired: stored MAC + Back/Test/Unpair. This branch also takes over
+    // the frame after a capture (insideMenu is derived per frame). Back
+    // first (index 0): a "Cancel" press landing one frame late must not
+    // hit Unpair and erase the just-captured MAC (camera precedent).
+    display.setTextSize(1);
+    display.println(F("        EGG"));
+
+    char mac[sensoregg_protocol::kMacStrLen];
+    sensoreggPairedMac(mac, sizeof(mac));
+    display.println(mac);  // 17 chars — a "Paired: " prefix would not fit
+
+    display.setTextSize(2);
+    display.print(menuSelectionIndex == 0 ? "->" : "  ");
+    display.println(F("Back"));
+    display.print(menuSelectionIndex == 1 ? "->" : "  ");
+    display.println(F("Test"));
+    display.print(menuSelectionIndex == 2 ? "->" : "  ");
+    display.println(F("Unpair"));
+  } else {
+    // Unpaired: window-gated capture status. The scanner is forced on
+    // while the window is open and observes EVERY egg in range; capture
+    // waits for one advertising ITS OWN pairing window (the egg-side
+    // long-press) — physical possession is the authorization.
+    display.setTextSize(1);
+    display.println(F("      PAIR EGG"));
+    display.println();
+
+    if (sensoreggPairingInProgress()) {
+      display.println(F("Hold button on egg"));
+      display.println(F("to start pairing..."));
+      display.print(F("Egg: "));
+      if (sensoreggLinkUp()) {
+        display.print(F("heard v"));
+        display.println(sensoreggProtoVersion());
+      } else {
+        display.println(F("---"));
+      }
+      display.print(F("Window: "));
+      display.println(sensoreggPairingFlag() ? F("OPEN") : F("--"));
+    } else {
+      // Window closed without a capture (2-min timeout or a cancel that
+      // landed while the page was still up).
+      display.println(F("Pairing stopped"));
+      display.println();
+      display.println();
+      display.println();
+    }
+
+    display.println();
+    display.println(F("B2:Cancel"));
+  }
+
+  safeDisplayUpdate();
+}
+
+void displayPage_egg_test() {
+  resetDisplay();
+
+  // Eight size-1 rows, 21 chars each. Entering this page latched the
+  // bench scan (sensoreggTestEnterMode), so everything below is live on
+  // a desk — this is the egg's soak/diagnostic harness, and like the
+  // camera test page it never idle-sleeps.
+  display.setTextSize(1);
+
+  // Row 0: title, link tri-state (HUNG outranks OK — packets arriving
+  // but the sequence frozen means the egg needs a power cycle), and the
+  // protocol version of the latest frame.
+  display.print(F("EGG TEST rf:"));
+  if (sensoreggAppHung()) {
+    display.print(F("HUNG"));
+  } else if (sensoreggLinkUp()) {
+    display.print(F("OK"));
+  } else {
+    display.print(F("--"));
+  }
+  display.print(F(" v"));
+  const uint8_t eggVer = sensoreggProtoVersion();
+  if (eggVer == 0) {
+    display.println(F("-"));
+  } else {
+    display.println(eggVer);
+  }
+
+  // Rows 1-2: temperatures (Fahrenheit at render — house rule; logging
+  // stays Celsius) and battery. Every NaN check is isNanF: plain
+  // isnan() folds to false under -Ofast.
+  const float egtF = sensoregg_protocol::celsiusToFahrenheit(sensoreggEgtC());
+  const float cjF =
+      sensoregg_protocol::celsiusToFahrenheit(sensoreggJunctionC());
+  const float auxF = sensoregg_protocol::celsiusToFahrenheit(sensoreggAuxC());
+  display.print(F("EGT "));
+  if (isNanF(egtF)) {
+    display.print(F("---"));
+  } else {
+    display.print(egtF, 1);
+    display.print(F("F"));
+  }
+  display.print(F(" CJ "));
+  if (isNanF(cjF)) {
+    display.println(F("---"));
+  } else {
+    display.print((int)lroundf(cjF));  // rounded: keeps the row <= 21 chars
+    display.println(F("F"));
+  }
+
+  display.print(F("AUX "));
+  if (isNanF(auxF)) {
+    display.print(F("---"));  // v1 egg, stale link, or divider sentinel
+  } else {
+    display.print(auxF, 1);
+    display.print(F("F"));
+  }
+  display.print(F(" BAT "));
+  const uint8_t eggBatt = sensoreggBatteryPct();
+  if (eggBatt == 0xFF) {
+    display.println(F("--%"));
+  } else {
+    display.print(eggBatt);
+    display.println(F("%"));
+  }
+
+  // Row 3: raw sequence counter (first real consumer of
+  // sensoreggSequence()) + measured packet rate (~9-10 Hz healthy).
+  display.print(F("SEQ "));
+  display.print(sensoreggSequence());
+  display.print(F("  "));
+  display.print(sensoreggPacketHz(), 1);
+  display.println(F("Hz"));
+
+  // Row 4: live flags from the latest frame.
+  display.print(F("FLG"));
+  if (sensoreggPairingFlag()) display.print(F(" PAIR"));
+  if (sensoreggTcFault()) display.print(F(" FAULT"));
+  if (!sensoreggPairingFlag() && !sensoreggTcFault()) display.print(F(" -"));
+  display.println();
+
+  // Row 5: which egg the filter accepts.
+  char eggMac[sensoregg_protocol::kMacStrLen];
+  if (sensoreggPairedMac(eggMac, sizeof(eggMac))) {
+    display.print(F("MAC "));  // 4 + 17 = 21 chars exactly
+    display.println(eggMac);
+  } else {
+    display.println(F("MAC any (unpaired)"));
+  }
+
+  // Rows 6-7: spacer + the single menu row.
+  display.println();
+  display.print(menuSelectionIndex == 0 ? F("->") : F("  "));
+  display.println(F("Back"));
+
+  safeDisplayUpdate();
+}
+
+#endif  // BIRDSEYE_ENABLE_SENSOREGG
 
 void displayPage_camera_serial_entry() {
   resetDisplay();
@@ -699,7 +1100,12 @@ void displayPage_gps_speed() {
 void displayPage_gps_lap_time() {
   resetDisplay();
 
-  display.println(F("  Current Lap Time"));
+  if (dragModeIsActive()) {
+    display.print(F("  Drag "));
+    display.println(dragDistanceLabel());
+  } else {
+    display.println(F("  Current Lap Time"));
+  }
 
   display.print(F("\n\n"));
   display.setTextSize(3);
@@ -707,7 +1113,26 @@ void displayPage_gps_lap_time() {
   bool raceStarted = activeTimerRaceStarted();
   unsigned long currentLapTimeMs = activeTimerCurrentLapTime();
 
-  if (sprintModeIsActive() && !activeTimerRunActive()) {
+  if (dragModeIsActive() && !activeTimerRunActive()) {
+    if (activeTimerLaps() > 0) {
+      // Between runs with a result: show the last ET big, trap + 0-60
+      // under it — the "what did I just run" glance at the top end.
+      char lapStr[lap_format::kLapTimeStrLen];
+      lap_format::formatLapTime(activeTimerLastLapTime(), lap_format::kSpace,
+                                lapStr, sizeof(lapStr));
+      display.print(lapStr);
+      // First newline at size 3 so the advance clears the 24 px glyph
+      // row — size-1 newlines (8 px) would put the subtext ON the ET.
+      display.print(F("\n"));
+      display.setTextSize(1);
+      display.print(F(" "));
+      displayPrintDragStats(dragLastTrapMph(), dragLast0to60Ms());
+    } else {
+      // No run yet: staged = clock armed, launch when ready.
+      display.setTextSize(2);
+      display.print(dragIsStaged() ? F(" *staged*") : F(" *waiting*"));
+    }
+  } else if (sprintModeIsActive() && !activeTimerRunActive()) {
     // Sprint mode, between runs: the session stays live (all pages work),
     // but there is no lap ticking — say so instead of a dead 0:00.
     display.setTextSize(2);
@@ -726,7 +1151,13 @@ void displayPage_gps_lap_time() {
 void displayPage_gps_pace() {
   resetDisplay();
 
-  display.println(F("  Current Lap Pace"));
+  // Drag mode has no reference lap to pace against — this page becomes
+  // the live 0-60 readout during a run instead.
+  if (dragModeIsActive()) {
+    display.println(F("     0-60 Split"));
+  } else {
+    display.println(F("  Current Lap Pace"));
+  }
 
   int paceLaps = activeTimerLaps();
   float paceDiff = activeTimerPaceDifference();
@@ -763,11 +1194,25 @@ void displayPage_gps_pace() {
     display.setCursor(1, lineHeight);
     display.setTextSize(3);
     display.print(F("STOPPED"));
-  } else if (sprintModeIsActive() && !activeTimerRunActive()) {
-    // Sprint mode, between runs — no live pace to compare (see lap page).
+  } else if ((sprintModeIsActive() || dragModeIsActive()) &&
+             !activeTimerRunActive()) {
+    // Sprint/drag, between runs — no live pace to compare (see lap page).
     display.setCursor(0, lineHeight);
     display.setTextSize(2);
-    display.print(F(" *waiting*"));
+    display.print(dragModeIsActive() && dragIsStaged() ? F(" *staged*")
+                                                       : F(" *waiting*"));
+  } else if (dragModeIsActive()) {
+    // Run in progress: the split once 60 is crossed, dashes until then.
+    display.setCursor(0, lineHeight);
+    display.setTextSize(3);
+    unsigned long split60 = dragCurrent0to60Ms();
+    if (split60 > 0) {
+      display.print(F(" "));
+      displayPrintSplitSeconds(split60);
+      display.print(F("s"));
+    } else {
+      display.print(F(" -.--"));
+    }
   } else if (paceRaceStarted && paceLaps >= 1) {
     display.setCursor(0, lineHeight);
     display.setTextSize(4);
@@ -825,6 +1270,13 @@ void displayPage_gps_best_lap() {
     display.print(F("\n\n"));
     display.print(F("Lap: "));
     display.print(bestLapNum);
+
+    if (dragModeIsActive()) {
+      // The best run's own trap + 0-60 (snapshotted with the best ET).
+      display.setTextSize(1);
+      display.print(F("\n\n "));
+      displayPrintDragStats(dragBestTrapMph(), dragBest0to60Ms());
+    }
   } else {
     display.print(F("\n"));
     display.setTextSize(3);
@@ -1313,15 +1765,26 @@ void displayPage_sd_format() {
   display.setTextWrap(true);
   display.setTextColor(DISPLAY_TEXT_WHITE);
   display.setTextSize(1);
-  if (sdFormatLastFailed) {
-    display.println(F("Format FAILED - retry"));
-  } else {
-    display.println(F("Card is not formatted"));
+  // Line 2 (+3): what the last attempt said. Six size-1 rows fit under
+  // the size-2 title, so the MOUNT case spends its spare row on the one
+  // action that actually helps — re-formatting a card that formatted fine
+  // but will not mount only loops.
+  switch (sdFormatFailure) {
+    case SD_FORMAT_FAIL_ERASE:
+      display.println(F("Format FAILED - retry"));
+      break;
+    case SD_FORMAT_FAIL_MOUNT:
+      display.println(F("Formatted: no mount"));
+      display.println(F("Power-cycle the unit"));
+      break;
+    default:
+      display.println(F("Card is not formatted"));
+      break;
   }
 
   uint32_t secondsLeft = sd_format_page::holdSecondsLeft(sdFormatState, millis());
   if (secondsLeft > 0) {
-    display.println(F(""));
+    if (sdFormatFailure != SD_FORMAT_FAIL_MOUNT) display.println(F(""));
     display.print(F("Formatting in "));
     display.print(secondsLeft);
     display.println(F("s..."));
@@ -1330,6 +1793,17 @@ void displayPage_sd_format() {
     display.println(F("Hold SELECT 3s to"));
     display.println(F("format the card"));
     display.println(F("(ERASES EVERYTHING)"));
+  }
+  // Diagnostic line: why this boot happened + SdFat's last card error.
+  // "boot:WDT" here means the watchdog reset the device mid-boot (it
+  // survives a soft reset) — the card is probably fine and mid-command,
+  // and a power cycle, not an erase, is the fix.
+  if (secondsLeft == 0) {
+    display.print(F("boot:"));
+    display.print(wake_cause::shortName(bootWakeCause));
+    display.print(F(" err:"));
+    if (sdLastErrorCode < 0x10) display.print('0');
+    display.println(sdLastErrorCode, HEX);
   }
   safeDisplayUpdate();
 }

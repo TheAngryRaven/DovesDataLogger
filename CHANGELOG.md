@@ -12,6 +12,76 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Fixed
+- **A soft reboot no longer runs the next boot under a watchdog it can't
+  see.** The nRF52 hardware WDT survives `NVIC_SystemReset()` — only a
+  pin, brown-out, power-on or System OFF reset clears it — so every
+  firmware-initiated reboot (BLE/USB transfer exit, OTA, the SD format
+  page, the reboot combo) handed the next boot a ~4 s deadline it never
+  fed until the end of `setup()`. A healthy boot fit; a slow SD init
+  (SdFat's 2 s ACMD41 timeout, three attempts) did not, and the WDT reset
+  the device mid-SD-transaction, leaving a card that firmware cannot reset
+  (CS grounded, no power switch) reading as "no FAT volume" on every
+  following soft boot. Field signature: a freshly formatted, perfectly
+  good card offered for formatting again on every reboot until a power
+  cycle. `setup()` now detects a carried-over WDT first thing
+  (`wdtBootCheck()`), feeds it between every slow boot step, and
+  `wdtSetup()` no longer tries to reconfigure a running (register-locked)
+  WDT.
+- **The SD format page verifies the mount and says what failed.** After
+  `SD.format()` the fresh volume must actually mount before "Format OK"
+  and the reboot; a card that formatted but won't mount now stays on the
+  page as `Formatted: no mount / Power-cycle the unit` instead of
+  rebooting into an identical "Card is not formatted" loop. The confirm
+  page's last line now carries the boot cause and SdFat's last card error
+  (`boot:WDT err:20`), and the SD FAULT page carries the same, so a
+  watchdog-induced loop is visible on the device.
+- **The boot SD probe needs consecutive evidence before offering an
+  erase.** `SD_SETUP()` re-probes the volume once after a 250 ms settle
+  and only declares the card unformatted when the card layer answered
+  both times and the volume mounted neither time (host-tested `sd_probe`
+  rules); a card that stops answering between probes is treated as dead
+  (FAULT, no erase offer), and a volume that mounts on the retry boots
+  normally. The recovered-on-probe path also now records the active SPI
+  clock it had been leaving at 0.
+
+### Added
+- **SensorEgg pairing menu + live-data test page** (plan 0017): a new
+  **Egg** row on the main menu (SensorEgg builds only). Pairing is
+  window-gated: open the logger's 2-minute capture window, long-press
+  the egg's button, and the first egg heard advertising its own pairing
+  window is stored — to the new `sensoregg_mac` setting, applied live,
+  with the paired page offering Back / Test / Unpair (persist-first,
+  exactly like the camera). Unpaired = accept-any, as before. The new
+  **EGG TEST** page latches the race-gated scanner on at the desk and
+  shows the full live picture: rf link tri-state, protocol version,
+  EGT/CJ/AUX/battery, sequence + measured packet rate, PAIR/FAULT
+  flags, and the active MAC filter. The camera test page's egg soak
+  line works on a desk again (it had silently died when plan 0012
+  race-gated the scanner) — entering it latches the egg bench mode too.
+  The MAC parse/format/byte-order helpers live in the host-tested
+  `sensoregg_protocol` unit.
+- **Manual drag mode — the christmas tree** (plan 0016): Drag now asks
+  **Automatic or Manual** after the distance. Manual stages like a strip:
+  stop, and the LED bar lights a white staging pip, then three yellows at
+  the sportsman-tree 500 ms cadence, then green — mirrored on the screen
+  as STOP TO STAGE, a big 3…2…1 countdown, and a flashing GO. Moving
+  during the yellows is a RED LIGHT foul; sitting still 5 s after green
+  is FAILED TO LAUNCH; both flash red and wait for a button, and every
+  run ends on a results screen (ET, trap, 0-60, and a new **reaction
+  time**) that re-arms on any button. The screen stays pinned to staging
+  info for the whole manual session; hold Select 2 s to end it.
+  Automatic mode is unchanged.
+- **Drag mode** (plan 0015): main menu → **Drag** → pick a distance
+  (1/8 Mile, 1000 ft, 1/4 Mile, 1/2 Mile, 1 Mile) and the session starts
+  — no track file, no detection. The device stages at a standstill,
+  starts the clock rollout-style (11.25 in past the staged position),
+  and ends the run at the target distance, reporting ET, trap speed,
+  and a 0-60 mph split; it re-arms automatically for the next pass. All
+  runs land in one DOVEX session with `race_mode=DRAG` (the laps line is
+  the run ETs — same backwards-compatible trailing-column scheme as
+  SPRINT). The run state machine is the host-tested `drag_timer` unit.
+
 ## [4.1.0] - 2026-08-24
 
 MINOR — new settings and device behaviour, backwards compatible with the

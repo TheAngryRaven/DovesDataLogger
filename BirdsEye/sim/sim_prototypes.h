@@ -30,6 +30,7 @@
 #include "SdFat.h"
 
 #include "course_creator.h"
+#include "drag_tree.h"
 #include "gps_status_page.h"
 #include "sd_format_page.h"
 #include "wake_cause.h"
@@ -40,6 +41,7 @@ int getBatteryPercent(float voltage);
 void checkForNewLapData();
 void wdtSetup();
 void wdtPet();
+void wdtBootCheck();
 void setup();
 void loop();
 DovesLapTimer* getActiveTimerDLT();
@@ -61,8 +63,23 @@ unsigned long activeTimerBestSectorTime(int sector);
 bool raceEngineStopped();
 SprintTimer* getActiveTimerSprint();
 bool sprintModeIsActive();
+bool dragModeIsActive();
+bool dragIsStaged();
+const char* dragDistanceLabel();
+float dragLastTrapMph();
+unsigned long dragLast0to60Ms();
+float dragBestTrapMph();
+unsigned long dragBest0to60Ms();
+unsigned long dragCurrent0to60Ms();
 bool activeTimerRunActive();
 bool createSprintSession();
+void startDragSession(int distanceIdx, bool manualStaging);
+void dragStagingLoop();
+bool dragManualActive();
+bool dragStagingPinActive();
+bool dragTreeStripActive();
+drag_tree::Stage dragTreeStage();
+unsigned long dragLastReactionMs();
 void trackDetectionLoop();
 void startRaceSession(RaceEntryCause cause);
 void endRaceSession();
@@ -91,6 +108,11 @@ void ACCEL_LOOP();
 void displayPage_boot();
 void displayPage_gps_status();
 void displayPage_main_menu();
+void displayPage_drag_distance();
+void displayPage_drag_mode();
+void displayPage_drag_staging();
+void displayPrintDragStats(float trapMph, unsigned long split60Ms);
+void displayPrintSplitSeconds(unsigned long ms);
 void displayPage_bluetooth();
 void displayPage_transfer_menu();
 void displayPage_usb_storage();
@@ -113,6 +135,8 @@ void displayPage_gps_best_lap();
 void displayPage_tachometer();
 void displayPage_sensorTemp();
 void displayPage_sensorTemp2();
+void displayPage_pair_egg();  // plan 0017 (flag-gated in the firmware)
+void displayPage_egg_test();  // plan 0017
 void displayPage_optimal_lap();
 void displayPage_gps_lap_list();
 void displayPage_stop_logging();

@@ -141,6 +141,8 @@ set(SIM_CORE_SOURCES
   ${BIRDSEYE_DIR}/course_prune.cpp
   ${BIRDSEYE_DIR}/crossing_pattern.cpp
   ${BIRDSEYE_DIR}/dovex_header.cpp
+  ${BIRDSEYE_DIR}/drag_timer.cpp
+  ${BIRDSEYE_DIR}/drag_tree.cpp
   ${BIRDSEYE_DIR}/gps_stats.cpp
   ${BIRDSEYE_DIR}/gps_status_page.cpp
   ${BIRDSEYE_DIR}/gps_time.cpp
@@ -158,6 +160,7 @@ set(SIM_CORE_SOURCES
   ${BIRDSEYE_DIR}/sat_bars.cpp
   ${BIRDSEYE_DIR}/sd_access_policy.cpp
   ${BIRDSEYE_DIR}/sd_format_page.cpp
+  ${BIRDSEYE_DIR}/sd_probe.cpp
   ${BIRDSEYE_DIR}/sector_purple.cpp
   ${BIRDSEYE_DIR}/sensoregg_protocol.cpp
   ${BIRDSEYE_DIR}/sprint_select.cpp

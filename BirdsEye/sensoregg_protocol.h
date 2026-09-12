@@ -157,4 +157,40 @@ void seqMonitorFeed(SeqMonitor& m, uint16_t seq, uint32_t nowMs);
 // change has been seen within kStalenessMs (wrap-safe timing).
 bool seqMonitorLive(const SeqMonitor& m, uint32_t nowMs);
 
+// ---- Pairing MAC helpers (plan 0017 — runtime pairing filter) -----------
+// The egg-MAC filter lives in settings as text ("AA:BB:CC:DD:EE:FF", "" =
+// unpaired/accept-any); these pure helpers own the parse/format and the
+// byte-order rules so they are host-tested. "Human" order is MSB-first —
+// the order the egg prints at boot and SENSOREGG_MAC uses; the radio's
+// ble_gap_addr_t reports LSB-first.
+
+// Pairing capture window: how long the logger listens for an egg
+// advertising its pairing-window flag (egg long-press = 30 s of flag)
+// before giving up. Matches the camera's pairing timeout.
+constexpr uint32_t kPairingTimeoutMs = 120000;
+
+// "AA:BB:CC:DD:EE:FF" + NUL.
+constexpr size_t kMacStrLen = 18;
+
+// Strict parse: exactly 17 chars, hex pairs separated by ':', case-
+// insensitive. Returns false (out untouched) on any deviation. Note that
+// "00:00:00:00:00:00" parses successfully to the wildcard — callers must
+// treat that as unpaired (macIsWildcard), same as an empty setting.
+bool parseMac(const char* s, uint8_t outHuman[6]);
+
+// Format to uppercase "AA:BB:CC:DD:EE:FF", NUL-terminated at out[17].
+void formatMac(const uint8_t human[6], char out[kMacStrLen]);
+
+// Reverse byte order (human MSB-first <-> ble_gap_addr_t LSB-first).
+// Involution: reversing twice restores the input. Aliasing-safe.
+void macReverse(const uint8_t in[6], uint8_t out[6]);
+
+// All-zeros = "accept any egg" (unpaired).
+bool macIsWildcard(const uint8_t mac[6]);
+
+// Filter decision for the scan callback: wildcard accepts anyone;
+// otherwise the peer address (as the radio reports it, LSB-first) must
+// equal the human-ordered filter reversed.
+bool macAccepts(const uint8_t filterHuman[6], const uint8_t peerLsbFirst[6]);
+
 }  // namespace sensoregg_protocol

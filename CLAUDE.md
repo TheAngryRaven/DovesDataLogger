@@ -54,6 +54,13 @@ Core capabilities:
 - 25 Hz GPS lap timing with sector support (DovesLapTimer library)
 - **"Just Drive" auto-detection** via CourseManager: automatic track
   proximity matching, course detection, and Lap Anything fallback
+- **Drag mode**: distance runs (1/8 mi–1 mi) with no track at all —
+  rollout-style launch from a standstill, ET + trap speed + 0-60 split,
+  automatic re-arm between passes (subsystem 9, plan 0015), plus a
+  **manual mode** (plan 0016): a christmas-tree staging sequence on the
+  LED strip + OLED (white pip → three yellows at 500 ms → green), with
+  red-light fouls, a failed-to-launch timeout, a reaction-time stat, and
+  press-any-button re-arm on a pinned staging screen
 - RPM monitoring via inductive tachometer pickup
 - Accelerometer logging (g-force X/Y/Z) via onboard LSM6DS3 IMU
 - DOVEX data logging with reserved 1 KB header (crash-safe GPS data)
@@ -107,7 +114,7 @@ All sketch sources live in `BirdsEye/` so the folder name matches the
 | `profiling.{h,ino}` | Main-loop CPU profiling glue (subsystem 18, beta only): DWT/micros timebase probe, section brackets, the pin-30 scope output, once-a-second rollup. Also the reason a beta build never drives the 5 V boost EN |
 | `replay.{h,ino}` | Instant DOVEX header replay |
 | `sd_functions.{h,ino}` | SD init, track list/JSON parsing (dual format), track manifest, SD access arbitration |
-| `sensoregg.{h,ino}` | SensorEgg wireless EGT: passive BLE scan (observer), scan-callback→loop double buffer, `SENSOREGG_MAC` pairing, Temp1/Junction1 data surface (see subsystem 14) |
+| `sensoregg.{h,ino}` | SensorEgg wireless EGT: passive BLE scan (observer), scan-callback→loop double buffer, settings-backed MAC pairing + bench latch (plan 0017), Temp1/Junction1 data surface (see subsystem 14) |
 | `settings.{h,ino}` | Persistent JSON settings on SD (`/SETTINGS.json`), `getSetting()`/`setSetting()` |
 | `tachometer.{h,ino}` | Falling-edge ISR on D0, Kalman-filtered RPM calculation |
 | `usb_msc.{h,ino}` | USB Mass Storage (TinyUSB MSC): SD card as a drag-and-drop drive (see subsystem 12) |
@@ -145,12 +152,15 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `sensoregg_protocol.{h,cpp}` | SensorEgg `PW-ADV` v1+v2 advertising payload parser (magic filter, int16 deci-°C decode with `0x8000`→NaN sentinel, flags, sequence, v2 aux thermistor + battery) + wrap-safe 1 s staleness rule + passive-scan tuning constants |
 | `crossing_pattern.{h,cpp}` | The two-frame crossing animation as geometry (eight 16x16 cells, odd row bands, alternating phase) instead of 2 KB of stored bitmap; golden-tested byte-identical to the images it replaced |
 | `sprint_select.{h,cpp}` | Sprint mode selection: newest-course-by-`date_created` ordering (sortable ISO strings) + the circuit-vs-sprint tiebreak decision table (`race_mode` pref; circuit yields to a sprint course created today) |
+| `drag_timer.{h,cpp}` | Drag mode (plan 0015): the whole run state machine — re-latching standstill anchor, rollout-style launch (interpolated crossing), cumulative-distance finish with interpolated ET + trap speed, 0-60 split, silent aborts (mid-run standstill, fix gap), automatic re-arm — plus the distance table (targets/labels/DOVEX names). Plan 0016 adds the launch gate (`setLaunchEnabled` — manual staging holds the clock until green) and `runStartEpochMs()` (the RT computation's rollout-crossing timestamp) |
+| `drag_tree.{h,cpp}` | Manual drag staging tree (plan 0016): the christmas-tree state machine (arm → stage → white pip → 3 yellows at 500 ms → green → run → results, red-light foul, 5 s failed-to-launch, Select-hold exit) driving BOTH the LED strip (`renderStrip`) and the OLED (`countdownDigit`/`flashPhase`) from one state so they can never disagree. Observes drag_timer, never duplicates physics; the foul threshold IS `drag_timer::kLaunchMinMph` |
 | `course_prune.{h,cpp}` | Which sprint courses to drop when a track file is full (subsystem 15): `N{YYMMDD}_{HHMM}` matcher, and the drop order — **renamed-in-the-app before device-named** (a rename proves the app has a copy), then oldest by `date_created` |
 | `course_creator.{h,cpp}` | On-device course creator model (subsystem 15): screen/row table, required-vs-optional lines, the two webapp-compat save rules, the point-averaging hold (3 s, ≥8 fixes, ≤10 m h_acc), and `N{YYMMDD}_{HHMM}` name generation |
 | `track_json.{h,cpp}` | The firmware's only track-JSON **writer** — course/track object emitters + a fixed-point coordinate formatter (integer math: no working `%f` on this core, and `dtostrf` doesn't exist on the host) |
 | `wake_cause.{h,cpp}` | Boot wake-cause decode: RESETREAS + GPIO LATCH register snapshots → tach / button / USB / watchdog / soft-reset / cold boot (System OFF shutdown, subsystem 10) |
 | `gps_status_page.{h,cpp}` | GPS status boot page state machine: hold, 3 s auto-close after fix+timeValid, button skip, exit destination (menu vs race), idle → shutdown; `timeSyncState()` names which time milestone is outstanding (date/time vs the slow `fullyResolved`) |
 | `sd_format_page.{h,cpp}` | SD format-confirm boot page state machine: Select held 3 s continuously → format (release restarts the full window; other buttons never confirm), 5 min idle → shutdown |
+| `sd_probe.{h,cpp}` | Boot SD probe verdict (mounted / retry / unformatted / dead): the format offer needs the card layer to answer on **two consecutive** probes across a 250 ms settle with the volume mounting on neither — one no-volume look is what a card wedged mid-command by a WDT-interrupted boot produces — and a card-layer failure at any point is "dead" (FAULT), never "blank" |
 | `sat_bars.{h,cpp}` | Status-page satellite signal bars: NAV-SAT CNO selection (used-in-nav first, strongest first) + bar x/w/h layout math for the 128×~30 px bottom half |
 
 ### Simulator (`BirdsEye/sim/`)
@@ -173,7 +183,7 @@ handoff spec.
 | `frame_hash.{h,cpp}` | FNV-1a 32 over the 1024-byte framebuffer (golden fixtures, viewer dirty-check, future HIL tap) |
 | `png_dump.{h,cpp}` | Dependency-free PNG writer (stored-deflate + repo crc32) for eyeballing frames |
 | `native_main.cpp` | Phase-1 driver: boot → skip GPS status page → 60 s soak, state prints |
-| `golden_main.cpp` | Phase-2 driver: scripted real-menu walk capturing 8 golden page hashes (`golden/golden_hashes.txt`; regenerate with `--print`, eyeball with `--dump`) |
+| `golden_main.cpp` | Phase-2 driver: scripted real-menu walk capturing golden page hashes (`golden/golden_hashes.txt`; regenerate with `--print`, eyeball with `--dump`) |
 | `oracle_main.cpp` | Phase-3 driver: lap-timing oracle. Default = synthetic constant-speed OKC circle (period exact by construction) through the whole real pipeline (boot page → race entry → proximity detect → CourseDetector "Normal" → laps ±40 ms); `--dovex <file>` replays a hardware log against its own header laps; diagnostic modes: `--dovex-noheader <file>` replays a header-less (crashed-session) log and prints live detection/lap state instead of asserting, `--two-session <file> [break-min]` reproduces a full track day (synthetic session 1 → auto-idle end → parked break with GPS drift → real-log session 2) to test CourseManager state carryover |
 | `fixtures/okc_tillotson_1.dovex` | Hardware-recorded OKC session (13 laps) — the `--dovex` oracle's CI fixture; the sim reproduces its header lap list to the exact millisecond (also the `--two-session` carryover test's session 2) |
 | `API.md` | Canonical WASM API contract (v1): artifact set, method surface, injectPvt schema, deltas from the handoff-spec draft (async `reset()` via module re-instantiation) |
@@ -246,6 +256,7 @@ loop()  ~250 Hz
  ├─ readButtons()           multi-sample debounce + edge detection
  ├─ gpsStatusPageLoop()     boot GPS status page: GPS re-detect + hold/auto-close/exit
  ├─ sdFormatPageLoop()      boot SD format page: hold-Select confirm → format + reboot
+ ├─ dragStagingLoop()       manual drag tree (plan 0016): step drag_tree, launch gate, RT
  ├─ displayLoop()           pages read from active timer helpers
  ├─ autoRaceModeCheck()     RPM>500 or speed>=10 → enter race from menu
  └─ resetButtons()          clear pressed flags
@@ -456,7 +467,18 @@ loop()  ~250 Hz
   the ending hard reset runs no shutdown teardown. Format failure returns
   to the confirm page (marked `FAILED - retry`; fresh full hold to retry —
   keeps the idle-timeout battery protection the FAULT dead-end lacks);
-  a dead/absent card never offers the format. 5 min idle → shutdown
+  a dead/absent card never offers the format. **The fresh volume must
+  mount before "Format OK"** (`sdFormatFailure` = `SD_FORMAT_FAIL_MOUNT`
+  otherwise: the page reads `Formatted: no mount / Power-cycle the
+  unit` and does NOT reboot — re-formatting a card that formatted fine
+  cannot help, and the reboot was the loop). The confirm page's last
+  line shows `boot:<cause> err:<SdFat code>` (`wake_cause::shortName`
+  + `sdLastErrorCode`), and the SD FAULT page the same: `boot:WDT`
+  there means the watchdog reset the device mid-boot, which points at
+  the previous soft reset, not the card (see subsystem 10). The "no
+  volume" diagnosis itself is the host-tested `sd_probe` rule —
+  consecutive probes, a settle between, card-layer flap = dead.
+  5 min idle → shutdown
   (deferred while the engine runs), and a charging-loop resume with the
   card still unformatted returns to the format page, not the menu.
 - **Dual JSON format**: `parseTrackFile()` auto-detects root type:
@@ -548,6 +570,14 @@ loop()  ~250 Hz
   - Camera: `PAGE_PAIR_CAMERA` (-6) pairing / paired-status management,
     `PAGE_CAMERA_SERIAL_ENTRY` (-7) manual 6-char serial entry fallback,
     `PAGE_CAMERA_TEST` (-10) bench test menu (paired-only manual controls).
+  - Egg (plan 0017, `BIRDSEYE_ENABLE_SENSOREGG` builds only):
+    `PAGE_PAIR_EGG` (-20) pairing / paired-status management (the `Egg`
+    main-menu row is appended after Camera and gated, so stock menus keep
+    6 rows and existing golden fixtures are untouched), `PAGE_EGG_TEST`
+    (-21) bench live-data page. Both latch the race-gated scanner on
+    while open (the pairing window / bench mode are OR-ed into
+    `eggScanWanted()`), and both carry their Back/Cancel row per the rule
+    above.
   - Course creator (subsystem 15): `PAGE_COURSE_TRACK` (-11) track prompt,
     `PAGE_COURSE_TYPE` (-12) circuit/sprint, `PAGE_COURSE_LINES` (-13) line
     menu, `PAGE_COURSE_LINE` (-14) per-line points, `PAGE_COURSE_POINT`
@@ -555,6 +585,13 @@ loop()  ~250 Hz
     is a range test. `PAGE_COURSE_PRUNE` (-16) sits deliberately OUTSIDE that
     range: it is a plain two-row confirm, not one of the model's screens, so it
     must not be handed to `course_creator::rowCount()`.
+  - Drag mode: `PAGE_DRAG_DISTANCE` (-17), the distance picker (five
+    distances + Back, same scrolling 3-row window as the main menu);
+    `PAGE_DRAG_MODE` (-18), the Automatic/Manual/Back picker (plan 0016);
+    `PAGE_DRAG_STAGING` (-19), the manual staging screen — **pinned** for
+    the whole manual session (gpsLockHold construction: direct
+    `currentPage` assignment + buttonsDisabled; presses are consumed by
+    `dragStagingLoop()` before `displayLoop()` runs).
   - Errors: `PAGE_INTERNAL_WARNING` (100), `PAGE_INTERNAL_FAULT` (105),
     `PAGE_SD_FORMAT` (106, card responds but FAT won't mount — driven by
     `sdFormatPageLoop()`, buttons live unlike FAULT).
@@ -835,6 +872,58 @@ loop()  ~250 Hz
   (`sprintModeIsActive() && !activeTimerRunActive()`); everything else
   stays live. The DOVEX header gets `race_mode=SPRINT` and the sprint
   course name.
+- **Drag mode (plan 0015)**: main menu → **Drag** → `PAGE_DRAG_DISTANCE`
+  picker (1/8 Mile, 1000 ft, 1/4 Mile, 1/2 Mile, 1 Mile) →
+  `PAGE_DRAG_MODE` (Automatic / Manual, plan 0016) → the session starts
+  via `startDragSession(idx, manual)` → `startRaceSession(MANUAL)`.
+  **No track, no detection**: `trackDetected` is latched true (the sprint
+  latch) so `trackDetectionLoop()` never stands up a CourseManager, and
+  `dragTimer != nullptr` IS drag mode — the same construction as sprint,
+  drag branch FIRST in every `activeTimer*()` helper, runs duck-typing as
+  laps. The whole run state machine is the host-tested `drag_timer` unit:
+  stage at a standstill (≤1 mph held 1 s; the anchor is a **re-latching
+  running mean** of standstill fixes so GPS drift in a staging lane can't
+  fake a launch), launch rollout-style (11.25 in displacement + ≥2 mph,
+  ET start interpolated between the straddling 25 Hz fixes), accumulate
+  chord distance to the target, finish with interpolated ET + trap speed
+  and a 0-60 split (0 if never reached). Mid-run standstill (3 s) or a
+  ≥2 s fix gap abandons the run **silently** — which is also how a
+  queue-creep phantom launch self-cancels — then the timer re-arms on the
+  next standstill, so a whole day of passes is one DOVEX session
+  (`race_mode=DRAG`, course `DRAG 1/4 MILE` etc., laps line = run ETs;
+  trap/0-60 deliberately NOT in the header — the 25 Hz rows carry speed).
+  Run capture rides `checkForNewLapData()`'s run-count edge; each
+  completed run AND each fresh STAGED latch re-arms the auto-idle grace
+  (an active staging queue never idles out; manual 5 min/5 mph rules
+  otherwise apply, with the usual tach promotion). Display: no new
+  rotation pages — the Current Lap page shows live ET / last ET +
+  `trap`/`0-60` subtext / `*staged*`; the Pace page becomes the live 0-60
+  readout; the Best Lap page adds the best run's trap/0-60; the LED pace
+  pip is suppressed between runs like sprint.
+- **Manual drag mode (plan 0016)**: the Manual row runs the same physics
+  behind a **christmas tree**. The host-tested `drag_tree` unit is the
+  ONE sequencer driving both outputs: LED strip `----w----` (staged
+  white pip) → `---ywy---`/`--yywyy--`/`-yyywyyy-` at 500 ms →
+  `gyyywyyyg` green, and the matching OLED screens (STOP TO STAGE, big
+  3/2/1 at size 7, flashing GO — flash phases from `flashPhase()`, a
+  500 ms half-period chosen because the 3 Hz display aliases anything
+  faster). The physics **launch gate** (`DragTimer::setLaunchEnabled`)
+  is closed except while the tree shows green, so movement during the
+  yellows is a **RED LIGHT** foul, not a run; green + 5 s still =
+  FAILED TO LAUNCH; a mid-run physics abort surfaces as RUN ABORTED —
+  all three flash the strip red and wait for a button. **RT** = the
+  interpolated rollout crossing (`runStartEpochMs()`) minus the green
+  epoch, both Unix epoch ms — display-only (results screen), not in the
+  DOVEX header. The display is **pinned** to `PAGE_DRAG_STAGING` for
+  the whole manual session (gpsLockHold construction); presses are
+  consumed by `dragStagingLoop()` (the `gpsStatusPageLoop()` slot:
+  after `readButtons()`, `resetButtons()` on consumption). Exit = hold
+  Select 2 s in any non-running state (`kExitHoldMs`; a held side
+  button disarms it so the reboot combo wins; the pin's only gate is
+  `dragManualMode`, cleared in `endRaceSession()`, so every session
+  ender releases it). The LED tree renders strip-only via a new arm in
+  the strip cascade (status LEDs stay live; search pip wins without a
+  fix; normal RPM/speed scale during the run itself).
 
 ### 10. Shutdown (System OFF)
 
@@ -893,6 +982,23 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   `NRF_POWER->SYSTEMOFF`. **GPREGRET is untouched** — register 0 belongs
   to the OTA/bootloader handoff (subsystem 11). The WDT halts in System
   OFF (all clocks stop); `wdtSetup()` re-arms on the fresh boot.
+- **The WDT SURVIVES a soft reset** (`NVIC_SystemReset()` — the transfer
+  exits, OTA, the format page, the reboot combo). Only pin, brown-out,
+  power-on and System OFF wake clear it; a soft reset leaves it running,
+  registers locked, counter wherever the last pet left it. The next boot
+  is therefore on a ~4 s clock from its first instruction and `setup()`
+  used to feed nothing until `wdtSetup()` at its very end: fine for a
+  ~2 s clean boot, fatal with a slow SD init (2026-09 field report — a
+  WDT reset mid-SD-transaction left a card firmware cannot reset, and
+  every soft boot after that offered to format a good card until a
+  power cycle). `wdtBootCheck()` runs FIRST in `setup()` (right after
+  `captureBootWakeCause()`): if `NRF_WDT->RUNSTATUS` says running it
+  pets and sets `wdtCarriedOver`; `setup()` pets between every slow
+  step (display delays, each `SD.begin()` attempt, the probe settle,
+  GPS probe, camera/egg/strip init) — no-ops on a clean boot; and
+  `wdtSetup()` skips the (locked) configuration when one is already
+  running. A boot's cause is on the debug line (`Boot cause: SRST`) and
+  the SD format / FAULT pages.
 - **Wake sources**: tach pulse (D0, engine start — any transition away
   from the sampled idle level), any button, or VBUS (USB plug-in,
   always armed on nRF52840).
@@ -1231,12 +1337,16 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   `egt` status mode still parses and round-trips on any build; only its
   rendering is gated (`led_status::Inputs.eggSupported`).
   Keep any new egg code behind the flag.
-- **What (POC)**: a wireless thermocouple pod (DovesSensorEgg repo) reads a
-  K-type EGT probe via MCP9600 and broadcasts EGT + cold junction in BLE
-  **advertising packets** — protocol `PW-ADV-1`: 14-byte Manufacturer
-  Specific Data (`FF FF` company ID + `50 57` magic *inside* the array,
-  version, flags, int16 LE deci-°C ×2 with `0x8000` = invalid sentinel,
-  raw MCP9600 STATUS, battery stub, uint16 sequence), ~10 Hz.
+- **What**: a wireless thermocouple pod (DovesSensorEgg repo) reads a
+  K-type EGT probe via MCP9600 and broadcasts its readings in BLE
+  **advertising packets** — protocol `PW-ADV` v1 (14 bytes) and v2
+  (16 bytes): `FF FF` company ID + `50 57` magic *inside* the array,
+  version byte (0x01/0x02), flags (bit0 = egg pairing window, bit1 = TC
+  fault), int16 LE deci-°C EGT + cold junction with `0x8000` = invalid
+  sentinel, raw MCP9600 STATUS, battery percent (real on v2; 0xFF =
+  unknown), uint16 sequence, and on v2 an aux intake-air thermistor
+  (int16 LE deci-°C, "Temp2"), ~10 Hz. v1 eggs still parse — their aux
+  reads NaN — so a mixed-age fleet never blinds the logger.
 - **Radio role — do not "improve" this**: the logger is a pure passive
   OBSERVER (`Bluefruit.Scanner`, `useActiveScan(false)`, 90 ms interval /
   40 ms window ≈ 44% duty, RSSI ≥ −90). No SCAN_REQ, no connection, no
@@ -1259,16 +1369,39 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   the spec's 40 ms.) (3) `SENSOREGG_LOOP()` kicks stop+start after 30 s
   with no accepted packet — a lost deferred callback otherwise halts the
   scanner silently forever.
-- **Pairing (POC)**: `SENSOREGG_MAC` #define in `sensoregg.h`, human byte
-  order; all-zeros (default) = accept any advertiser matching the payload
-  magic. The scan callback filters length + magic + MAC, copies the raw 14
-  bytes into a double buffer (camera ce81 idiom), stamps `millis()`, and
-  calls `Scanner.resume()` — **mandatory**, or the scanner halts after one
-  report. No Serial/SD/display in the callback (BLE task context).
+- **Pairing (plan 0017)**: runtime MAC filter persisted as the
+  `sensoregg_mac` setting (`"AA:BB:CC:DD:EE:FF"`; empty = unpaired =
+  accept any advertiser matching the payload magic), loaded in
+  `SENSOREGG_SETUP()`; the `SENSOREGG_MAC` #define in `sensoregg.h`
+  (human byte order) is only the fallback for unset/invalid. Capture is
+  **window-gated** from the Egg menu: the 2-minute window
+  (`kPairingTimeoutMs`) forces the scanner on and bypasses the MAC
+  filter (so a different egg can be captured while one is paired), and
+  the first parsed frame advertising the egg's OWN pairing-window flag
+  (egg-side long-press, flags bit0) wins — persist-first (a failed SD
+  write keeps the window open to retry), then the RAM filter, then the
+  window closes. Unpair = persist-first `""` → accept-any. Applied LIVE
+  on pair/unpair — no reboot, same exception as `camera_serial`. The
+  scan callback filters length + magic + MAC, copies **up to the
+  largest known layout** (`kPayloadLenMax` — the old fixed-14 copy
+  silently truncated v2 frames) plus the advertiser address into a
+  double buffer (camera ce81 idiom), stamps `millis()`, and calls
+  `Scanner.resume()` — **mandatory**, or the scanner halts after one
+  report. No Serial/SD/display in the callback (BLE task context); the
+  capture decision runs in the main-loop drain on host-tested logic
+  (`macAccepts` and friends in `sensoregg_protocol`).
 - **Consumption**: `SENSOREGG_LOOP()` (main loop) drains + parses via the
   host-tested `sensoregg_protocol` unit. Accessors: `sensoreggEgtC()` /
-  `sensoreggJunctionC()` (NaN when stale, egg-invalid, or app-hung),
-  `sensoreggLinkUp()`, `sensoreggTcFault()`, `sensoreggAppHung()`.
+  `sensoreggJunctionC()` / `sensoreggAuxC()` (NaN when stale,
+  egg-invalid, or app-hung), `sensoreggBatteryPct()`,
+  `sensoreggLinkUp()`, `sensoreggTcFault()`, `sensoreggAppHung()`; plus
+  the plan-0017 pairing/bench surface — `sensoreggIsPaired` /
+  `RequestPair` / `CancelPair` / `PairingInProgress` / `Unpair` /
+  `PairedMac`, `sensoreggTestEnterMode/ExitMode` (the bench latch that
+  joins `raceActive` and the pairing window in `eggScanWanted()`, also
+  latched by the camera test page for the desk soak), and
+  `sensoreggProtoVersion` / `PairingFlag` / `PacketHz` / `Sequence` for
+  the EGG TEST page.
 - **Zombie-egg detection**: BLE radios rebroadcast the last-set advert
   buffer autonomously, so an egg whose *application* hangs (suspected
   blocking MCP9600 I2C read under ignition EMI; 2026-07-19 field incident,
@@ -1291,7 +1424,10 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   fallback note (spec §7.2.3) rather than touching the shared `begin(1, 0)`.
 - **Sim**: `sensoregg.ino` is excluded from the sim TU like the other BLE
   modules; `module_stubs.cpp` returns NaN/false so the page renders `---`
-  and rows log `nan`.
+  and rows log `nan` (the pairing-surface stubs mirror the compiled-out
+  twins: never paired, nothing heard). The sim builds flag-0, so the Egg
+  menu row and pages don't exist there — golden hashes double as the
+  gating-leak check: if a hash moves after egg work, a `#if` escaped.
 
 ### 15. On-device Course Creator (`course_creator.{h,cpp}`, `track_json.{h,cpp}`)
 
@@ -1710,8 +1846,9 @@ timestamp,sats,hdop,lat,lng,speed_mph,altitude_m,heading_deg,h_acc_m,rpm,accel_x
   (after `optimal_ms`, in that order). Appending keeps old logs
   readable (parsed as empty) and lets older readers ignore the extra
   columns — backwards compatible by design. `race_mode` is `CIRCUIT` /
-  `SPRINT` (empty = circuit): a webapp loading helper — with `SPRINT`,
-  the laps line is a runs line. Nothing on-device reads it back.
+  `SPRINT` / `DRAG` (empty = circuit): a webapp loading helper — with
+  `SPRINT` or `DRAG`, the laps line is a runs line (drag runs are ETs).
+  Nothing on-device reads it back.
 - **GPS data** (byte 1024+): CSV column header then streaming GPS rows.
 - **`Temp1` / `Junction1` / `Temp2`** (trailing columns): SensorEgg EGT +
   cold junction + v2 aux intake-air temp, all °C. Literal `nan` when the
@@ -1808,6 +1945,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
   "led_status_left": "rpm",
   "led_status_right": "egt",
   "temp1_alert_c": "650",
+  "sensoregg_mac": "",
   "utc_offset_min": "0",
   "led_brightness_night": "16",
   "led_day_start_hour": "7",
@@ -1835,6 +1973,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | `target_rpm` | int | `15000` | True RPM SHIFT/warning point: RPM-scale ceiling and the `rpm` status-LED flasher threshold. Clamp 1000–20000 (tach filter's ceiling). Was `rev_limit` before plan 0013 — a device carrying the old key has its value migrated into this one on first boot and the old key removed |
 | `overrev_limit` | int | `0` (disabled) | True RPM PROBLEM limit (plan 0007): past it the whole 11-px chain flashes red (outranks the purple celebration) and the tach page shows `*OVER REV*`; latch clears below `target_rpm × 0.97`. 0 = off (no chain flash, no header); else clamp 1000–20000 |
 | `temp1_alert_c` | int | `650` | **SensorEgg builds only** since plan 0013 — a stock image neither writes nor reads it. Temp1 (EGT) alert threshold in **Celsius** for the `egt` status mode: red flash at/above, clears 20 °C below, solid blue when the probe signal is NaN/stale. Clamp 50–1200 |
+| `sensoregg_mac` | string | `""` (empty = unpaired) | **SensorEgg builds only** (plan 0017). Paired egg MAC `"AA:BB:CC:DD:EE:FF"`, written by the Egg menu's window-gated capture (persist-first); empty or unparsable = accept any PW-ADV egg (the `SENSOREGG_MAC` fallback). **Applied LIVE on pair/unpair** — an exception to the next-boot rule below, like the camera serial |
 | `utc_offset_min` | int | `0` | Minutes east of UTC (US Central standard `-360`, India `330`, Newfoundland `-210`). Clamp ±840; out of band keeps 0 (= UTC). **Presentation only** — nothing logged is converted (subsystem 17) |
 | `led_brightness_night` | int | `16` | NeoPixel cap 0–255 used inside the night window. `0` blanks the strip but leaves the 5 V rail UP — only `led_brightness` 0 cuts the rail |
 | `led_day_start_hour` | int | `7` | **Local** hour the day cap takes over. Clamp 0–23 |
@@ -1852,7 +1991,9 @@ the one loaded). Sector lines stay optional — zero, one, or two.
   error (single retry against the regenerated file). An *empty* file is
   not corrupt — the default-population paths rebuild it in place.
 - Editable on a computer or via BLE `SSET` command — changes take effect
-  on next reboot (BLE disconnect triggers auto-reboot).
+  on next reboot (BLE disconnect triggers auto-reboot). Exceptions:
+  `camera_serial` and `sensoregg_mac` are applied live by their pairing
+  flows (both persist first, then update RAM state).
 - Read on-demand via `getSetting()`, written via `setSetting()`.
 
 ---
@@ -1869,6 +2010,8 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | Status page idle shutdown | 5 min (no lock, no engine) | `gps_status_page.h` |
 | SD format confirm hold | 3 s continuous Select | `sd_format_page.h` |
 | SD format page idle shutdown | 5 min | `sd_format_page.h` |
+| SD boot probe | 2 consecutive no-volume probes, 250 ms settle, before the format offer | `sd_probe.h` |
+| Hardware WDT | ~4 s; **survives soft reset** — fed from the first instruction of the next boot (`wdtBootCheck`) | `BirdsEye.ino` |
 | GPS boot re-detect | 3 tries, 10 s apart | `gps_functions.ino` |
 | Menu idle shutdown | 5 min (`SLEEP_IDLE_TIMEOUT_MS`) | `project.h` |
 | USB-on-menu charge idle | 60 s (`USB_MENU_CHARGE_IDLE_MS`) — compiled out unless `BIRDSEYE_ENABLE_ONBOARD_CHARGING` | `project.h` |
@@ -1890,6 +2033,14 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | Course creator h_acc gate | drop >10 m, warn >5 m | `course_creator.h` |
 | Course creator name format | `N{YYMMDD}_{HHMM}` (+ `MMDDHHMM` short name) | `course_creator.h` |
 | Sprint prune order | renamed-in-app first, then oldest `date_created`; confirm only when a device-named course would go | `course_prune.h` |
+| Drag rollout | 0.9375 ft (11.25 in), ET start interpolated | `drag_timer.h` |
+| Drag tree cadence / pre-stage hold | 500 ms per yellow / staged +2 s before the tree starts | `drag_tree.h` |
+| Drag tree failed-launch / exit hold | green +5 s still → failed / Select held 2 s → end session | `drag_tree.h` |
+| Drag tree flash half-period | 500 ms (3 Hz OLED aliases anything faster) | `drag_tree.h` |
+| Drag stage / launch / abort | ≤1 mph held 1 s / ≥2 mph + rollout / ≤2 mph held 3 s or ≥2 s fix gap (silent) | `drag_timer.h` |
+| Drag prove-out | launch must reach 15 mph within 5 s of ET start, else silently abandoned | `drag_timer.h` |
+| Drag time base | Unix epoch ms (`getGpsUnixTimestampMillis()`) — never time-of-day ms (wraps at UTC midnight) | `gps_functions.ino` |
+| Drag distances | 660 / 1000 / 1320 / 2640 / 5280 ft (picker order) | `drag_timer.cpp` |
 | Track JSON coordinate precision | 8 decimals (~1.1 mm) | `track_json.h` |
 | Tach min pulse gap | 3 ms (`wasted`) / 6 ms (`single`) — same ~20 000 RPM ceiling either way | `tach_filter.h` (`minPulseGapUs`) |
 | Tach revs per pulse | `wasted` ? 1.0 : 2.0 — **no cylinder term** (plan 0014) | `tach_filter.h` (`revsPerPulse`) |
@@ -1940,7 +2091,8 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | SensorEgg scan interval / window | 90 ms / 40 ms (≈44% duty, test-capped ≤45%), passive | `sensoregg_protocol.h` |
 | SensorEgg scanner self-heal | 30 s no packet → stop+start kick | `sensoregg_protocol.h` |
 | SensorEgg RSSI floor | −90 dBm | `sensoregg_protocol.h` |
-| SensorEgg pairing MAC | `SENSOREGG_MAC` (all-zeros = any egg) | `sensoregg.h` |
+| SensorEgg pairing MAC | `sensoregg_mac` setting (plan 0017); `SENSOREGG_MAC` is the fallback (all-zeros = any egg) | `sensoregg.h` / `settings.ino` |
+| SensorEgg pairing timeout | 120 s capture window (`kPairingTimeoutMs`, camera parity) | `sensoregg_protocol.h` |
 | NeoPixel strip flag | `BIRDSEYE_ENABLE_NEOPIXEL`, default **1** on every channel since 4.1.0 | `project.h` |
 | Loop profiling flag | `BIRDSEYE_ENABLE_PROFILING`, default 0; 1 on the beta channel | `project.h` |
 | Profiling pin / span | 30 (`PROFILING_PIN`, = boost EN) / whole loop (`PROFILING_PIN_SECTION`) | `profiling.h` |

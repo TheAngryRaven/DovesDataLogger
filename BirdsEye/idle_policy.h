@@ -44,7 +44,7 @@ struct Inputs {
   bool  speedRuleSession = false;   // cause is MANUAL or SPEED (after promotion)
   bool  cameraRecording = false;    // camera FSM in kRecording
   bool  gpsLockHoldActive = false;  // session still waiting for its GPS time lock
-  bool  sprintEngineRunning = false;  // sprint mode AND tach reads > 0
+  bool  sprintEngineRunning = false;  // sprint OR drag mode AND tach reads > 0
   float speedMph = 0.0f;
 };
 

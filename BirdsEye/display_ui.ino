@@ -281,7 +281,9 @@ void switchToDisplayPage(int newDisplayPage) {
 
 void displaySetup() {
   debugln(F("SETTING UP DISPLAY"));
+  wdtPet();  // a WDT carried over a soft reset is counting (see wdtBootCheck)
   delay(250); // wait for the OLED to power up
+  wdtPet();
 
   // Set I2C timeout to prevent infinite hangs from EMI-induced bus faults
   Wire.setTimeout(100);
@@ -313,6 +315,7 @@ void displaySetup() {
   display.drawBitmap(0, 0, image_data_bird1, 128, 64, 1);
   safeDisplayUpdate();
   delay(750);
+  wdtPet();
 
   displayPage_boot();
 }
@@ -331,6 +334,10 @@ void handleMenuPageSelection() {
       startRaceSession(RACE_ENTRY_MANUAL);
       switchToDisplayPage(GPS_SPEED);
     } else if (menuSelectionIndex == 1) {
+      // Drag mode (plan 0015) — pick a distance, then straight to racing.
+      debugln(F("Main Menu: Drag selected"));
+      switchToDisplayPage(PAGE_DRAG_DISTANCE);
+    } else if (menuSelectionIndex == 2) {
       // Replay selected
       debugln(F("Main Menu: Replay selected"));
       resetReplayState();
@@ -341,11 +348,11 @@ void handleMenuPageSelection() {
         internalNotification[sizeof(internalNotification) - 1] = '\0';
         switchToDisplayPage(PAGE_INTERNAL_WARNING);
       }
-    } else if (menuSelectionIndex == 2) {
+    } else if (menuSelectionIndex == 3) {
       // Transfer selected — open the Bluetooth-vs-USB submenu
       debugln(F("Main Menu: Transfer selected"));
       switchToDisplayPage(PAGE_TRANSFER_MENU);
-    } else if (menuSelectionIndex == 3) {
+    } else if (menuSelectionIndex == 4) {
       // Create Course — walk the cones and capture the timing lines.
       debugln(F("Main Menu: Create Course selected"));
       if (!courseCreatorEnter()) {
@@ -357,13 +364,50 @@ void handleMenuPageSelection() {
         internalNotification[sizeof(internalNotification) - 1] = '\0';
         switchToDisplayPage(PAGE_INTERNAL_WARNING);
       }
-    } else {
+    } else if (menuSelectionIndex == 5) {
       // Camera selected — paired shows status/unpair, unpaired starts pairing
       debugln(F("Main Menu: Camera selected"));
       if (!cameraIsPaired()) {
         cameraRequestPair();  // pairing begins as the page comes up
       }
       switchToDisplayPage(PAGE_PAIR_CAMERA);
+#if BIRDSEYE_ENABLE_SENSOREGG
+    } else {
+      // Egg selected (index 6, plan 0017) — paired shows status/unpair,
+      // unpaired opens the capture window as the page comes up (camera
+      // pattern). On a stock build menuLimit caps the index at 5, so the
+      // flag-gated else is unreachable there and compiled out entirely.
+      debugln(F("Main Menu: Egg selected"));
+      if (!sensoreggIsPaired()) {
+        sensoreggRequestPair();
+      }
+      switchToDisplayPage(PAGE_PAIR_EGG);
+#endif
+    }
+  } else if (currentPage == PAGE_DRAG_DISTANCE) {
+    // Five distances + Back (last row). A distance opens the mode page
+    // (Automatic / Manual, plan 0016) — the session starts from there.
+    if (menuSelectionIndex >= drag_timer::kDistanceCount) {
+      debugln(F("Drag: Back selected"));
+      switchToDisplayPage(PAGE_MAIN_MENU);
+    } else {
+      dragPendingDistanceIdx = menuSelectionIndex;
+      switchToDisplayPage(PAGE_DRAG_MODE);
+    }
+  } else if (currentPage == PAGE_DRAG_MODE) {
+    // Automatic keeps today's behavior exactly (same landing page);
+    // Manual runs the christmas-tree flow on the pinned staging page.
+    if (menuSelectionIndex == 0) {
+      debugln(F("Drag: Automatic selected"));
+      startDragSession(dragPendingDistanceIdx, false);
+      switchToDisplayPage(GPS_SPEED);
+    } else if (menuSelectionIndex == 1) {
+      debugln(F("Drag: Manual selected"));
+      startDragSession(dragPendingDistanceIdx, true);
+      switchToDisplayPage(PAGE_DRAG_STAGING);
+    } else {
+      debugln(F("Drag: mode Back selected"));
+      switchToDisplayPage(PAGE_DRAG_DISTANCE);
     }
   } else if (currentPage == PAGE_PAIR_CAMERA) {
     // Only a menu while paired (Back / Test / Unpair) — the unpaired
@@ -376,6 +420,10 @@ void handleMenuPageSelection() {
     } else if (menuSelectionIndex == 1) {
       debugln(F("Camera: Test selected"));
       cameraTestEnterMode();
+      // Latch the egg bench scan too (no-op on stock builds): this page's
+      // egg soak line was dead on a desk since plan 0012 race-gated the
+      // scanner — see the comment at the readout in display_pages.ino.
+      sensoreggTestEnterMode();
       switchToDisplayPage(PAGE_CAMERA_TEST);
     } else {
       debugln(F("Camera: Unpair selected"));
@@ -423,14 +471,50 @@ void handleMenuPageSelection() {
         // mode first or cameraTestActive would stay latched (FSM
         // suppressed) with no way back to this menu's Back action.
         cameraTestExitMode();
+        sensoreggTestExitMode();  // drop the egg soak latch with it
         switchToDisplayPage(PAGE_INTERNAL_WARNING);
       }
     } else {
       debugln(F("Camera Test: Back"));
       cameraTestExitMode();
+      sensoreggTestExitMode();  // drop the egg soak latch with it
       switchToDisplayPage(PAGE_PAIR_CAMERA);
     }
     forceDisplayRefresh();
+#if BIRDSEYE_ENABLE_SENSOREGG
+  } else if (currentPage == PAGE_PAIR_EGG) {
+    // Menu only while paired (Back / Test / Unpair) — the unpaired
+    // capture screen handles its buttons in the custom branch in
+    // displayLoop(). Back is index 0 so a late "Cancel" press right
+    // after a capture can't land on Test or Unpair (camera precedent).
+    if (menuSelectionIndex == 0) {
+      debugln(F("Egg: Back selected"));
+      switchToDisplayPage(PAGE_MAIN_MENU);
+    } else if (menuSelectionIndex == 1) {
+      debugln(F("Egg: Test selected"));
+      sensoreggTestEnterMode();  // latch the scanner on outside races
+      switchToDisplayPage(PAGE_EGG_TEST);
+    } else {
+      debugln(F("Egg: Unpair selected"));
+      if (sensoreggUnpair()) {
+        switchToDisplayPage(PAGE_MAIN_MENU);
+      } else {
+        // Persist-first refused: the settings write failed (SD trouble)
+        // and nothing changed — warn instead of silently diverging.
+        strncpy(internalNotification, "Settings write\nfailed!",
+                sizeof(internalNotification) - 1);
+        internalNotification[sizeof(internalNotification) - 1] = '\0';
+        switchToDisplayPage(PAGE_INTERNAL_WARNING);
+      }
+    }
+  } else if (currentPage == PAGE_EGG_TEST) {
+    // Single row: Back. Drop the bench latch so the race gate owns the
+    // scanner again.
+    debugln(F("Egg Test: Back"));
+    sensoreggTestExitMode();
+    switchToDisplayPage(PAGE_PAIR_EGG);
+    forceDisplayRefresh();
+#endif
   } else if (currentPage == PAGE_TRANSFER_MENU) {
     if (menuSelectionIndex == 2) {
       // Back — the only non-rebooting way off this page.
@@ -584,6 +668,17 @@ void displayLoop() {
     currentPage = TACHOMETER;
   }
 
+  // Manual drag staging (plan 0016): the whole manual session lives on
+  // the staging page — tree, run, results. Applied AFTER the GPS-lock
+  // hold so this pin wins (the staging page carries its own GPS-wait
+  // line). Direct assignment like the hold above, not
+  // switchToDisplayPage(), which would stamp/refresh every frame. The
+  // pin's only gate is dragManualMode, cleared by endRaceSession() —
+  // every session ender releases it by construction.
+  if (dragStagingPinActive()) {
+    currentPage = PAGE_DRAG_STAGING;
+  }
+
   // Check if I2C recovery was flagged by a previous slow display update
   if (i2cRecoveryNeeded) {
     i2cRecoveryNeeded = false;
@@ -628,6 +723,12 @@ void displayLoop() {
       displayPage_gps_status();
     } else if (currentPage == PAGE_MAIN_MENU) {
       displayPage_main_menu();
+    } else if (currentPage == PAGE_DRAG_DISTANCE) {
+      displayPage_drag_distance();
+    } else if (currentPage == PAGE_DRAG_MODE) {
+      displayPage_drag_mode();
+    } else if (currentPage == PAGE_DRAG_STAGING) {
+      displayPage_drag_staging();
     } else if (currentPage == PAGE_BLUETOOTH) {
       displayPage_bluetooth();
     } else if (currentPage == PAGE_TRANSFER_MENU) {
@@ -638,6 +739,12 @@ void displayLoop() {
       displayPage_pair_camera();
     } else if (currentPage == PAGE_CAMERA_TEST) {
       displayPage_camera_test();
+#if BIRDSEYE_ENABLE_SENSOREGG
+    } else if (currentPage == PAGE_PAIR_EGG) {
+      displayPage_pair_egg();
+    } else if (currentPage == PAGE_EGG_TEST) {
+      displayPage_egg_test();
+#endif
     } else if (currentPage == PAGE_COURSE_TRACK) {
       displayPage_course_track();
     } else if (currentPage == PAGE_COURSE_TYPE) {
@@ -730,6 +837,8 @@ void displayLoop() {
 
   if (
     currentPage == PAGE_MAIN_MENU ||
+    currentPage == PAGE_DRAG_DISTANCE ||
+    currentPage == PAGE_DRAG_MODE ||
     currentPage == PAGE_BLUETOOTH ||
     currentPage == PAGE_TRANSFER_MENU ||
     currentPage == PAGE_USB_STORAGE ||
@@ -742,11 +851,25 @@ void displayLoop() {
     // flips the page into menu mode the moment a serial is captured.
     (currentPage == PAGE_PAIR_CAMERA && cameraIsPaired()) ||
     currentPage == PAGE_CAMERA_TEST ||
+#if BIRDSEYE_ENABLE_SENSOREGG
+    // Egg page mirrors the camera page: menu only while paired; the
+    // unpaired capture screen uses the custom branch below (plan 0017).
+    (currentPage == PAGE_PAIR_EGG && sensoreggIsPaired()) ||
+    currentPage == PAGE_EGG_TEST ||
+#endif
     courseCreatorActive()
   ) {
     insideMenu = true;
     if (currentPage == PAGE_MAIN_MENU) {
-      menuLimit = 5; // Race, Review, Transfer, Create Course, Camera
+#if BIRDSEYE_ENABLE_SENSOREGG
+      menuLimit = 7; // Race, Drag, Review, Transfer, Create Course, Camera, Egg
+#else
+      menuLimit = 6; // Race, Drag, Review, Transfer, Create Course, Camera
+#endif
+    } else if (currentPage == PAGE_DRAG_DISTANCE) {
+      menuLimit = drag_timer::kDistanceCount + 1; // distances + Back
+    } else if (currentPage == PAGE_DRAG_MODE) {
+      menuLimit = 3; // Automatic, Manual, Back
     } else if (courseCreatorActive()) {
       // Row count is the model's to decide — it changes with course type
       // (sprint grows a finish row) and with which screen is up.
@@ -761,6 +884,12 @@ void displayLoop() {
       menuLimit = 3; // Back, Test, Unpair
     } else if (currentPage == PAGE_CAMERA_TEST) {
       menuLimit = 4; // Wake, Record, Power Off, Back
+#if BIRDSEYE_ENABLE_SENSOREGG
+    } else if (currentPage == PAGE_PAIR_EGG) {
+      menuLimit = 3; // Back, Test, Unpair
+    } else if (currentPage == PAGE_EGG_TEST) {
+      menuLimit = 1; // Back
+#endif
     } else if (
       currentPage == LOGGING_STOP_CONFIRM ||
       currentPage == PAGE_COURSE_PRUNE ||
@@ -781,6 +910,12 @@ void displayLoop() {
     buttonsDisabled = true;
   }
 
+  // Pinned manual drag staging: every press belongs to dragStagingLoop()
+  // (arm / re-arm / the Select-hold exit) — navigation is dead here.
+  if (dragStagingPinActive()) {
+    buttonsDisabled = true;
+  }
+
   // menu operator
   if (insideMenu && !buttonsDisabled) {
     // we are in a menu do weird menu things
@@ -795,8 +930,16 @@ void displayLoop() {
     // items the direction was unobservable (either button wrapped to the
     // other row), so it was never noticed. Its third row makes it visible.
     bool reverseDirection = (currentPage == PAGE_MAIN_MENU ||
+                             currentPage == PAGE_DRAG_DISTANCE ||
+                             currentPage == PAGE_DRAG_MODE ||
                              currentPage == PAGE_PAIR_CAMERA ||
                              currentPage == PAGE_CAMERA_TEST ||
+#if BIRDSEYE_ENABLE_SENSOREGG
+                             // Statically rendered top-to-bottom, exactly
+                             // like the camera pages (bug #7 class).
+                             currentPage == PAGE_PAIR_EGG ||
+                             currentPage == PAGE_EGG_TEST ||
+#endif
                              currentPage == PAGE_COURSE_PRUNE ||
                              currentPage == PAGE_TRANSFER_MENU ||
                              courseCreatorActive());
@@ -846,6 +989,11 @@ void displayLoop() {
       debugln(menuSelectionIndex);
       forceDisplayRefresh();
     }
+  } else if (currentPage == PAGE_DRAG_STAGING) {
+    // Manual drag staging (plan 0016): presses are consumed by
+    // dragStagingLoop() BEFORE displayLoop() runs — nothing to do here.
+    // The branch exists so the generic navigation below can't grab the
+    // pinned page (same construction as PAGE_GPS_STATUS below).
   } else if (currentPage == PAGE_GPS_STATUS) {
     // Boot GPS status page: presses are consumed by gpsStatusPageLoop()
     // (BirdsEye.ino) BEFORE displayLoop() runs — nothing to do here. This
@@ -875,6 +1023,17 @@ void displayLoop() {
       cameraCancelPair();
       switchToDisplayPage(PAGE_MAIN_MENU);
     }
+#if BIRDSEYE_ENABLE_SENSOREGG
+  } else if (currentPage == PAGE_PAIR_EGG) {
+    // Unpaired capture screen only (the paired variant is a menu above).
+    // B2 (Select) = cancel. B1 stays deliberately unbound — reserved for
+    // a future manual MAC entry page (plan 0017 deferred it).
+    if (btn2->pressed) {
+      debugln(F("Pair Egg: cancel"));
+      sensoreggCancelPair();
+      switchToDisplayPage(PAGE_MAIN_MENU);
+    }
+#endif
   } else if (currentPage == PAGE_CAMERA_SERIAL_ENTRY) {
     // Manual serial entry button map:
     //   B1 (Left)   = cycle char backward (cursor 0-5) / toggle OK-CANCEL

@@ -29,6 +29,7 @@ add_executable(birdseye_tests
   wake_cause_test.cpp
   gps_status_page_test.cpp
   sd_format_page_test.cpp
+  sd_probe_test.cpp
   sat_bars_test.cpp
   sensoregg_protocol_test.cpp
   sprint_select_test.cpp
@@ -43,6 +44,8 @@ add_executable(birdseye_tests
   sector_purple_test.cpp
   ble_stream_test.cpp
   loop_profile_test.cpp
+  drag_timer_test.cpp
+  drag_tree_test.cpp
   ${BIRDSEYE_DIR}/haversine.cpp
   ${BIRDSEYE_DIR}/gps_stats.cpp
   ${BIRDSEYE_DIR}/gps_time.cpp
@@ -61,6 +64,7 @@ add_executable(birdseye_tests
   ${BIRDSEYE_DIR}/wake_cause.cpp
   ${BIRDSEYE_DIR}/gps_status_page.cpp
   ${BIRDSEYE_DIR}/sd_format_page.cpp
+  ${BIRDSEYE_DIR}/sd_probe.cpp
   ${BIRDSEYE_DIR}/sat_bars.cpp
   ${BIRDSEYE_DIR}/sensoregg_protocol.cpp
   ${BIRDSEYE_DIR}/sprint_select.cpp
@@ -75,6 +79,8 @@ add_executable(birdseye_tests
   ${BIRDSEYE_DIR}/sector_purple.cpp
   ${BIRDSEYE_DIR}/ble_stream.cpp
   ${BIRDSEYE_DIR}/loop_profile.cpp
+  ${BIRDSEYE_DIR}/drag_timer.cpp
+  ${BIRDSEYE_DIR}/drag_tree.cpp
 )
 
 target_include_directories(birdseye_tests PRIVATE

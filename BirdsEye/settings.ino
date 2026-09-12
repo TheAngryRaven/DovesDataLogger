@@ -181,6 +181,11 @@ static void ensureDefaultSettings() {
     // threshold for, and the key would just spend settings-file bytes
     // on every stock device.
     { "temp1_alert_c", "650" },
+    // Paired egg MAC "AA:BB:CC:DD:EE:FF"; empty = unpaired = accept any
+    // PW-ADV egg (plan 0017). Written by the Egg menu's window-gated
+    // capture (persist-first); applied LIVE on pair/unpair — one of the
+    // two settings exempt from the next-boot rule, like camera_serial.
+    { "sensoregg_mac", "" },
 #endif
     // Plan 0013: what each status LED shows, and the speed the 9-px bar
     // scales against on a session with no tachometer. Mode tokens are

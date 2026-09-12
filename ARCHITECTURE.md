@@ -98,7 +98,11 @@ to the matching `*_LOOP()`.
   detection. Built for a soldered-in module: a missing `/TRACKS` folder is
   created automatically, and a card that responds without a mountable FAT
   volume boots into a hold-to-confirm on-device format page
-  (`sd_format_page` pure unit) rather than a dead-end fault screen.
+  (`sd_format_page` pure unit) rather than a dead-end fault screen. The
+  "no volume" verdict needs two consecutive probes with a settle between
+  (`sd_probe` pure unit) — a card wedged mid-command by an interrupted
+  boot looks blank on one look — and a format must mount before it reports
+  OK, or the page says so instead of rebooting into the same loop.
 - **Display/UI** (`display_ui`, `display_pages`) — OLED driver abstraction,
   multi-sample debounced buttons, page routing.
 - **Bluetooth** (`bluetooth` + the `ble_stream` pure unit) — BLE service for
@@ -185,6 +189,18 @@ to the matching `*_LOOP()`.
 - **Settings** (`settings`) — JSON key/value store on the SD card.
 - **CourseManager** (external library) — owns course detection, sector
   timing, and the Lap Anything fallback once a track is matched.
+- **Drag mode** (`drag_timer` + `drag_tree` pure units) — distance runs
+  with no track at all: pick 1/8 mile…1 mile from the menu, stage at a
+  standstill, and a rollout-style launch starts the clock. ET, trap
+  speed, and a 0-60 split per run; re-arms automatically after each pass.
+  The whole state machine (re-latching standstill anchor, interpolated
+  rollout/finish crossings, silent aborts) is host-tested; the sketch
+  keeps only sprint-style glue (plan 0015). **Manual mode** (plan 0016)
+  adds a christmas-tree staging sequence — white pip, three yellows at
+  the sportsman 500 ms, green — driven by one state machine onto both the
+  LED strip and a pinned OLED countdown, with red-light fouls, a
+  failed-to-launch timeout, and a reaction-time stat; the physics launch
+  gate opens only on the green light.
 
 ## Design decisions worth knowing
 
@@ -250,7 +266,12 @@ The device lives next to an ignition system. Defenses: multi-sample
 button reads with a refire lockout, a Kalman-filtered tach that absorbs
 ISR jitter, a reduced 2 MHz SD SPI clock, an I2C bus-recovery routine that
 bit-bangs the display bus free if it hangs, and a 4 s hardware watchdog as
-the last resort.
+the last resort. That watchdog **survives a soft reset** (only a pin,
+brown-out, power-on or System OFF reset clears it), so every
+firmware-initiated reboot hands the next boot a running WDT: `setup()`
+checks for one first thing (`wdtBootCheck()`) and feeds it between the
+slow boot steps, and `wdtSetup()` leaves a running one alone — its
+registers are locked.
 
 ### Shutdown is System OFF, wake is a reboot
 There is no power switch (deliberately — the next hardware revision drops

@@ -95,6 +95,8 @@
 #include "display_pages.h"
 #include "display_ui.h"
 #include "dovex_header.h"
+#include "drag_timer.h"
+#include "drag_tree.h"
 #include "gps_functions.h"
 #include "gps_status_page.h"
 #include "haversine.h"
@@ -166,6 +168,25 @@ int detectedTrackIndex = -1;
 SprintTimer* sprintTimer = nullptr;
 char sprintCourseName[MAX_LAYOUT_LENGTH] = "";
 int sprintLastRunCount = 0;  // run-complete edge for lap history capture
+
+// Drag mode (plan 0015): distance runs with no track at all. Same shape
+// as sprint — a non-null dragTimer IS drag mode, courseManager stays
+// null for the session, and runs duck-type as laps everywhere.
+drag_timer::DragTimer* dragTimer = nullptr;
+int dragLastRunCount = 0;    // run-complete edge for lap history capture
+int dragDistanceIdx = -1;    // index into drag_timer's distance table
+bool dragWasStaged = false;  // ARMED->STAGED edge for the idle-grace re-arm
+
+// Manual drag mode (plan 0016): the christmas-tree staging sequence.
+// dragManualMode is latched by startDragSession and cleared ONLY by
+// endRaceSession — it is the display pin's whole gate, so every session
+// ender releases the pinned screen by construction.
+bool dragManualMode = false;
+drag_tree::State dragTreeState;
+unsigned long dragLastRtMs = 0;   // reaction time of the last manual run
+uint64_t dragGreenEpochMs = 0;    // green-light instant, Unix epoch ms
+int dragPendingDistanceIdx = 0;   // carried from the distance picker to
+                                  // the mode page
 unsigned long idleStartTime = 0;
 bool idleTimerRunning = false;
 bool raceActive = false;
@@ -501,6 +522,33 @@ unsigned long lapHistory[lapHistoryMaxLaps];
 int lapHistoryCount = 0;
 
 void checkForNewLapData() {
+  // Drag mode: same run-count-edge capture as sprint below (identical
+  // consecutive ETs are normal). Two idle-grace re-arms keep a staging
+  // queue from ending the session on tach-less cars: every completed run
+  // (sprint precedent) and every fresh STAGED latch — queue creep
+  // re-stages every couple of minutes, so an active queue never idles
+  // out, while a genuinely parked car still ends after the grace.
+  if (dragTimer != nullptr) {
+    const bool stagedNow = dragTimer->staged();
+    if (stagedNow && !dragWasStaged) {
+      raceSessionStartedAt = millis();
+    }
+    dragWasStaged = stagedNow;
+
+    int runs = dragTimer->runs();
+    if (runs > dragLastRunCount) {
+      dragLastRunCount = runs;
+      raceSessionStartedAt = millis();
+      if (lapHistoryCount < lapHistoryMaxLaps) {
+        lastLap = dragTimer->lastEtMs();
+        lapHistory[lapHistoryCount] = lastLap;
+        lapHistoryCount++;
+        debugln(F("New drag run added to history..."));
+      }
+    }
+    return;
+  }
+
   // Sprint mode: capture on the RUN-COMPLETE EDGE (run count increment),
   // not on value change — two identical run times in a row are normal at
   // autocross and the value-change dedupe below would silently drop the
@@ -593,10 +641,11 @@ bool enableLogging = false;
 // machine lives in the host-tested sd_format_page unit. displayLoop()
 // only ever renders the confirm screen; the running/done screens are
 // painted directly by sdPerformFormat() (which blocks the main loop).
-// A failed attempt returns to the confirm page with sdFormatLastFailed
-// set so the renderer can say so.
+// A failed attempt returns to the confirm page with sdFormatFailure
+// set so the renderer can say which half failed (see sd_functions.h).
 sd_format_page::State sdFormatState;
-bool sdFormatLastFailed = false;
+uint8_t sdFormatFailure = SD_FORMAT_FAIL_NONE;
+uint8_t sdLastErrorCode = 0;
 
 ///////////////////////////////////////////
 // ON-DEVICE COURSE CREATOR (plan 0002 §5)
@@ -760,6 +809,21 @@ const int PAGE_COURSE_POINT = -15;   // "Save current pos" averaging hold
 // two-row confirm, not one of the model's screens, so it must not be handed
 // to course_creator::rowCount().
 const int PAGE_COURSE_PRUNE = -16;   // "Track full - drop N old runs?"
+// Drag mode (plan 0015): the distance picker between the main menu's
+// Drag row and the race rotation. Five distances + Back.
+const int PAGE_DRAG_DISTANCE = -17;
+// Drag mode picker + the manual staging screen (plan 0016). The staging
+// page is PINNED for the whole manual session (gpsLockHold precedent):
+// negative ids sit outside the arrow rotation and onRacingPage by
+// construction, which is exactly what a pinned page needs.
+const int PAGE_DRAG_MODE = -18;     // Automatic / Manual / Back
+const int PAGE_DRAG_STAGING = -19;  // tree countdown / run / results
+// SensorEgg pairing UI (plan 0017). Ids defined unconditionally like
+// PAGE_CAMERA_TEST; the pages are only reachable on a
+// BIRDSEYE_ENABLE_SENSOREGG build (menu row, renderers and wiring are
+// all gated).
+const int PAGE_PAIR_EGG = -20;  // egg pairing / paired-status screen
+const int PAGE_EGG_TEST = -21;  // egg bench/live-data page (never idle-sleeps)
 
 // running menu (these must be in order)
 #if BIRDSEYE_ENABLE_PROFILING
@@ -863,9 +927,57 @@ int lap_list_pages = 1;
 // WATCHDOG TIMER
 // nRF52840 hardware WDT - recovers from any lockup within ~4 seconds.
 // Primary defense against I2C bus hangs, SD card stalls, etc.
+//
+// THE WDT SURVIVES A SOFT RESET. Only a pin reset, brown-out, power-on
+// or a System OFF wake clears it; NVIC_SystemReset() — every reboot this
+// firmware performs itself (BLE/USB transfer exit, OTA, the SD format
+// page, the reboot combo) — leaves it running with its config locked
+// and its counter wherever the last pet left it. So the boot after one
+// of those reboots is on the clock from its first instruction: it has
+// ~4 s minus whatever was left to reach wdtSetup() at the end of
+// setup(), or the WDT resets it mid-boot. That is survivable on a
+// healthy unit (a clean boot is ~2 s) and was invisible until a slow
+// SD card ate the margin: a WDT reset mid-SD-transaction leaves a card
+// that firmware cannot reset (CS grounded, no power switch), every
+// following soft boot found "card answers, no volume", and the format
+// page kept coming back until a power cycle (2026-09 field report).
+//
+// wdtBootCheck() therefore runs FIRST in setup(): if the WDT is already
+// running it is fed immediately and wdtCarriedOver is set, and setup()
+// pets it between every slow step — those pets are no-ops on a clean
+// boot (writing RR[0] to a stopped WDT does nothing). wdtSetup() then
+// only configures a WDT that is not already running: the registers are
+// read-only once started, so the carried-over one keeps its 4 s.
 ///////////////////////////////////////////
 
+bool wdtCarriedOver = false;  // WDT was already running at boot (soft reset)
+
+// True when the hardware WDT is running. RUNSTATUS bit 0 is the only bit
+// in that register on the nRF52840; tested by value rather than through
+// the MDK's bitfield macro because its name differs between MDK releases
+// (RUNSTATUS vs RUNSTATUSWDT).
+static bool wdtIsRunning() {
+  #ifndef SIM
+  return (NRF_WDT->RUNSTATUS & 1u) != 0;
+  #else
+  return false;  // the sim never starts a WDT
+  #endif
+}
+
+void wdtBootCheck() {
+  if (!wdtIsRunning()) return;
+  wdtCarriedOver = true;
+  wdtPet();
+}
+
 void wdtSetup() {
+  if (wdtIsRunning()) {
+    // Carried over from the previous session's soft reset: CONFIG/CRV/RREN
+    // are locked, so writing them would be a silent no-op. Just feed it —
+    // the reload register is the one thing still writable.
+    wdtPet();
+    return;
+  }
   NRF_WDT->CONFIG = WDT_CONFIG_SLEEP_Run << WDT_CONFIG_SLEEP_Pos;  // Keep running in sleep
   NRF_WDT->CRV = 4 * 32768;  // ~4 second timeout (32768 Hz clock)
   NRF_WDT->RREN = WDT_RREN_RR0_Enabled << WDT_RREN_RR0_Pos;      // Enable reload register 0
@@ -931,11 +1043,21 @@ static void captureBootWakeCause() {
 
 void setup() {
   captureBootWakeCause();
+  // Before ANYTHING slow: a WDT carried over a soft reset is already
+  // counting (see the WATCHDOG TIMER block).
+  wdtBootCheck();
 
 #ifdef HAS_DEBUG
   Serial.begin(9600);
   while (!Serial);
 #endif
+  wdtPet();
+  debug(F("Boot cause: "));
+  debug(wake_cause::shortName(bootWakeCause));
+  if (wdtCarriedOver) {
+    debug(F(" (WDT still running from the soft reset — feeding through setup)"));
+  }
+  debugln(F(""));
 
   #ifndef SIM
     analogReadResolution(ADC_RESOLUTION);
@@ -957,10 +1079,13 @@ void setup() {
   #endif
 
   displaySetup();
+  wdtPet();
 
   // setup sd card and confirm we can read track list
   sdSetupSuccess = SD_SETUP();
+  wdtPet();
   sdTrackSuccess = buildTrackList();
+  wdtPet();
   if(sdSetupSuccess && sdTrackSuccess) {
     debugln(F("Obtained Track List"));
     for (int i = 0; i < trackManifestCount; i++) {
@@ -972,6 +1097,7 @@ void setup() {
 
   // Load settings from SD (creates defaults on first boot)
   SETTINGS_SETUP();
+  wdtPet();
 
   // Colour preference is applied HERE, not in the settings block further
   // down, because displaySetup() runs before the SD card exists — the panel
@@ -994,8 +1120,10 @@ void setup() {
   }
 
   ACCEL_SETUP();
+  wdtPet();
 
   GPS_SETUP();
+  wdtPet();
 
   // Read settings into runtime variables
   {
@@ -1206,6 +1334,7 @@ void setup() {
   // of any 4.1.0+ image is the one that spends the NFC pads and resets
   // once. See project.h.
   NEOPIXEL_SETUP();
+  wdtPet();
 
   // Loop profiling (plan 0011, beta only). MUST run after NEOPIXEL_SETUP:
   // the profiling pin is one of the NFC pads, and that call is what
@@ -1215,12 +1344,14 @@ void setup() {
 
   // Camera auto-record: load the persisted Insta360 serial + init the FSM
   CAMERA_SETUP();
+  wdtPet();
 
   // SensorEgg wireless EGT: bring the BLE core up and start the passive
   // scanner (after CAMERA_SETUP so every GATT service is registered by
   // bleCoreEnsureInit before anything advertises). A no-op — and BLE stays
   // lazy — unless BIRDSEYE_ENABLE_SENSOREGG is set (beta channel only).
   SENSOREGG_SETUP();
+  wdtPet();
 
   if (!sdSetupSuccess && sdCardUnformatted) {
     // Card answers but no FAT volume mounts: soldered-in module out of the
@@ -1232,8 +1363,12 @@ void setup() {
     sd_format_page::begin(sdFormatState, millis());
     switchToDisplayPage(PAGE_SD_FORMAT);
   } else if (!sdSetupSuccess) {
-    strncpy(internalNotification, "SD Init failed!\n\nlogging not possible!", sizeof(internalNotification) - 1);
-    internalNotification[sizeof(internalNotification) - 1] = '\0';
+    // Boot cause + SdFat error on the fault page: a "WDT" boot here is a
+    // watchdog reset mid-boot (it survives a soft reset), which points at
+    // the previous session, not the card.
+    snprintf(internalNotification, sizeof(internalNotification),
+             "SD Init failed!\n\nlogging not possible!\nboot:%s err:%02X",
+             wake_cause::shortName(bootWakeCause), sdLastErrorCode);
     switchToDisplayPage(PAGE_INTERNAL_FAULT);
 #if BIRDSEYE_ENABLE_ONBOARD_CHARGING
   } else if (bootWakeCause == wake_cause::Cause::kUsbWake) {
@@ -1291,12 +1426,67 @@ bool sprintModeIsActive() {
 }
 
 /**
+ * @brief Drag mode (plan 0015) — a non-null dragTimer IS drag mode, the
+ * same construction as sprint. Every activeTimer*() helper below checks
+ * the drag branch first; drag runs duck-type as laps.
+ */
+bool dragModeIsActive() {
+  return dragTimer != nullptr;
+}
+
+// Drag-mode display accessors (null-safe): the trap/0-60 stats have no
+// lap-timer analog, so they don't ride the activeTimer*() surface —
+// display_pages reads these directly, like the sprint pages read
+// sprintModeIsActive().
+bool dragIsStaged() {
+  return dragTimer != nullptr && dragTimer->staged();
+}
+
+// Manual drag mode (plan 0016) — the staging-tree surface the display
+// and LED code read. The pin predicate gates BOTH the page pin and the
+// button kill in display_ui.ino.
+bool dragManualActive() {
+  return dragTimer != nullptr && dragManualMode;
+}
+bool dragStagingPinActive() {
+  return raceActive && dragManualActive();
+}
+bool dragTreeStripActive() {
+  return dragStagingPinActive() && drag_tree::stripActive(dragTreeState.stage);
+}
+drag_tree::Stage dragTreeStage() {
+  return dragTreeState.stage;
+}
+unsigned long dragLastReactionMs() {
+  return dragLastRtMs;
+}
+const char* dragDistanceLabel() {
+  return drag_timer::label(dragDistanceIdx);
+}
+float dragLastTrapMph() {
+  return dragTimer != nullptr ? dragTimer->lastTrapMph() : 0.0f;
+}
+unsigned long dragLast0to60Ms() {
+  return dragTimer != nullptr ? dragTimer->last0to60Ms() : 0;
+}
+float dragBestTrapMph() {
+  return dragTimer != nullptr ? dragTimer->bestTrapMph() : 0.0f;
+}
+unsigned long dragBest0to60Ms() {
+  return dragTimer != nullptr ? dragTimer->best0to60Ms() : 0;
+}
+unsigned long dragCurrent0to60Ms() {
+  return dragTimer != nullptr ? dragTimer->current0to60Ms() : 0;
+}
+
+/**
  * @brief True while timing is "live": a sprint run in progress, or (in
  * circuit mode) the race started. Drives the sprint pages' *waiting*
  * state — between runs the device stays in race mode with all pages up,
  * but Current Lap / Pace show *waiting* instead of a dead 0:00.
  */
 bool activeTimerRunActive() {
+  if (dragTimer != nullptr) return dragTimer->runActive();
   if (sprintTimer != nullptr) return sprintTimer->isRunActive();
   return activeTimerRaceStarted();
 }
@@ -1319,6 +1509,7 @@ WaypointLapTimer* getActiveTimerWLT() {
 
 // Unified getter helpers for display pages
 bool activeTimerRaceStarted() {
+  if (dragTimer != nullptr) return dragTimer->runActive() || dragTimer->runs() > 0;
   if (sprintTimer != nullptr) return sprintTimer->getRaceStarted();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getRaceStarted();
@@ -1328,6 +1519,7 @@ bool activeTimerRaceStarted() {
 }
 
 bool activeTimerCrossing() {
+  if (dragTimer != nullptr) return false;  // no lines to cross
   if (sprintTimer != nullptr) return sprintTimer->getCrossing();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getCrossing();
@@ -1337,6 +1529,7 @@ bool activeTimerCrossing() {
 }
 
 int activeTimerLaps() {
+  if (dragTimer != nullptr) return dragTimer->runs();
   if (sprintTimer != nullptr) return sprintTimer->getRuns();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getLaps();
@@ -1346,6 +1539,9 @@ int activeTimerLaps() {
 }
 
 unsigned long activeTimerCurrentLapTime() {
+  // Epoch ms, matching the feed in gps_functions.ino — the time-of-day
+  // clock wraps at UTC midnight and the mismatch would corrupt live ET.
+  if (dragTimer != nullptr) return dragTimer->currentEtMs(getGpsUnixTimestampMillis());
   if (sprintTimer != nullptr) return sprintTimer->getCurrentRunTime();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getCurrentLapTime();
@@ -1355,6 +1551,7 @@ unsigned long activeTimerCurrentLapTime() {
 }
 
 unsigned long activeTimerLastLapTime() {
+  if (dragTimer != nullptr) return dragTimer->lastEtMs();
   if (sprintTimer != nullptr) return sprintTimer->getLastRunTime();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getLastLapTime();
@@ -1364,6 +1561,7 @@ unsigned long activeTimerLastLapTime() {
 }
 
 unsigned long activeTimerBestLapTime() {
+  if (dragTimer != nullptr) return dragTimer->bestEtMs();
   if (sprintTimer != nullptr) return sprintTimer->getBestRunTime();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getBestLapTime();
@@ -1373,6 +1571,7 @@ unsigned long activeTimerBestLapTime() {
 }
 
 int activeTimerBestLapNumber() {
+  if (dragTimer != nullptr) return dragTimer->bestRunNumber();
   if (sprintTimer != nullptr) return sprintTimer->getBestRunNumber();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getBestLapNumber();
@@ -1382,6 +1581,7 @@ int activeTimerBestLapNumber() {
 }
 
 float activeTimerPaceDifference() {
+  if (dragTimer != nullptr) return 0.0f;  // no reference lap to pace against
   if (sprintTimer != nullptr) return sprintTimer->getPaceDifference();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getPaceDifference();
@@ -1391,6 +1591,9 @@ float activeTimerPaceDifference() {
 }
 
 float activeTimerTotalDistance() {
+  // Meters, like every other branch of this accessor — the unit is
+  // feet-native, so convert at the boundary.
+  if (dragTimer != nullptr) return dragTimer->distanceFt() * 0.3048f;
   if (sprintTimer != nullptr) return sprintTimer->getTotalDistanceTraveled();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getTotalDistanceTraveled();
@@ -1400,6 +1603,7 @@ float activeTimerTotalDistance() {
 }
 
 unsigned long activeTimerOptimalLapTime() {
+  if (dragTimer != nullptr) return 0;  // no sectors, no optimal
   if (sprintTimer != nullptr) return sprintTimer->getOptimalLapTime();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getOptimalLapTime();
@@ -1407,6 +1611,7 @@ unsigned long activeTimerOptimalLapTime() {
 }
 
 bool activeTimerSectorsConfigured() {
+  if (dragTimer != nullptr) return false;
   if (sprintTimer != nullptr) return sprintTimer->areSectorLinesConfigured();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->areSectorLinesConfigured();
@@ -1417,6 +1622,7 @@ bool activeTimerSectorsConfigured() {
 // Sprint-first like every sibling; WaypointLapTimer (Lap Anything) has
 // no sectors, so those sessions return 0 and the monitor stays reset.
 int activeTimerCurrentSector() {
+  if (dragTimer != nullptr) return 0;
   if (sprintTimer != nullptr) return sprintTimer->getCurrentSector();
   DovesLapTimer* dlt = getActiveTimerDLT();
   if (dlt) return dlt->getCurrentSector();
@@ -1424,6 +1630,7 @@ int activeTimerCurrentSector() {
 }
 
 unsigned long activeTimerLapSectorTime(int sector) {
+  if (dragTimer != nullptr) return 0;
   if (sprintTimer != nullptr) {
     if (sector == 1) return sprintTimer->getCurrentLapSector1Time();
     if (sector == 2) return sprintTimer->getCurrentLapSector2Time();
@@ -1440,6 +1647,7 @@ unsigned long activeTimerLapSectorTime(int sector) {
 }
 
 unsigned long activeTimerBestSectorTime(int sector) {
+  if (dragTimer != nullptr) return 0;
   if (sprintTimer != nullptr) {
     if (sector == 1) return sprintTimer->getBestSector1Time();
     if (sector == 2) return sprintTimer->getBestSector2Time();
@@ -1527,6 +1735,101 @@ bool createSprintSession() {
   debug(L.date_created[0] ? L.date_created : "n/a");
   debugln(F(")"));
   return true;
+}
+
+/**
+ * @brief Stand up a drag session (plan 0015): no track, no detection —
+ * just a distance target picked on PAGE_DRAG_DISTANCE. trackDetected is
+ * latched the way sprint latches it, so trackDetectionLoop() can't stand
+ * up a CourseManager when the strip happens to be near a saved track;
+ * dragTimer must exist BEFORE startRaceSession() so its Lap Anything
+ * fallback stays suppressed.
+ *
+ * manualStaging (plan 0016) runs the christmas-tree flow: the physics
+ * launch gate starts CLOSED (opened only while the tree shows green)
+ * and the display pins to PAGE_DRAG_STAGING for the whole session. No
+ * default argument — Arduino's prototype generator is unreliable with
+ * them, so both call sites pass it explicitly.
+ */
+void startDragSession(int distanceIdx, bool manualStaging) {
+  // Defensive mirror of createSprintSession() — nothing can exist when
+  // this is reached from the menu, but the deletes keep that a fact.
+  if (courseManager != nullptr) {
+    delete courseManager;
+    courseManager = nullptr;
+  }
+  if (sprintTimer != nullptr) {
+    delete sprintTimer;
+    sprintTimer = nullptr;
+  }
+  if (dragTimer == nullptr) {
+    dragTimer = new drag_timer::DragTimer();
+  }
+  dragTimer->setTarget(distanceIdx);
+  dragDistanceIdx = dragTimer->targetIdx();  // clamped by the unit
+  dragLastRunCount = 0;
+  dragWasStaged = false;
+  dragManualMode = manualStaging;
+  dragLastRtMs = 0;
+  dragGreenEpochMs = 0;
+  if (manualStaging) {
+    drag_tree::begin(dragTreeState, millis());
+    dragTimer->setLaunchEnabled(false);  // opened only on the green light
+  }
+  trackDetected = true;
+  startRaceSession(RACE_ENTRY_MANUAL);
+
+  debug(F("Drag session ready — "));
+  debug(drag_timer::label(dragDistanceIdx));
+  debugln(manualStaging ? F(" (manual tree)") : F(" (automatic)"));
+}
+
+/**
+ * @brief Manual drag staging loop (plan 0016): builds the tree's input
+ * snapshot, steps the host-tested drag_tree unit, and executes its
+ * one-shot effects. Runs after readButtons() and before displayLoop()
+ * (the gps_status_page slot) so a consumed press never leaks into the
+ * page below the pin. The physics launch gate is re-asserted every
+ * iteration: open exactly while the tree shows green.
+ */
+void dragStagingLoop() {
+  if (!raceActive || dragTimer == nullptr || !dragManualMode) return;
+
+  drag_tree::Inputs in;
+  in.nowMs = millis();
+  in.fix = gpsData.fix;
+  in.speedMph = gps_speed_mph;
+  in.timerStaged = dragTimer->staged();
+  in.runActive = dragTimer->runActive();
+  in.runs = dragTimer->runs();
+  in.buttonPressed = btn1->pressed || btn2->pressed || btn3->pressed;
+  in.selectHeld = isButtonHeld(2, 0);  // live level (updateButtonHoldState)
+  in.otherButtonHeld = isButtonHeld(1, 0) || isButtonHeld(3, 0);
+
+  const drag_tree::Effects fx = drag_tree::step(dragTreeState, in);
+
+  dragTimer->setLaunchEnabled(dragTreeState.stage ==
+                              drag_tree::Stage::kGreen);
+
+  if (fx.greenEdge) {
+    // EPOCH ms, the same clock as runStartEpochMs() — RT is the
+    // difference of the two, so they must never mix time bases.
+    dragGreenEpochMs = getGpsUnixTimestampMillis();
+    dragLastRtMs = 0;
+  }
+  if (fx.runStartEdge) {
+    const uint64_t s = dragTimer->runStartEpochMs();
+    dragLastRtMs =
+        (s > dragGreenEpochMs) ? (unsigned long)(s - dragGreenEpochMs) : 0;
+  }
+  if (fx.consumedButton) {
+    resetButtons();  // the press must not also drive displayLoop()
+  }
+  if (fx.exitSession) {
+    endRaceSession();  // clears dragManualMode -> releases the pin
+    switchToDisplayPage(PAGE_MAIN_MENU);
+    resetButtons();
+  }
 }
 
 /**
@@ -1738,6 +2041,20 @@ void endRaceSession() {
   }
   sprintCourseName[0] = '\0';
   sprintLastRunCount = 0;
+  // Clean up drag session (plan 0015). dragManualMode is the staging
+  // pin's whole gate (plan 0016), so clearing it HERE means every
+  // session ender — the tree's Select-hold exit, auto-idle, shutdown —
+  // releases the pinned screen by construction.
+  if (dragTimer != nullptr) {
+    delete dragTimer;
+    dragTimer = nullptr;
+  }
+  dragLastRunCount = 0;
+  dragDistanceIdx = -1;
+  dragWasStaged = false;
+  dragManualMode = false;
+  dragLastRtMs = 0;
+  dragGreenEpochMs = 0;
   trackDetected = false;
   detectedTrackIndex = -1;
   raceActive = false;
@@ -1761,6 +2078,7 @@ void endRaceSession() {
 void createLapAnythingCourseManager() {
   if (courseManager != nullptr) return;  // Already exists
   if (sprintTimer != nullptr) return;    // Sprint session owns timing
+  if (dragTimer != nullptr) return;      // Drag session owns timing
   activeTrackConfig.longName = "Unknown";
   activeTrackConfig.shortName = "";
   activeTrackConfig.courseCount = 0;
@@ -1806,7 +2124,8 @@ void checkAutoIdle() {
       (raceEntryCause == RACE_ENTRY_MANUAL || raceEntryCause == RACE_ENTRY_SPEED);
   pin.cameraRecording = cameraActivelyRecording();
   pin.gpsLockHoldActive = gpsLockHoldActive;
-  pin.sprintEngineRunning = (sprintTimer != nullptr && tachLastReported > 0);
+  pin.sprintEngineRunning =
+      ((sprintTimer != nullptr || dragTimer != nullptr) && tachLastReported > 0);
   pin.speedMph = gps_speed_mph;
   const idle_policy::Decision d = idle_policy::evaluate(pin);
 
@@ -2276,7 +2595,10 @@ void writeDovexHeader() {
 
   const char* courseName = "Lap Anything";
   const char* shortName  = "";
-  if (sprintTimer != nullptr) {
+  if (dragTimer != nullptr) {
+    courseName = drag_timer::dovexName(dragDistanceIdx);
+    shortName = "DRAG";
+  } else if (sprintTimer != nullptr) {
     courseName = sprintCourseName[0] ? sprintCourseName : "Sprint";
     shortName = activeTrackMetadata.shortName;  // from the session's parse
   } else if (courseManager != nullptr) {
@@ -2293,8 +2615,10 @@ void writeDovexHeader() {
       activeTimerBestLapTime(),
       activeTimerOptimalLapTime(),
       settingDeviceName,
-      // Webapp loading helper: with SPRINT the laps line is a runs line.
-      sprintTimer != nullptr ? "SPRINT" : "CIRCUIT",
+      // Webapp loading helper: with SPRINT or DRAG the laps line is a
+      // runs line (drag runs are ETs).
+      dragTimer != nullptr ? "DRAG"
+                           : (sprintTimer != nullptr ? "SPRINT" : "CIRCUIT"),
   };
 
   static char headerBuf[dovex_header::kHeaderSize];
@@ -2800,7 +3124,8 @@ void loop() {
   //   sdFormatPageLoop:  hold Select 3s to format
   //   courseCreatorLoop: feed GPS into an averaging hold
   PROFILE_SECTION(loop_profile::kDisplay, gpsStatusPageLoop();
-                  sdFormatPageLoop(); courseCreatorLoop(); displayLoop());
+                  sdFormatPageLoop(); courseCreatorLoop();
+                  dragStagingLoop(); displayLoop());
   resetButtons();
 
   if (tachLastReported > topTachReported) {

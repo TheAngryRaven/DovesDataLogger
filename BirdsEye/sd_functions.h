@@ -40,6 +40,24 @@ extern volatile int currentSDAccess;
 // Routes boot to the format-confirm page instead of the FAULT dead-end.
 extern bool sdCardUnformatted;
 
+// SdFat's card-level error code from the last failed boot probe or
+// post-format mount (SdBase::sdErrorCode(); 0 = none). Shown on the
+// format page's diagnostic line and the SD FAULT page so a wiring or
+// card-state failure can be told apart from a blank card in the field.
+extern uint8_t sdLastErrorCode;
+
+// Why the last on-device format attempt bounced back to the confirm page
+// (sdFormatFailure). NONE = no attempt yet / last one rebooted clean.
+// ERASE = SD.format() itself failed (retryable, usually engine-on EMI).
+// MOUNT = the format reported success but the fresh volume would not
+// mount afterwards: re-formatting will not help, the card or its wiring
+// is the problem, and a power cycle is the recovery (the card cannot be
+// reset by firmware — CS is grounded and there is no power switch).
+constexpr uint8_t SD_FORMAT_FAIL_NONE = 0;
+constexpr uint8_t SD_FORMAT_FAIL_ERASE = 1;
+constexpr uint8_t SD_FORMAT_FAIL_MOUNT = 2;
+extern uint8_t sdFormatFailure;
+
 // Attempt to acquire SD for a given mode. Idempotent for the same
 // mode. Returns false if SD is busy with a different mode.
 bool acquireSDAccess(int mode);
@@ -64,14 +82,16 @@ bool scanTrackDir(const char* folder, uint8_t kind);
 
 // Initialize the SD card (with EMI-tolerant retries). Returns true
 // on success. Populates the global SD object. On failure, probes the
-// raw card and sets sdCardUnformatted when it responds without a
-// mountable FAT volume.
+// raw card layer by layer (host-tested sd_probe rules) and sets
+// sdCardUnformatted only when it answers consistently, across a settle,
+// without a mountable FAT volume. Records sdLastErrorCode.
 bool SD_SETUP();
 
 // Format the card FAT16/32 (blocking; pets the WDT via the formatter's
-// progress callbacks). Reboots the device on success; on failure returns
-// to the confirm page with sdFormatLastFailed set (a fresh full hold is
-// required to retry). Only call from the PAGE_SD_FORMAT confirm flow.
+// progress callbacks). Verifies the fresh volume mounts, then reboots.
+// On failure returns to the confirm page with sdFormatFailure set (a
+// fresh full hold is required to retry). Only call from the
+// PAGE_SD_FORMAT confirm flow.
 void sdPerformFormat();
 
 // (Re)initialize the SD card at a specific SPI clock (EMI-tolerant retries).

@@ -123,6 +123,25 @@ uint8_t sensoreggBatteryPct() { return 0xFF; }
 bool sensoreggTcFault() { return false; }
 uint16_t sensoreggSequence() { return 0; }
 
+// Pairing/bench surface (plan 0017). The flag-0 sim never renders the
+// Egg pages, but the stub block mirrors the module's full surface so a
+// future flag-1 sim build links. Same return values as the .ino's
+// compiled-out twins ("never paired, nothing heard").
+bool sensoreggIsPaired() { return false; }
+void sensoreggRequestPair() {}
+void sensoreggCancelPair() {}
+bool sensoreggPairingInProgress() { return false; }
+bool sensoreggUnpair() { return true; }
+bool sensoreggPairedMac(char* buf, size_t bufSize) {
+  if (buf != nullptr && bufSize > 0) buf[0] = '\0';
+  return false;
+}
+void sensoreggTestEnterMode() {}
+void sensoreggTestExitMode() {}
+uint8_t sensoreggProtoVersion() { return 0; }
+bool sensoreggPairingFlag() { return false; }
+float sensoreggPacketHz() { return 0.0f; }
+
 // ---- neopixel.ino surface ----
 
 // No LED strip in the sim (and no UICR to program). The pure units
