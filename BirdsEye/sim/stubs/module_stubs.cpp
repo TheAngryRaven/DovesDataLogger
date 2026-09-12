@@ -142,6 +142,12 @@ uint8_t sensoreggProtoVersion() { return 0; }
 bool sensoreggPairingFlag() { return false; }
 float sensoreggPacketHz() { return 0.0f; }
 
+// GATT link surface (plan 0018): the sim has no radio, so no link ever
+// forms — same answers as the .ino's compiled-out twins.
+void sensoreggGattClientInit() {}
+uint8_t sensoreggLinkMode() { return 0; }
+uint16_t sensoreggGattMtu() { return 0; }
+
 // ---- neopixel.ino surface ----
 
 // No LED strip in the sim (and no UICR to program). The pure units

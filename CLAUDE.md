@@ -150,6 +150,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `camera_fsm.{h,cpp}` | Insta360 auto-record lifecycle FSM (8 states, all debounce/retry/timeout timing + tunables); board-portable core shared with the nRF54 "Falcon" target |
 | `insta360_protocol.{h,cpp}` | Insta360 X4 BLE frame builders/parsers (wake advert, remote scan response, ce82 buttons, ce82 GPS/RMC frame, ce81 serial parsing, ce81 `0x10` record-timer state parse) with golden-byte tests |
 | `sensoregg_protocol.{h,cpp}` | SensorEgg `PW-ADV` v1+v2 advertising payload parser (magic filter, int16 deci-°C decode with `0x8000`→NaN sentinel, flags, sequence, v2 aux thermistor + battery) + wrap-safe 1 s staleness rule + passive-scan tuning constants |
+| `sensoregg_gatt.{h,cpp}` | PerchWerks Sensor Service decoders (plan 0018): self-describing Descriptor (strides by declared record_len), Sample batch frames, Clock, descriptor-driven role mapping, v1 clock fit with `boot_id` epoch — fixtures byte-identical to the egg repo's `pw_gatt_encode` goldens |
 | `crossing_pattern.{h,cpp}` | The two-frame crossing animation as geometry (eight 16x16 cells, odd row bands, alternating phase) instead of 2 KB of stored bitmap; golden-tested byte-identical to the images it replaced |
 | `sprint_select.{h,cpp}` | Sprint mode selection: newest-course-by-`date_created` ordering (sortable ISO strings) + the circuit-vs-sprint tiebreak decision table (`race_mode` pref; circuit yields to a sprint course created today) |
 | `drag_timer.{h,cpp}` | Drag mode (plan 0015): the whole run state machine — re-latching standstill anchor, rollout-style launch (interpolated crossing), cumulative-distance finish with interpolated ET + trap speed, 0-60 split, silent aborts (mid-run standstill, fix gap), automatic re-arm — plus the distance table (targets/labels/DOVEX names). Plan 0016 adds the launch gate (`setLaunchEnabled` — manual staging holds the clock until green) and `runStartEpochMs()` (the RT computation's rollout-crossing timestamp) |
@@ -586,12 +587,16 @@ loop()  ~250 Hz
 
 ### 6. Bluetooth (`bluetooth.ino`)
 
-- **Shared BLE core, used by transfer and the camera** (see subsystem 13):
-  the one-time `bleCoreEnsureInit()` runs `Bluefruit.begin(1, 0)` — one
-  peripheral connection, no central (both the transfer service and the
-  camera remote are peripheral roles) — configures Just-Works bonding, and
-  registers *every* GATT service (DFU, DIS, file service, camera remote via
-  `cameraBleRegisterServices()`) before any advertising starts.
+- **Shared BLE core, used by transfer, the camera and the egg link** (see
+  subsystems 13-14): the one-time `bleCoreEnsureInit()` runs
+  `Bluefruit.begin(1, 1)` on SensorEgg builds — one peripheral connection
+  (transfer service and camera remote share it) plus one central slot for
+  the egg's PerchWerks GATT link (plan 0018, skinny
+  `configCentralConn(247, 6, 1, 1)` so the pod link can never crowd the
+  camera) — and `begin(1, 0)` on stock builds. Configures Just-Works
+  bonding and registers *every* GATT surface (DFU, DIS, file service,
+  camera remote via `cameraBleRegisterServices()`, egg client objects via
+  `sensoreggGattClientInit()`) before any advertising starts.
   `BLE_SETUP()` / `BLE_STOP()` are now just the transfer-mode owner
   transitions on top of that core.
 - **Radio ownership (`BleOwner`)**: the single advert set + peripheral
@@ -1290,7 +1295,7 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   the `ce82` 3-second-hold button frame over the R link, so both Record and
   Power Off depend on the R link being up and subscribed.
 
-### 14. SensorEgg Wireless EGT (`sensoregg.ino`, `sensoregg_protocol.{h,cpp}`)
+### 14. SensorEgg Wireless EGT (`sensoregg.ino`, `sensoregg_protocol.{h,cpp}`, `sensoregg_gatt.{h,cpp}`)
 
 - **BUILD FLAG — `BIRDSEYE_ENABLE_SENSOREGG` (`project.h`)**: this whole
   subsystem is a beta-channel feature. `0` (master/release default)
@@ -1318,14 +1323,28 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   unknown), uint16 sequence, and on v2 an aux intake-air thermistor
   (int16 LE deci-°C, "Temp2"), ~10 Hz. v1 eggs still parse — their aux
   reads NaN — so a mixed-age fleet never blinds the logger.
-- **Radio role — do not "improve" this**: the logger is a pure passive
-  OBSERVER (`Bluefruit.Scanner`, `useActiveScan(false)`, 90 ms interval /
-  40 ms window ≈ 44% duty, RSSI ≥ −90). No SCAN_REQ, no connection, no
-  GATT — so it cannot contend with the camera peripheral link for TX
-  airtime; S140 time-slices scan windows around connection events. The
-  egg accepts no connections. **The camera link wins every tradeoff** —
-  and scan duty is capped (test-enforced ≤45%) because SoftDevice
-  scan-window ISRs defer the TIMER3 GPS drain (see subsystem 1).
+- **Radio role (plan 0018)**: observer + **GATT central**. A PAIRED egg
+  in range, while the egg radio is wanted, gets a central connection and
+  streams the PerchWerks Sensor Service (`sensoregg_gatt.{h,cpp}`,
+  host-tested: self-describing channel table, per-channel batch frames,
+  Clock/`boot_id` epoch, v1 clock fit). Everything else — unpaired pods,
+  pre-connect, backoff, and pairing capture — is the passive OBSERVER
+  exactly as before (`Bluefruit.Scanner`, `useActiveScan(false)`, 90 ms /
+  40 ms ≈ 44% duty, RSSI ≥ −90, no SCAN_REQ). The two are never live at
+  once (a connected single-link peripheral stops advertising), and both
+  feed the same `eggReading` surface, so DOVEX/pages/LED are
+  transport-agnostic. **The camera link still wins every tradeoff** — now
+  expressed as: skinny central params (`configCentralConn` event length
+  6 = 7.5 ms cap), the same race/bench gate as the scanner
+  (`eggLinkWanted` = gate + paired), and `SENSOREGG_SLEEP()` dropping the
+  link for transfers and shutdown. Scan duty stays capped (test-enforced
+  ≤45%, SoftDevice scan-window ISRs defer the TIMER3 GPS drain — see
+  subsystem 1) and is not paid at all while streaming. GATT bring-up
+  (blocking discovery/reads) runs in the Bluefruit callback task — the
+  one documented deviation from "callbacks only copy"; the notify data
+  plane keeps the copy-only frame-ring discipline. Degradations while
+  streaming: `tcFault` reads false (frames carry no MCP STATUS),
+  `protoVersion`/`pairingFlag` hold their last beacon values.
 - **Scanner robustness (bench-proven, do not remove)**: (1)
   `Scanner.filterMSD(0xFFFF)` rejects ambient packets INLINE — Bluefruit
   self-resumes filtered reports, while an accepted report pauses scanning
@@ -1391,8 +1410,9 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   display setting comes later).
 - **BLE lifetime change**: `SENSOREGG_SETUP()` (called from `setup()` after
   `CAMERA_SETUP()`) runs `bleCoreEnsureInit()` at boot — BLE is no longer
-  lazy. Scanner start failure logs the documented `Bluefruit.begin(1, 1)`
-  fallback note (spec §7.2.3) rather than touching the shared `begin(1, 0)`.
+  lazy. (The old "spec §7.2.3 `begin(1, 1)` fallback" note is history:
+  plan 0018 made `begin(1, 1)` the shipped design on SensorEgg builds,
+  for the egg's central link.)
 - **Sim**: `sensoregg.ino` is excluded from the sim TU like the other BLE
   modules; `module_stubs.cpp` returns NaN/false so the page renders `---`
   and rows log `nan` (the pairing-surface stubs mirror the compiled-out

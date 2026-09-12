@@ -13,6 +13,23 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Added
+- **SensorEgg GATT link** (plan 0018): a paired egg is no longer just
+  overheard — during races and on the Egg/Camera test pages the logger
+  now **connects** as BLE central and consumes the egg's PerchWerks
+  Sensor Service: it reads the pod's self-describing channel table
+  (nothing egg-specific is hardcoded — a future pod with different
+  channels parses with zero logger changes), anchors a clock fit on a
+  timed Clock read with a `boot_id` epoch (an egg reboot is detected,
+  logged and re-anchored, never silently interleaved), and streams
+  acquisition-stamped per-channel sample frames into the exact same
+  data surface the beacon feeds — DOVEX columns, race pages and the LED
+  behave identically on either transport. The beacon remains the
+  unclaimed/disconnected fallback and the pairing transport; while
+  streaming, the 44 % scan duty isn't paid at all. EGG TEST shows
+  `rf:GATT` and the live MTU. SensorEgg builds run
+  `Bluefruit.begin(1, 1)` with deliberately skinny central parameters —
+  the camera link still wins every tradeoff, and `SENSOREGG_SLEEP()`
+  drops the pod link for transfers and shutdown.
 - **SensorEgg pairing menu + live-data test page** (plan 0017): a new
   **Egg** row on the main menu (SensorEgg builds only). Pairing is
   window-gated: open the logger's 2-minute capture window, long-press

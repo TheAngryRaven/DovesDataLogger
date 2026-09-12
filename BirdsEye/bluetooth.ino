@@ -776,12 +776,23 @@ void bleCoreEnsureInit() {
   // HVN TX queue 10 (up from BANDWIDTH_MAX's 3 — deeper notification pipeline),
   // WrCmd queue 1 (default, we don't use write commands).
   Bluefruit.configPrphConn(247, 100, 10, 1);
-  // 1 peripheral + 0 central: the camera feature is now a pure PERIPHERAL
-  // remote emulation (the camera connects to US and we notify our ce82
-  // buttons), so the old central slot for the X4's be80 control link is
-  // gone. Both the transfer service and the camera remote are peripherals
-  // sharing the single peripheral slot via bleOwner.
+  // The camera feature is a pure PERIPHERAL remote emulation (the camera
+  // connects to US and we notify our ce82 buttons) — the old central
+  // slot for the X4's be80 control link is gone, and the transfer
+  // service + camera remote share the single peripheral slot via
+  // bleOwner. On SensorEgg builds one central slot returns (plan 0018):
+  // the egg's PerchWerks GATT link, with deliberately SKINNY central
+  // parameters (event length 6 = 7.5 ms cap) so the pod link can never
+  // crowd the camera or a transfer — the camera link wins every
+  // tradeoff, same as ever. Never call configCentralBandwidth (or
+  // configPrphBandwidth): both silently re-apply presets over these
+  // exact calls.
+#if BIRDSEYE_ENABLE_SENSOREGG
+  Bluefruit.configCentralConn(247, 6, 1, 1);
+  Bluefruit.begin(1, 1);
+#else
   Bluefruit.begin(1, 0);
+#endif
   Bluefruit.setTxPower(4);
 
   Bluefruit.Periph.setConnectCallback(bleConnectCallback);
@@ -827,11 +838,18 @@ void bleCoreEnsureInit() {
 
   bleSetupFileService();
 
-  // Camera remote GATT (peripheral ce80 + D0FF services) plus the central
-  // client objects for the camera's be80 service. GATT services can only
-  // be added before advertising starts, so they are registered here even
-  // when the user never touches the camera feature.
+  // Camera remote GATT (peripheral ce80 + D0FF services — ce80
+  // peripheral only; the be80-era central client objects are long
+  // gone). GATT services can only be added before advertising starts,
+  // so they are registered here even when the user never touches the
+  // camera feature.
   cameraBleRegisterServices();
+
+#if BIRDSEYE_ENABLE_SENSOREGG
+  // SensorEgg GATT client objects (plan 0018) — discovery metadata must
+  // exist before the central role is used.
+  sensoreggGattClientInit();
+#endif
 
   bleInitialized = true;
 
