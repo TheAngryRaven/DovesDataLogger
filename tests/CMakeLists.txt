@@ -31,6 +31,7 @@ add_executable(birdseye_tests
   sd_format_page_test.cpp
   sat_bars_test.cpp
   sensoregg_protocol_test.cpp
+  sensoregg_gatt_test.cpp
   sprint_select_test.cpp
   crossing_pattern_test.cpp
   course_creator_test.cpp
@@ -65,6 +66,7 @@ add_executable(birdseye_tests
   ${BIRDSEYE_DIR}/sd_format_page.cpp
   ${BIRDSEYE_DIR}/sat_bars.cpp
   ${BIRDSEYE_DIR}/sensoregg_protocol.cpp
+  ${BIRDSEYE_DIR}/sensoregg_gatt.cpp
   ${BIRDSEYE_DIR}/sprint_select.cpp
   ${BIRDSEYE_DIR}/course_prune.cpp
   ${BIRDSEYE_DIR}/crossing_pattern.cpp
