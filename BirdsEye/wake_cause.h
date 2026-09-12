@@ -77,4 +77,11 @@ Cause decode(const Regs& regs, const PinMasks& pins);
 // assumption.
 bool tachIdleIsHigh(unsigned highSamples, unsigned totalSamples);
 
+// Short fixed tag for a cause (4 chars or fewer, never null) for the boot
+// debug line and the boot-time status pages. Exists so a boot that landed
+// on the SD format page or the FAULT page can say WHY it booted: a "WDT"
+// there is the watchdog having fired mid-boot (a soft reset does not stop
+// the nRF52 WDT), which is a very different problem from a blank card.
+const char* shortName(Cause c);
+
 }  // namespace wake_cause

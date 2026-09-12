@@ -12,6 +12,39 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Fixed
+- **A soft reboot no longer runs the next boot under a watchdog it can't
+  see.** The nRF52 hardware WDT survives `NVIC_SystemReset()` — only a
+  pin, brown-out, power-on or System OFF reset clears it — so every
+  firmware-initiated reboot (BLE/USB transfer exit, OTA, the SD format
+  page, the reboot combo) handed the next boot a ~4 s deadline it never
+  fed until the end of `setup()`. A healthy boot fit; a slow SD init
+  (SdFat's 2 s ACMD41 timeout, three attempts) did not, and the WDT reset
+  the device mid-SD-transaction, leaving a card that firmware cannot reset
+  (CS grounded, no power switch) reading as "no FAT volume" on every
+  following soft boot. Field signature: a freshly formatted, perfectly
+  good card offered for formatting again on every reboot until a power
+  cycle. `setup()` now detects a carried-over WDT first thing
+  (`wdtBootCheck()`), feeds it between every slow boot step, and
+  `wdtSetup()` no longer tries to reconfigure a running (register-locked)
+  WDT.
+- **The SD format page verifies the mount and says what failed.** After
+  `SD.format()` the fresh volume must actually mount before "Format OK"
+  and the reboot; a card that formatted but won't mount now stays on the
+  page as `Formatted: no mount / Power-cycle the unit` instead of
+  rebooting into an identical "Card is not formatted" loop. The confirm
+  page's last line now carries the boot cause and SdFat's last card error
+  (`boot:WDT err:20`), and the SD FAULT page carries the same, so a
+  watchdog-induced loop is visible on the device.
+- **The boot SD probe needs consecutive evidence before offering an
+  erase.** `SD_SETUP()` re-probes the volume once after a 250 ms settle
+  and only declares the card unformatted when the card layer answered
+  both times and the volume mounted neither time (host-tested `sd_probe`
+  rules); a card that stops answering between probes is treated as dead
+  (FAULT, no erase offer), and a volume that mounts on the retry boots
+  normally. The recovered-on-probe path also now records the active SPI
+  clock it had been leaving at 0.
+
 ### Added
 - **SensorEgg pairing menu + live-data test page** (plan 0017): a new
   **Egg** row on the main menu (SensorEgg builds only). Pairing is

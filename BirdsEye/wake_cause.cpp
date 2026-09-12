@@ -26,4 +26,17 @@ bool tachIdleIsHigh(unsigned highSamples, unsigned totalSamples) {
   return highSamples * 2 >= totalSamples;
 }
 
+const char* shortName(Cause c) {
+  switch (c) {
+    case Cause::kColdBoot: return "COLD";
+    case Cause::kTachWake: return "TACH";
+    case Cause::kButtonWake: return "BTN";
+    case Cause::kUsbWake: return "USB";
+    case Cause::kWatchdog: return "WDT";
+    case Cause::kSoftReset: return "SRST";
+    case Cause::kOffWakeUnknown: return "OFF?";
+  }
+  return "?";
+}
+
 }  // namespace wake_cause

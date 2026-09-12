@@ -160,6 +160,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `wake_cause.{h,cpp}` | Boot wake-cause decode: RESETREAS + GPIO LATCH register snapshots → tach / button / USB / watchdog / soft-reset / cold boot (System OFF shutdown, subsystem 10) |
 | `gps_status_page.{h,cpp}` | GPS status boot page state machine: hold, 3 s auto-close after fix+timeValid, button skip, exit destination (menu vs race), idle → shutdown; `timeSyncState()` names which time milestone is outstanding (date/time vs the slow `fullyResolved`) |
 | `sd_format_page.{h,cpp}` | SD format-confirm boot page state machine: Select held 3 s continuously → format (release restarts the full window; other buttons never confirm), 5 min idle → shutdown |
+| `sd_probe.{h,cpp}` | Boot SD probe verdict (mounted / retry / unformatted / dead): the format offer needs the card layer to answer on **two consecutive** probes across a 250 ms settle with the volume mounting on neither — one no-volume look is what a card wedged mid-command by a WDT-interrupted boot produces — and a card-layer failure at any point is "dead" (FAULT), never "blank" |
 | `sat_bars.{h,cpp}` | Status-page satellite signal bars: NAV-SAT CNO selection (used-in-nav first, strongest first) + bar x/w/h layout math for the 128×~30 px bottom half |
 
 ### Simulator (`BirdsEye/sim/`)
@@ -466,7 +467,18 @@ loop()  ~250 Hz
   the ending hard reset runs no shutdown teardown. Format failure returns
   to the confirm page (marked `FAILED - retry`; fresh full hold to retry —
   keeps the idle-timeout battery protection the FAULT dead-end lacks);
-  a dead/absent card never offers the format. 5 min idle → shutdown
+  a dead/absent card never offers the format. **The fresh volume must
+  mount before "Format OK"** (`sdFormatFailure` = `SD_FORMAT_FAIL_MOUNT`
+  otherwise: the page reads `Formatted: no mount / Power-cycle the
+  unit` and does NOT reboot — re-formatting a card that formatted fine
+  cannot help, and the reboot was the loop). The confirm page's last
+  line shows `boot:<cause> err:<SdFat code>` (`wake_cause::shortName`
+  + `sdLastErrorCode`), and the SD FAULT page the same: `boot:WDT`
+  there means the watchdog reset the device mid-boot, which points at
+  the previous soft reset, not the card (see subsystem 10). The "no
+  volume" diagnosis itself is the host-tested `sd_probe` rule —
+  consecutive probes, a settle between, card-layer flap = dead.
+  5 min idle → shutdown
   (deferred while the engine runs), and a charging-loop resume with the
   card still unformatted returns to the format page, not the menu.
 - **Dual JSON format**: `parseTrackFile()` auto-detects root type:
@@ -970,6 +982,23 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   `NRF_POWER->SYSTEMOFF`. **GPREGRET is untouched** — register 0 belongs
   to the OTA/bootloader handoff (subsystem 11). The WDT halts in System
   OFF (all clocks stop); `wdtSetup()` re-arms on the fresh boot.
+- **The WDT SURVIVES a soft reset** (`NVIC_SystemReset()` — the transfer
+  exits, OTA, the format page, the reboot combo). Only pin, brown-out,
+  power-on and System OFF wake clear it; a soft reset leaves it running,
+  registers locked, counter wherever the last pet left it. The next boot
+  is therefore on a ~4 s clock from its first instruction and `setup()`
+  used to feed nothing until `wdtSetup()` at its very end: fine for a
+  ~2 s clean boot, fatal with a slow SD init (2026-09 field report — a
+  WDT reset mid-SD-transaction left a card firmware cannot reset, and
+  every soft boot after that offered to format a good card until a
+  power cycle). `wdtBootCheck()` runs FIRST in `setup()` (right after
+  `captureBootWakeCause()`): if `NRF_WDT->RUNSTATUS` says running it
+  pets and sets `wdtCarriedOver`; `setup()` pets between every slow
+  step (display delays, each `SD.begin()` attempt, the probe settle,
+  GPS probe, camera/egg/strip init) — no-ops on a clean boot; and
+  `wdtSetup()` skips the (locked) configuration when one is already
+  running. A boot's cause is on the debug line (`Boot cause: SRST`) and
+  the SD format / FAULT pages.
 - **Wake sources**: tach pulse (D0, engine start — any transition away
   from the sampled idle level), any button, or VBUS (USB plug-in,
   always armed on nRF52840).
@@ -1981,6 +2010,8 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | Status page idle shutdown | 5 min (no lock, no engine) | `gps_status_page.h` |
 | SD format confirm hold | 3 s continuous Select | `sd_format_page.h` |
 | SD format page idle shutdown | 5 min | `sd_format_page.h` |
+| SD boot probe | 2 consecutive no-volume probes, 250 ms settle, before the format offer | `sd_probe.h` |
+| Hardware WDT | ~4 s; **survives soft reset** — fed from the first instruction of the next boot (`wdtBootCheck`) | `BirdsEye.ino` |
 | GPS boot re-detect | 3 tries, 10 s apart | `gps_functions.ino` |
 | Menu idle shutdown | 5 min (`SLEEP_IDLE_TIMEOUT_MS`) | `project.h` |
 | USB-on-menu charge idle | 60 s (`USB_MENU_CHARGE_IDLE_MS`) — compiled out unless `BIRDSEYE_ENABLE_ONBOARD_CHARGING` | `project.h` |

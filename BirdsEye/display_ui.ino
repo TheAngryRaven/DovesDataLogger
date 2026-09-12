@@ -281,7 +281,9 @@ void switchToDisplayPage(int newDisplayPage) {
 
 void displaySetup() {
   debugln(F("SETTING UP DISPLAY"));
+  wdtPet();  // a WDT carried over a soft reset is counting (see wdtBootCheck)
   delay(250); // wait for the OLED to power up
+  wdtPet();
 
   // Set I2C timeout to prevent infinite hangs from EMI-induced bus faults
   Wire.setTimeout(100);
@@ -313,6 +315,7 @@ void displaySetup() {
   display.drawBitmap(0, 0, image_data_bird1, 128, 64, 1);
   safeDisplayUpdate();
   delay(750);
+  wdtPet();
 
   displayPage_boot();
 }

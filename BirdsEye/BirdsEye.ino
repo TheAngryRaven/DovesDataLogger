@@ -641,10 +641,11 @@ bool enableLogging = false;
 // machine lives in the host-tested sd_format_page unit. displayLoop()
 // only ever renders the confirm screen; the running/done screens are
 // painted directly by sdPerformFormat() (which blocks the main loop).
-// A failed attempt returns to the confirm page with sdFormatLastFailed
-// set so the renderer can say so.
+// A failed attempt returns to the confirm page with sdFormatFailure
+// set so the renderer can say which half failed (see sd_functions.h).
 sd_format_page::State sdFormatState;
-bool sdFormatLastFailed = false;
+uint8_t sdFormatFailure = SD_FORMAT_FAIL_NONE;
+uint8_t sdLastErrorCode = 0;
 
 ///////////////////////////////////////////
 // ON-DEVICE COURSE CREATOR (plan 0002 §5)
@@ -926,9 +927,57 @@ int lap_list_pages = 1;
 // WATCHDOG TIMER
 // nRF52840 hardware WDT - recovers from any lockup within ~4 seconds.
 // Primary defense against I2C bus hangs, SD card stalls, etc.
+//
+// THE WDT SURVIVES A SOFT RESET. Only a pin reset, brown-out, power-on
+// or a System OFF wake clears it; NVIC_SystemReset() — every reboot this
+// firmware performs itself (BLE/USB transfer exit, OTA, the SD format
+// page, the reboot combo) — leaves it running with its config locked
+// and its counter wherever the last pet left it. So the boot after one
+// of those reboots is on the clock from its first instruction: it has
+// ~4 s minus whatever was left to reach wdtSetup() at the end of
+// setup(), or the WDT resets it mid-boot. That is survivable on a
+// healthy unit (a clean boot is ~2 s) and was invisible until a slow
+// SD card ate the margin: a WDT reset mid-SD-transaction leaves a card
+// that firmware cannot reset (CS grounded, no power switch), every
+// following soft boot found "card answers, no volume", and the format
+// page kept coming back until a power cycle (2026-09 field report).
+//
+// wdtBootCheck() therefore runs FIRST in setup(): if the WDT is already
+// running it is fed immediately and wdtCarriedOver is set, and setup()
+// pets it between every slow step — those pets are no-ops on a clean
+// boot (writing RR[0] to a stopped WDT does nothing). wdtSetup() then
+// only configures a WDT that is not already running: the registers are
+// read-only once started, so the carried-over one keeps its 4 s.
 ///////////////////////////////////////////
 
+bool wdtCarriedOver = false;  // WDT was already running at boot (soft reset)
+
+// True when the hardware WDT is running. RUNSTATUS bit 0 is the only bit
+// in that register on the nRF52840; tested by value rather than through
+// the MDK's bitfield macro because its name differs between MDK releases
+// (RUNSTATUS vs RUNSTATUSWDT).
+static bool wdtIsRunning() {
+  #ifndef SIM
+  return (NRF_WDT->RUNSTATUS & 1u) != 0;
+  #else
+  return false;  // the sim never starts a WDT
+  #endif
+}
+
+void wdtBootCheck() {
+  if (!wdtIsRunning()) return;
+  wdtCarriedOver = true;
+  wdtPet();
+}
+
 void wdtSetup() {
+  if (wdtIsRunning()) {
+    // Carried over from the previous session's soft reset: CONFIG/CRV/RREN
+    // are locked, so writing them would be a silent no-op. Just feed it —
+    // the reload register is the one thing still writable.
+    wdtPet();
+    return;
+  }
   NRF_WDT->CONFIG = WDT_CONFIG_SLEEP_Run << WDT_CONFIG_SLEEP_Pos;  // Keep running in sleep
   NRF_WDT->CRV = 4 * 32768;  // ~4 second timeout (32768 Hz clock)
   NRF_WDT->RREN = WDT_RREN_RR0_Enabled << WDT_RREN_RR0_Pos;      // Enable reload register 0
@@ -994,11 +1043,21 @@ static void captureBootWakeCause() {
 
 void setup() {
   captureBootWakeCause();
+  // Before ANYTHING slow: a WDT carried over a soft reset is already
+  // counting (see the WATCHDOG TIMER block).
+  wdtBootCheck();
 
 #ifdef HAS_DEBUG
   Serial.begin(9600);
   while (!Serial);
 #endif
+  wdtPet();
+  debug(F("Boot cause: "));
+  debug(wake_cause::shortName(bootWakeCause));
+  if (wdtCarriedOver) {
+    debug(F(" (WDT still running from the soft reset — feeding through setup)"));
+  }
+  debugln(F(""));
 
   #ifndef SIM
     analogReadResolution(ADC_RESOLUTION);
@@ -1020,10 +1079,13 @@ void setup() {
   #endif
 
   displaySetup();
+  wdtPet();
 
   // setup sd card and confirm we can read track list
   sdSetupSuccess = SD_SETUP();
+  wdtPet();
   sdTrackSuccess = buildTrackList();
+  wdtPet();
   if(sdSetupSuccess && sdTrackSuccess) {
     debugln(F("Obtained Track List"));
     for (int i = 0; i < trackManifestCount; i++) {
@@ -1035,6 +1097,7 @@ void setup() {
 
   // Load settings from SD (creates defaults on first boot)
   SETTINGS_SETUP();
+  wdtPet();
 
   // Colour preference is applied HERE, not in the settings block further
   // down, because displaySetup() runs before the SD card exists — the panel
@@ -1057,8 +1120,10 @@ void setup() {
   }
 
   ACCEL_SETUP();
+  wdtPet();
 
   GPS_SETUP();
+  wdtPet();
 
   // Read settings into runtime variables
   {
@@ -1269,6 +1334,7 @@ void setup() {
   // of any 4.1.0+ image is the one that spends the NFC pads and resets
   // once. See project.h.
   NEOPIXEL_SETUP();
+  wdtPet();
 
   // Loop profiling (plan 0011, beta only). MUST run after NEOPIXEL_SETUP:
   // the profiling pin is one of the NFC pads, and that call is what
@@ -1278,12 +1344,14 @@ void setup() {
 
   // Camera auto-record: load the persisted Insta360 serial + init the FSM
   CAMERA_SETUP();
+  wdtPet();
 
   // SensorEgg wireless EGT: bring the BLE core up and start the passive
   // scanner (after CAMERA_SETUP so every GATT service is registered by
   // bleCoreEnsureInit before anything advertises). A no-op — and BLE stays
   // lazy — unless BIRDSEYE_ENABLE_SENSOREGG is set (beta channel only).
   SENSOREGG_SETUP();
+  wdtPet();
 
   if (!sdSetupSuccess && sdCardUnformatted) {
     // Card answers but no FAT volume mounts: soldered-in module out of the
@@ -1295,8 +1363,12 @@ void setup() {
     sd_format_page::begin(sdFormatState, millis());
     switchToDisplayPage(PAGE_SD_FORMAT);
   } else if (!sdSetupSuccess) {
-    strncpy(internalNotification, "SD Init failed!\n\nlogging not possible!", sizeof(internalNotification) - 1);
-    internalNotification[sizeof(internalNotification) - 1] = '\0';
+    // Boot cause + SdFat error on the fault page: a "WDT" boot here is a
+    // watchdog reset mid-boot (it survives a soft reset), which points at
+    // the previous session, not the card.
+    snprintf(internalNotification, sizeof(internalNotification),
+             "SD Init failed!\n\nlogging not possible!\nboot:%s err:%02X",
+             wake_cause::shortName(bootWakeCause), sdLastErrorCode);
     switchToDisplayPage(PAGE_INTERNAL_FAULT);
 #if BIRDSEYE_ENABLE_ONBOARD_CHARGING
   } else if (bootWakeCause == wake_cause::Cause::kUsbWake) {
