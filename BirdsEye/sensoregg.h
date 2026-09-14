@@ -13,19 +13,31 @@
 // is dropped from the rotation, and BLE goes back to lazy init. This
 // header's contract below describes the enabled build.
 //
-// Receives the DovesSensorEgg's PW-ADV advertising broadcasts, v1 and
-// v2 (see sensoregg_protocol.h for the byte layouts), and exposes the
-// latest readings to the logger and display. Scope: one egg, EGT
-// ("Temp1") + cold junction ("Junction1"), and on v2 eggs the aux
-// intake-air thermistor ("Temp2") + a real battery percent.
+// Receives the egg's data over two transports into ONE surface. Scope:
+// one egg, EGT ("Temp1") + cold junction ("Junction1"), aux intake-air
+// thermistor ("Temp2") + battery percent.
 //
-// RADIO ROLE: pure OBSERVER on the shared SoftDevice. Passive scanning
-// only — we never transmit a SCAN_REQ, never connect, and hold no GATT
-// link to the egg, so the scanner cannot contend with the Insta360 X4
-// camera link (peripheral role) for TX airtime. S140 natively time-slices
-// scan windows around existing connection events. The egg is a pure
-// broadcaster and accepts no connections. Do not "improve" this into a
-// connection — the camera link wins every tradeoff.
+// RADIO ROLE (plan 0018): observer + GATT CENTRAL on the shared
+// SoftDevice. A PAIRED egg in range, while the egg radio is wanted,
+// gets a GATT connection and streams the PerchWerks Sensor Service
+// (self-describing channel table, per-channel batch frames stamped at
+// acquisition, a Clock/boot_id epoch — sensoregg_gatt.{h,cpp}).
+// Everything else — unpaired pods, the pre-connect window, backoff,
+// and the pairing capture itself — rides the passive PW-ADV observer
+// exactly as before (no SCAN_REQ; sensoregg_protocol.{h,cpp}). The two
+// are never live at once: a connected single-link peripheral stops
+// advertising. THE CAMERA LINK STILL WINS EVERY TRADEOFF — the old
+// "never connect" rule's real content survives as mechanism: skinny
+// central parameters (event length 6 = 7.5 ms cap, bluetooth.ino), the
+// same race/bench gate as the scanner, and SENSOREGG_SLEEP() dropping
+// the link for transfers and shutdown. While streaming, the scanner's
+// 44% duty is not paid at all.
+//
+// GATT DEGRADATIONS (documented, deliberate): Sample frames carry no
+// MCP STATUS, so sensoreggTcFault() reads false while streaming (an
+// open probe still shows as sentinel -> NaN -> '---', the same visible
+// outcome); sensoreggProtoVersion()/sensoreggPairingFlag() hold their
+// last beacon values.
 //
 // PAIRING (plan 0017): runtime MAC filter, persisted as the
 // "sensoregg_mac" setting ("AA:BB:CC:DD:EE:FF"; empty = unpaired =
@@ -173,6 +185,22 @@ uint8_t sensoreggProtoVersion();
 // !hung like tcFault so a frozen payload can't show a live window.
 bool sensoreggPairingFlag();
 
-// Measured accepted-parse rate over a 1 s tumbling window (~9-10 Hz on a
-// healthy bench at the egg's 111.875 ms advertising interval).
+// Measured accepted-parse rate over a 1 s tumbling window (~9-10 Hz on
+// a healthy bench at the egg's 111.875 ms advertising interval; on a
+// GATT stream it counts notify frames instead — ~6-7 Hz for the EGT
+// pod's channel mix).
 float sensoreggPacketHz();
+
+// ---- GATT link surface (plan 0018) ----
+
+// Register the PerchWerks client objects + central callbacks. Called by
+// bleCoreEnsureInit() (flag-gated there) — discovery metadata must
+// exist before the central role is used. Not for anyone else to call.
+void sensoreggGattClientInit();
+
+// 0 = nothing heard, 1 = fresh beacon data, 2 = GATT stream live.
+uint8_t sensoreggLinkMode();
+
+// Live ATT MTU of the egg link (0 when not connected). 247 after a
+// successful exchange; frames are sized to it on the egg side.
+uint16_t sensoreggGattMtu();

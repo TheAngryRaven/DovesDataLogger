@@ -28,14 +28,15 @@
 // Bluefruit task callbacks for routing decisions.
 extern volatile BleOwner bleOwner;
 
-// One-time Bluefruit core bring-up, idempotent: conn config,
-// begin(1 peripheral + 1 central — the central slot is the camera
-// control link), TX power, connect/disconnect callbacks, conn
-// interval, DFU + DIS services, the file service, and the camera GATT
-// (cameraBleRegisterServices()). Registers every service BEFORE any
-// advertising starts. Deliberately does NOT advertise, set the device
-// name, or touch the conn-LED — those belong to whichever owner takes
-// the radio next.
+// One-time Bluefruit core bring-up, idempotent: conn config, begin(1
+// peripheral + 1 central on SensorEgg builds — the central slot is the
+// egg's PerchWerks GATT link, plan 0018; stock builds begin(1, 0)), TX
+// power, connect/disconnect callbacks, conn interval, DFU + DIS
+// services, the file service, the camera GATT
+// (cameraBleRegisterServices()) and the egg client objects. Registers
+// every service BEFORE any advertising starts. Deliberately does NOT
+// advertise, set the device name, or touch the conn-LED — those belong
+// to whichever owner takes the radio next.
 void bleCoreEnsureInit();
 
 // Rebuild the advert set for transfer mode from scratch: stop + clear

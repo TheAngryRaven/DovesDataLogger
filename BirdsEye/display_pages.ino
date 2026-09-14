@@ -708,12 +708,15 @@ void displayPage_egg_test() {
   // camera test page it never idle-sleeps.
   display.setTextSize(1);
 
-  // Row 0: title, link tri-state (HUNG outranks OK — packets arriving
-  // but the sequence frozen means the egg needs a power cycle), and the
-  // protocol version of the latest frame.
+  // Row 0: title, link state (HUNG outranks everything — packets/frames
+  // arriving but the sequence frozen means the egg needs a power cycle;
+  // GATT = the plan-0018 stream is live; OK = fresh beacon data), and
+  // the protocol version of the latest beacon frame.
   display.print(F("EGG TEST rf:"));
   if (sensoreggAppHung()) {
     display.print(F("HUNG"));
+  } else if (sensoreggLinkMode() == 2) {
+    display.print(F("GATT"));
   } else if (sensoreggLinkUp()) {
     display.print(F("OK"));
   } else {
@@ -766,12 +769,20 @@ void displayPage_egg_test() {
   }
 
   // Row 3: raw sequence counter (first real consumer of
-  // sensoreggSequence()) + measured packet rate (~9-10 Hz healthy).
+  // sensoreggSequence()) + measured packet/frame rate (~9-10 Hz beacon,
+  // ~6-7 Hz GATT) + live MTU while the GATT link is up.
+  // Worst case "SEQ 65535 10.2Hz M247" = 21 chars exactly.
   display.print(F("SEQ "));
   display.print(sensoreggSequence());
-  display.print(F("  "));
+  display.print(F(" "));
   display.print(sensoreggPacketHz(), 1);
-  display.println(F("Hz"));
+  display.print(F("Hz"));
+  const uint16_t eggMtu = sensoreggGattMtu();
+  if (eggMtu != 0) {
+    display.print(F(" M"));
+    display.print(eggMtu);
+  }
+  display.println();
 
   // Row 4: live flags from the latest frame.
   display.print(F("FLG"));

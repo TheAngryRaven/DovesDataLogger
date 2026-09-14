@@ -1,14 +1,22 @@
 ///////////////////////////////////////////
-// SENSOREGG MODULE (wireless EGT pod — passive BLE observer)
+// SENSOREGG MODULE (wireless EGT pod — observer + GATT central)
 //
-// Receives the DovesSensorEgg's PW-ADV broadcasts (v1 and v2) and
-// exposes the latest readings. See sensoregg.h for the role,
-// pairing, and threading contracts, and sensoregg_protocol.{h,cpp}
-// (host-tested) for the byte layout and staleness rule.
+// Two data paths into ONE surface (plan 0018):
+//  - PAIRED egg in range while the egg radio is wanted -> the logger
+//    connects as CENTRAL and consumes the PerchWerks Sensor Service
+//    (sensoregg_gatt.{h,cpp}, host-tested): self-describing channel
+//    table, per-channel Sample batch frames, Clock/boot_id epoch.
+//  - Otherwise -> the passive PW-ADV observer exactly as before
+//    (sensoregg_protocol.{h,cpp}); it is also the pairing transport.
+// Both feed eggReading/eggRxMs/eggSeqMon, so every accessor, DOVEX
+// column, race page and LED path is agnostic to the transport. They
+// are never live at once: a connected single-link peripheral stops
+// advertising.
 //
-// The scanner is a pure passive OBSERVER: no SCAN_REQ, no connection, so
-// it cannot contend with the Insta360 X4 camera link for TX airtime.
-// S140 time-slices scan windows around existing connection events.
+// The camera link still wins every tradeoff: the central connection
+// uses skinny parameters (configCentralConn event length 6 = 7.5 ms
+// cap, bluetooth.ino), follows the same race/bench gate as the
+// scanner, and SENSOREGG_SLEEP() drops it for transfers and shutdown.
 //
 // Cross-module globals (Bluefruit) are visible via Arduino's .ino
 // concatenation — same as camera_ble.ino relies on.
@@ -24,14 +32,18 @@
 #if BIRDSEYE_ENABLE_SENSOREGG
 
 #include "bluetooth.h"  // bleCoreEnsureInit()
+#include "sensoregg_gatt.h"  // PW service decoders + clock fit (plan 0018)
 #include "sensoregg_protocol.h"
 #include "settings.h"   // getSetting/setSetting — the sensoregg_mac key
 
-// Forward declaration: the callback signature mentions a SoftDevice type,
-// and Arduino's auto-prototype generator inserts prototypes BEFORE
-// <bluefruit.h> is included — an explicit prototype makes arduino-cli
-// skip generating one (same workaround as camera_ble.ino).
+// Forward declarations: these callback signatures mention SoftDevice /
+// Bluefruit types, and Arduino's auto-prototype generator inserts
+// prototypes BEFORE <bluefruit.h> is included — an explicit prototype
+// makes arduino-cli skip generating one (same workaround as
+// camera_ble.ino).
 static void sensoreggScanCallback(ble_gap_evt_adv_report_t* report);
+static void sensoreggSampleNotifyCb(BLEClientCharacteristic* chr,
+                                    uint8_t* data, uint16_t len);
 
 ///////////////////////////////////////////
 // MODULE STATE
@@ -97,6 +109,77 @@ static uint32_t eggLastStartTryMs = 0;  // last start attempt (retry throttle)
 // refusal costs one SVC per second instead of one per ~4 ms loop iteration.
 static constexpr uint32_t kEggStartRetryMs = 1000;
 
+// ---- GATT LINK state (plan 0018) ------------------------------------------
+
+// Client objects for the egg's PerchWerks service. Same LE UUID byte
+// arrays the egg registers (spec section 2; [12]=index low, [13]=high).
+// Brace-init: parens around a BLEUuid(array) temp is the most-vexing-
+// parse and declares a function instead.
+static const uint8_t kPwSvcUuid[16] = {
+    0xba, 0x99, 0x4a, 0x31, 0x9c, 0xc1, 0xd7, 0x96,
+    0x75, 0x4a, 0x72, 0x4e, 0x57, 0x50, 0x10, 0xe1};  // 0x5057 service
+static const uint8_t kPwDescUuid[16] = {
+    0xba, 0x99, 0x4a, 0x31, 0x9c, 0xc1, 0xd7, 0x96,
+    0x75, 0x4a, 0x72, 0x4e, 0x58, 0x50, 0x10, 0xe1};  // 0x5058 Descriptor
+static const uint8_t kPwSampUuid[16] = {
+    0xba, 0x99, 0x4a, 0x31, 0x9c, 0xc1, 0xd7, 0x96,
+    0x75, 0x4a, 0x72, 0x4e, 0x59, 0x50, 0x10, 0xe1};  // 0x5059 Sample
+static const uint8_t kPwClkUuid[16] = {
+    0xba, 0x99, 0x4a, 0x31, 0x9c, 0xc1, 0xd7, 0x96,
+    0x75, 0x4a, 0x72, 0x4e, 0x5A, 0x50, 0x10, 0xe1};  // 0x505A Clock
+static BLEClientService        eggSvc{BLEUuid(kPwSvcUuid)};
+static BLEClientCharacteristic eggChrDesc{BLEUuid(kPwDescUuid)};
+static BLEClientCharacteristic eggChrSamp{BLEUuid(kPwSampUuid)};
+static BLEClientCharacteristic eggChrClk{BLEUuid(kPwClkUuid)};
+
+// Ordered so "engaged" (a connection exists or is being made) is a
+// single >= compare: BACKOFF sits between the idle states and
+// CONNECTING on purpose.
+enum EggLinkState : uint8_t {
+  EGG_LINK_IDLE = 0,   // link not wanted (unpaired / gate closed)
+  EGG_LINK_WAIT_ADV,   // wanted — the scan callback fires the connect
+  EGG_LINK_BACKOFF,    // cooling off after a failure/disconnect
+  EGG_LINK_CONNECTING, // sd_ble_gap_connect in flight
+  EGG_LINK_BRINGUP,    // discovery/reads running in the callback task
+  EGG_LINK_STREAMING,  // notify subscription live, surface fed by GATT
+};
+static volatile uint8_t  eggLinkState = EGG_LINK_IDLE;
+static volatile uint16_t eggConnHandle = BLE_CONN_HANDLE_INVALID;
+static volatile uint32_t eggLinkEventMs = 0;  // stamp of the last transition
+static constexpr uint32_t kEggConnectTimeoutMs = 10000;
+static constexpr uint32_t kEggLinkBackoffMs = 5000;
+
+// Bring-up staging: the central connect callback (Bluefruit callback
+// task) runs the BLOCKING discovery/read sequence — a documented
+// deviation from "callbacks only copy" (each client op waits a
+// connection interval; ~15 round trips on the main loop would stall the
+// 25 Hz DOVEX row engine for seconds). It stages raw bytes here,
+// ready-flag-LAST; the main loop parses and commits.
+static uint8_t           eggDescRaw[512];
+static volatile uint16_t eggDescLen = 0;
+static uint8_t           eggClkRaw[sensoregg_gatt::kClockLen];
+static volatile uint32_t eggClkReqMs = 0, eggClkRspMs = 0;
+static volatile bool eggBringupReady = false;
+static volatile bool eggBringupFailed = false;
+
+// Notify frame ring (the data plane keeps the copy-only discipline):
+// the notify callback memcpys, SENSOREGG_LOOP drains. 32-byte slots
+// cover the egg's <=26-byte frames; a fatter future pod's frames are
+// counted as drops rather than truncated.
+static uint8_t           eggFrameBuf[8][32];
+static volatile uint8_t  eggFrameLen[8];
+static volatile uint32_t eggFrameAtMs[8];
+static volatile bool     eggFrameReady[8] = {false};
+static volatile uint8_t  eggFrameW = 0;  // notify callback writes
+static uint8_t           eggFrameR = 0;  // main loop reads
+static uint32_t          eggFrameDrops = 0;
+
+// Committed pod identity (main loop only, valid while STREAMING).
+static sensoregg_gatt::PodDescriptor eggPod;
+static int8_t eggRoleIdx[sensoregg_gatt::ROLE_COUNT] = {-1, -1, -1, -1};
+static int8_t eggFastestIdx = 0;  // whose frame seq feeds the zombie monitor
+static sensoregg_gatt::ClockFit eggClockFit;
+
 // RACE-GATED SCANNER (plan 0012). The scanner's 40-of-every-90 ms radio
 // claim is only paid while a race session is running — the one time the EGT
 // feed is actually consumed (DOVEX rows + the Temp pages are race-only).
@@ -113,8 +196,31 @@ static constexpr uint32_t kEggStartRetryMs = 1000;
 // test page's Back row, so the plan-0012 "never pay scan duty on the
 // menu" rule still holds for every passive path (transfer, replay,
 // idle menu).
-static bool eggScanWanted() {
+static bool eggRadioWanted() {
   return (raceActive || eggPairingActive || eggTestActive) && !eggSleeping;
+}
+
+// Plan 0018 split the gate three ways. A connection exists or is being
+// made:
+static bool eggLinkEngaged() {
+  return eggLinkState >= EGG_LINK_CONNECTING;
+}
+
+// The GATT link is wanted whenever the radio is AND a specific egg is
+// paired (an unpaired filter would connect to anyone's pod — the beacon
+// path stays promiscuous instead).
+static bool eggLinkWanted() {
+  return eggRadioWanted() && sensoreggIsPaired();
+}
+
+// The scanner runs while the pairing window is open (it must observe
+// every egg) or while no link is engaged (unclaimed pod, pre-connect,
+// backoff). While STREAMING the 44% scan duty is not paid at all — the
+// paired egg is silent anyway (a connected single-link peripheral stops
+// advertising). Keeps its name so the callback resume-gate and the
+// reconcile below are untouched.
+static bool eggScanWanted() {
+  return eggRadioWanted() && (eggPairingActive || !eggLinkEngaged());
 }
 
 ///////////////////////////////////////////
@@ -134,6 +240,23 @@ static void sensoreggScanCallback(ble_gap_evt_adv_report_t* report) {
   uint8_t buf[BLE_GAP_ADV_SET_DATA_SIZE_MAX];
   uint8_t len = Bluefruit.Scanner.parseReportByType(
       report, BLE_GAP_AD_TYPE_MANUFACTURER_SPECIFIC_DATA, buf, sizeof(buf));
+
+  // GATT connect trigger (plan 0018): a connectable report from the
+  // PAIRED egg, while the main loop has posted WAIT_ADV, becomes the
+  // connection instead of a buffered beacon. NO Scanner.resume() on
+  // this path — Bluefruit carries the paused scanner's params straight
+  // into sd_ble_gap_connect, and resuming would fight it.
+  if (eggLinkState == EGG_LINK_WAIT_ADV && !eggPairingActive &&
+      report->type.connectable &&
+      len >= sensoregg_protocol::kPayloadLen &&
+      sensoregg_protocol::matchesMagic(buf, len) &&
+      sensoreggMacAccepted(report->peer_addr.addr) &&
+      sensoreggIsPaired()) {
+    eggLinkState = EGG_LINK_CONNECTING;
+    eggLinkEventMs = millis();
+    Bluefruit.Central.connect(report);
+    return;
+  }
 
   // During the pairing capture window the MAC filter is bypassed so a
   // NEW egg (including a different one while another is paired) can be
@@ -166,6 +289,97 @@ static void sensoreggScanCallback(ble_gap_evt_adv_report_t* report) {
   if (eggScanWanted()) {
     Bluefruit.Scanner.resume();
   }
+}
+
+///////////////////////////////////////////
+// GATT LINK (plan 0018 — central client callbacks)
+///////////////////////////////////////////
+
+// Notify callback (Bluefruit callback task): pure copy into the frame
+// ring, ready-flag-last — the data plane keeps the module's copy-only
+// discipline. An over-long frame (a fatter future pod at high MTU) is
+// counted, never truncated.
+static void sensoreggSampleNotifyCb(BLEClientCharacteristic* chr,
+                                    uint8_t* data, uint16_t len) {
+  (void)chr;
+  if (len == 0 || len > sizeof(eggFrameBuf[0])) {
+    eggFrameDrops++;
+    return;
+  }
+  const uint8_t w = eggFrameW;
+  if (eggFrameReady[w]) {  // ring full — the main loop is behind
+    eggFrameDrops++;
+    return;
+  }
+  memcpy(eggFrameBuf[w], data, len);
+  eggFrameLen[w] = (uint8_t)len;
+  eggFrameAtMs[w] = millis();
+  eggFrameReady[w] = true;
+  eggFrameW = (uint8_t)((w + 1) & 7);
+}
+
+// Central connect callback: runs the whole BLOCKING bring-up sequence
+// in the Bluefruit callback task (documented deviation — see the
+// staging block's comment; plan 0018). Stages raw bytes; the main loop
+// parses and commits. No Serial here — the commit path narrates.
+static void sensoreggCentralConnectCb(uint16_t connHandle) {
+  eggConnHandle = connHandle;
+  eggLinkState = EGG_LINK_BRINGUP;
+  eggLinkEventMs = millis();
+
+  bool ok = eggSvc.discover(connHandle);
+  if (ok) ok = eggChrDesc.discover();
+  if (ok) ok = eggChrClk.discover();
+  if (ok) ok = eggChrSamp.discover();
+  if (ok) {
+    // Best-effort MTU raise: not correctness-critical — the client
+    // read() long-reads past 23 on its own, and the egg sizes notify
+    // frames to whatever MTU ends up live.
+    BLEConnection* conn = Bluefruit.Connection(connHandle);
+    if (conn) conn->requestMtuExchange(247);
+  }
+  if (ok) {
+    eggDescLen = eggChrDesc.read(eggDescRaw, sizeof(eggDescRaw));
+    ok = eggDescLen >= sensoregg_gatt::kDescHeaderLen;
+  }
+  if (ok) {
+    // The timed Clock read IS the clock-fit anchor: request/response
+    // stamps bracket the pod's millis snapshot.
+    eggClkReqMs = millis();
+    ok = eggChrClk.read(eggClkRaw, sizeof(eggClkRaw)) >=
+         sensoregg_gatt::kClockLen;
+    eggClkRspMs = millis();
+  }
+  if (ok) ok = eggChrSamp.enableNotify();
+
+  if (ok) {
+    eggBringupReady = true;  // ready-flag-last; main loop commits
+  } else {
+    eggBringupFailed = true;
+    Bluefruit.disconnect(connHandle);
+  }
+}
+
+static void sensoreggCentralDisconnectCb(uint16_t connHandle,
+                                         uint8_t reason) {
+  (void)connHandle;
+  (void)reason;
+  eggConnHandle = BLE_CONN_HANDLE_INVALID;
+  eggLinkState = EGG_LINK_BACKOFF;
+  eggLinkEventMs = millis();
+}
+
+// Called from bleCoreEnsureInit() (flag-gated there): client discovery
+// metadata + central callbacks must exist before the central role is
+// used. Client begin()s attach the characteristics to the service.
+void sensoreggGattClientInit() {
+  eggSvc.begin();
+  eggChrDesc.begin();
+  eggChrSamp.setNotifyCallback(sensoreggSampleNotifyCb);
+  eggChrSamp.begin();
+  eggChrClk.begin();
+  Bluefruit.Central.setConnectCallback(sensoreggCentralConnectCb);
+  Bluefruit.Central.setDisconnectCallback(sensoreggCentralDisconnectCb);
 }
 
 ///////////////////////////////////////////
@@ -237,6 +451,20 @@ void SENSOREGG_SLEEP() {
     Bluefruit.Scanner.stop();
   }
   eggScannerRunning = false;
+
+  // Plan 0018: the GATT link goes down with the radio. Cancel a pending
+  // connect (it parks the scanner inside the SoftDevice) and drop a
+  // live link — this covers BLE transfer mode (BLE_SETUP calls this
+  // first) and shutdown (bleShutdownQuiesce()'s bounded settle runs
+  // after us and gives the disconnect airtime; its own disconnect only
+  // handles the peripheral handle).
+  if (eggLinkState == EGG_LINK_CONNECTING) {
+    sd_ble_gap_connect_cancel();
+  }
+  if (eggConnHandle != BLE_CONN_HANDLE_INVALID) {
+    Bluefruit.disconnect(eggConnHandle);
+  }
+  eggLinkState = EGG_LINK_IDLE;
 }
 
 void SENSOREGG_WAKE() {
@@ -282,6 +510,11 @@ void SENSOREGG_LOOP() {
         if (setSetting("sensoregg_mac", macStr)) {
           memcpy(eggMacFilter, human, sizeof(eggMacFilter));
           eggPairingActive = false;
+          // A NEWLY captured egg supersedes any live GATT link to the
+          // old one (plan 0018) — the reconcile then courts the new MAC.
+          if (eggConnHandle != BLE_CONN_HANDLE_INVALID) {
+            Bluefruit.disconnect(eggConnHandle);
+          }
           debugln(F("SensorEgg: paired"));
         } else {
           debugln(F("SensorEgg: pair capture — settings write failed, retrying"));
@@ -311,6 +544,153 @@ void SENSOREGG_LOOP() {
           (float)eggRateCount * 1000.0f / (float)(now - eggRateWindowMs);
       eggRateCount = 0;
       eggRateWindowMs = now;
+    }
+  }
+
+  // ---- GATT link (plan 0018): commit, drain, reconcile ----
+
+  // Bring-up failed in the callback task -> cool off.
+  if (eggBringupFailed) {
+    eggBringupFailed = false;
+    eggLinkState = EGG_LINK_BACKOFF;
+    eggLinkEventMs = millis();
+    debugln(F("SensorEgg: GATT bring-up failed"));
+  }
+
+  // Bring-up staged -> parse the descriptor + clock, anchor the fit,
+  // start consuming. The staging buffers are quiet once the ready flag
+  // is up (the callback task's sequence has finished).
+  if (eggBringupReady) {
+    eggBringupReady = false;
+    sensoregg_gatt::PodDescriptor pd;
+    uint8_t clkBoot = 0;
+    uint32_t clkPod = 0;
+    if (sensoregg_gatt::parseDescriptor(eggDescRaw, eggDescLen, pd) &&
+        sensoregg_gatt::parseClock(eggClkRaw, sizeof(eggClkRaw), clkBoot,
+                                   clkPod)) {
+      eggPod = pd;
+      sensoregg_gatt::mapChannels(eggPod, eggRoleIdx);
+      eggFastestIdx = sensoregg_gatt::fastestChannel(eggPod);
+      sensoregg_gatt::clockFitAnchor(eggClockFit, clkBoot, clkPod,
+                                     eggClkReqMs, eggClkRspMs);
+      eggLinkState = EGG_LINK_STREAMING;
+      debug(F("SensorEgg: GATT link up — fw "));
+      debug(eggPod.fwMajor);
+      debug(F("."));
+      debug(eggPod.fwMinor);
+      debug(F(", channels "));
+      debugln(eggPod.channelCount);
+    } else {
+      debugln(F("SensorEgg: descriptor/clock parse failed — dropping link"));
+      if (eggConnHandle != BLE_CONN_HANDLE_INVALID) {
+        Bluefruit.disconnect(eggConnHandle);
+      }
+      eggLinkState = EGG_LINK_BACKOFF;
+      eggLinkEventMs = millis();
+    }
+  }
+
+  // Drain the notify frame ring: decode, epoch-check, route the latest
+  // sample of each frame into the SAME surface the beacon feeds —
+  // everything downstream is transport-agnostic.
+  while (eggFrameReady[eggFrameR]) {
+    uint8_t local[sizeof(eggFrameBuf[0])];
+    const uint8_t localLen = eggFrameLen[eggFrameR];
+    const uint32_t atMs = eggFrameAtMs[eggFrameR];
+    memcpy(local, eggFrameBuf[eggFrameR], sizeof(local));
+    eggFrameReady[eggFrameR] = false;
+    eggFrameR = (uint8_t)((eggFrameR + 1) & 7);
+
+    sensoregg_gatt::SampleFrame f;
+    if (!sensoregg_gatt::parseSampleFrame(local, localLen, f)) continue;
+
+    if (!sensoregg_gatt::clockFitSameEpoch(eggClockFit, f.bootId)) {
+      // The pod's millis restarted under us (watchdog / brownout). An
+      // egg reboot drops the physical link anyway — this is the mop-up
+      // for frames racing the disconnect. Reconnect re-anchors.
+      debugln(F("SensorEgg: pod rebooted (boot_id changed) — re-anchoring"));
+      if (eggConnHandle != BLE_CONN_HANDLE_INVALID) {
+        Bluefruit.disconnect(eggConnHandle);
+      }
+      continue;
+    }
+
+    int8_t chIdx = -1;
+    for (uint8_t i = 0; i < eggPod.channelCount; i++) {
+      if (eggPod.ch[i].id == f.channelId) {
+        chIdx = (int8_t)i;
+        break;
+      }
+    }
+    if (chIdx < 0) continue;
+
+    const int16_t rawLast = f.raw[f.n - 1];
+    const float real = sensoregg_gatt::sampleToReal(rawLast, eggPod.ch[chIdx]);
+    if (chIdx == eggRoleIdx[sensoregg_gatt::ROLE_EGT]) {
+      eggReading.egtC = real;
+    } else if (chIdx == eggRoleIdx[sensoregg_gatt::ROLE_CJ]) {
+      eggReading.junctionC = real;
+    } else if (chIdx == eggRoleIdx[sensoregg_gatt::ROLE_AUX]) {
+      eggReading.auxC = real;
+    } else if (chIdx == eggRoleIdx[sensoregg_gatt::ROLE_BATT]) {
+      // Ratio channel is whole percent (scale 1.0) — route the raw,
+      // sentinel/out-of-range -> the surface's 0xFF "unknown".
+      eggReading.battery = (rawLast < 0 || rawLast > 100)
+                               ? (uint8_t)0xFF
+                               : (uint8_t)rawLast;
+    }
+    eggReading.sequence = f.seq;  // display: the stream's own counter
+    // Zombie detection feeds on the FASTEST channel's frame seq only —
+    // per-channel u8 counters are independent, and mixing them would
+    // alias as "frozen". seqMonitorFeed only tests inequality, so the
+    // u8 -> u16 widening is harmless.
+    if (chIdx == eggFastestIdx) {
+      sensoregg_protocol::seqMonitorFeed(eggSeqMon, f.seq, atMs);
+    }
+    eggRxMs = atMs;
+    eggHaveReading = true;
+    eggRateCount++;  // the test page's Hz meter counts GATT frames too
+  }
+
+  // Link reconcile: post/withdraw the wanted state, time out a stuck
+  // connect, expire the backoff. The scan callback does the actual
+  // connecting (it holds the fresh adv report).
+  {
+    const uint32_t now = millis();
+    switch (eggLinkState) {
+      case EGG_LINK_IDLE:
+        if (eggLinkWanted()) {
+          eggLinkState = EGG_LINK_WAIT_ADV;
+        }
+        break;
+      case EGG_LINK_WAIT_ADV:
+        if (!eggLinkWanted()) {
+          eggLinkState = EGG_LINK_IDLE;
+        }
+        break;
+      case EGG_LINK_BACKOFF:
+        if ((uint32_t)(now - eggLinkEventMs) >= kEggLinkBackoffMs) {
+          eggLinkState = eggLinkWanted() ? EGG_LINK_WAIT_ADV : EGG_LINK_IDLE;
+        }
+        break;
+      case EGG_LINK_CONNECTING:
+        if ((uint32_t)(now - eggLinkEventMs) >= kEggConnectTimeoutMs) {
+          sd_ble_gap_connect_cancel();
+          eggLinkState = EGG_LINK_BACKOFF;
+          eggLinkEventMs = now;
+          debugln(F("SensorEgg: connect timed out"));
+        }
+        break;
+      case EGG_LINK_BRINGUP:
+      case EGG_LINK_STREAMING:
+        // Gate dropped (race over, unpair, sleep already handled) —
+        // release the link; the disconnect callback moves us to BACKOFF.
+        if (!eggLinkWanted() && eggConnHandle != BLE_CONN_HANDLE_INVALID) {
+          Bluefruit.disconnect(eggConnHandle);
+        }
+        break;
+      default:
+        break;
     }
   }
 
@@ -482,6 +862,18 @@ float sensoreggPacketHz() {
   return eggRateHz;
 }
 
+uint8_t sensoreggLinkMode() {
+  // 2 = GATT stream live; 1 = fresh beacon data; 0 = nothing heard.
+  if (eggLinkState == EGG_LINK_STREAMING) return 2;
+  return sensoreggLinkUp() ? 1 : 0;
+}
+
+uint16_t sensoreggGattMtu() {
+  if (eggConnHandle == BLE_CONN_HANDLE_INVALID) return 0;
+  BLEConnection* conn = Bluefruit.Connection(eggConnHandle);
+  return conn ? conn->getMtu() : 0;
+}
+
 #else  // !BIRDSEYE_ENABLE_SENSOREGG
 
 ///////////////////////////////////////////
@@ -526,5 +918,9 @@ void sensoreggTestExitMode() {}
 uint8_t sensoreggProtoVersion() { return 0; }
 bool sensoreggPairingFlag() { return false; }
 float sensoreggPacketHz() { return 0.0f; }
+
+void sensoreggGattClientInit() {}
+uint8_t sensoreggLinkMode() { return 0; }
+uint16_t sensoreggGattMtu() { return 0; }
 
 #endif  // BIRDSEYE_ENABLE_SENSOREGG
