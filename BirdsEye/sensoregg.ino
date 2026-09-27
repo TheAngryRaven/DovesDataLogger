@@ -258,9 +258,21 @@ static void sensoreggScanCallback(ble_gap_evt_adv_report_t* report) {
       sensoregg_protocol::matchesMagic(buf, len) &&
       sensoreggMacAccepted(report->peer_addr.addr) &&
       sensoreggIsPaired()) {
+    // CONNECTING is posted BEFORE the request: the connect callback
+    // only adopts a link it finds in CONNECTING.
     eggLinkState = EGG_LINK_CONNECTING;
     eggLinkEventMs = millis();
-    Bluefruit.Central.connect(report);
+    const bool accepted = Bluefruit.Central.connect(report);
+    if (!accepted) {
+      // Refused outright — no connect callback will ever come. Back off
+      // now and un-pause the scanner (it is still parked on this
+      // report) so the beacon keeps feeding the surface meanwhile.
+      eggLinkState = sensoregg_gatt::linkAfterConnectRequest(accepted);
+      eggLinkEventMs = millis();
+      if (eggScanWanted()) {
+        Bluefruit.Scanner.resume();
+      }
+    }
     return;
   }
 

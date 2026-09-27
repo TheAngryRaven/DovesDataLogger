@@ -73,6 +73,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   as soon as its own channel stops arriving (the 1 s rule for EGT/CJ; a
   slow channel gets one frame of slack at its own rate, e.g. 2 s for a
   1 s intake-air channel).
+- **A refused SensorEgg connect no longer costs 15 s of silence** (plan
+  0018 review). When the radio refused the connection request outright,
+  the logger still waited out the full 10 s connect timeout and 5 s
+  backoff with the scanner paused, so neither the GATT stream nor the
+  beacon fed the EGT readout. It now backs off immediately and resumes
+  the scanner.
 
 ### Added
 - **SensorEgg GATT link** (plan 0018): a paired egg is no longer just

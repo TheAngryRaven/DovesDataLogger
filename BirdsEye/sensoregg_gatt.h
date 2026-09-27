@@ -163,6 +163,14 @@ LinkState linkReconcileOrphan(LinkState state, bool handleValid);
 // CONNECTING state is retired to BACKOFF; IDLE/BACKOFF stay put).
 bool linkAcceptCentralConnect(LinkState state, bool sleeping, bool wanted);
 
+// State after the scan callback asked the SoftDevice to connect. A
+// refused request (Central.connect() == false: radio busy, invalid
+// params) never produces a connect callback, so staying CONNECTING
+// would sit out the full 10 s connect timeout — plus the 5 s backoff —
+// with the scanner paused on the report that triggered it. Refused ->
+// BACKOFF immediately (and the caller resumes the scanner).
+LinkState linkAfterConnectRequest(bool accepted);
+
 // ---- Stream surface rules (review fixes 2026-09) -------------------------
 // The GATT stream feeds the same sensoregg_protocol::Reading the beacon
 // does, but it only carries the channels the descriptor maps — nothing

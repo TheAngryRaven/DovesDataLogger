@@ -155,6 +155,10 @@ bool linkAcceptCentralConnect(LinkState state, bool sleeping, bool wanted) {
   return state == LINK_CONNECTING && !sleeping && wanted;
 }
 
+LinkState linkAfterConnectRequest(bool accepted) {
+  return accepted ? LINK_CONNECTING : LINK_BACKOFF;
+}
+
 void readingResetForStream(sensoregg_protocol::Reading& r) {
   r.egtC = NAN;
   r.junctionC = NAN;

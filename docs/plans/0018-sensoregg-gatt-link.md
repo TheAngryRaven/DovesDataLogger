@@ -182,3 +182,9 @@ host-tested; the sketch keeps only the critical sections and radio calls.
   the EGT/CJ channels (250 ms) keep exactly the beacon's 1 s rule.
   This supersedes the "graceful degradations" bullet above: nothing but
   `protoVersion` holds a beacon value any more.
+- **E4 — `Central.connect()` result ignored.** A refused request never
+  yields a connect callback, so the machine sat in CONNECTING for the
+  10 s timeout (+5 s backoff) with the scanner paused on the triggering
+  report. Now `linkAfterConnectRequest(false)` → BACKOFF, stamped, and
+  the callback resumes the scanner (when the scan is wanted) so the
+  beacon keeps feeding the surface.

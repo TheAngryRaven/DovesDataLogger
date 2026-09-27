@@ -322,3 +322,10 @@ TEST_CASE("sensoregg_gatt - each role goes stale on its own channel") {
     roleFreshnessReset(f);
     CHECK(!roleFresh(f, ROLE_CJ, 2000));
 }
+
+TEST_CASE("sensoregg_gatt - a refused connect request backs off at once") {
+    CHECK(linkAfterConnectRequest(true) == LINK_CONNECTING);
+    // E4: no connect callback will follow a refusal — don't sit out the
+    // 10 s connect timeout with the scanner paused.
+    CHECK(linkAfterConnectRequest(false) == LINK_BACKOFF);
+}
