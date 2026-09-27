@@ -723,11 +723,10 @@ void SENSOREGG_LOOP() {
       eggReading.auxC = real;
       role = sensoregg_gatt::ROLE_AUX;
     } else if (chIdx == eggRoleIdx[sensoregg_gatt::ROLE_BATT]) {
-      // Ratio channel is whole percent (scale 1.0) — route the raw,
-      // sentinel/out-of-range -> the surface's 0xFF "unknown".
-      eggReading.battery = (rawLast < 0 || rawLast > 100)
-                               ? (uint8_t)0xFF
-                               : (uint8_t)rawLast;
+      // Through the descriptor's scale/offset like every other channel
+      // (the EGT pod happens to declare 1.0/0, a future pod need not);
+      // sentinel -> 0xFF "unknown", otherwise clamped 0-100.
+      eggReading.battery = sensoregg_gatt::batteryPercent(real);
       role = sensoregg_gatt::ROLE_BATT;
     }
     if (role >= 0) {

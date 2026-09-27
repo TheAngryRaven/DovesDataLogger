@@ -197,3 +197,7 @@ host-tested; the sketch keeps only the critical sections and radio calls.
   `D<n>`), and `DropMonitor` drops the link after drops in 3 consecutive
   1 s windows — one SD-stall burst is judged as a single window and
   never fires it.
+- **E6 — battery ignored scale/offset.** Now `sampleToReal()` then
+  `batteryPercent()` (NaN → 0xFF, clamp 0–100, rounded; NaN tested by
+  bit pattern for `-Ofast`). Out-of-range values now clamp instead of
+  reading "unknown".

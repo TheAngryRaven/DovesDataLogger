@@ -87,6 +87,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   (244 bytes), the running count of dropped frames shows on EGG TEST as
   `D<n>`, and drops in three consecutive seconds drop the link so the
   beacon takes over instead of streaming into the floor.
+- **SensorEgg battery over GATT honours the pod's declared scaling**
+  (plan 0018 review). The battery channel's raw value was used as a
+  percent directly, ignoring the scale/offset the pod's channel table
+  declares, so a pod reporting in tenths of a percent would have read as
+  "unknown". It now converts like every other channel and clamps to
+  0–100.
 
 ### Added
 - **SensorEgg GATT link** (plan 0018): a paired egg is no longer just

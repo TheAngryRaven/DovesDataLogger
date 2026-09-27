@@ -373,3 +373,23 @@ TEST_CASE("sensoregg_gatt - drops in consecutive windows drop the link once") {
     CHECK(!dropMonitorUpdate(m, 1, 0x00000100UL));  // only 512 ms elapsed
     CHECK(!dropMonitorUpdate(m, 1, 0x00000400UL));  // window closes, bad 1
 }
+
+TEST_CASE("sensoregg_gatt - battery percent honours the descriptor scaling") {
+    ChannelInfo c;
+    c.scale = 1.0f;
+    c.offset = 0.0f;
+    CHECK(batteryPercent(sampleToReal(87, c)) == 87);
+    CHECK(batteryPercent(sampleToReal(INT16_MIN, c)) == 0xFF);  // sentinel
+    // E6: a pod declaring deci-percent must not read 870 -> "unknown".
+    c.scale = 0.1f;
+    CHECK(batteryPercent(sampleToReal(870, c)) == 87);
+    CHECK(batteryPercent(sampleToReal(875, c)) == 88);  // rounds
+    // An offset applies too.
+    c.scale = 1.0f;
+    c.offset = -10.0f;
+    CHECK(batteryPercent(sampleToReal(60, c)) == 50);
+    // Out of range clamps rather than wrapping a uint8_t.
+    c.offset = 0.0f;
+    CHECK(batteryPercent(sampleToReal(250, c)) == 100);
+    CHECK(batteryPercent(sampleToReal(-5, c)) == 0);
+}

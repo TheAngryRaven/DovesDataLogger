@@ -89,6 +89,14 @@ bool parseClock(const uint8_t* d, size_t len, uint8_t& bootId,
 // sentinel becomes NaN BEFORE the conversion (never scaled).
 float sampleToReal(int16_t raw, const ChannelInfo& c);
 
+// The surface's battery percent from a battery-role channel's
+// engineering value (i.e. AFTER sampleToReal — the descriptor's
+// scale/offset apply to the ratio channel like any other): NaN (the
+// sentinel) -> 0xFF "unknown"; otherwise clamped to 0-100 and rounded.
+// NaN is detected by bit pattern (nan_bits.h) — the device builds with
+// -Ofast, where isnan() folds to false and NaN comparisons are UB.
+uint8_t batteryPercent(float real);
+
 // Descriptor-driven role mapping — the consumer never hardcodes channel
 // ids. Temperatures route by the schema's normative names ("EGT", "CJ",
 // "IAT"); the battery routes by quantity 0x08 (ratio). outIdx[] holds

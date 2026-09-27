@@ -3,6 +3,8 @@
 #include <math.h>
 #include <string.h>
 
+#include "nan_bits.h"
+
 namespace sensoregg_gatt {
 
 namespace {
@@ -85,6 +87,13 @@ bool parseClock(const uint8_t* d, size_t len, uint8_t& bootId,
 float sampleToReal(int16_t raw, const ChannelInfo& c) {
   if (raw == kInvalidSentinel) return NAN;
   return (float)raw * c.scale + c.offset;
+}
+
+uint8_t batteryPercent(float real) {
+  if (isNanF(real)) return 0xFF;
+  if (real <= 0.0f) return 0;
+  if (real >= 100.0f) return 100;
+  return (uint8_t)(real + 0.5f);
 }
 
 void mapChannels(const PodDescriptor& pd, int8_t outIdx[ROLE_COUNT]) {
