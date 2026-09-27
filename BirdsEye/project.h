@@ -18,7 +18,8 @@
 // via the Device Information Service (see bluetooth.ino) so a companion
 // (DovesDataViewer) can compare it against the latest GitHub release and
 // decide whether an OTA update is needed. Keep this in sync with the release
-// git tag (tag v2.0.0 -> "2.0.0") and the CHANGELOG.
+// git tag (tag v2.0.0 -> "2.0.0") and the CHANGELOG — release.yml refuses a
+// tag that disagrees with the quoted literal below.
 //
 // Beta/nightly builds override it from the build flag: the beta workflow
 // passes -DFIRMWARE_VERSION_OVERRIDE=<base>-beta.<gitsha> as a bare token —

@@ -198,7 +198,7 @@ handoff spec.
 
 | Path | Contents |
 |---|---|
-| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, sim-build (native sim TU + 60 s boot soak + determinism + goldens + lap oracles + two-session carryover, plus a wasm job: emsdk 3.1.61 build + node smoke + `birdseye-sim-wasm` artifact), release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). Per-channel build config: `BETA` builds track DovesLapTimer's `BETA` branch and pass `-DBIRDSEYE_ENABLE_SENSOREGG=1`; master/release pin `v4.3.0` and build the `project.h` defaults — which since 4.1.0 means NeoPixel ON, SensorEgg off. BETA-side PRs also run `compile-stock-arm` (flags off, both boards); on the BETA → master release PR it uses the `v4.3.0` pin, so that PR compiles exactly release.yml's configuration. |
+| `.github/workflows/` | CI: compile-sketch (+ flash-size gate), arduino-lint, unit-tests, clang-tidy, coverage, sim-build (native sim TU + 60 s boot soak + determinism + goldens + lap oracles + two-session carryover, plus a wasm job: emsdk 3.1.61 build + node smoke + `birdseye-sim-wasm` artifact), release (dual-board build + GitHub Release + prod OTA manifest to `gh-pages`), beta (dual-board build on `BETA`-branch push → latest-only `beta/` OTA channel on `gh-pages`, no Release). Per-channel build config: `BETA` builds track DovesLapTimer's `BETA` branch and pass `-DBIRDSEYE_ENABLE_SENSOREGG=1`; master/release pin `v4.3.0` and build the `project.h` defaults — which since 4.1.0 means NeoPixel ON, SensorEgg off. BETA-side PRs also run `compile-stock-arm` (flags off, both boards); on the BETA → master release PR it uses the `v4.3.0` pin, so that PR compiles exactly release.yml's configuration. `release.yml` refuses a tag whose version doesn't equal `FIRMWARE_VERSION` in `project.h` or has no `## [x.y.z]` CHANGELOG heading |
 | `tests/` | Host doctest harness (CMake) for the pure-logic units |
 | `docs/plans/` | Numbered design records (`NNNN-slug.md`, see its README) — the rationale behind each chunk of work; plan-executing commits cite the number. Same convention as DovesDataViewer |
 | `CHANGELOG.md` | Keep-a-Changelog history; release workflow ties to version tags |
@@ -2196,7 +2196,10 @@ This device operates in ignition-noise environments. Three layers of defense:
   BLE; a plain IDE build with no flag defaults to `sense`.
 - **Firmware version** is a single `#define FIRMWARE_VERSION` in `project.h`.
   Keep it in sync with the release git tag (`v2.0.0` -> `"2.0.0"`); it is
-  reported over BLE (DIS) for the OTA update check. `FIRMWARE_VARIANT`
+  reported over BLE (DIS) for the OTA update check, and `release.yml`
+  fails a tag build whose tag doesn't match it (or whose version has no
+  CHANGELOG heading) — the manifest version comes from the tag, so a
+  mismatch would offer the update forever. `FIRMWARE_VARIANT`
   (also in `project.h`) feeds the DIS model string. The version literal can be
   overridden at build time with `-DFIRMWARE_VERSION_OVERRIDE=<token>` (a bare
   token; `project.h` stringizes it) — the `beta` workflow uses this to stamp

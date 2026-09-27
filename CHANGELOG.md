@@ -129,6 +129,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   exactly what `release.yml` will build (release library, no feature
   flags, both boards). Before, BETA source met the pinned library and the
   flags-off non-Sense image for the first time on the tag push.
+- **CI: a release tag must match the firmware's own version.** The OTA
+  manifest's version is taken from the git tag, but devices report
+  `FIRMWARE_VERSION` from `project.h` — tagging `v4.2.0` on a tree still
+  saying `4.1.0` published a manifest no updated device could ever
+  satisfy, so the companion app would offer the update forever.
+  `release.yml` now fails the tag build before anything is built or
+  published unless the tag equals `FIRMWARE_VERSION` and `CHANGELOG.md`
+  has a `## [x.y.z]` heading for it.
 
 ## [4.1.0] - 2026-08-24
 
