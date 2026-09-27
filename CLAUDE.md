@@ -891,8 +891,11 @@ loop()  ~250 Hz
   fake a launch), launch rollout-style (11.25 in displacement + ≥2 mph,
   ET start interpolated between the straddling 25 Hz fixes), accumulate
   chord distance to the target, finish with interpolated ET + trap speed
-  and a 0-60 split (0 if never reached). Mid-run standstill (3 s) or a
-  ≥2 s fix gap abandons the run **silently** — which is also how a
+  and a 0-60 split (0 if never reached). Mid-run standstill (3 s), a
+  ≥2 s fix gap, or 2 s of wall clock with no fix at all (the
+  `checkFixLoss` watchdog the glue calls every loop with `millis()` —
+  every other rule edges on a fix, so a fix lost for good would
+  otherwise leave the run live forever) abandons the run **silently** — which is also how a
   queue-creep phantom launch self-cancels — then the timer re-arms on the
   next standstill, so a whole day of passes is one DOVEX session
   (`race_mode=DRAG`, course `DRAG 1/4 MILE` etc., laps line = run ETs;
@@ -2057,7 +2060,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | Drag tree cadence / pre-stage hold | 500 ms per yellow / staged +2 s before the tree starts | `drag_tree.h` |
 | Drag tree failed-launch / exit hold | green +5 s still → failed / Select held 2 s → end session | `drag_tree.h` |
 | Drag tree flash half-period | 500 ms (3 Hz OLED aliases anything faster) | `drag_tree.h` |
-| Drag stage / launch / abort | ≤1 mph held 1 s / ≥2 mph + rollout / ≤2 mph held 3 s or ≥2 s fix gap (silent) | `drag_timer.h` |
+| Drag stage / launch / abort | ≤1 mph held 1 s / ≥2 mph + rollout / ≤2 mph held 3 s, ≥2 s fix gap, or 2 s wall-clock with no fix (`checkFixLoss`) (silent) | `drag_timer.h` |
 | Drag prove-out | launch must reach 15 mph within 5 s of ET start, else silently abandoned | `drag_timer.h` |
 | Drag time base | Unix epoch ms (`getGpsUnixTimestampMillis()`) — never time-of-day ms (wraps at UTC midnight) | `gps_functions.ino` |
 | Drag distances | 660 / 1000 / 1320 / 2640 / 5280 ft (picker order) | `drag_timer.cpp` |

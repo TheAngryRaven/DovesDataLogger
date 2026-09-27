@@ -136,3 +136,26 @@ on GPS_SPEED exactly as before.
 - No jump-start detection during PRE-STAGE (movement there just
   re-stages silently — the foul window is the yellows, like a real tree
   between pre-stage and green).
+
+## Review fixes (2026-09)
+
+Findings from the pre-release review of plans 0015 + 0016, one commit
+each, each with a regression test in the pure unit that owns the rule.
+
+- **D1 — fix lost mid-pass wedged the pinned screen.** `kRunning` skips
+  the Select-hold exit (so a pass can't be ended by a stray thumb), and
+  every physics abort edges on a fix passed to `onFix()` — which the glue
+  only calls with a fix. A fix that dropped at speed and never came back
+  left `runActive` true forever: tree stuck in `kRunning`, pinned page
+  eating every button, live ET still ticking. The root cause is the
+  physics having no notion of wall time, so the fix is there, not in the
+  tree: `DragTimer::checkFixLoss(nowMs, lastFixMs)` — the glue passes
+  `millis()` and the `millis()` of the last fix it fed, and a staged or
+  launched timer with no fix for `kFixLossAbortMs` (= the in-stream
+  `kFixGapAbortMs`, 2 s, same reasoning) drops to ARMED **and forgets its
+  previous fix**, so a returning fix starts a fresh stream instead of
+  resuming a stale run. The tree's existing "`runActive` fell without a
+  run" rule then surfaces RUN ABORTED, whose screen accepts the exit
+  hold. Keying on the last fix *fed* (not `gpsData.fix`) also covers a
+  receiver that stops streaming with its fix flag latched true. Applies
+  to automatic mode too (a live ET frozen on a dead fix).

@@ -279,6 +279,30 @@ TEST_CASE("mid-run physics abort surfaces as RUN ABORTED") {
   CHECK(r.stage() == Stage::kWaitStop);
 }
 
+TEST_CASE("fix lost mid-run: the physics watchdog abort frees the pinned screen") {
+  // Review D1 end to end on the tree's terms: the GPS fix drops at
+  // speed and never returns. The glue's fix-loss watchdog
+  // (DragTimer::checkFixLoss) drops runActive; the tree must surface
+  // RUN ABORTED and the exit hold must then work — before the fix, the
+  // tree sat in kRunning forever with the exit hold suppressed.
+  Rig r;
+  r.toGreen();
+  r.speed = 60.0f;
+  r.runActive = true;
+  r.now += 100;
+  r.step();
+  REQUIRE(r.stage() == Stage::kRunning);
+  r.fix = false;
+  r.tick(drag_timer::kFixLossAbortMs);  // physics still "running"...
+  CHECK(r.stage() == Stage::kRunning);
+  r.runActive = false;                  // ...until the watchdog fires
+  r.now += 20;
+  r.step();
+  REQUIRE(r.stage() == Stage::kAborted);
+  r.selectHeld = true;
+  CHECK(r.tick(drag_tree::kExitHoldMs + 40));
+}
+
 // ---------------------------------------------------------------------------
 // Exit hold
 // ---------------------------------------------------------------------------

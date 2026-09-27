@@ -97,6 +97,16 @@ constexpr float kRestageFt = 10.0f;
 // to the re-latch (the mean follows the parked car's drifting fix).
 constexpr int kAnchorMeanWindow = 32;
 
+// Wall-clock fix-loss watchdog (review fix D1). Every rule above edges
+// on a fix passed to onFix(), so a fix that drops mid-pass and never
+// comes back left the run LAUNCHED forever — and on the manual tree's
+// pinned screen that was a wedge with no exit. The glue therefore
+// reports host time + the time of the last fix it fed, and a staged or
+// launched timer with no fix for this long is abandoned exactly like
+// the in-stream fix-gap abort (same threshold, same reasoning: nothing
+// measured across the gap is trustworthy).
+constexpr uint32_t kFixLossAbortMs = kFixGapAbortMs;
+
 enum class Phase : uint8_t {
   kArmed,     // waiting for a standstill (also post-run / post-abort)
   kStaged,    // stopped, anchor latched, watching for the rollout
@@ -132,6 +142,15 @@ class DragTimer {
   // in Unix epoch ms (0 before the first launch). The manual tree's
   // reaction time is this minus the green-light epoch.
   uint64_t runStartEpochMs() const { return (uint64_t)(runStartMs_ + 0.5); }
+
+  // Fix-loss watchdog, called every loop by the glue with host
+  // millis() and the millis() of the last fix it fed to onFix(). Once
+  // kFixLossAbortMs pass without a fix, a STAGED or LAUNCHED timer
+  // drops back to ARMED and forgets its previous fix, so a returning
+  // fix starts a fresh stream instead of resuming a stale run. Returns
+  // true when it aborted. Both args are wrap-safe uint32 millis; the
+  // unit still never reads a clock itself.
+  bool checkFixLoss(uint32_t nowMs, uint32_t lastFixMs);
 
   int runs() const { return runs_; }
 

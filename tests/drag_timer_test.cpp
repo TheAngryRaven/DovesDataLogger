@@ -264,6 +264,65 @@ TEST_CASE("fix gap over threshold aborts the run") {
   CHECK(s.t.runs() == 0);
 }
 
+TEST_CASE("fix lost mid-run with no fix ever returning aborts on the watchdog") {
+  // Review D1: every rule edges on onFix(), so a fix that drops at speed
+  // and never returns used to leave the run LAUNCHED forever (on the
+  // manual tree's pinned screen, a wedge with no exit).
+  Strip s(0);
+  s.standstill(0.0, 2000);
+  const double v = 60.0;
+  for (double x = 0.0; x < 200.0; x += v * 0.04) {
+    s.fix(x, v * kFtPerSecToMph);
+  }
+  REQUIRE(s.t.runActive());
+
+  const uint32_t lastFixMillis = 50000;  // host millis of the last fix fed
+  CHECK_FALSE(s.t.checkFixLoss(lastFixMillis + drag_timer::kFixLossAbortMs - 1,
+                               lastFixMillis));
+  CHECK(s.t.runActive());
+  CHECK(s.t.checkFixLoss(lastFixMillis + drag_timer::kFixLossAbortMs,
+                         lastFixMillis));
+  CHECK_FALSE(s.t.runActive());
+  CHECK(s.t.phase() == Phase::kArmed);
+  CHECK(s.t.runs() == 0);
+  // Idempotent once armed.
+  CHECK_FALSE(s.t.checkFixLoss(lastFixMillis + 60000, lastFixMillis));
+}
+
+TEST_CASE("fix-loss watchdog is millis-wrap safe") {
+  Strip s(0);
+  s.standstill(0.0, 2000);
+  REQUIRE(s.t.phase() == Phase::kStaged);
+  const uint32_t last = 0xFFFFFF00u;
+  CHECK_FALSE(s.t.checkFixLoss(last + 100u, last));  // wrapped, 100 ms
+  CHECK(s.t.checkFixLoss(last + drag_timer::kFixLossAbortMs, last));
+  CHECK(s.t.phase() == Phase::kArmed);
+}
+
+TEST_CASE("a fix returning after the watchdog starts a fresh stream, not a stale run") {
+  Strip s(0);
+  s.standstill(0.0, 2000);
+  const double v = 60.0;
+  for (double x = 0.0; x < 200.0; x += v * 0.04) {
+    s.fix(x, v * kFtPerSecToMph);
+  }
+  REQUIRE(s.t.runActive());
+  REQUIRE(s.t.checkFixLoss(10000 + drag_timer::kFixLossAbortMs, 10000));
+  // The fix comes back well down the strip still at speed: nothing may
+  // resume, and crossing the target must not complete a run.
+  s.now += 500;
+  CHECK_FALSE(s.t.runActive());
+  for (double x = 400.0; x < 900.0; x += v * 0.04) {
+    CHECK_FALSE(s.fix(x, v * kFtPerSecToMph));
+  }
+  CHECK(s.t.runs() == 0);
+  // And the timer is healthy: stop, stage, run.
+  s.standstill(900.0, 2000);
+  CHECK(s.t.phase() == Phase::kStaged);
+  CHECK(s.launchConstAccel(900.0, 30.0, 15000));
+  CHECK(s.t.runs() == 1);
+}
+
 TEST_CASE("fix gap under threshold accumulates the chord and continues") {
   Strip s(0);
   s.standstill(0.0, 2000);

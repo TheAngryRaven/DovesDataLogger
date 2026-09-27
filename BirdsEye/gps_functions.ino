@@ -496,6 +496,7 @@ void GPS_LOOP() {
       dragTimer->onFix(gpsData.latitudeDegrees, gpsData.longitudeDegrees,
                        (float)(gpsData.speed * 1.15078),  // knots -> mph
                        getGpsUnixTimestampMillis());
+      dragLastFixMillis = (uint32_t)millis();  // fix-loss watchdog reference
     }
 
   #ifdef SD_CARD_LOGGING_ENABLED

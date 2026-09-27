@@ -176,6 +176,11 @@ drag_timer::DragTimer* dragTimer = nullptr;
 int dragLastRunCount = 0;    // run-complete edge for lap history capture
 int dragDistanceIdx = -1;    // index into drag_timer's distance table
 bool dragWasStaged = false;  // ARMED->STAGED edge for the idle-grace re-arm
+// millis() of the last fix fed to dragTimer->onFix() — the fix-loss
+// watchdog's reference (review D1). Every physics rule edges on a fix,
+// so without a wall-clock check a fix lost mid-pass left the run live
+// forever (and the manual tree's pinned screen with no exit).
+uint32_t dragLastFixMillis = 0;
 
 // Manual drag mode (plan 0016): the christmas-tree staging sequence.
 // dragManualMode is latched by startDragSession and cleared ONLY by
@@ -529,6 +534,11 @@ void checkForNewLapData() {
   // re-stages every couple of minutes, so an active queue never idles
   // out, while a genuinely parked car still ends after the grace.
   if (dragTimer != nullptr) {
+    // Fix-loss watchdog first, so the staged/run edges below and the
+    // manual tree (stepped later this loop) all see the abort.
+    if (dragTimer->checkFixLoss((uint32_t)millis(), dragLastFixMillis)) {
+      debugln(F("Drag: fix lost — staged/in-flight run abandoned"));
+    }
     const bool stagedNow = dragTimer->staged();
     if (stagedNow && !dragWasStaged) {
       raceSessionStartedAt = millis();
@@ -1769,6 +1779,7 @@ void startDragSession(int distanceIdx, bool manualStaging) {
   dragDistanceIdx = dragTimer->targetIdx();  // clamped by the unit
   dragLastRunCount = 0;
   dragWasStaged = false;
+  dragLastFixMillis = (uint32_t)millis();
   dragManualMode = manualStaging;
   dragLastRtMs = 0;
   dragGreenEpochMs = 0;

@@ -13,6 +13,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Fixed
+- **Drag mode review fixes** (plans 0015/0016):
+  - A GPS fix lost mid-pass and never regained no longer wedges manual
+    drag mode. The run stayed "live" forever — the staging screen stuck
+    on a ticking ET with every button ignored. A staged or in-flight run
+    with no fix for 2 s is now abandoned (RUN ABORTED on the manual
+    screen, from which Select-hold exits), and a returning fix starts
+    fresh instead of resuming the stale run.
 - **A soft reboot no longer runs the next boot under a watchdog it can't
   see.** The nRF52 hardware WDT survives `NVIC_SystemReset()` — only a
   pin, brown-out, power-on or System OFF reset clears it — so every

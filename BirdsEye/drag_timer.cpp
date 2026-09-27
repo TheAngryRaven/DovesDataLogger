@@ -264,6 +264,14 @@ bool DragTimer::onFix(double lat, double lng, float speedMph,
   return completed;
 }
 
+bool DragTimer::checkFixLoss(uint32_t nowMs, uint32_t lastFixMs) {
+  if (phase_ == Phase::kArmed) return false;
+  if ((uint32_t)(nowMs - lastFixMs) < kFixLossAbortMs) return false;
+  resetToArmed();
+  havePrev_ = false;  // the next fix is the first of a fresh stream
+  return true;
+}
+
 unsigned long DragTimer::currentEtMs(uint64_t nowGpsMs) const {
   if (phase_ != Phase::kLaunched) return 0;
   const double et = (double)nowGpsMs - runStartMs_;
