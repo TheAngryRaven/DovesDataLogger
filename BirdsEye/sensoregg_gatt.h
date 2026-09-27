@@ -21,6 +21,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "sensoregg_protocol.h"  // Reading + kStalenessMs (the shared surface)
+
 namespace sensoregg_gatt {
 
 constexpr uint8_t kMaxChannels = 21;    // 8 + 21*24 = 512 = ATT max value
@@ -160,5 +162,49 @@ LinkState linkReconcileOrphan(LinkState state, bool handleValid);
 // answer means: disconnect that handle without adopting it (a
 // CONNECTING state is retired to BACKOFF; IDLE/BACKOFF stay put).
 bool linkAcceptCentralConnect(LinkState state, bool sleeping, bool wanted);
+
+// ---- Stream surface rules (review fixes 2026-09) -------------------------
+// The GATT stream feeds the same sensoregg_protocol::Reading the beacon
+// does, but it only carries the channels the descriptor maps — nothing
+// else in that struct is refreshed by a frame, while every frame keeps
+// the link's arrival stamp fresh. Two rules keep that from holding a
+// value (a held value draws a flat line indistinguishable from data):
+
+// On committing STREAMING, clear everything the stream will (or can
+// never) rewrite: temperatures NaN, battery 0xFF (unknown), flags /
+// status / tcFault / pairingActive cleared, sequence 0. Sample frames
+// carry no MCP STATUS and no pairing bit, so while streaming those
+// read false (a fault still reaches the page as the sentinel -> NaN ->
+// '---'). protoVersion is left as the last beacon's: it names the
+// egg's beacon firmware, which the stream does not contradict.
+void readingResetForStream(sensoregg_protocol::Reading& r);
+
+// Per-role receive stamps: each mapped role is fresh only while ITS OWN
+// channel keeps arriving, so an EGT channel that stops while CJ carries
+// on goes NaN instead of being held by CJ's traffic. A role that was
+// never stamped (e.g. a pod with no IAT channel) is never fresh.
+//
+// Staleness per role = the frame's own cadence with one frame of slack,
+// 2 x (n x interval_ms), floored at sensoregg_protocol::kStalenessMs
+// (so a fast channel keeps exactly the 1 s rule) and capped at
+// kRoleStaleMaxMs (a corrupt interval can't hold a value for minutes).
+// The floor alone would be wrong for slow channels: the EGT pod's IAT
+// runs at 1 s and its battery at 30 s, so a flat 1 s rule would flap
+// IAT and blank the battery forever.
+constexpr uint32_t kRoleStaleMaxMs = 60000;
+
+uint32_t roleStaleAfterMs(uint8_t n, uint16_t intervalMs);
+
+struct RoleFreshness {
+  bool have[ROLE_COUNT] = {false, false, false, false};
+  uint32_t atMs[ROLE_COUNT] = {0, 0, 0, 0};
+  uint32_t staleAfterMs[ROLE_COUNT] = {0, 0, 0, 0};
+};
+
+void roleFreshnessReset(RoleFreshness& f);
+void roleFreshnessStamp(RoleFreshness& f, Role role, uint32_t atMs,
+                        uint8_t n, uint16_t intervalMs);
+// Wrap-safe: fresh while (now - at) < staleAfter.
+bool roleFresh(const RoleFreshness& f, Role role, uint32_t nowMs);
 
 }  // namespace sensoregg_gatt

@@ -164,3 +164,21 @@ host-tested; the sketch keeps only the critical sections and radio calls.
   connect that lands after the 10 s timeout gave up. The disconnect
   callback ignores handles other than `eggConnHandle`, so refusing a
   connection cannot knock the machine into BACKOFF.
+- **E3 — beacon-only fields held under GATT traffic.** `tcFault`, the
+  aux temperature and the battery kept their last beacon values while
+  every frame refreshed the shared `eggRxMs`: a stuck `*TC FAULT*`, and
+  an IAT-less pod logging a flat line into `Temp2` (the never-hold rule,
+  broken). And because zombie detection watches only the fastest
+  channel, an EGT channel that stopped while CJ carried on held EGT.
+  Now `readingResetForStream()` clears the surface on commit (temps NaN,
+  battery 0xFF, flags/status/tcFault/pairing false, seq 0; protoVersion
+  kept) and the zombie monitor restarts; `RoleFreshness` stamps each
+  mapped role on its own frames, and every value accessor also requires
+  its role fresh while the stream was the last writer. *Judgement
+  call:* the per-role window is the channel's own frame cadence with one
+  frame of slack (`2 × n × interval_ms`), **floored at the 1 s
+  `kStalenessMs` rule** and capped at 60 s — a flat 1 s rule would flap
+  the pod's 1 s IAT channel and permanently blank its 30 s battery, while
+  the EGT/CJ channels (250 ms) keep exactly the beacon's 1 s rule.
+  This supersedes the "graceful degradations" bullet above: nothing but
+  `protoVersion` holds a beacon value any more.

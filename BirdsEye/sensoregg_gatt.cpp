@@ -155,4 +155,42 @@ bool linkAcceptCentralConnect(LinkState state, bool sleeping, bool wanted) {
   return state == LINK_CONNECTING && !sleeping && wanted;
 }
 
+void readingResetForStream(sensoregg_protocol::Reading& r) {
+  r.egtC = NAN;
+  r.junctionC = NAN;
+  r.auxC = NAN;
+  r.flags = 0;
+  r.pairingActive = false;
+  r.tcFault = false;
+  r.status = 0;
+  r.battery = 0xFF;
+  r.sequence = 0;
+  // protoVersion deliberately kept (see header).
+}
+
+uint32_t roleStaleAfterMs(uint8_t n, uint16_t intervalMs) {
+  const uint32_t span = (uint32_t)n * (uint32_t)intervalMs;  // <= 117*65535
+  uint32_t stale = 2u * span;                                 // no overflow
+  if (stale < sensoregg_protocol::kStalenessMs) {
+    stale = sensoregg_protocol::kStalenessMs;
+  }
+  if (stale > kRoleStaleMaxMs) stale = kRoleStaleMaxMs;
+  return stale;
+}
+
+void roleFreshnessReset(RoleFreshness& f) { f = RoleFreshness(); }
+
+void roleFreshnessStamp(RoleFreshness& f, Role role, uint32_t atMs,
+                        uint8_t n, uint16_t intervalMs) {
+  if (role >= ROLE_COUNT) return;
+  f.have[role] = true;
+  f.atMs[role] = atMs;
+  f.staleAfterMs[role] = roleStaleAfterMs(n, intervalMs);
+}
+
+bool roleFresh(const RoleFreshness& f, Role role, uint32_t nowMs) {
+  if (role >= ROLE_COUNT || !f.have[role]) return false;
+  return (uint32_t)(nowMs - f.atMs[role]) < f.staleAfterMs[role];
+}
+
 }  // namespace sensoregg_gatt

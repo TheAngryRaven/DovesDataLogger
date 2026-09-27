@@ -1371,9 +1371,14 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   subsystem 1) and is not paid at all while streaming. GATT bring-up
   (blocking discovery/reads) runs in the Bluefruit callback task — the
   one documented deviation from "callbacks only copy"; the notify data
-  plane keeps the copy-only frame-ring discipline. Degradations while
-  streaming: `tcFault` reads false (frames carry no MCP STATUS),
-  `protoVersion`/`pairingFlag` hold their last beacon values.
+  plane keeps the copy-only frame-ring discipline. **Committing the
+  stream clears the beacon-only fields** (temps NaN, battery 0xFF,
+  `tcFault`/pairing flag false — frames carry no MCP STATUS or pairing
+  bit; only `protoVersion` keeps its beacon value), and each value is
+  live only while **its own channel** keeps arriving
+  (`sensoregg_gatt::RoleFreshness`: 2 × the frame's n × interval,
+  floored at the 1 s rule, capped at 60 s) — the shared arrival stamp
+  alone would let any channel's traffic hold another's value.
 - **Scanner robustness (bench-proven, do not remove)**: (1)
   `Scanner.filterMSD(0xFFFF)` rejects ambient packets INLINE — Bluefruit
   self-resumes filtered reports, while an accepted report pauses scanning

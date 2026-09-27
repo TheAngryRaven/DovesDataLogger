@@ -177,6 +177,14 @@ static sensoregg_gatt::PodDescriptor eggPod;
 static int8_t eggRoleIdx[sensoregg_gatt::ROLE_COUNT] = {-1, -1, -1, -1};
 static int8_t eggFastestIdx = 0;  // whose frame seq feeds the zombie monitor
 static sensoregg_gatt::ClockFit eggClockFit;
+// Stream surface bookkeeping (plan 0018 review, E3). eggReadingFromGatt
+// is true while the stream was the last writer of eggReading — then
+// every value accessor is additionally gated on ITS OWN role's receive
+// stamp (eggRoleFresh), because the shared eggRxMs is kept fresh by any
+// channel's frames. A beacon parse clears it (the beacon rewrites the
+// whole Reading at once, so the plain 1 s rule is exact there).
+static bool eggReadingFromGatt = false;
+static sensoregg_gatt::RoleFreshness eggRoleFresh;
 
 // RACE-GATED SCANNER (plan 0012). The scanner's 40-of-every-90 ms radio
 // claim is only paid while a race session is running — the one time the EGT
@@ -520,6 +528,7 @@ void SENSOREGG_LOOP() {
     sensoregg_protocol::Reading r;
     if (sensoregg_protocol::parsePayload(local, localLen, r)) {
       eggReading = r;
+      eggReadingFromGatt = false;
       eggRxMs = atMs;
       eggHaveReading = true;
       sensoregg_protocol::seqMonitorFeed(eggSeqMon, r.sequence, atMs);
@@ -616,6 +625,13 @@ void SENSOREGG_LOOP() {
       if (committed) eggLinkState = EGG_LINK_STREAMING;
       taskEXIT_CRITICAL();
       if (committed) {
+        // Start the stream from a clean surface: nothing a beacon left
+        // behind (tcFault, pairing flag, an aux/battery value the pod
+        // may never stream) may be held under a fresh frame stamp.
+        sensoregg_gatt::readingResetForStream(eggReading);
+        sensoregg_gatt::roleFreshnessReset(eggRoleFresh);
+        eggSeqMon = sensoregg_protocol::SeqMonitor();
+        eggReadingFromGatt = true;
         debug(F("SensorEgg: GATT link up — fw "));
         debug(eggPod.fwMajor);
         debug(F("."));
@@ -671,18 +687,28 @@ void SENSOREGG_LOOP() {
 
     const int16_t rawLast = f.raw[f.n - 1];
     const float real = sensoregg_gatt::sampleToReal(rawLast, eggPod.ch[chIdx]);
+    int8_t role = -1;
     if (chIdx == eggRoleIdx[sensoregg_gatt::ROLE_EGT]) {
       eggReading.egtC = real;
+      role = sensoregg_gatt::ROLE_EGT;
     } else if (chIdx == eggRoleIdx[sensoregg_gatt::ROLE_CJ]) {
       eggReading.junctionC = real;
+      role = sensoregg_gatt::ROLE_CJ;
     } else if (chIdx == eggRoleIdx[sensoregg_gatt::ROLE_AUX]) {
       eggReading.auxC = real;
+      role = sensoregg_gatt::ROLE_AUX;
     } else if (chIdx == eggRoleIdx[sensoregg_gatt::ROLE_BATT]) {
       // Ratio channel is whole percent (scale 1.0) — route the raw,
       // sentinel/out-of-range -> the surface's 0xFF "unknown".
       eggReading.battery = (rawLast < 0 || rawLast > 100)
                                ? (uint8_t)0xFF
                                : (uint8_t)rawLast;
+      role = sensoregg_gatt::ROLE_BATT;
+    }
+    if (role >= 0) {
+      sensoregg_gatt::roleFreshnessStamp(eggRoleFresh,
+                                         (sensoregg_gatt::Role)role, atMs,
+                                         f.n, f.intervalMs);
     }
     eggReading.sequence = f.seq;  // display: the stream's own counter
     // Zombie detection feeds on the FASTEST channel's frame seq only —
@@ -805,6 +831,16 @@ void SENSOREGG_LOOP() {
 // DATA SURFACE
 ///////////////////////////////////////////
 
+// Per-role gate on top of the link-level rule: while the stream was the
+// last writer, a value is live only while its own channel is (E3).
+// Takes a plain uint8_t: Arduino's auto-prototype generator places this
+// signature above the includes, where sensoregg_gatt::Role is unknown.
+static bool eggRoleLive(uint8_t role) {
+  return !eggReadingFromGatt ||
+         sensoregg_gatt::roleFresh(eggRoleFresh, (sensoregg_gatt::Role)role,
+                                   millis());
+}
+
 bool sensoreggLinkUp() {
   return eggHaveReading && sensoregg_protocol::isFresh(eggRxMs, millis());
 }
@@ -814,26 +850,38 @@ float sensoreggEgtC() {
   // link still yields NaN when the egg itself sent the invalid sentinel
   // OR when the egg's app has hung (radio beaconing a frozen payload —
   // a flat line must never masquerade as data).
-  if (!sensoreggLinkUp() || sensoreggAppHung()) return NAN;
+  if (!sensoreggLinkUp() || sensoreggAppHung() ||
+      !eggRoleLive(sensoregg_gatt::ROLE_EGT)) {
+    return NAN;
+  }
   return eggReading.egtC;
 }
 
 float sensoreggJunctionC() {
-  if (!sensoreggLinkUp() || sensoreggAppHung()) return NAN;
+  if (!sensoreggLinkUp() || sensoreggAppHung() ||
+      !eggRoleLive(sensoregg_gatt::ROLE_CJ)) {
+    return NAN;
+  }
   return eggReading.junctionC;
 }
 
 float sensoreggAuxC() {
   // Same gating as the EGT: stale link or hung app -> NaN. Also NaN when
   // the egg is v1 (no aux field) or its divider reported the sentinel.
-  if (!sensoreggLinkUp() || sensoreggAppHung()) return NAN;
+  if (!sensoreggLinkUp() || sensoreggAppHung() ||
+      !eggRoleLive(sensoregg_gatt::ROLE_AUX)) {
+    return NAN;
+  }
   return eggReading.auxC;
 }
 
 uint8_t sensoreggBatteryPct() {
   // 0xFF = unknown: stale/hung link, v1 stub, or the egg's own
   // no-pack-fitted gate. Never report a stale percent as current.
-  if (!sensoreggLinkUp() || sensoreggAppHung()) return 0xFF;
+  if (!sensoreggLinkUp() || sensoreggAppHung() ||
+      !eggRoleLive(sensoregg_gatt::ROLE_BATT)) {
+    return 0xFF;
+  }
   return eggReading.battery;
 }
 

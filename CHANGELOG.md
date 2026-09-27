@@ -62,6 +62,17 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   session or charging park. The logger now drops such a late connection
   the moment it arrives, and ignores the disconnect of a connection it
   never adopted.
+- **SensorEgg GATT stream no longer holds stale values** (plan 0018
+  review). Fields only the beacon carries were kept from the last beacon
+  while the stream's frames kept the link "fresh": a thermocouple fault
+  seen once could read `*TC FAULT*` for the whole session, and a pod
+  without an intake-air channel logged a flat line into `Temp2`. And
+  since frames from any channel kept the link alive, an EGT channel that
+  stopped while cold-junction frames continued left EGT frozen. Starting
+  the stream now clears those fields, and every value goes `nan`/`---`
+  as soon as its own channel stops arriving (the 1 s rule for EGT/CJ; a
+  slow channel gets one frame of slack at its own rate, e.g. 2 s for a
+  1 s intake-air channel).
 
 ### Added
 - **SensorEgg GATT link** (plan 0018): a paired egg is no longer just

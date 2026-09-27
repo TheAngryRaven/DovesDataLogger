@@ -33,11 +33,18 @@
 // the link for transfers and shutdown. While streaming, the scanner's
 // 44% duty is not paid at all.
 //
-// GATT DEGRADATIONS (documented, deliberate): Sample frames carry no
-// MCP STATUS, so sensoreggTcFault() reads false while streaming (an
-// open probe still shows as sentinel -> NaN -> '---', the same visible
-// outcome); sensoreggProtoVersion()/sensoreggPairingFlag() hold their
-// last beacon values.
+// WHAT THE STREAM REPORTS (plan 0018 review fixes): committing the
+// stream CLEARS every beacon-only field rather than holding it —
+// temperatures NaN and battery 0xFF until their own channel's first
+// frame, tcFault and the pairing flag false (Sample frames carry no MCP
+// STATUS and no pairing bit; an open probe still shows as sentinel ->
+// NaN -> '---', the same visible outcome). Each value is then live only
+// while ITS OWN channel keeps arriving (per-role stamps, staleness =
+// the channel's frame cadence with one frame of slack, floored at the
+// 1 s rule) — so an unmapped role (a pod with no IAT) stays NaN, and an
+// EGT channel that stops while CJ continues goes NaN. Only
+// sensoreggProtoVersion() keeps its last beacon value (it names the
+// egg's beacon firmware).
 //
 // PAIRING (plan 0017): runtime MAC filter, persisted as the
 // "sensoregg_mac" setting ("AA:BB:CC:DD:EE:FF"; empty = unpaired =
@@ -119,7 +126,8 @@ bool sensoreggLinkUp();
 bool sensoreggAppHung();
 
 // Latest EGT / cold junction in degC. NaN when the link is stale OR the
-// egg reported the invalid sentinel (open probe, sensor fault).
+// egg reported the invalid sentinel (open probe, sensor fault), or —
+// on the GATT stream — when that value's own channel has gone stale.
 float sensoreggEgtC();
 float sensoreggJunctionC();
 
@@ -133,7 +141,9 @@ float sensoreggAuxC();
 uint8_t sensoreggBatteryPct();
 
 // True while fresh AND the egg flags a thermocouple fault (open /
-// out-of-range probe, MCP9600 STATUS input-range bit).
+// out-of-range probe, MCP9600 STATUS input-range bit). Beacon-only:
+// always false while the GATT stream is the source (frames carry no
+// STATUS; the fault shows as a NaN EGT instead).
 bool sensoreggTcFault();
 
 // Free-running egg sequence counter from the latest payload (debug).
