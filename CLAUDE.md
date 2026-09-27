@@ -905,7 +905,11 @@ loop()  ~250 Hz
   lock, the one predicate the tree, staging screen and LED search pip
   share, because drag time is epoch ms and the pre-lock date jumps;
   trap/0-60 deliberately NOT in the header — the 25 Hz rows carry speed).
-  Run capture rides `checkForNewLapData()`'s run-count edge; each
+  A finished run is discarded as a **return-road drive** only when it
+  heads >90° from the last recorded run AND traps below
+  `kCruiseTrapRatio` (1.2) × its average speed (a cruise, not a pass) —
+  both, so a real pass is never lost on one signal (`rejectedRuns()`
+  counts them). Run capture rides `checkForNewLapData()`'s run-count edge; each
   completed run AND each fresh STAGED latch re-arms the auto-idle grace
   (an active staging queue never idles out; manual 5 min/5 mph rules
   otherwise apply, with the usual tach promotion). Display: no new
@@ -2075,6 +2079,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | Drag tree flash half-period | 500 ms (3 Hz OLED aliases anything faster) | `drag_tree.h` |
 | Drag stage / launch / abort | ≤1 mph held 1 s / ≥2 mph + rollout / ≤2 mph held 3 s, ≥2 s fix gap, or 2 s wall-clock with no fix (`checkFixLoss`) (silent) | `drag_timer.h` |
 | Drag prove-out | launch must reach 15 mph within 5 s of ET start, else silently abandoned | `drag_timer.h` |
+| Drag return-road gate | discard a finished run heading >90° from the last recorded one AND trapping < 1.2 × its average speed (`kCruiseTrapRatio`) | `drag_timer.h` |
 | Drag time base | Unix epoch ms (`getGpsUnixTimestampMillis()`) — never time-of-day ms (wraps at UTC midnight) | `gps_functions.ino` |
 | Drag distances | 660 / 1000 / 1320 / 2640 / 5280 ft (picker order) | `drag_timer.cpp` |
 | Track JSON coordinate precision | 8 decimals (~1.1 mm) | `track_json.h` |

@@ -436,6 +436,119 @@ TEST_CASE("a slow but real pass proves out and records") {
 // Launch gate (manual staging tree, plan 0016)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Return-road gate (review D7)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Stage at `x0`, then drive BACK down the strip (decreasing x): brisk
+// 3 s acceleration to `cruiseMph`, then hold it. Returns completion.
+bool returnRoadDrive(Strip& s, double x0, double cruiseMph, uint64_t maxMs) {
+  const double vMax = cruiseMph / kFtPerSecToMph;  // ft/s
+  const double a = vMax / 3.0;
+  const uint64_t start = s.now;
+  while (s.now - start < maxMs) {
+    const double tS = (double)(s.now - start) / 1000.0;
+    double x, v;
+    if (tS < 3.0) {
+      x = 0.5 * a * tS * tS;
+      v = a * tS;
+    } else {
+      x = 0.5 * a * 9.0 + vMax * (tS - 3.0);
+      v = vMax;
+    }
+    if (s.fix(x0 - x, v * kFtPerSecToMph)) return true;
+  }
+  return false;
+}
+
+}  // namespace
+
+TEST_CASE("return-road drive after a run is not recorded") {
+  // The car finishes a real pass, stops in the shutdown area, stages
+  // there, then drives the return road back at 25 mph. It clears the
+  // rollout, the 15 mph prove-out and the 660 ft target — a bogus ~20 s
+  // "run" before the gate.
+  Strip s(0);
+  s.standstill(0.0, 2000);
+  REQUIRE(s.launchConstAccel(0.0, 20.0, 15000));
+  REQUIRE(s.t.runs() == 1);
+  const unsigned long realEt = s.t.lastEtMs();
+
+  // Coast on past the stripe and park in the shutdown area.
+  s.standstill(900.0, 2000);
+  REQUIRE(s.t.phase() == Phase::kStaged);
+  CHECK_FALSE(returnRoadDrive(s, 900.0, 25.0, 40000));
+  CHECK(s.t.runs() == 1);
+  CHECK(s.t.rejectedRuns() == 1);
+  CHECK(s.t.lastEtMs() == realEt);
+  CHECK(s.t.bestEtMs() == realEt);
+  CHECK_FALSE(s.t.runActive());
+
+  // Back in the lanes, the next real pass still records.
+  s.standstill(0.0, 2000);
+  REQUIRE(s.t.phase() == Phase::kStaged);
+  CHECK(s.launchConstAccel(0.0, 20.0, 15000));
+  CHECK(s.t.runs() == 2);
+}
+
+TEST_CASE("a slow cruise-profile pass in the strip's direction still records") {
+  // Conservative: the heading test alone never discards a run going the
+  // same way as the last one, however gently it was driven.
+  Strip s(0);
+  s.standstill(0.0, 2000);
+  REQUIRE(s.launchConstAccel(0.0, 20.0, 15000));
+  s.standstill(-900.0, 2000);  // back behind the start line, staged
+  REQUIRE(s.t.phase() == Phase::kStaged);
+  // Same direction as run 1 (increasing x), cruise profile.
+  const double vMax = 25.0 / kFtPerSecToMph;
+  const double a = vMax / 3.0;
+  const uint64_t start = s.now;
+  bool done = false;
+  while (!done && s.now - start < 40000) {
+    const double tS = (double)(s.now - start) / 1000.0;
+    const double x = tS < 3.0 ? 0.5 * a * tS * tS
+                              : 0.5 * a * 9.0 + vMax * (tS - 3.0);
+    const double v = tS < 3.0 ? a * tS : vMax;
+    done = s.fix(-900.0 + x, v * kFtPerSecToMph);
+  }
+  CHECK(done);
+  CHECK(s.t.runs() == 2);
+  CHECK(s.t.rejectedRuns() == 0);
+}
+
+TEST_CASE("a full-effort pass in the opposite direction still records") {
+  // Two-way passes (e.g. wind-averaged top-speed runs) accelerate the
+  // whole way — trap well above average — so heading alone never drops
+  // them.
+  Strip s(0);
+  s.standstill(0.0, 2000);
+  REQUIRE(s.launchConstAccel(0.0, 20.0, 15000));
+  s.standstill(1500.0, 2000);
+  REQUIRE(s.t.phase() == Phase::kStaged);
+  const uint64_t start = s.now;
+  bool done = false;
+  while (!done && s.now - start < 15000) {
+    const double tS = (double)(s.now - start) / 1000.0;
+    done = s.fix(1500.0 - 0.5 * 20.0 * tS * tS, 20.0 * tS * kFtPerSecToMph);
+  }
+  CHECK(done);
+  CHECK(s.t.runs() == 2);
+  CHECK(s.t.rejectedRuns() == 0);
+}
+
+TEST_CASE("the first run of a session is never discarded by the gate") {
+  // No previous heading to compare against: a cruise-profile first run
+  // records (it can only be judged against a later one's direction).
+  Strip s(0);
+  s.standstill(900.0, 2000);
+  REQUIRE(s.t.phase() == Phase::kStaged);
+  CHECK(returnRoadDrive(s, 900.0, 25.0, 40000));
+  CHECK(s.t.runs() == 1);
+  CHECK(s.t.rejectedRuns() == 0);
+}
+
 TEST_CASE("launch disabled: rollout at speed re-arms instead of running") {
   Strip s(0);
   s.t.setLaunchEnabled(false);

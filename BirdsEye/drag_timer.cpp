@@ -2,6 +2,8 @@
 
 #include "haversine.h"
 
+#include <math.h>
+
 namespace drag_timer {
 
 namespace {
@@ -24,6 +26,9 @@ const char* const kDovexNames[kDistanceCount] = {
 };
 
 double lerp(double a, double b, double f) { return a + (b - a) * f; }
+
+constexpr double kPi = 3.14159265358979323846;
+constexpr double kMphPerFtPerSec = 3600.0 / 5280.0;
 }  // namespace
 
 float targetFeet(int idx) {
@@ -52,6 +57,8 @@ void DragTimer::setTarget(int idx) {
   targetIdx_ = idx;
   targetFt_ = kTargetsFt[idx];
   havePrev_ = false;
+  haveRunDir_ = false;
+  rejectedRuns_ = 0;
   runs_ = 0;
   lastEtMs_ = 0;
   lastTrapMph_ = 0.0f;
@@ -162,6 +169,8 @@ bool DragTimer::onFix(double lat, double lng, float speedMph,
           runStartMs_ = (double)gpsTimeMs;
         }
         phase_ = Phase::kLaunched;
+        launchLat_ = anchorLat_;
+        launchLng_ = anchorLng_;
         runDistFt_ = (float)(d - kRolloutFt);  // overshoot past rollout
         provenOut_ = speedMph >= kProveOutMph;
         sixtyCrossed_ = false;
@@ -223,9 +232,28 @@ bool DragTimer::onFix(double lat, double lng, float speedMph,
         const double f = (targetFt_ - distBefore) / stepFt;
         const double tFin = lerp((double)prevTimeMs_, (double)gpsTimeMs, f);
         const float trap = (float)lerp(prevSpeedMph_, speedMph, f);
+        const double etMs = tFin - runStartMs_;
+
+        // Return-road gate (D7): heading back AND cruising -> not a pass.
+        const double cosLat = cos(launchLat_ * kPi / 180.0);
+        const double dirN = lat - launchLat_;
+        const double dirE = (lng - launchLng_) * cosLat;
+        const bool headingBack =
+            haveRunDir_ && (dirN * runDirN_ + dirE * runDirE_) < 0.0;
+        const double avgMph =
+            etMs > 0.0 ? targetFt_ / (etMs / 1000.0) * kMphPerFtPerSec : 0.0;
+        const bool cruising = trap < kCruiseTrapRatio * avgMph;
+        if (headingBack && cruising) {
+          rejectedRuns_++;
+          resetToArmed();
+          break;
+        }
+        haveRunDir_ = true;
+        runDirN_ = dirN;
+        runDirE_ = dirE;
 
         runs_++;
-        lastEtMs_ = (unsigned long)(tFin - runStartMs_ + 0.5);
+        lastEtMs_ = (unsigned long)(etMs + 0.5);
         lastTrapMph_ = trap;
         last0to60Ms_ = run0to60Ms_;
         if (bestEtMs_ == 0 || lastEtMs_ < bestEtMs_) {

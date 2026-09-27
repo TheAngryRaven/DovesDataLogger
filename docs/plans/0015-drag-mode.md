@@ -72,7 +72,8 @@ as a timestamp gap.
   speed; 0 if never reached (short cars on the 1/8). Finish: cumulative
   distance crosses the target → ET and trap both interpolated between the
   straddling fixes; run recorded (count, last/best ET, best-run trap and
-  0–60 snapshot); back to ARMED. There is no FINISHED phase — "re-arm"
+  0–60 snapshot) unless the return-road gate (review D7, below) discards
+  it; back to ARMED. There is no FINISHED phase — "re-arm"
   IS "wait for standstill", which is ARMED. Two aborts, both silent:
   ≤ 2 mph held 3 s before the target (this also self-cancels queue-creep
   phantom launches), and the **prove-out gate** — a launch that fails to
@@ -198,3 +199,23 @@ each, each with a regression test in the pure unit that owns the rule.
   instead of the RPM/speed scale. Plan 0016 had excluded manual drag
   only. The gate is now `led_modes::paceValid(PaceGate)`, pure and
   host-tested, with `hasPaceReference = !dragModeIsActive()`.
+- **D7 — return-road drives recorded as runs.** A car stopped in the
+  shutdown area stages; driving the return road back at 20–30 mph then
+  clears the rollout, the 15 mph prove-out and the target distance, and
+  lands a slow bogus run in the lap history and the DOVEX laps line.
+  Chosen gate: a completed run is discarded (counted in `rejectedRuns()`,
+  never recorded) only when **both** (a) its launch→finish chord points
+  more than 90° from the last *recorded* run's — all passes on a strip
+  run one way, the return road the other — **and** (b) its trap speed
+  is below `kCruiseTrapRatio` (1.2) × its average speed. (b) is the
+  physics of a pass: from a standstill at full effort trap/average is
+  2.0 at constant acceleration and 1.5 at constant power, and stays
+  above ~1.3 even for a car that tops out early on the distance it
+  picked; a drive that settles into a cruise within a few seconds sits
+  near 1.0–1.15. Rejected alternatives: a trap-speed floor (a 206 kart
+  traps ~50 mph and a return road can be driven at 30 — no floor
+  separates them), an ET ceiling per distance (same overlap), and either
+  signal alone (heading alone kills two-way top-speed passes; the ratio
+  alone kills a slow-topping vehicle cruising out the back half of a
+  long distance). Deliberately conservative: the first run of a session
+  (no heading to compare) and every same-direction run are always kept.

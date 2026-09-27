@@ -92,6 +92,26 @@ constexpr uint32_t kProveOutMs  = 5000;
 // to launch; only a real slow reposition trips it.
 constexpr float kRestageFt = 10.0f;
 
+// Return-road rejection (review fix D7). A car stopped in the shutdown
+// area stages, then drives back down the return road at 20-30 mph: it
+// clears the rollout, the prove-out and the target distance, so without
+// this gate it records a slow bogus "run". Two properties separate that
+// drive from any pass, and a completed run is discarded only when BOTH
+// hold — so a real pass is never lost on one signal alone:
+//  1. It heads BACK: its launch->finish chord points more than 90 deg
+//     away from the last recorded run's (all passes on a strip run the
+//     same way; the return road parallels it the other way).
+//  2. It is a CRUISE, not an acceleration: trap speed below
+//     kCruiseTrapRatio x the run's average speed. Any pass from a
+//     standstill at full effort has trap >= ~1.3x average even when
+//     the car tops out early (constant acceleration gives 2.0, constant
+//     power 1.5); a drive that settles at a cruising speed in the first
+//     few seconds sits near 1.0-1.15.
+// Conservative by construction: the first run of a session (no heading
+// to compare against), every run in the strip's direction, and any
+// genuine acceleration in either direction are all kept.
+constexpr float kCruiseTrapRatio = 1.2f;
+
 // Anchor running-mean window (fix count). Averaging shrinks the anchor
 // noise well below a single fix's jitter; the cap keeps it responsive
 // to the re-latch (the mean follows the parked car's drifting fix).
@@ -154,6 +174,9 @@ class DragTimer {
 
   int runs() const { return runs_; }
 
+  // Completed runs discarded by the return-road gate (diagnostic).
+  int rejectedRuns() const { return rejectedRuns_; }
+
   // Live ET while a run is on, 0 otherwise. nowGpsMs lets the display
   // tick between fixes.
   unsigned long currentEtMs(uint64_t nowGpsMs) const;
@@ -211,7 +234,16 @@ class DragTimer {
   bool     slowTracking_ = false;
   uint64_t slowSinceMs_ = 0;
 
+  // Launch point of the live run (the anchor at launch) and the
+  // launch->finish direction of the last RECORDED run, for the
+  // return-road gate. Local flat-earth north/east components; only the
+  // sign of their dot product is used.
+  double   launchLat_ = 0.0, launchLng_ = 0.0;
+  bool     haveRunDir_ = false;
+  double   runDirN_ = 0.0, runDirE_ = 0.0;
+
   // Records.
+  int           rejectedRuns_ = 0;
   int           runs_ = 0;
   unsigned long lastEtMs_ = 0;
   float         lastTrapMph_ = 0.0f;

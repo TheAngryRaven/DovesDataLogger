@@ -41,6 +41,11 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   - Automatic drag runs after the first show the RPM/speed LED bar again
     instead of a single dim centre pixel (a pace display with nothing to
     pace against).
+  - Automatic drag mode no longer records the drive back down the return
+    road as a slow run. A finished "run" is discarded only when it both
+    heads the opposite way to the last recorded run and was driven at a
+    cruise rather than a full-effort acceleration, so real passes —
+    including slow ones — still count.
 - **A soft reboot no longer runs the next boot under a watchdog it can't
   see.** The nRF52 hardware WDT survives `NVIC_SystemReset()` — only a
   pin, brown-out, power-on or System OFF reset clears it — so every
