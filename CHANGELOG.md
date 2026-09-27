@@ -122,6 +122,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   identical to the library's `BETA`, and the sim defaults to `v4.3.0`,
   overridden to `BETA` only for BETA-targeted builds. Comments and docs
   only — no build behavior changes.
+- **CI: the release PR now compiles the release configuration.** The
+  flags-off `compile-stock-arm` job builds both boards (it was Sense
+  only), and on the BETA → master PR it links the release library pin
+  (`v4.3.0`) instead of the library's `BETA` — so that PR compiles
+  exactly what `release.yml` will build (release library, no feature
+  flags, both boards). Before, BETA source met the pinned library and the
+  flags-off non-Sense image for the first time on the tag push.
 
 ## [4.1.0] - 2026-08-24
 
