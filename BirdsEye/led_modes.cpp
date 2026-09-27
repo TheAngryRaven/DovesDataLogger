@@ -127,4 +127,11 @@ void renderSearchPip(uint32_t tMs, Rgb out[kStripCount]) {
   out[pos] = led_frame::kGreen;
 }
 
+bool paceValid(const PaceGate& g) {
+  if (!g.hasPaceReference) return false;
+  if (!g.raceStarted || g.laps < 1) return false;
+  if (g.runMode && !g.runActive) return false;
+  return true;
+}
+
 }  // namespace led_modes

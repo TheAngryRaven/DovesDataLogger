@@ -55,6 +55,24 @@ PacePip pacePip(float paceMsPerM);
 // Render the full 9-px strip: dim white centerline + the pip.
 void renderPace(float paceMsPerM, led_frame::Rgb out[led_frame::kStripCount]);
 
+// Whether the strip should show the pace pip at all (else it falls
+// through to the RPM/speed scale). Needs a started race with a completed
+// lap/run to pace against, a run in progress in the run-based modes
+// (sprint, drag — between runs there is nothing to pace), AND a mode
+// that actually HAS a pace reference. Drag has none (its pace accessor
+// is hard-wired 0.0), so every drag run — automatic or manual — gets
+// the scale; before this was a pure function, only manual drag was
+// excluded and automatic runs 2+ showed nothing but the dim centerline
+// (review D6).
+struct PaceGate {
+  bool raceStarted = false;
+  int  laps = 0;                 // completed laps / runs
+  bool runMode = false;          // sprint or drag
+  bool runActive = false;        // meaningful only in runMode
+  bool hasPaceReference = true;  // false in drag mode
+};
+bool paceValid(const PaceGate& g);
+
 // ---- Generic scale (RPM now, temps later) ------------------------------
 
 struct ScaleSpec {

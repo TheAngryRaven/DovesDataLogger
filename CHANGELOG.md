@@ -38,6 +38,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   - Leaving manual drag mode with the Select hold now stops a paired
     Insta360 recording, the same as Stop Logging does. It used to keep
     recording after the session ended.
+  - Automatic drag runs after the first show the RPM/speed LED bar again
+    instead of a single dim centre pixel (a pace display with nothing to
+    pace against).
 - **A soft reboot no longer runs the next boot under a watchdog it can't
   see.** The nRF52 hardware WDT survives `NVIC_SystemReset()` — only a
   pin, brown-out, power-on or System OFF reset clears it — so every

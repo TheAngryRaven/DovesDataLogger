@@ -142,7 +142,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `loop_profile.{h,cpp}` | Main-loop CPU accounting: per-section tick accumulation, saturating (never wrapping — a uint32 of DWT ticks is only ~67 s), and the once-a-second rollup into shares of wall time, loop rate, mean and worst iteration, plus measured idle (`SLP`). **Two clocks on purpose**: durations in TICKS with `ticksPerUs` supplied at rollup (so a sub-microsecond section is not quantised to zero), but the WINDOW closed on `millis()` — DWT counts cycles and stops when the core halts, and using it as a wall clock inflated the very first hardware reading. Board-portable by construction — the nRF5340 comparison needs the same instrument |
 | `local_time.{h,cpp}` | UTC + a fixed signed minute offset → local wall clock (4-digit year, correct month/year/leap rollover both ways) + the `isNight()` window test. **No DST, and NOTHING logged goes through it** — saved data stays UTC (subsystem 17) |
 | `led_frame.{h,cpp}` | NeoPixel pixel layout (11 px: 2 status + 9-px strip), `Rgb`/`Frame` PODs, and **`applyCap()` — the single global-brightness choke point** (post-condition: no channel exceeds the cap) |
-| `led_modes.{h,cpp}` | Strip modes + status actions: pace pip math (ms/m, slower = left/red), generic `ScaleSpec` left-fill (RPM red past halfway, speed with no red band at all), the `StatusAction` threshold/hysteresis/flash table, and `flashOn()` — the ONE definition of flash phase, shared with `led_status` |
+| `led_modes.{h,cpp}` | Strip modes + status actions: pace pip math (ms/m, slower = left/red) + `paceValid()` (when the pip shows at all), generic `ScaleSpec` left-fill (RPM red past halfway, speed with no red band at all), the `StatusAction` threshold/hysteresis/flash table, and `flashOn()` — the ONE definition of flash phase, shared with `led_status` |
 | `led_status.{h,cpp}` | The eight assignable status-LED modes (subsystem 16): the mode enum + strict name parser that the `led_status_left`/`led_status_right` settings store, the GPS and camera readiness ladders, and `evalMode()` — which delegates every threshold mode to `led_modes::evalStatus` rather than re-implementing hysteresis. `Inputs.eggSupported` is why an `egt` LED is dark on a stock build instead of a permanent solid blue |
 | `led_animations.{h,cpp}` | Boot + purple-sector animations as pure functions of `(tMs, seed)` — hash-based sparkles, no rand()/millis(), golden-testable |
 | `sector_purple.{h,cpp}` | The lap/sector CLOSE-EDGE monitor (the name predates half its job): open-time best snapshots + a derived S3 defeat the library's lap-line `updateBestSectors()` race, and the same trick one level up defeats it for `getBestLapTime()`. Emits which sector or lap just closed, its verdict **against the last recorded one** (not the best — that only ever answers purple or red), and the two purple flags. No purple on lap 1 |
@@ -912,7 +912,8 @@ loop()  ~250 Hz
   rotation pages — the Current Lap page shows live ET / last ET +
   `trap`/`0-60` subtext / `*staged*`; the Pace page becomes the live 0-60
   readout; the Best Lap page adds the best run's trap/0-60; the LED pace
-  pip is suppressed between runs like sprint.
+  pip never shows in drag (no pace reference — every run, automatic or
+  manual, gets the RPM/speed scale; `led_modes::paceValid`).
 - **Manual drag mode (plan 0016)**: the Manual row runs the same physics
   behind a **christmas tree**. The host-tested `drag_tree` unit is the
   ONE sequencer driving both outputs: LED strip `----w----` (staged
@@ -1599,8 +1600,10 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   2. **No GPS lock** (`!(gpsData.fix && gpsData.timeValid)` — the
      log-file-creation gate) → green **search pip** bouncing end-to-end
      (`renderSearchPip`, 1.6 s round-trip triangle wave).
-  3. **Pace valid** (`activeTimerRaceStarted() && laps >= 1 && !(sprint
-     && between-runs)`, mirroring the OLED pace page) → the **pace
+  3. **Pace valid** (`led_modes::paceValid`, host-tested:
+     `activeTimerRaceStarted() && laps >= 1 && !(sprint/drag &&
+     between-runs)` and never in drag, which has no pace reference;
+     mirroring the OLED pace page) → the **pace
      pip**: `activeTimerPaceDifference()` is **ms per meter**, positive
      = slower; full deflection ±1.0 ms/m (`kPaceFullScaleMsPerM`,
      0.25/pixel), ±0.125 deadband = dim-white centerline only. Slower =

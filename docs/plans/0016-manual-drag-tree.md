@@ -119,7 +119,9 @@ their priority above the whole branch. During the run (`kRunning`) the
 arm goes inactive and the normal RPM/speed scale takes over;
 `paceValid` gains `!dragManualActive()` so manual runs 2+ get the scale
 instead of a meaningless centered 0.0-pace pip (constant false for every
-other mode — auto unchanged).
+other mode — auto unchanged). *Superseded by review fix D6 (plan 0015):
+automatic drag had the same problem, so the exclusion is now all of drag
+mode, in the host-tested `led_modes::paceValid`.*
 
 ## Menu
 

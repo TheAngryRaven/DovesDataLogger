@@ -161,7 +161,8 @@ still ends ~8 min after its last movement. The engine-aware sprint reset in
   `*waiting*` between runs; the Best Lap page adds a best-run
   `trap / 0-60` subtext; the Pace page shows the live 0–60 status during a
   run instead of a meaningless +0.00 pace. The LED pace pip is suppressed
-  between runs exactly like sprint.
+  between runs exactly like sprint (and, since review fix D6, during runs
+  too — drag has no pace reference).
 - No settings persistence for the distance choice — the picker is two
   presses, and a stale remembered distance is worse than none.
 
@@ -190,3 +191,10 @@ each, each with a regression test in the pure unit that owns the rule.
   grace and always clears the timer, and `advance()` holds the whole
   grace/reset/hold sequence the sketch used to inline — host-tested,
   including the creep→re-stage regression and millis wrap.
+- **D6 — automatic runs 2+ showed only the dim centerline.** The strip's
+  `paceValid` turned true once a run existed and a new one was live,
+  and drag's pace accessor is hard-wired 0.0 — so from the second run on
+  the pass got the pace pip parked in its deadband (one dim pixel)
+  instead of the RPM/speed scale. Plan 0016 had excluded manual drag
+  only. The gate is now `led_modes::paceValid(PaceGate)`, pure and
+  host-tested, with `hasPaceReference = !dragModeIsActive()`.

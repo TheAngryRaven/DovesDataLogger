@@ -379,3 +379,42 @@ TEST_CASE("evalStatus treats a new Source tag like any other non-kNone") {
     CHECK(s1.active == s2.active);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Pace gate (review D6)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("paceValid: circuit paces once a lap exists") {
+  led_modes::PaceGate g;
+  g.raceStarted = true;
+  g.laps = 0;
+  CHECK_FALSE(led_modes::paceValid(g));
+  g.laps = 1;
+  CHECK(led_modes::paceValid(g));
+  g.raceStarted = false;
+  CHECK_FALSE(led_modes::paceValid(g));
+}
+
+TEST_CASE("paceValid: sprint paces only during a run") {
+  led_modes::PaceGate g;
+  g.raceStarted = true;
+  g.laps = 2;
+  g.runMode = true;
+  g.runActive = false;
+  CHECK_FALSE(led_modes::paceValid(g));
+  g.runActive = true;
+  CHECK(led_modes::paceValid(g));
+}
+
+TEST_CASE("paceValid: drag never paces, automatic runs 2+ included") {
+  // Regression: automatic drag run 2 (laps >= 1, run active) used to
+  // show the pace pip for a pace delta hard-wired to 0 — just the dim
+  // centerline — because only MANUAL drag was excluded.
+  led_modes::PaceGate g;
+  g.raceStarted = true;
+  g.laps = 1;
+  g.runMode = true;
+  g.runActive = true;
+  g.hasPaceReference = false;
+  CHECK_FALSE(led_modes::paceValid(g));
+}

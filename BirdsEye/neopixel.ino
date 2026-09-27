@@ -402,16 +402,16 @@ void NEOPIXEL_LOOP() {
           // RPM/speed arms below take over for the pass.
           drag_tree::renderStrip(dragTreeStage(), now, stripPx);
         } else {
-          const bool paceValid =
-              activeTimerRaceStarted() && activeTimerLaps() >= 1 &&
-              !((sprintModeIsActive() || dragModeIsActive()) &&
-                !activeTimerRunActive()) &&
-              // Manual drag has no reference to pace against (the pace
-              // accessor is hardwired 0.0) — suppress the centered pip
-              // so runs 2+ get the RPM/speed scale like run 1. Constant
-              // false for auto drag/sprint/circuit, so nothing changes.
-              !dragManualActive();
-          if (paceValid) {
+          led_modes::PaceGate pg;
+          pg.raceStarted = activeTimerRaceStarted();
+          pg.laps = activeTimerLaps();
+          pg.runMode = sprintModeIsActive() || dragModeIsActive();
+          pg.runActive = activeTimerRunActive();
+          // Drag has no reference to pace against (the pace accessor is
+          // hard-wired 0.0) — automatic AND manual, so every run gets
+          // the RPM/speed scale instead of a lone centerline (review D6).
+          pg.hasPaceReference = !dragModeIsActive();
+          if (led_modes::paceValid(pg)) {
             led_modes::renderPace(activeTimerPaceDifference(), stripPx);
           } else if (raceEntryCause == RACE_ENTRY_TACH) {
             const led_modes::ScaleSpec rpmSpec = {
