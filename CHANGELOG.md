@@ -44,6 +44,15 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   (FAULT, no erase offer), and a volume that mounts on the retry boots
   normally. The recovered-on-probe path also now records the active SPI
   clock it had been leaving at 0.
+- **The long SD walks feed the watchdog.** Building the track list opens
+  and JSON-parses every file under `/TRACKS` and `/TRACKS/SPRINT` (up to
+  200, 8 KB each, at the 2 MHz SPI clock) in one call; it ran unfed, so
+  a large track set or a slow card on a soft-reset boot — or right after
+  a BLE track upload/delete — could outlast the ~4 s WDT and reset the
+  device mid-SD-read, the same wedge the carried-over-WDT fix above
+  closes. The track scan now feeds it per file, as do the boot settings
+  default check (one file round trip per key), the replay file browser's
+  root walk, and the OTA staged-image CRC read-back.
 
 ### Added
 - **SensorEgg GATT link** (plan 0018): a paired egg is no longer just

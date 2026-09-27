@@ -1000,7 +1000,11 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   `captureBootWakeCause()`): if `NRF_WDT->RUNSTATUS` says running it
   pets and sets `wdtCarriedOver`; `setup()` pets between every slow
   step (display delays, each `SD.begin()` attempt, the probe settle,
-  GPS probe, camera/egg/strip init) — no-ops on a clean boot; and
+  GPS probe, camera/egg/strip init) — no-ops on a clean boot — and
+  **inside every unbounded SD walk** (the track-directory scan, the
+  settings default check, the replay browser's root walk, BLE
+  `LIST`/`TLIST`, the OTA read-back), which run at boot or under the
+  armed WDT and scale with what is on the card; and
   `wdtSetup()` skips the (locked) configuration when one is already
   running. A boot's cause is on the debug line (`Boot cause: SRST`) and
   the SD format / FAULT pages.

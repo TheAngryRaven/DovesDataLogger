@@ -270,7 +270,8 @@ the last resort. That watchdog **survives a soft reset** (only a pin,
 brown-out, power-on or System OFF reset clears it), so every
 firmware-initiated reboot hands the next boot a running WDT: `setup()`
 checks for one first thing (`wdtBootCheck()`) and feeds it between the
-slow boot steps, and `wdtSetup()` leaves a running one alone — its
+slow boot steps (and per entry inside the SD walks that scale with the
+card's contents, like the track-directory scan), and `wdtSetup()` leaves a running one alone — its
 registers are locked.
 
 ### Shutdown is System OFF, wake is a reboot

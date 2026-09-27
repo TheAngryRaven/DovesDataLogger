@@ -216,6 +216,10 @@ static void ensureDefaultSettings() {
 
   char buf[48];
   for (int i = 0; i < (int)(sizeof(defaults) / sizeof(defaults[0])); i++) {
+    // Every key is a full open + read + parse of the file (and a
+    // read-modify-write when missing) — ~25 round trips at 2 MHz inside
+    // SETTINGS_SETUP(), with a WDT carried over a soft reset counting.
+    wdtPet();
     if (!getSetting(defaults[i].key, buf, sizeof(buf))) {
       setSetting(defaults[i].key, defaults[i].defaultValue);
     }

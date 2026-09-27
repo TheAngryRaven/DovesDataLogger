@@ -390,6 +390,13 @@ bool scanTrackDir(const char* folder, uint8_t kind) {
 
   // Loop through each file in the directory
   while (file.openNext(&trackDir, O_READ)) {
+    // Fed per entry: up to MAX_LOCATIONS files, each an 8 KB read + a full
+    // ArduinoJson parse at the 2 MHz SPI clock, all inside one call. At boot
+    // a WDT carried over a soft reset is already counting (see
+    // wdtBootCheck), and after a BLE track upload/delete the armed ~4 s WDT
+    // is — a big track set or a slow card outlasts it, and the reset lands
+    // mid-SD-read, which is exactly how a card gets wedged.
+    wdtPet();
     if (numOfLocations >= MAX_LOCATIONS) {
       file.close();
       break;
