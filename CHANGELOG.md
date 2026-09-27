@@ -54,6 +54,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   "connected" state with no connection handle is reconciled back to the
   retry path, and a ready flag left over from an earlier bring-up can't
   be consumed by a later one.
+- **Shutdown and BLE transfer mode can no longer leave a SensorEgg link
+  up** (plan 0018 review). If the egg connection was completing inside
+  the radio at the moment the logger went to sleep or entered transfer
+  mode, the pending-connect cancel was a no-op and the link finished
+  coming up afterwards — occupying the radio for the whole transfer
+  session or charging park. The logger now drops such a late connection
+  the moment it arrives, and ignores the disconnect of a connection it
+  never adopted.
 
 ### Added
 - **SensorEgg GATT link** (plan 0018): a paired egg is no longer just

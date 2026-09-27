@@ -237,3 +237,16 @@ TEST_CASE("sensoregg_gatt - an orphaned connected state falls back to BACKOFF") 
     CHECK(linkReconcileOrphan(LINK_BACKOFF, false) == LINK_BACKOFF);
     CHECK(linkReconcileOrphan(LINK_CONNECTING, false) == LINK_CONNECTING);
 }
+
+TEST_CASE("sensoregg_gatt - the connect callback keeps only a wanted connect") {
+    CHECK(linkAcceptCentralConnect(LINK_CONNECTING, false, true));
+    // E2: SENSOREGG_SLEEP() ran while the SoftDevice was establishing
+    // the link (state already IDLE, sleep gate up).
+    CHECK(!linkAcceptCentralConnect(LINK_IDLE, true, false));
+    CHECK(!linkAcceptCentralConnect(LINK_CONNECTING, true, true));
+    // Gate dropped (race over / unpaired) while connecting.
+    CHECK(!linkAcceptCentralConnect(LINK_CONNECTING, false, false));
+    // The connect timeout already gave up and moved to BACKOFF.
+    CHECK(!linkAcceptCentralConnect(LINK_BACKOFF, false, true));
+    CHECK(!linkAcceptCentralConnect(LINK_WAIT_ADV, false, true));
+}

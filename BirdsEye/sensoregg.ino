@@ -321,6 +321,23 @@ static void sensoreggSampleNotifyCb(BLEClientCharacteristic* chr,
 // staging block's comment; plan 0018). Stages raw bytes; the main loop
 // parses and commits. No Serial here — the commit path narrates.
 static void sensoreggCentralConnectCb(uint16_t connHandle) {
+  // A connection we no longer want (SENSOREGG_SLEEP() ran while the
+  // SoftDevice was already establishing it, or the connect timeout gave
+  // up first) is dropped on arrival — otherwise it would come up in a
+  // transfer session / the charging park where nothing reconciles it.
+  // The handle is never adopted (the disconnect callback ignores a
+  // handle that is not eggConnHandle); a CONNECTING state whose gate
+  // dropped is retired to BACKOFF rather than left for the 10 s timeout.
+  if (!sensoregg_gatt::linkAcceptCentralConnect(
+          (sensoregg_gatt::LinkState)eggLinkState, eggSleeping,
+          eggLinkWanted())) {
+    Bluefruit.disconnect(connHandle);
+    if (eggLinkState == EGG_LINK_CONNECTING) {
+      eggLinkState = EGG_LINK_BACKOFF;
+      eggLinkEventMs = millis();
+    }
+    return;
+  }
   // A ready/failed flag still up from an EARLIER bring-up (consumed by
   // nobody — e.g. staged just before a sleep) must never pair with this
   // link's staging buffers. Clear both before touching the buffers.
@@ -365,8 +382,11 @@ static void sensoreggCentralConnectCb(uint16_t connHandle) {
 
 static void sensoreggCentralDisconnectCb(uint16_t connHandle,
                                          uint8_t reason) {
-  (void)connHandle;
   (void)reason;
+  // Only OUR link's drop moves the state machine. A connection the
+  // connect callback refused (above) was never adopted; its disconnect
+  // must not knock a sleeping/idle machine into BACKOFF.
+  if (connHandle != eggConnHandle) return;
   eggConnHandle = BLE_CONN_HANDLE_INVALID;
   eggLinkState = EGG_LINK_BACKOFF;
   eggLinkEventMs = millis();
@@ -460,7 +480,10 @@ void SENSOREGG_SLEEP() {
   // live link — this covers BLE transfer mode (BLE_SETUP calls this
   // first) and shutdown (bleShutdownQuiesce()'s bounded settle runs
   // after us and gives the disconnect airtime; its own disconnect only
-  // handles the peripheral handle).
+  // handles the peripheral handle). A link the SoftDevice already
+  // established but whose connect callback has not run yet is invisible
+  // here (no handle, connect_cancel() a no-op) — the callback itself
+  // refuses it on arrival (linkAcceptCentralConnect sees eggSleeping).
   if (eggLinkState == EGG_LINK_CONNECTING) {
     sd_ble_gap_connect_cancel();
   }

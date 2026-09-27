@@ -151,4 +151,8 @@ LinkState linkReconcileOrphan(LinkState state, bool handleValid) {
   return state;
 }
 
+bool linkAcceptCentralConnect(LinkState state, bool sleeping, bool wanted) {
+  return state == LINK_CONNECTING && !sleeping && wanted;
+}
+
 }  // namespace sensoregg_gatt

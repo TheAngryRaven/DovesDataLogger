@@ -154,3 +154,13 @@ host-tested; the sketch keeps only the critical sections and radio calls.
   BACKOFF every loop; the connect callback clears any stale
   ready/failed flag before touching the staging buffers, and
   `SENSOREGG_SLEEP()` clears them too.
+- **E2 — a link completing across `SENSOREGG_SLEEP()`.** With the
+  SoftDevice's CONNECTED raised but the deferred connect callback not
+  yet run, sleep saw no handle and `sd_ble_gap_connect_cancel()` was a
+  no-op; the callback then brought the link up inside a transfer
+  session or the charging park. The connect callback now asks
+  `linkAcceptCentralConnect()` (state CONNECTING, not sleeping, still
+  wanted) and disconnects the handle otherwise — which also covers a
+  connect that lands after the 10 s timeout gave up. The disconnect
+  callback ignores handles other than `eggConnHandle`, so refusing a
+  connection cannot knock the machine into BACKOFF.

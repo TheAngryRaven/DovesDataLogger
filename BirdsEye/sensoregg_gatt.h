@@ -149,4 +149,16 @@ bool linkMayCommitStreaming(LinkState state, bool handleValid);
 // over. Every other state is returned unchanged.
 LinkState linkReconcileOrphan(LinkState state, bool handleValid);
 
+// Should the central connect callback keep the connection it was just
+// handed? Only when it is the connect we asked for (state CONNECTING)
+// and the link is still wanted and the radio is not asleep. The
+// SoftDevice can raise CONNECTED after SENSOREGG_SLEEP() already ran
+// (its connect_cancel() is a no-op once the link exists, and the
+// handle was not yet known to disconnect) or after the connect timeout
+// gave up; accepting then would bring the link up during a transfer
+// session / the charging park, where nothing reconciles it. A false
+// answer means: disconnect that handle without adopting it (a
+// CONNECTING state is retired to BACKOFF; IDLE/BACKOFF stay put).
+bool linkAcceptCentralConnect(LinkState state, bool sleeping, bool wanted);
+
 }  // namespace sensoregg_gatt
