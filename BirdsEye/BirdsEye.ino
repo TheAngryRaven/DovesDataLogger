@@ -97,6 +97,7 @@
 #include "dovex_header.h"
 #include "drag_timer.h"
 #include "drag_tree.h"
+#include "gps_time.h"  // epochNowMs — the green-light stamp (drag tree RT)
 #include "gps_functions.h"
 #include "gps_status_page.h"
 #include "haversine.h"
@@ -473,6 +474,10 @@ volatile bool gpsDataFresh = false;  // Set by PVT callback, cleared by GPS_LOOP
 // Compare this against a remembered value instead. (gpsFrameCounter is no
 // help: it zeroes every second for the frame-rate maths.)
 volatile uint32_t gpsPvtSequence = 0;
+// millis() when the last PVT arrived — with that PVT's epoch it gives
+// "now" on the epoch clock between fixes (gps_time::epochNowMs). Used to
+// stamp the drag tree's green light (review D4).
+volatile uint32_t gpsPvtArrivalMillis = 0;
 
 // GPS nav-rate target: the rate GPS_RECONFIGURE() (and every wake/recovery
 // path that calls it) re-asserts. Boot starts in status mode (5 Hz +
@@ -1841,14 +1846,18 @@ void dragStagingLoop() {
 
   if (fx.greenEdge) {
     // EPOCH ms, the same clock as runStartEpochMs() — RT is the
-    // difference of the two, so they must never mix time bases.
-    dragGreenEpochMs = getGpsUnixTimestampMillis();
+    // difference of the two, so they must never mix time bases. And
+    // "now" on that clock, not the last fix's time: the green lands up
+    // to a nav period after the last PVT, and stamping it with the
+    // fix's time read every RT 0-40 ms high with jitter (review D4).
+    dragGreenEpochMs = gps_time::epochNowMs(getGpsUnixTimestampMillis(),
+                                            gpsPvtArrivalMillis,
+                                            (uint32_t)millis());
     dragLastRtMs = 0;
   }
   if (fx.runStartEdge) {
-    const uint64_t s = dragTimer->runStartEpochMs();
-    dragLastRtMs =
-        (s > dragGreenEpochMs) ? (unsigned long)(s - dragGreenEpochMs) : 0;
+    dragLastRtMs = drag_tree::reactionTimeMs(dragTimer->runStartEpochMs(),
+                                             dragGreenEpochMs);
   }
   if (fx.consumedButton) {
     resetButtons();  // the press must not also drive displayLoop()

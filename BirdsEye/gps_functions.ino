@@ -221,6 +221,7 @@ void onPVTReceived(UBX_NAV_PVT_data_t *pvt) {
 
   gpsDataFresh = true;
   gpsPvtSequence++;  // monotonic; for consumers that run after GPS_LOOP()
+  gpsPvtArrivalMillis = millis();  // epoch 'now' between fixes (gps_time::epochNowMs)
   gpsFrameCounter++;
 }
 

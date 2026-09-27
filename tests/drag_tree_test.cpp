@@ -4,6 +4,7 @@
 
 #include "doctest.h"
 #include "drag_tree.h"
+#include "gps_time.h"
 #include "led_frame.h"
 
 using drag_tree::Effects;
@@ -423,4 +424,33 @@ TEST_CASE("countdownDigit and stripActive maps") {
   CHECK(drag_tree::stripActive(Stage::kGreen));
   CHECK(drag_tree::stripActive(Stage::kRedLight));
   CHECK_FALSE(drag_tree::stripActive(Stage::kRunning));
+}
+
+// ---------------------------------------------------------------------------
+// Reaction time (review D4)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("reactionTimeMs: run start minus green, clamped") {
+  CHECK(drag_tree::reactionTimeMs(1785077000500ull, 1785077000000ull) == 500u);
+  CHECK(drag_tree::reactionTimeMs(1785077000000ull, 1785077000000ull) == 0u);
+  CHECK(drag_tree::reactionTimeMs(1785077000000ull, 1785077000500ull) == 0u);
+  CHECK(drag_tree::reactionTimeMs(0, 1785077000000ull) == 0u);
+  CHECK(drag_tree::reactionTimeMs(1785077000500ull, 0) == 0u);
+}
+
+TEST_CASE("RT: green stamped at 'now' on the epoch clock, not the last fix") {
+  // The last PVT (epoch E) arrived at host millis 10000; the tree goes
+  // green 35 ms later, between fixes. The driver's rollout crossing is
+  // interpolated at E + 535 by the physics (fix-time accurate). True RT
+  // is 500 ms. Stamping green with the last fix's epoch (the pre-fix
+  // glue) read 535 — high by the sampling phase, 0-40 ms of jitter at
+  // 25 Hz.
+  const uint64_t e = 1785077000000ull;
+  const uint32_t arrival = 10000;
+  const uint32_t greenMillis = arrival + 35;
+  const uint64_t runStart = e + 535;
+
+  const uint64_t green = gps_time::epochNowMs(e, arrival, greenMillis);
+  CHECK(drag_tree::reactionTimeMs(runStart, green) == 500u);
+  CHECK(drag_tree::reactionTimeMs(runStart, e) == 535u);  // the old bias
 }

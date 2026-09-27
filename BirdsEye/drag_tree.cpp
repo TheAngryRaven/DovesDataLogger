@@ -194,4 +194,10 @@ char countdownDigit(Stage st) {
 
 bool stripActive(Stage st) { return st != Stage::kRunning; }
 
+unsigned long reactionTimeMs(uint64_t runStartEpochMs, uint64_t greenEpochMs) {
+  if (runStartEpochMs == 0 || greenEpochMs == 0) return 0;
+  if (runStartEpochMs <= greenEpochMs) return 0;
+  return (unsigned long)(runStartEpochMs - greenEpochMs);
+}
+
 }  // namespace drag_tree

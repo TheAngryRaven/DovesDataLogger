@@ -130,7 +130,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `haversine.{h,cpp}` | Great-circle distance in miles (track proximity) |
 | `idle_policy.{h,cpp}` | Auto-idle session-end decision table (tach 60 s/2 mph vs manual/speed 5 min/5 mph, camera-yield + GPS-lock-hold exception, sprint engine-aware reset) + the promotion of SPEED/MANUAL sessions to TACH rules once the engine fires + the idle `Clock` (3 min grace + idle timer as one struct; `rearmGrace()` — session start, sprint/drag runs, drag stage latches — always clears a running timer too) |
 | `gps_stats.{h,cpp}` | GPS pipeline drop accounting: expected-vs-received PVT window math (exact fractional carry, 1-frame jitter slack, capped credit, rate-switch suppression) feeding the debug-page `Drops` counter |
-| `gps_time.{h,cpp}` | Leap-year/Unix-epoch math, `u64ToDecimalString` |
+| `gps_time.{h,cpp}` | Leap-year/Unix-epoch math, `u64ToDecimalString`, `epochNowMs` (epoch "now" between fixes = last PVT epoch + millis since its arrival) |
 | `gps_validation.{h,cpp}` | PVT sample sanity gate + dtostrf-output check |
 | `dovex_header.{h,cpp}` | DOVEX 1 KB header `format()` / `parse()` |
 | `filename_validator.{h,cpp}` | FAT-safe / traversal-proof check for BLE filenames |
@@ -926,7 +926,10 @@ loop()  ~250 Hz
   FAILED TO LAUNCH; a mid-run physics abort surfaces as RUN ABORTED —
   all three flash the strip red and wait for a button. **RT** = the
   interpolated rollout crossing (`runStartEpochMs()`) minus the green
-  epoch, both Unix epoch ms — display-only (results screen), not in the
+  epoch (`drag_tree::reactionTimeMs`), both Unix epoch ms — the green
+  stamped as "now" via `gps_time::epochNowMs` (last PVT epoch + millis
+  since that PVT arrived, `gpsPvtArrivalMillis`), never the last fix's
+  time, which read RT up to a nav period high — display-only (results screen), not in the
   DOVEX header. The display is **pinned** to `PAGE_DRAG_STAGING` for
   the whole manual session (gpsLockHold construction); presses are
   consumed by `dragStagingLoop()` (the `gpsStatusPageLoop()` slot:

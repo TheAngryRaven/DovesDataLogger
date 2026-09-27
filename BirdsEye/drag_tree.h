@@ -136,6 +136,15 @@ char countdownDigit(Stage st);
 // display's 3 Hz refresh.
 bool flashPhase(uint32_t nowMs);
 
+// Reaction time from two Unix-epoch-ms instants: the physics'
+// interpolated rollout crossing (DragTimer::runStartEpochMs) minus the
+// green-light stamp. 0 when either is missing or the run started before
+// green (cannot happen with the launch gate closed, but a clamp beats
+// an unsigned wrap to ~49 days on the results screen). The green stamp
+// must be taken with gps_time::epochNowMs — "now", not the last fix's
+// time — or RT reads high by up to a nav period (review D4).
+unsigned long reactionTimeMs(uint64_t runStartEpochMs, uint64_t greenEpochMs);
+
 // False only for kRunning: the strip returns to the normal race compose
 // (RPM/speed scale) while the pass is being driven.
 bool stripActive(Stage st);

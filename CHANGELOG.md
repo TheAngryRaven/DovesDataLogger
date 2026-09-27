@@ -31,6 +31,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
     grace did not stop an idle timer that had already started, so slow
     queue creep followed by a re-stage could end the session the moment
     the new grace ran out.
+  - Manual drag reaction time no longer reads 0–40 ms high. The green
+    light was stamped with the last GPS fix's time instead of "now", so
+    RT carried up to a whole GPS update period of error, varying run to
+    run.
 - **A soft reboot no longer runs the next boot under a watchdog it can't
   see.** The nRF52 hardware WDT survives `NVIC_SystemReset()` — only a
   pin, brown-out, power-on or System OFF reset clears it — so every

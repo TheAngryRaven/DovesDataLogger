@@ -172,3 +172,17 @@ each, each with a regression test in the pure unit that owns the rule.
   pure-unit test: the predicate is the one-line conjunction, and the
   point of the fix is that four call sites share it; the sim always
   injects a resolved time, so its goldens are unchanged.
+- **D4 — reaction time read high with jitter.** The green edge was
+  stamped `getGpsUnixTimestampMillis()`, which is the *last fix's* time:
+  the green lands anywhere up to a nav period (40 ms at 25 Hz) after it,
+  so every RT read 0–40 ms high with sampling-phase jitter, while the run
+  start it is subtracted from is interpolated to fix-time accuracy. The
+  PVT callback now records `millis()` at arrival
+  (`gpsPvtArrivalMillis`), the green is stamped
+  `gps_time::epochNowMs(lastEpoch, arrivalMillis, millis())`, and the
+  subtraction is `drag_tree::reactionTimeMs()` — both pure and
+  host-tested. Residual, stated rather than hidden: the receiver's own
+  output latency (fix time → callback) is a small constant the firmware
+  cannot see without a PPS line, so RT still trails by that. The sim's
+  `drag_staging_results` golden moved (RT 0.68 → 0.66 on the same
+  scripted pass) and was regenerated.

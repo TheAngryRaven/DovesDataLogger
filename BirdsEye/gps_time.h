@@ -31,6 +31,18 @@ uint64_t unixTimestampMillis(uint16_t year, uint8_t month, uint8_t day,
                              uint8_t hour, uint8_t minute, uint8_t sec,
                              uint16_t ms);
 
+// "Now" on the Unix-epoch-ms clock, between PVT fixes: the epoch of the
+// last PVT plus the host time elapsed since it ARRIVED (both host times
+// wrap-safe uint32 millis). getGpsUnixTimestampMillis() alone is the
+// last fix's time — up to a whole nav period (40 ms at 25 Hz) stale and
+// jittering with the sampling phase, which is fine for a log row and
+// wrong for stamping an instant like the drag tree's green light
+// (review D4). 0 while no PVT epoch exists. The receiver's own output
+// latency (fix time -> callback) is NOT recoverable without a PPS line,
+// so the result still trails true time by that small constant.
+uint64_t epochNowMs(uint64_t lastPvtEpochMs, uint32_t pvtArrivalMillis,
+                    uint32_t nowMillis);
+
 // Convert an unsigned 64-bit value to a decimal ASCII string.
 // Writes at most 21 chars (20 digits for UINT64_MAX + null terminator).
 // Returns the number of digits written, NOT counting the null terminator.
