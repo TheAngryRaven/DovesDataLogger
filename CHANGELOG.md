@@ -53,6 +53,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   closes. The track scan now feeds it per file, as do the boot settings
   default check (one file round trip per key), the replay file browser's
   root walk, and the OTA staged-image CRC read-back.
+- **`HAS_DEBUG` builds no longer boot-loop without a serial terminal
+  after a soft reset.** The `while (!Serial)` wait at the top of
+  `setup()` never fed the carried-over watchdog, so with nothing
+  attached to the USB port it reset the device every ~4 s. It now feeds
+  the WDT while it waits. Developer builds only — shipped images don't
+  define `HAS_DEBUG`.
 
 ### Added
 - **SensorEgg GATT link** (plan 0018): a paired egg is no longer just

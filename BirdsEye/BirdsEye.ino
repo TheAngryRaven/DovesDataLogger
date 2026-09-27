@@ -1049,7 +1049,10 @@ void setup() {
 
 #ifdef HAS_DEBUG
   Serial.begin(9600);
-  while (!Serial);
+  // Fed while waiting: after a soft reset the carried-over WDT is counting,
+  // and with no terminal attached this wait never ends — unfed, it reset
+  // the device every ~4 s forever.
+  while (!Serial) wdtPet();
 #endif
   wdtPet();
   debug(F("Boot cause: "));
