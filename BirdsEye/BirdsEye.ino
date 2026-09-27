@@ -1863,7 +1863,9 @@ void dragStagingLoop() {
     resetButtons();  // the press must not also drive displayLoop()
   }
   if (fx.exitSession) {
-    endRaceSession();  // clears dragManualMode -> releases the pin
+    // User-initiated: stops a paired camera too, exactly like the
+    // LOGGING STOP confirm. Clears dragManualMode -> releases the pin.
+    endRaceSessionByUser();
     switchToDisplayPage(PAGE_MAIN_MENU);
     resetButtons();
   }
@@ -2039,16 +2041,29 @@ void startRaceSession(RaceEntryCause cause) {
 }
 
 /**
+ * @brief The user's explicit "I'm done": stop the camera recording
+ * immediately (bypassing its stationary+engine-off hold), then end the
+ * session. The ONE path for every user-initiated ender — the LOGGING
+ * STOP confirm and the manual drag Select-hold exit. Two hand-written
+ * copies drifted once: the drag exit called endRaceSession() alone and
+ * left a paired camera recording in the staging lane (review D5).
+ */
+void endRaceSessionByUser() {
+  CAMERA_NOTIFY_SESSION_END();
+  endRaceSession();
+}
+
+/**
  * @brief End the current race session: write DOVEX header, close file,
- * clean up CourseManager, reset state. Used by both checkAutoIdle()
- * and LOGGING_STOP_CONFIRM in display_ui.ino.
+ * clean up CourseManager, reset state. Used by checkAutoIdle() and, via
+ * endRaceSessionByUser(), by the user-initiated enders.
  */
 void endRaceSession() {
   // Deliberately NO camera notification here: for TACH sessions the
   // camera must keep recording through a stationary grid idle — its own
   // stationary-AND-engine-off rule decides the recording stop. The
-  // camera is stopped explicitly where the ender owns it: the manual
-  // stop confirm (display_ui.ino), the manual/speed-session idle timer
+  // camera is stopped explicitly where the ender owns it: the user's
+  // own enders (endRaceSessionByUser()), the manual/speed-session idle timer
   // (checkAutoIdle() calls CAMERA_NOTIFY_SESSION_END() itself before
   // this), and shutdown entry (CAMERA_SLEEP() in enterShutdown()).
 

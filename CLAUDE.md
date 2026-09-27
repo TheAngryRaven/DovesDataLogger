@@ -934,7 +934,9 @@ loop()  ~250 Hz
   the whole manual session (gpsLockHold construction); presses are
   consumed by `dragStagingLoop()` (the `gpsStatusPageLoop()` slot:
   after `readButtons()`, `resetButtons()` on consumption). Exit = hold
-  Select 2 s in any non-running state (`kExitHoldMs`; a held side
+  Select 2 s in any non-running state — through `endRaceSessionByUser()`,
+  the one user-initiated ender shared with the LOGGING STOP confirm
+  (camera notify, then end) (`kExitHoldMs`; a held side
   button disarms it so the reboot combo wins; the pin's only gate is
   `dragManualMode`, cleared in `endRaceSession()`, so every session
   ender releases it). The LED tree renders strip-only via a new arm in

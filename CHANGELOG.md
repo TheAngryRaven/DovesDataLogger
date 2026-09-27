@@ -35,6 +35,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
     light was stamped with the last GPS fix's time instead of "now", so
     RT carried up to a whole GPS update period of error, varying run to
     run.
+  - Leaving manual drag mode with the Select hold now stops a paired
+    Insta360 recording, the same as Stop Logging does. It used to keep
+    recording after the session ended.
 - **A soft reboot no longer runs the next boot under a watchdog it can't
   see.** The nRF52 hardware WDT survives `NVIC_SystemReset()` — only a
   pin, brown-out, power-on or System OFF reset clears it — so every

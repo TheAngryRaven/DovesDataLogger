@@ -186,3 +186,11 @@ each, each with a regression test in the pure unit that owns the rule.
   cannot see without a PPS line, so RT still trails by that. The sim's
   `drag_staging_results` golden moved (RT 0.68 → 0.66 on the same
   scripted pass) and was regenerated.
+- **D5 — the Select-hold exit left a paired camera recording.** The
+  tree's exit effect called `endRaceSession()` alone, which deliberately
+  never touches the camera (a tach session's camera outlives a grid
+  idle); the LOGGING STOP confirm — the other user-initiated ender —
+  notifies the camera first. Both now go through one
+  `endRaceSessionByUser()` (camera notify, then end), so the two can't
+  drift again. Sketch glue with no decision in it, so no pure test; the
+  sim builds and walks the exit path (its camera surface is a stub).

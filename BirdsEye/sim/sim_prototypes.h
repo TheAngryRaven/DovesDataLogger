@@ -84,6 +84,7 @@ unsigned long dragLastReactionMs();
 void trackDetectionLoop();
 void startRaceSession(RaceEntryCause cause);
 void endRaceSession();
+void endRaceSessionByUser();
 void createLapAnythingCourseManager();
 void checkAutoIdle();
 void autoRaceModeCheck();
