@@ -329,3 +329,47 @@ TEST_CASE("sensoregg_gatt - a refused connect request backs off at once") {
     // 10 s connect timeout with the scanner paused.
     CHECK(linkAfterConnectRequest(false) == LINK_BACKOFF);
 }
+
+// ---------------------------------------------------------------------------
+// Frame ring sizing + sustained-drop rule (review fixes 2026-09)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("sensoregg_gatt - the largest legal frame fits the receive slot") {
+    CHECK(kMaxFrameLen == 244);          // ATT_MTU 247 - 3
+    CHECK(kMaxFrameLen == 247 - 3);
+    // And a full-size frame parses.
+    uint8_t buf[kMaxFrameLen] = {0};
+    buf[9] = kMaxSamplesPerFrame;
+    SampleFrame f;
+    CHECK(parseSampleFrame(buf, sizeof(buf), f));
+    CHECK(f.n == kMaxSamplesPerFrame);
+}
+
+TEST_CASE("sensoregg_gatt - one stall's burst of drops never drops the link") {
+    DropMonitor m;
+    CHECK(!dropMonitorUpdate(m, 0, 0));      // first call arms
+    // A 2 s SD stall: the loop comes back once, 10 frames lost.
+    CHECK(!dropMonitorUpdate(m, 10, 2000));
+    // Healthy afterwards: the bad streak resets.
+    CHECK(!dropMonitorUpdate(m, 10, 3000));
+    CHECK(!dropMonitorUpdate(m, 12, 4000));  // one more bad window
+    CHECK(!dropMonitorUpdate(m, 12, 5000));  // clean again
+    CHECK(!dropMonitorUpdate(m, 12, 5999));  // mid-window: no verdict
+}
+
+TEST_CASE("sensoregg_gatt - drops in consecutive windows drop the link once") {
+    DropMonitor m;
+    dropMonitorReset(m, 100, 0);
+    CHECK(!dropMonitorUpdate(m, 101, 1000));  // bad 1
+    CHECK(!dropMonitorUpdate(m, 101, 1500));  // mid-window
+    CHECK(!dropMonitorUpdate(m, 105, 2000));  // bad 2
+    CHECK(dropMonitorUpdate(m, 106, 3000));   // bad 3 -> fail
+    // Re-armed: it takes another full streak to fire again.
+    CHECK(!dropMonitorUpdate(m, 107, 4000));
+    CHECK(!dropMonitorUpdate(m, 108, 5000));
+    CHECK(dropMonitorUpdate(m, 109, 6000));
+    // Wrap-safe window timing across the millis wrap.
+    dropMonitorReset(m, 0, 0xFFFFFF00UL);
+    CHECK(!dropMonitorUpdate(m, 1, 0x00000100UL));  // only 512 ms elapsed
+    CHECK(!dropMonitorUpdate(m, 1, 0x00000400UL));  // window closes, bad 1
+}

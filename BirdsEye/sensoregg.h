@@ -214,3 +214,8 @@ uint8_t sensoreggLinkMode();
 // Live ATT MTU of the egg link (0 when not connected). 247 after a
 // successful exchange; frames are sized to it on the egg side.
 uint16_t sensoreggGattMtu();
+
+// Cumulative notify frames the logger could not keep since boot (ring
+// full, or oversize). Shown on EGG TEST as D<n>; drops in 3 consecutive
+// 1 s windows drop the link so the beacon path takes over.
+uint32_t sensoreggFrameDrops();

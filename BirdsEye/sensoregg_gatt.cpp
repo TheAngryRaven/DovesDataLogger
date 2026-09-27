@@ -159,6 +159,30 @@ LinkState linkAfterConnectRequest(bool accepted) {
   return accepted ? LINK_CONNECTING : LINK_BACKOFF;
 }
 
+void dropMonitorReset(DropMonitor& m, uint32_t totalDrops, uint32_t nowMs) {
+  m.started = true;
+  m.windowStartMs = nowMs;
+  m.dropsAtWindowStart = totalDrops;
+  m.badWindows = 0;
+}
+
+bool dropMonitorUpdate(DropMonitor& m, uint32_t totalDrops, uint32_t nowMs) {
+  if (!m.started) {
+    dropMonitorReset(m, totalDrops, nowMs);
+    return false;
+  }
+  if ((uint32_t)(nowMs - m.windowStartMs) < kDropWindowMs) return false;
+  const bool bad = totalDrops != m.dropsAtWindowStart;
+  m.badWindows = bad ? (uint8_t)(m.badWindows + 1) : (uint8_t)0;
+  m.windowStartMs = nowMs;
+  m.dropsAtWindowStart = totalDrops;
+  if (m.badWindows >= kDropWindowsToFail) {
+    m.badWindows = 0;
+    return true;
+  }
+  return false;
+}
+
 void readingResetForStream(sensoregg_protocol::Reading& r) {
   r.egtC = NAN;
   r.junctionC = NAN;

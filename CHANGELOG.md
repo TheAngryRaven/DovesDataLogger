@@ -79,6 +79,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   backoff with the scanner paused, so neither the GATT stream nor the
   beacon fed the EGT readout. It now backs off immediately and resumes
   the scanner.
+- **SensorEgg GATT frames of any legal size are received, and lost frames
+  are visible** (plan 0018 review). The logger's receive slots held only
+  32 bytes, so an egg batching more than 11 samples per frame (the spec
+  allows 117) had every such frame silently discarded while the link
+  looked healthy. Slots now take the largest frame the link can carry
+  (244 bytes), the running count of dropped frames shows on EGG TEST as
+  `D<n>`, and drops in three consecutive seconds drop the link so the
+  beacon takes over instead of streaming into the floor.
 
 ### Added
 - **SensorEgg GATT link** (plan 0018): a paired egg is no longer just

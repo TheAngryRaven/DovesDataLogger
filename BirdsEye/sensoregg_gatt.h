@@ -32,6 +32,10 @@ constexpr uint8_t kMinRecordLen = 24;   // schema v1; larger = newer schema,
 constexpr size_t kSampleHeaderLen = 10;
 constexpr size_t kClockLen = 6;
 constexpr uint8_t kMaxSamplesPerFrame = 117;  // (247-3-10)/2, spec section 5
+// Largest Sample notify the link can carry: ATT_MTU 247 (the logger's
+// configCentralConn cap) - 3 = 244 = a full 117-sample frame. Receive
+// buffers sized to this take every legal frame at any negotiated MTU.
+constexpr size_t kMaxFrameLen = 10 + 2 * (size_t)kMaxSamplesPerFrame;
 constexpr int16_t kInvalidSentinel = INT16_MIN;  // 0x8000 = "no valid reading"
 
 // One parsed channel descriptor record (PW_CHANNEL_SCHEMA.md section 5).
@@ -170,6 +174,34 @@ bool linkAcceptCentralConnect(LinkState state, bool sleeping, bool wanted);
 // with the scanner paused on the report that triggered it. Refused ->
 // BACKOFF immediately (and the caller resumes the scanner).
 LinkState linkAfterConnectRequest(bool accepted);
+
+// Sustained-drop rule for the notify frame ring. A drop is a frame the
+// logger could not keep (ring full — the main loop fell behind — or a
+// frame over kMaxFrameLen). One bad window is normal: an SD garbage-
+// collection stall parks the main loop for up to ~2 s and the ring
+// overflows once, and latest-value semantics lose nothing but
+// superseded samples. Drops in kDropWindowsToFail CONSECUTIVE
+// kDropWindowMs windows mean the stream is not being consumed; the
+// caller then drops the link so the beacon path (and the reconnect)
+// takes over rather than streaming into the floor. Feed the cumulative
+// drop counter every loop while streaming; a stall spanning several
+// windows is judged as one window (windows tumble on loop time).
+constexpr uint32_t kDropWindowMs = 1000;
+constexpr uint8_t kDropWindowsToFail = 3;
+
+struct DropMonitor {
+  bool started = false;
+  uint32_t windowStartMs = 0;
+  uint32_t dropsAtWindowStart = 0;
+  uint8_t badWindows = 0;
+};
+
+// Start a fresh evaluation at the current cumulative count.
+void dropMonitorReset(DropMonitor& m, uint32_t totalDrops, uint32_t nowMs);
+
+// Returns true once, when the kDropWindowsToFail-th consecutive bad
+// window closes (and re-arms the count).
+bool dropMonitorUpdate(DropMonitor& m, uint32_t totalDrops, uint32_t nowMs);
 
 // ---- Stream surface rules (review fixes 2026-09) -------------------------
 // The GATT stream feeds the same sensoregg_protocol::Reading the beacon

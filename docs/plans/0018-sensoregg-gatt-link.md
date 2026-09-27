@@ -188,3 +188,12 @@ host-tested; the sketch keeps only the critical sections and radio calls.
   report. Now `linkAfterConnectRequest(false)` → BACKOFF, stamped, and
   the callback resumes the scanner (when the scan is wanted) so the
   beacon keeps feeding the surface.
+- **E5 — oversize frames dropped silently.** 32-byte ring slots took
+  only ≤11-sample frames; the spec allows 117 per frame. Slots are now
+  `kMaxFrameLen` = 244 (ATT_MTU 247 − 3: every legal frame at any MTU the
+  logger negotiates), 8 deep = ~1.9 KB (was 256 B; depth kept so a ~1 s
+  main-loop stall at the ~7 Hz frame rate loses only superseded values).
+  `eggFrameDrops` is surfaced (`sensoreggFrameDrops()`, EGG TEST row 4
+  `D<n>`), and `DropMonitor` drops the link after drops in 3 consecutive
+  1 s windows — one SD-stall burst is judged as a single window and
+  never fires it.

@@ -161,16 +161,27 @@ static volatile bool eggBringupReady = false;
 static volatile bool eggBringupFailed = false;
 
 // Notify frame ring (the data plane keeps the copy-only discipline):
-// the notify callback memcpys, SENSOREGG_LOOP drains. 32-byte slots
-// cover the egg's <=26-byte frames; a fatter future pod's frames are
-// counted as drops rather than truncated.
-static uint8_t           eggFrameBuf[8][32];
+// the notify callback memcpys, SENSOREGG_LOOP drains. Slots are sized
+// to kMaxFrameLen (244 = ATT_MTU 247 - 3, a full 117-sample frame), the
+// largest notify the link can legally carry — the old 32-byte slots
+// silently dropped any batch over 11 samples while the link stayed up
+// looking healthy. 8 x 244 = ~1.9 KB (was 256 B): the depth is kept at
+// 8 so a main-loop stall (SD GC, 100 ms-2 s) at the stream's ~7 Hz
+// frame rate still loses at most a second of superseded values, and
+// ~1.7 KB extra is noise next to the 8 KB track-JSON buffers on the
+// 256 KB part. Drops (ring full, or an impossible oversize frame) are
+// counted, shown on EGG TEST, and a sustained run of them drops the
+// link (sensoregg_gatt::DropMonitor) so the beacon path takes over.
+static uint8_t           eggFrameBuf[8][sensoregg_gatt::kMaxFrameLen];
 static volatile uint8_t  eggFrameLen[8];
 static volatile uint32_t eggFrameAtMs[8];
 static volatile bool     eggFrameReady[8] = {false};
 static volatile uint8_t  eggFrameW = 0;  // notify callback writes
 static uint8_t           eggFrameR = 0;  // main loop reads
-static uint32_t          eggFrameDrops = 0;
+static volatile uint32_t eggFrameDrops = 0;  // callback writes, loop reads
+static sensoregg_gatt::DropMonitor eggDropMon;  // main loop only
+static_assert(sensoregg_gatt::kMaxFrameLen <= 255,
+              "eggFrameLen is a uint8_t");
 
 // Committed pod identity (main loop only, valid while STREAMING).
 static sensoregg_gatt::PodDescriptor eggPod;
@@ -644,6 +655,8 @@ void SENSOREGG_LOOP() {
         sensoregg_gatt::roleFreshnessReset(eggRoleFresh);
         eggSeqMon = sensoregg_protocol::SeqMonitor();
         eggReadingFromGatt = true;
+        sensoregg_gatt::dropMonitorReset(eggDropMon, eggFrameDrops,
+                                         millis());
         debug(F("SensorEgg: GATT link up — fw "));
         debug(eggPod.fwMajor);
         debug(F("."));
@@ -733,6 +746,17 @@ void SENSOREGG_LOOP() {
     eggRxMs = atMs;
     eggHaveReading = true;
     eggRateCount++;  // the test page's Hz meter counts GATT frames too
+  }
+
+  // Sustained frame drops (E5): the stream isn't being consumed — drop
+  // the link so the beacon path takes over; the reconnect after the
+  // backoff starts a fresh evaluation.
+  if (eggLinkState == EGG_LINK_STREAMING &&
+      eggConnHandle != BLE_CONN_HANDLE_INVALID &&
+      sensoregg_gatt::dropMonitorUpdate(eggDropMon, eggFrameDrops,
+                                        millis())) {
+    debugln(F("SensorEgg: sustained frame drops — dropping link"));
+    Bluefruit.disconnect(eggConnHandle);
   }
 
   // Link reconcile: post/withdraw the wanted state, time out a stuck
@@ -987,6 +1011,10 @@ uint8_t sensoreggLinkMode() {
   return sensoreggLinkUp() ? 1 : 0;
 }
 
+uint32_t sensoreggFrameDrops() {
+  return eggFrameDrops;
+}
+
 uint16_t sensoreggGattMtu() {
   if (eggConnHandle == BLE_CONN_HANDLE_INVALID) return 0;
   BLEConnection* conn = Bluefruit.Connection(eggConnHandle);
@@ -1041,5 +1069,6 @@ float sensoreggPacketHz() { return 0.0f; }
 void sensoreggGattClientInit() {}
 uint8_t sensoreggLinkMode() { return 0; }
 uint16_t sensoreggGattMtu() { return 0; }
+uint32_t sensoreggFrameDrops() { return 0; }
 
 #endif  // BIRDSEYE_ENABLE_SENSOREGG
