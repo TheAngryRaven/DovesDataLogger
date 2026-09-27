@@ -206,3 +206,34 @@ TEST_CASE("sensoregg_gatt - clock fit survives the u32 millis wrap") {
     // And a frame slightly BEFORE the anchor maps backward, not 4 Gms off.
     CHECK(clockFitPodToLogger(f, 0xFFFFFE00UL) == 500010UL - 256UL);
 }
+
+// ---------------------------------------------------------------------------
+// Link state machine (review fixes 2026-09)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("sensoregg_gatt - STREAMING commits only onto the live bring-up") {
+    CHECK(linkMayCommitStreaming(LINK_BRINGUP, true));
+    // E1: the disconnect callback beat the loop's commit — it already
+    // wrote BACKOFF and dropped the handle. The commit must not
+    // resurrect a dead link as STREAMING.
+    CHECK(!linkMayCommitStreaming(LINK_BACKOFF, false));
+    CHECK(!linkMayCommitStreaming(LINK_BRINGUP, false));
+    // A stale ready flag consumed after sleep (IDLE) never commits.
+    CHECK(!linkMayCommitStreaming(LINK_IDLE, false));
+    CHECK(!linkMayCommitStreaming(LINK_IDLE, true));
+    CHECK(!linkMayCommitStreaming(LINK_STREAMING, true));
+    CHECK(!linkMayCommitStreaming(LINK_CONNECTING, true));
+}
+
+TEST_CASE("sensoregg_gatt - an orphaned connected state falls back to BACKOFF") {
+    CHECK(linkReconcileOrphan(LINK_STREAMING, false) == LINK_BACKOFF);
+    CHECK(linkReconcileOrphan(LINK_BRINGUP, false) == LINK_BACKOFF);
+    // Live links are untouched.
+    CHECK(linkReconcileOrphan(LINK_STREAMING, true) == LINK_STREAMING);
+    CHECK(linkReconcileOrphan(LINK_BRINGUP, true) == LINK_BRINGUP);
+    // States that legitimately hold no handle are untouched.
+    CHECK(linkReconcileOrphan(LINK_IDLE, false) == LINK_IDLE);
+    CHECK(linkReconcileOrphan(LINK_WAIT_ADV, false) == LINK_WAIT_ADV);
+    CHECK(linkReconcileOrphan(LINK_BACKOFF, false) == LINK_BACKOFF);
+    CHECK(linkReconcileOrphan(LINK_CONNECTING, false) == LINK_CONNECTING);
+}

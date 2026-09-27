@@ -132,17 +132,15 @@ static BLEClientCharacteristic eggChrDesc{BLEUuid(kPwDescUuid)};
 static BLEClientCharacteristic eggChrSamp{BLEUuid(kPwSampUuid)};
 static BLEClientCharacteristic eggChrClk{BLEUuid(kPwClkUuid)};
 
-// Ordered so "engaged" (a connection exists or is being made) is a
-// single >= compare: BACKOFF sits between the idle states and
-// CONNECTING on purpose.
-enum EggLinkState : uint8_t {
-  EGG_LINK_IDLE = 0,   // link not wanted (unpaired / gate closed)
-  EGG_LINK_WAIT_ADV,   // wanted — the scan callback fires the connect
-  EGG_LINK_BACKOFF,    // cooling off after a failure/disconnect
-  EGG_LINK_CONNECTING, // sd_ble_gap_connect in flight
-  EGG_LINK_BRINGUP,    // discovery/reads running in the callback task
-  EGG_LINK_STREAMING,  // notify subscription live, surface fed by GATT
-};
+// The link states live in the host-tested sensoregg_gatt unit (with
+// the transition rules that race the callback task); short local names
+// keep the glue readable. Ordered so "engaged" is a single >= compare.
+static constexpr uint8_t EGG_LINK_IDLE = sensoregg_gatt::LINK_IDLE;
+static constexpr uint8_t EGG_LINK_WAIT_ADV = sensoregg_gatt::LINK_WAIT_ADV;
+static constexpr uint8_t EGG_LINK_BACKOFF = sensoregg_gatt::LINK_BACKOFF;
+static constexpr uint8_t EGG_LINK_CONNECTING = sensoregg_gatt::LINK_CONNECTING;
+static constexpr uint8_t EGG_LINK_BRINGUP = sensoregg_gatt::LINK_BRINGUP;
+static constexpr uint8_t EGG_LINK_STREAMING = sensoregg_gatt::LINK_STREAMING;
 static volatile uint8_t  eggLinkState = EGG_LINK_IDLE;
 static volatile uint16_t eggConnHandle = BLE_CONN_HANDLE_INVALID;
 static volatile uint32_t eggLinkEventMs = 0;  // stamp of the last transition
@@ -323,6 +321,11 @@ static void sensoreggSampleNotifyCb(BLEClientCharacteristic* chr,
 // staging block's comment; plan 0018). Stages raw bytes; the main loop
 // parses and commits. No Serial here — the commit path narrates.
 static void sensoreggCentralConnectCb(uint16_t connHandle) {
+  // A ready/failed flag still up from an EARLIER bring-up (consumed by
+  // nobody — e.g. staged just before a sleep) must never pair with this
+  // link's staging buffers. Clear both before touching the buffers.
+  eggBringupReady = false;
+  eggBringupFailed = false;
   eggConnHandle = connHandle;
   eggLinkState = EGG_LINK_BRINGUP;
   eggLinkEventMs = millis();
@@ -465,6 +468,10 @@ void SENSOREGG_SLEEP() {
     Bluefruit.disconnect(eggConnHandle);
   }
   eggLinkState = EGG_LINK_IDLE;
+  // A bring-up staged before the sleep is moot — don't let it be
+  // consumed on the wake side.
+  eggBringupReady = false;
+  eggBringupFailed = false;
 }
 
 void SENSOREGG_WAKE() {
@@ -573,13 +580,28 @@ void SENSOREGG_LOOP() {
       eggFastestIdx = sensoregg_gatt::fastestChannel(eggPod);
       sensoregg_gatt::clockFitAnchor(eggClockFit, clkBoot, clkPod,
                                      eggClkReqMs, eggClkRspMs);
-      eggLinkState = EGG_LINK_STREAMING;
-      debug(F("SensorEgg: GATT link up — fw "));
-      debug(eggPod.fwMajor);
-      debug(F("."));
-      debug(eggPod.fwMinor);
-      debug(F(", channels "));
-      debugln(eggPod.channelCount);
+      // Commit only onto the bring-up we staged: the disconnect callback
+      // (higher-priority task) may already have written BACKOFF and
+      // dropped the handle. Check + set inside one critical section so
+      // it cannot land between them (BASEPRI-masked — the SoftDevice's
+      // radio interrupts are unaffected; sd_functions.ino precedent).
+      bool committed;
+      taskENTER_CRITICAL();
+      committed = sensoregg_gatt::linkMayCommitStreaming(
+          (sensoregg_gatt::LinkState)eggLinkState,
+          eggConnHandle != BLE_CONN_HANDLE_INVALID);
+      if (committed) eggLinkState = EGG_LINK_STREAMING;
+      taskEXIT_CRITICAL();
+      if (committed) {
+        debug(F("SensorEgg: GATT link up — fw "));
+        debug(eggPod.fwMajor);
+        debug(F("."));
+        debug(eggPod.fwMinor);
+        debug(F(", channels "));
+        debugln(eggPod.channelCount);
+      } else {
+        debugln(F("SensorEgg: link gone before commit — not streaming"));
+      }
     } else {
       debugln(F("SensorEgg: descriptor/clock parse failed — dropping link"));
       if (eggConnHandle != BLE_CONN_HANDLE_INVALID) {
@@ -657,6 +679,20 @@ void SENSOREGG_LOOP() {
   // connecting (it holds the fresh adv report).
   {
     const uint32_t now = millis();
+    // Orphan guard: BRINGUP/STREAMING with no handle held means a
+    // disconnect was lost in a race — fall back to BACKOFF so the
+    // scanner and the retry path take over instead of wedging.
+    taskENTER_CRITICAL();
+    {
+      const uint8_t fixed = sensoregg_gatt::linkReconcileOrphan(
+          (sensoregg_gatt::LinkState)eggLinkState,
+          eggConnHandle != BLE_CONN_HANDLE_INVALID);
+      if (fixed != eggLinkState) {
+        eggLinkState = fixed;
+        eggLinkEventMs = now;
+      }
+    }
+    taskEXIT_CRITICAL();
     switch (eggLinkState) {
       case EGG_LINK_IDLE:
         if (eggLinkWanted()) {

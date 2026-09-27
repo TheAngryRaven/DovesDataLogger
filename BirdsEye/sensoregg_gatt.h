@@ -117,4 +117,36 @@ bool clockFitSameEpoch(const ClockFit& f, uint8_t frameBootId);
 // within +/- ~24.8 days of the anchor, i.e. always in practice.
 uint32_t clockFitPodToLogger(const ClockFit& f, uint32_t podMs);
 
+// ---- Link state machine (review fixes 2026-09) ---------------------------
+// The sketch's central-link states, owned here so the transition rules
+// that race the Bluefruit callback task are host-tested. Ordered so
+// "engaged" (a connection exists or is being made) is a single >=
+// compare: BACKOFF sits between the idle states and CONNECTING on
+// purpose.
+enum LinkState : uint8_t {
+  LINK_IDLE = 0,    // link not wanted (unpaired / gate closed)
+  LINK_WAIT_ADV,    // wanted — the scan callback fires the connect
+  LINK_BACKOFF,     // cooling off after a failure/disconnect
+  LINK_CONNECTING,  // sd_ble_gap_connect in flight
+  LINK_BRINGUP,     // discovery/reads running in the callback task
+  LINK_STREAMING,   // notify subscription live, surface fed by GATT
+};
+
+// May the main loop promote a staged bring-up to STREAMING? Only while
+// the bring-up it staged is still the live one: state still BRINGUP and
+// a connection handle still held. The disconnect callback runs in a
+// higher-priority task and can land between the bring-up's ready flag
+// and the loop's commit — it has already written BACKOFF and dropped
+// the handle, and an unconditional commit would overwrite that with
+// STREAMING on a link that no longer exists (scanner held off, EGT NaN
+// until shutdown). The caller evaluates this and writes the new state
+// inside one critical section.
+bool linkMayCommitStreaming(LinkState state, bool handleValid);
+
+// Reconcile guard: a state that claims a connection (BRINGUP or
+// STREAMING) while no handle is held is an orphan left by a lost race —
+// send it to BACKOFF so the normal retry path (and the scanner) takes
+// over. Every other state is returned unchanged.
+LinkState linkReconcileOrphan(LinkState state, bool handleValid);
+
 }  // namespace sensoregg_gatt

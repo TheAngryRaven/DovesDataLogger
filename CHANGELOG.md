@@ -44,6 +44,16 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   (FAULT, no erase offer), and a volume that mounts on the retry boots
   normally. The recovered-on-probe path also now records the active SPI
   clock it had been leaving at 0.
+- **SensorEgg GATT link can no longer wedge "streaming" with no link**
+  (plan 0018 review). If the egg dropped in the instant between the
+  bring-up finishing and the main loop committing it, the disconnect was
+  overwritten and the logger sat in STREAMING with no connection — the
+  scanner held off (a link counted as engaged) and EGT read `---` until
+  shutdown or a transfer. The commit now happens only while the staged
+  bring-up is still the live one (checked and set atomically), a
+  "connected" state with no connection handle is reconciled back to the
+  retry path, and a ready flag left over from an earlier bring-up can't
+  be consumed by a later one.
 
 ### Added
 - **SensorEgg GATT link** (plan 0018): a paired egg is no longer just

@@ -140,4 +140,15 @@ uint32_t clockFitPodToLogger(const ClockFit& f, uint32_t podMs) {
   return f.loggerMs0 + (uint32_t)delta;
 }
 
+bool linkMayCommitStreaming(LinkState state, bool handleValid) {
+  return state == LINK_BRINGUP && handleValid;
+}
+
+LinkState linkReconcileOrphan(LinkState state, bool handleValid) {
+  if (!handleValid && (state == LINK_BRINGUP || state == LINK_STREAMING)) {
+    return LINK_BACKOFF;
+  }
+  return state;
+}
+
 }  // namespace sensoregg_gatt

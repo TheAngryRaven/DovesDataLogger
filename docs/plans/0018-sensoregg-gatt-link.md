@@ -136,3 +136,21 @@ dropping the link for transfers and shutdown.
   (its anchor + epoch machinery ships here, unused by rows yet);
   LESC bonding when the egg's phase 4 lands; multi-pod (the state
   machine is single-link by design today).
+
+## Review fixes (2026-09)
+
+Findings from the post-merge review, one commit each. The link-state
+rules that race the Bluefruit callback task moved into
+`sensoregg_gatt` (`LinkState` + decision helpers) so they are
+host-tested; the sketch keeps only the critical sections and radio calls.
+
+- **E1 — STREAMING with no link.** The disconnect callback (a
+  higher-priority task) could run between the bring-up's ready flag and
+  the main loop's commit; the unconditional `STREAMING` write then
+  resurrected a dead link and held the scanner off. Now:
+  `linkMayCommitStreaming()` (state still BRINGUP + handle held) is
+  evaluated and applied inside one `taskENTER_CRITICAL()` section;
+  `linkReconcileOrphan()` sends BRINGUP/STREAMING-without-a-handle to
+  BACKOFF every loop; the connect callback clears any stale
+  ready/failed flag before touching the staging buffers, and
+  `SENSOREGG_SLEEP()` clears them too.
