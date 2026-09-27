@@ -26,6 +26,11 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
     when the lock landed — silently killing a run or producing a bogus
     reaction time. The staging screen, the LED search pip and the timer
     now share one "fix + time lock" check.
+  - A drag re-stage or completed run (and a completed sprint run) now
+    gives the session a full idle allowance again. Re-arming the 3-minute
+    grace did not stop an idle timer that had already started, so slow
+    queue creep followed by a re-stage could end the session the moment
+    the new grace ran out.
 - **A soft reboot no longer runs the next boot under a watchdog it can't
   see.** The nRF52 hardware WDT survives `NVIC_SystemReset()` — only a
   pin, brown-out, power-on or System OFF reset clears it — so every

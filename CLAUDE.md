@@ -128,7 +128,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | File | Purpose |
 |---|---|
 | `haversine.{h,cpp}` | Great-circle distance in miles (track proximity) |
-| `idle_policy.{h,cpp}` | Auto-idle session-end decision table (tach 60 s/2 mph vs manual/speed 5 min/5 mph, camera-yield + GPS-lock-hold exception, sprint engine-aware reset) + the promotion of SPEED/MANUAL sessions to TACH rules once the engine fires |
+| `idle_policy.{h,cpp}` | Auto-idle session-end decision table (tach 60 s/2 mph vs manual/speed 5 min/5 mph, camera-yield + GPS-lock-hold exception, sprint engine-aware reset) + the promotion of SPEED/MANUAL sessions to TACH rules once the engine fires + the idle `Clock` (3 min grace + idle timer as one struct; `rearmGrace()` — session start, sprint/drag runs, drag stage latches — always clears a running timer too) |
 | `gps_stats.{h,cpp}` | GPS pipeline drop accounting: expected-vs-received PVT window math (exact fractional carry, 1-frame jitter slack, capped credit, rate-switch suppression) feeding the debug-page `Drops` counter |
 | `gps_time.{h,cpp}` | Leap-year/Unix-epoch math, `u64ToDecimalString` |
 | `gps_validation.{h,cpp}` | PVT sample sanity gate + dtostrf-output check |
@@ -857,7 +857,9 @@ loop()  ~250 Hz
   never yields to the camera — it is the only ender. **Sprint mode is
   engine-aware**: idle counts only while the tach reads 0 too (between-run
   queue waits keep the engine running), and every completed run re-arms
-  the 3-minute grace period.
+  the 3-minute grace period (`idle_policy::rearmGrace`, which clears any
+  idle timer already running — re-arming the grace alone left a stale
+  timer that ended the session as the new grace expired).
 - **Sprint mode (plan 0002)**: tracks under `/TRACKS/SPRINT/` make the
   session point-to-point. `trackDetectionLoop()` finds the nearest
   manifest entry PER KIND; with both kinds in range the `race_mode`

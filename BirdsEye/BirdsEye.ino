@@ -192,10 +192,11 @@ unsigned long dragLastRtMs = 0;   // reaction time of the last manual run
 uint64_t dragGreenEpochMs = 0;    // green-light instant, Unix epoch ms
 int dragPendingDistanceIdx = 0;   // carried from the distance picker to
                                   // the mode page
-unsigned long idleStartTime = 0;
-bool idleTimerRunning = false;
 bool raceActive = false;
-unsigned long raceSessionStartedAt = 0;  // For auto-idle grace period after RPM wake
+// Auto-idle grace window + idle timer as ONE struct (idle_policy::Clock,
+// review D3): re-arming the grace must also clear a running idle timer,
+// so idle_policy::rearmGrace() is the only way to restart it.
+idle_policy::Clock idleClock;
 // How the active session started (RACE_ENTRY_NONE between sessions). Decides
 // the session-end rule and the camera driver: manual/speed sessions have no
 // engine signal, so they record from session start and end on the 5 min
@@ -541,14 +542,14 @@ void checkForNewLapData() {
     }
     const bool stagedNow = dragTimer->staged();
     if (stagedNow && !dragWasStaged) {
-      raceSessionStartedAt = millis();
+      idle_policy::rearmGrace(idleClock, (uint32_t)millis());
     }
     dragWasStaged = stagedNow;
 
     int runs = dragTimer->runs();
     if (runs > dragLastRunCount) {
       dragLastRunCount = runs;
-      raceSessionStartedAt = millis();
+      idle_policy::rearmGrace(idleClock, (uint32_t)millis());
       if (lapHistoryCount < lapHistoryMaxLaps) {
         lastLap = dragTimer->lastEtMs();
         lapHistory[lapHistoryCount] = lastLap;
@@ -568,7 +569,7 @@ void checkForNewLapData() {
     int runs = sprintTimer->getRuns();
     if (runs > sprintLastRunCount) {
       sprintLastRunCount = runs;
-      raceSessionStartedAt = millis();
+      idle_policy::rearmGrace(idleClock, (uint32_t)millis());
       if (lapHistoryCount < lapHistoryMaxLaps) {
         lastLap = sprintTimer->getLastRunTime();
         lapHistory[lapHistoryCount] = lastLap;
@@ -2022,7 +2023,7 @@ void trackDetectionLoop() {
 void startRaceSession(RaceEntryCause cause) {
   raceActive = true;
   enableLogging = true;
-  raceSessionStartedAt = millis();
+  idle_policy::rearmGrace(idleClock, (uint32_t)millis());
   raceEntryCause = cause;
   // Create a minimal CourseManager if none exists yet (no track detected)
   createLapAnythingCourseManager();
@@ -2086,8 +2087,7 @@ void endRaceSession() {
   detectedTrackIndex = -1;
   raceActive = false;
   raceEntryCause = RACE_ENTRY_NONE;
-  idleTimerRunning = false;
-  idleStartTime = 0;
+  idleClock = idle_policy::Clock{};
 
   // Reset lap history
   lapHistoryCount = 0;
@@ -2157,29 +2157,10 @@ void checkAutoIdle() {
   const idle_policy::Decision d = idle_policy::evaluate(pin);
 
   // Camera owns the end of a tach session while recording (see idle_policy
-  // for the rule and the GPS-lock-hold exception).
-  if (d.yieldToCamera) return;
-
-  // Grace period: don't auto-idle within first 3 minutes of a session.
-  // After RPM wake the car is often stationary (warming up, waiting for
-  // track session) and GPS needs time to reacquire. Without this, the
-  // idle timer kills the session before the driver even moves. (Sprint
-  // runs re-arm it via checkForNewLapData().)
-  if (millis() - raceSessionStartedAt < 180000UL) return;
-
-  if (d.resetTimer) {
-    idleTimerRunning = false;
-    idleStartTime = 0;
-    return;
-  }
-
-  if (!idleTimerRunning) {
-    idleTimerRunning = true;
-    idleStartTime = millis();
-    return;
-  }
-
-  if (millis() - idleStartTime >= d.holdMs) {
+  // for the rule and the GPS-lock-hold exception); the 3 min grace (re-
+  // armed by sprint/drag runs and drag stage latches, together with the
+  // idle timer) and the hold itself are idle_policy::advance().
+  if (idle_policy::advance(idleClock, d, (uint32_t)millis())) {
     if (d.stopCameraOnEnd) {
       debugln(F("Auto-idle: 5min at <5mph — ending session + camera"));
       // This ender owns the camera for manual/speed sessions: sessionDemand

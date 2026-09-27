@@ -172,3 +172,21 @@ still ends ~8 min after its last movement. The engine-aware sprint reset in
 - No trap-zone speed averaging (see Accuracy).
 - No per-distance best history across sessions — the DOVEX files are the
   record; the webapp is the place to compare days.
+
+## Review fixes (2026-09)
+
+Findings from the pre-release review of plans 0015 + 0016, one commit
+each, each with a regression test in the pure unit that owns the rule.
+
+- **D3 — re-arming the idle grace left a running idle clock behind.**
+  The drag stage latch, the drag run and the sprint run all re-armed the
+  auto-idle grace by rewriting `raceSessionStartedAt`, but
+  `checkAutoIdle()` returned early during the grace without touching an
+  idle timer that had *already started*. Creep below the idle speed long
+  enough to start the timer, then re-stage: the stale timer kept its old
+  start, so the session ended the instant the new grace expired instead
+  of a full hold later. The grace and the timer now live together in
+  `idle_policy::Clock`; `rearmGrace()` is the only way to restart the
+  grace and always clears the timer, and `advance()` holds the whole
+  grace/reset/hold sequence the sketch used to inline — host-tested,
+  including the creep→re-stage regression and millis wrap.
