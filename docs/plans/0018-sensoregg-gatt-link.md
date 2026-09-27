@@ -133,7 +133,8 @@ dropping the link for transfers and shutdown.
 
 - Status: shipped with this plan's PR into BETA.
 - Follow-ups: per-sample DOVEX row timestamping using the clock fit
-  (its anchor + epoch machinery ships here, unused by rows yet);
+  (its anchor + epoch machinery ships here; only the epoch check is
+  consumed — `clockFitPodToLogger()` is reserved for this);
   LESC bonding when the egg's phase 4 lands; multi-pod (the state
   machine is single-link by design today).
 
@@ -201,3 +202,11 @@ host-tested; the sketch keeps only the critical sections and radio calls.
   `batteryPercent()` (NaN → 0xFF, clamp 0–100, rounded; NaN tested by
   bit pattern for `-Ofast`). Out-of-range values now clamp instead of
   reading "unknown".
+- **E8 — clock-fit API with no firmware consumer.** Stated plainly
+  rather than deleted: the sketch anchors `eggClockFit` on every
+  bring-up and consumes only `clockFitSameEpoch()` (pod-reboot
+  detection). `clockFitPodToLogger()` and `halfRttMs` are anchored but
+  **not yet consumed** — reserved, tested, for the per-sample row
+  timestamping follow-up below. Documented in `sensoregg_gatt.h`,
+  `sensoregg.h` and at the sketch's `eggClockFit`. No sketch state was
+  truly dead (the fit itself carries the epoch).

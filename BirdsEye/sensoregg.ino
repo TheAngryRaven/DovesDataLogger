@@ -191,6 +191,9 @@ static_assert(sensoregg_gatt::kMaxFrameLen <= 255,
 static sensoregg_gatt::PodDescriptor eggPod;
 static int8_t eggRoleIdx[sensoregg_gatt::ROLE_COUNT] = {-1, -1, -1, -1};
 static int8_t eggFastestIdx = 0;  // whose frame seq feeds the zombie monitor
+// Anchored on every bring-up; only its epoch (boot_id) is consumed today
+// — pod->logger time mapping is reserved for per-sample resampling
+// (plan 0018 follow-ups).
 static sensoregg_gatt::ClockFit eggClockFit;
 // Stream surface bookkeeping (plan 0018 review, E3). eggReadingFromGatt
 // is true while the stream was the last writer of eggReading — then

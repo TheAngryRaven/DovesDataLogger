@@ -114,6 +114,15 @@ int8_t fastestChannel(const PodDescriptor& pd);
 // anchors on the connect-time Clock read: logger time = the
 // request/response midpoint (tightest pair available), pod time = the
 // value read. boot_id inequality = the pod's millis restarted (epoch).
+//
+// FIRMWARE CONSUMPTION TODAY: the sketch anchors a fit on every
+// bring-up and uses ONLY clockFitSameEpoch() (the pod-reboot check).
+// clockFitPodToLogger() and halfRttMs have no firmware consumer yet —
+// the surface is latest-value-only and DOVEX rows are stamped by the
+// logger's GPS clock. They are kept, tested, deliberately: reserved for
+// the follow-up plan that timestamps per-sample rows from the fit (plan
+// 0018 "Status / follow-ups"). Do not read an unused-API warning as
+// dead code to delete.
 struct ClockFit {
   bool valid = false;
   uint8_t bootId = 0;

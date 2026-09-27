@@ -21,7 +21,10 @@
 // SoftDevice. A PAIRED egg in range, while the egg radio is wanted,
 // gets a GATT connection and streams the PerchWerks Sensor Service
 // (self-describing channel table, per-channel batch frames stamped at
-// acquisition, a Clock/boot_id epoch — sensoregg_gatt.{h,cpp}).
+// acquisition, a Clock/boot_id epoch — sensoregg_gatt.{h,cpp}). The
+// clock fit is anchored on every bring-up but only its epoch (boot_id)
+// check is consumed; mapping pod time onto logger time is reserved for
+// a future per-sample resampling plan — values here are latest-sample.
 // Everything else — unpaired pods, the pre-connect window, backoff,
 // and the pairing capture itself — rides the passive PW-ADV observer
 // exactly as before (no SCAN_REQ; sensoregg_protocol.{h,cpp}). The two
