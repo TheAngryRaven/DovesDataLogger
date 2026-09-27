@@ -114,6 +114,15 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   the run ETs — same backwards-compatible trailing-column scheme as
   SPRINT). The run state machine is the host-tested `drag_timer` unit.
 
+### Changed
+- **CI: stale DovesLapTimer-pin notes corrected.** `compile-sketch.yml`
+  claimed the release pin could not compile BETA source (no tag carrying
+  `CrossingEngine`/`SprintTimer`), and CLAUDE.md said the sim pins the
+  library's `BETA` branch. Neither is true any more: `v4.3.0`'s `src/` is
+  identical to the library's `BETA`, and the sim defaults to `v4.3.0`,
+  overridden to `BETA` only for BETA-targeted builds. Comments and docs
+  only — no build behavior changes.
+
 ## [4.1.0] - 2026-08-24
 
 MINOR — new settings and device behaviour, backwards compatible with the

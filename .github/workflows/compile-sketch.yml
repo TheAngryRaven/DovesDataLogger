@@ -22,13 +22,13 @@ jobs:
       #                        it compiled BETA code against master's pins and
       #                        failed on the sprint headers forever.
       #   ref_name == BETA  -> push / workflow_dispatch on BETA itself
-      # Anything else is master/release. NOTE: merging BETA into master is
-      # what promotes the channel — at that point the fallbacks below must be
-      # bumped deliberately (a DovesLapTimer release tag carrying
-      # CrossingEngine/SprintTimer, plus a decision on the SensorEgg flag),
-      # here and in sim-build.yml / release.yml. (The condition is repeated
-      # rather than hoisted into its own env var because a job-level `env:`
-      # entry cannot reference its siblings.)
+      # Anything else is master/release. The release pin (v4.3.0) already
+      # carries CrossingEngine/SprintTimer, so BETA source builds against it
+      # too; bump it deliberately — here and in sim-build.yml / release.yml /
+      # BirdsEye/sim/CMakeLists.txt — only when the firmware starts needing
+      # library code newer than the tag. (The condition is repeated rather
+      # than hoisted into its own env var because a job-level `env:` entry
+      # cannot reference its siblings.)
       # DovesLapTimer ref: the beta channel tracks the library's own BETA
       # branch so the two move together; everything else pins the known-good
       # release tag.
@@ -211,9 +211,8 @@ jobs:
   #
   # One board is enough: the two arms here differ only in feature flags,
   # and the sense/non-sense split is already covered above.
-  # LAPTIMER_REF deliberately stays BETA so the flags are the ONLY
-  # variable — pinning the release tag as well would fail on BETA-era
-  # library APIs and tell us nothing about the flags.
+  # The library ref stays BETA so the flags are the ONLY variable
+  # between this job and the flags-on build above.
   compile-stock-arm:
     name: xiao-nrf52840-sense (flags off)
     if: >-
