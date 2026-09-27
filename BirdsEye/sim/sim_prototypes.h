@@ -64,6 +64,7 @@ bool raceEngineStopped();
 SprintTimer* getActiveTimerSprint();
 bool sprintModeIsActive();
 bool dragModeIsActive();
+bool gpsFixAndTimeLocked();
 bool dragIsStaged();
 const char* dragDistanceLabel();
 float dragLastTrapMph();

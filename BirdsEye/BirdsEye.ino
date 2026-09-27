@@ -1444,6 +1444,22 @@ bool dragModeIsActive() {
   return dragTimer != nullptr;
 }
 
+/**
+ * @brief THE "GPS is usable for drag timing" predicate: a position fix
+ * AND the receiver's full UTC time lock (validDate + validTime +
+ * fullyResolved — the log-file-creation gate). Before the lock the
+ * receiver reports a placeholder date, and drag timing runs on Unix
+ * EPOCH ms, so a placeholder-dated fix would timestamp the staged
+ * anchor, the green light and the ET start on a clock that jumps by
+ * years the moment the lock lands (review D2: a silently aborted run,
+ * or a garbage reaction time). The physics feed, the manual tree's
+ * input, the staging screen's WAITING FOR GPS line and the LED search
+ * pip all read this one function so they can never disagree.
+ */
+bool gpsFixAndTimeLocked() {
+  return gpsData.fix && gpsData.timeValid;
+}
+
 // Drag-mode display accessors (null-safe): the trap/0-60 stats have no
 // lap-timer analog, so they don't ride the activeTimer*() surface —
 // display_pages reads these directly, like the sprint pages read
@@ -1808,7 +1824,7 @@ void dragStagingLoop() {
 
   drag_tree::Inputs in;
   in.nowMs = millis();
-  in.fix = gpsData.fix;
+  in.fix = gpsFixAndTimeLocked();  // same gate as the physics feed
   in.speedMph = gps_speed_mph;
   in.timerStaged = dragTimer->staged();
   in.runActive = dragTimer->runActive();

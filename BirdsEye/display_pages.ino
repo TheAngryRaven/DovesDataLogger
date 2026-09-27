@@ -258,7 +258,7 @@ void displayPage_drag_staging() {
       display.println(dragDistanceLabel());
       display.println();
       display.setTextSize(2);
-      if (!gpsData.fix || !gpsData.timeValid) {
+      if (!gpsFixAndTimeLocked()) {
         display.println(F(" WAITING"));
         display.println(F(" FOR GPS"));
       } else if (gps_speed_mph >= drag_timer::kLaunchMinMph) {

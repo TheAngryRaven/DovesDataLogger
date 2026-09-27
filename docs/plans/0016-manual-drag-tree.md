@@ -159,3 +159,16 @@ each, each with a regression test in the pure unit that owns the rule.
   hold. Keying on the last fix *fed* (not `gpsData.fix`) also covers a
   receiver that stops streaming with its fix flag latched true. Applies
   to automatic mode too (a live ET frozen on a dead fix).
+- **D2 — the tree counted down before the GPS time lock.** The tree's
+  `in.fix` was bare `gpsData.fix`, while the LED search pip and the
+  staging screen's WAITING FOR GPS line used `fix && timeValid`, and the
+  physics was fed on a bare fix too. Before the lock the receiver
+  reports a placeholder date, and drag timing is Unix **epoch** ms — so
+  the anchor, the green-light stamp and the ET start sat on a clock that
+  jumps by years the moment the lock lands (a backwards step silently
+  aborts the run; a forwards one is a garbage RT). One predicate,
+  `gpsFixAndTimeLocked()`, now gates the physics feed (automatic mode
+  too), the tree input, the staging screen and the LED search pip. No
+  pure-unit test: the predicate is the one-line conjunction, and the
+  point of the fix is that four call sites share it; the sim always
+  injects a resolved time, so its goldens are unchanged.

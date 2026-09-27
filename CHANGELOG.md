@@ -20,6 +20,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
     with no fix for 2 s is now abandoned (RUN ABORTED on the manual
     screen, from which Select-hold exits), and a returning fix starts
     fresh instead of resuming the stale run.
+  - Drag mode waits for the GPS time lock, not just a position fix,
+    before staging, running the christmas tree or timing a run. Before
+    the lock the receiver's placeholder date made the drag clock jump
+    when the lock landed — silently killing a run or producing a bogus
+    reaction time. The staging screen, the LED search pip and the timer
+    now share one "fix + time lock" check.
 - **A soft reboot no longer runs the next boot under a watchdog it can't
   see.** The nRF52 hardware WDT survives `NVIC_SystemReset()` — only a
   pin, brown-out, power-on or System OFF reset clears it — so every

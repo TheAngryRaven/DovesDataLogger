@@ -387,7 +387,7 @@ void NEOPIXEL_LOOP() {
       led_frame::Rgb stripPx[led_frame::kStripCount];
       bool stripOff = raceEngineStopped();
       if (!stripOff) {
-        if (!gpsData.fix || !gpsData.timeValid) {
+        if (!gpsFixAndTimeLocked()) {
           // Wins over the staging tree too: physics can't stage without
           // a fix (the tree sits in kWaitStop) and the familiar green
           // pip is the correct "GPS searching" signal; the pinned

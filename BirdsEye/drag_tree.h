@@ -84,7 +84,7 @@ enum class Stage : uint8_t {
 // Snapshot built fresh by the sketch each loop iteration.
 struct Inputs {
   uint32_t nowMs = 0;          // millis()
-  bool  fix = false;           // gpsData.fix
+  bool  fix = false;           // gpsFixAndTimeLocked(): fix AND UTC lock
   float speedMph = 0.0f;       // gps_speed_mph (meaningful only with fix)
   bool  timerStaged = false;   // dragTimer->staged()
   bool  runActive = false;     // dragTimer->runActive()

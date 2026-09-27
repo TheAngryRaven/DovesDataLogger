@@ -899,6 +899,9 @@ loop()  ~250 Hz
   queue-creep phantom launch self-cancels — then the timer re-arms on the
   next standstill, so a whole day of passes is one DOVEX session
   (`race_mode=DRAG`, course `DRAG 1/4 MILE` etc., laps line = run ETs;
+  the timer is fed only while `gpsFixAndTimeLocked()` — fix AND UTC
+  lock, the one predicate the tree, staging screen and LED search pip
+  share, because drag time is epoch ms and the pre-lock date jumps;
   trap/0-60 deliberately NOT in the header — the 25 Hz rows carry speed).
   Run capture rides `checkForNewLapData()`'s run-count edge; each
   completed run AND each fresh STAGED latch re-arms the auto-idle grace
