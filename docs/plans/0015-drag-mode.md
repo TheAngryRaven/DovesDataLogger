@@ -61,7 +61,8 @@ as a timestamp gap.
   re-latching anchor the only false-launch source left is real motion
   (queue creep), and that self-cancels through the abort rule without
   recording anything. Launch = displacement from anchor ≥ rollout **AND**
-  speed ≥ 2 mph (jitter or dead-slow creep never launches); the ET start is
+  speed ≥ 2 mph (jitter or dead-slow creep never launches; creep that
+  passes the rollout below 2 mph re-stages — review D8); the ET start is
   linearly interpolated on the displacement curve between the two straddling
   fixes, and the run's distance is seeded with the overshoot past rollout.
 - **LAUNCHED**: per fix, add the chord distance (drag runs are straight —
@@ -219,3 +220,20 @@ each, each with a regression test in the pure unit that owns the rule.
   alone kills a slow-topping vehicle cruising out the back half of a
   long distance). Deliberately conservative: the first run of a session
   (no heading to compare) and every same-direction run are always kept.
+- **D8 — a slow creep before launch started the clock late.** Staged,
+  a car creeping at 1–2 mph (above the 1 mph staging threshold, below
+  the 2 mph launch speed) could cover the whole 11.25 in rollout without
+  launching; the moment it then passed 2 mph the launch edge found the
+  rollout already behind it (`dPrev ≥ kRolloutFt`), the interpolation
+  clamped to the previous fix, and the run was timed from late with the
+  crept ground credited to its distance. Now a STAGED car moving above
+  the staging threshold that passes the rollout without launch speed
+  **re-stages** (drops to ARMED). If it stops, it is staged again at the
+  new spot a second later and the next launch times exactly; if it rolls
+  straight into a launch it had no standing start and records nothing —
+  the strip equivalent of rolling through the beams. Gated on Doppler
+  speed, so standstill position jitter past the rollout radius still
+  cannot un-stage a parked car (the 10 ft `kRestageFt` drift rule is
+  unchanged). Tests: creep→launch records nothing; creep→stop→launch
+  times to the analytic ET (the old code missed it by the anchor mean's
+  lag).

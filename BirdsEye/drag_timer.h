@@ -89,7 +89,9 @@ constexpr uint32_t kProveOutMs  = 5000;
 // (speed stayed under kLaunchMinMph) has moved to a new spot — drop
 // back to ARMED and re-stage there. Deliberately much larger than the
 // rollout so standstill jitter can never un-stage a car that is about
-// to launch; only a real slow reposition trips it.
+// to launch. A car CREEPING (speed above kStagedMaxMph) re-stages much
+// sooner — the moment it passes the rollout (review D8) — because a
+// launch from there would start the clock late.
 constexpr float kRestageFt = 10.0f;
 
 // Return-road rejection (review fix D7). A car stopped in the shutdown

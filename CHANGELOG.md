@@ -46,6 +46,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
     heads the opposite way to the last recorded run and was driven at a
     cruise rather than a full-effort acceleration, so real passes —
     including slow ones — still count.
+  - Creeping forward slowly after staging no longer produces a short
+    drag ET. Rolling past the start point below launch speed now
+    re-stages the car; before, the clock started late and counted the
+    crept distance toward the run.
 - **A soft reboot no longer runs the next boot under a watchdog it can't
   see.** The nRF52 hardware WDT survives `NVIC_SystemReset()` — only a
   pin, brown-out, power-on or System OFF reset clears it — so every

@@ -176,9 +176,23 @@ bool DragTimer::onFix(double lat, double lng, float speedMph,
         sixtyCrossed_ = false;
         run0to60Ms_ = 0;
         slowTracking_ = false;
+      } else if (d >= kRolloutFt && speedMph > kStagedMaxMph) {
+        // Creep through the rollout below launch speed (review D8). The
+        // car has left its staged spot without launching, so there is
+        // no standstill left to time from: letting it carry on meant a
+        // later push past 2 mph "launched" with the rollout ALREADY
+        // behind it — the interpolation clamped to the previous fix, so
+        // the clock started late and the timed distance included ground
+        // crept before it. Re-stage instead: a car that stops is staged
+        // again at its new spot a second later; one that rolls straight
+        // into a launch has no standing start and records nothing. Real
+        // speed (Doppler, > the staging threshold) is required, so
+        // standstill position jitter past the rollout radius still
+        // cannot un-stage a parked car.
+        resetToArmed();
       } else if (d >= kRestageFt) {
-        // Moved to a new spot without ever reaching launch speed — a
-        // slow reposition (staging-lane creep). Re-stage from scratch.
+        // Drifted far from the anchor with no speed behind it — a
+        // reposition the speed test above missed. Re-stage from scratch.
         resetToArmed();
       }
       break;

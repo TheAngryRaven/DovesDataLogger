@@ -126,6 +126,48 @@ TEST_CASE("slow reposition re-stages at the new spot") {
   CHECK(s.t.runs() == 0);
 }
 
+TEST_CASE("creep through the rollout below launch speed re-stages") {
+  // Review D8: creeping at 1-2 mph past the rollout, then pushing past
+  // 2 mph, used to "launch" with the rollout already behind the car —
+  // the interpolation clamped to the previous fix, starting the clock
+  // late and crediting crept ground to the run.
+  Strip s(0);
+  s.standstill(0.0, 2000);
+  REQUIRE(s.t.phase() == Phase::kStaged);
+  const double v = 2.2;  // ft/s = 1.5 mph: above staged, below launch
+  double x = 0.0;
+  while (x < drag_timer::kRolloutFt - 0.1) {
+    s.fix(x, v * kFtPerSecToMph);
+    x += v * 0.04;
+  }
+  CHECK(s.t.phase() == Phase::kStaged);  // inside the rollout: still staged
+  for (int i = 0; i < 10; i++) {
+    s.fix(x, v * kFtPerSecToMph);
+    x += v * 0.04;
+  }
+  CHECK(s.t.phase() == Phase::kArmed);   // crept through it: re-stage
+
+  // Rolling straight into a launch from the creep: no standing start,
+  // nothing timed.
+  CHECK_FALSE(s.launchConstAccel(x, 20.0, 15000));
+  CHECK(s.t.runs() == 0);
+}
+
+TEST_CASE("creep, stop, then launch times from the new spot exactly") {
+  Strip s(0);
+  s.standstill(0.0, 2000);
+  const double v = 2.2;  // 1.5 mph creep for 3 ft
+  for (double x = 0.0; x < 3.0; x += v * 0.04) s.fix(x, v * kFtPerSecToMph);
+  s.standstill(3.0, 1500);
+  REQUIRE(s.t.phase() == Phase::kStaged);
+
+  const double a = 14.7;
+  REQUIRE(s.launchConstAccel(3.0, a, 60000));
+  const double tRoll = sqrt(2.0 * drag_timer::kRolloutFt / a);
+  const double tFin = sqrt(2.0 * (660.0 + drag_timer::kRolloutFt) / a);
+  CHECK(fabs((double)s.t.lastEtMs() - (tFin - tRoll) * 1000.0) <= kDtMs);
+}
+
 // ---------------------------------------------------------------------------
 // The run: rollout, ET, trap, 0-60
 // ---------------------------------------------------------------------------

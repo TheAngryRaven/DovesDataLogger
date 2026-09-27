@@ -891,7 +891,9 @@ loop()  ~250 Hz
   stage at a standstill (≤1 mph held 1 s; the anchor is a **re-latching
   running mean** of standstill fixes so GPS drift in a staging lane can't
   fake a launch), launch rollout-style (11.25 in displacement + ≥2 mph,
-  ET start interpolated between the straddling 25 Hz fixes), accumulate
+  ET start interpolated between the straddling 25 Hz fixes; creeping
+  through the rollout below 2 mph re-stages instead, so the clock can
+  never start with the rollout already behind the car), accumulate
   chord distance to the target, finish with interpolated ET + trap speed
   and a 0-60 split (0 if never reached). Mid-run standstill (3 s), a
   ≥2 s fix gap, or 2 s of wall clock with no fix at all (the
