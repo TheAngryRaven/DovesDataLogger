@@ -1403,8 +1403,9 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   filter (so a different egg can be captured while one is paired), and
   the first parsed frame advertising the egg's OWN pairing-window flag
   (egg-side long-press, flags bit0) wins — persist-first (a failed SD
-  write keeps the window open to retry), then the RAM filter, then the
-  window closes. Unpair = persist-first `""` → accept-any. Applied LIVE
+  write keeps the window open to retry, throttled to ~1 Hz by
+  `pairPersistDue` rather than the ~10 Hz beacon rate), then the RAM
+  filter, then the window closes. Unpair = persist-first `""` → accept-any. Applied LIVE
   on pair/unpair — no reboot, same exception as `camera_serial`. The
   scan callback filters length + magic + MAC, copies **up to the
   largest known layout** (`kPayloadLenMax` — the old fixed-14 copy

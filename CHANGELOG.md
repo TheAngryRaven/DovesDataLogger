@@ -93,6 +93,11 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   declares, so a pod reporting in tenths of a percent would have read as
   "unknown". It now converts like every other channel and clamps to
   0–100.
+- **A failing SD card is no longer hammered during egg pairing** (plan
+  0017 review). When saving a newly captured egg failed, the logger
+  retried the settings write on every matching beacon — about ten full
+  read-modify-writes of `SETTINGS.json` a second for up to two minutes.
+  Retries are now paced at about once a second.
 
 ### Added
 - **SensorEgg GATT link** (plan 0018): a paired egg is no longer just

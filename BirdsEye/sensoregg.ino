@@ -66,6 +66,10 @@ static uint8_t eggMacFilter[6] = SENSOREGG_MAC;
 static volatile bool eggPairingActive = false;  // capture window open
 static volatile bool eggTestActive = false;     // EGG TEST bench latch
 static uint32_t eggPairStartMs = 0;             // main loop only
+// Capture persist throttle (main loop only): a failing settings write
+// is retried at ~1 Hz, not at the beacon rate (plan 0017 review).
+static bool eggPairPersistTried = false;
+static uint32_t eggPairPersistLastMs = 0;
 // Per-slot advertiser address (raw LSB-first), captured alongside the
 // payload so the main-loop drain can pair without the callback ever
 // learning any protocol. Plain RAM like eggBuf; the ready flags below
@@ -560,11 +564,16 @@ void SENSOREGG_LOOP() {
       // Pairing capture (plan 0017): first frame whose egg advertises
       // its own pairing-window flag wins. PERSIST FIRST (camera
       // precedent, camera_ble.ino) — a failed SD write leaves the
-      // window open so the next frame retries. The RAM filter is
+      // window open and a later frame retries, throttled to ~1 Hz
+      // (pairPersistDue) so a failing card isn't hammered at 10 Hz. The RAM filter is
       // updated while eggPairingActive still bypasses it in the
       // callback, so a torn filter read can never reject the captured
       // egg; the flag clears last.
-      if (eggPairingActive && r.pairingActive) {
+      if (eggPairingActive && r.pairingActive &&
+          sensoregg_protocol::pairPersistDue(eggPairPersistTried,
+                                             eggPairPersistLastMs, atMs)) {
+        eggPairPersistTried = true;
+        eggPairPersistLastMs = atMs;
         uint8_t human[6];
         char macStr[sensoregg_protocol::kMacStrLen];
         sensoregg_protocol::macReverse(localPeer, human);
@@ -947,6 +956,7 @@ bool sensoreggIsPaired() {
 void sensoreggRequestPair() {
   // Idempotent; a re-request restarts the timeout clock.
   eggPairStartMs = millis();
+  eggPairPersistTried = false;  // a fresh window's first capture is immediate
   eggPairingActive = true;
 }
 
