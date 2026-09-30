@@ -21,10 +21,11 @@
 // device_name and race_mode are trailing columns so they stay backwards
 // compatible: older readers stop at optimal_ms and ignore them, and logs
 // written before the columns existed parse back with empty values.
-// race_mode is "CIRCUIT" or "SPRINT" (compare case-insensitively; empty
-// or absent = CIRCUIT, so every legacy log reads as a circuit session).
-// It is deliberately just a loading helper for the webapp — with SPRINT,
-// the laps line is a runs line — nothing on-device depends on it.
+// race_mode is "CIRCUIT", "SPRINT" or "DRAG" (compare case-insensitively;
+// empty or absent = CIRCUIT, so every legacy log reads as a circuit
+// session). It is deliberately just a loading helper for the webapp —
+// with SPRINT or DRAG, the laps line is a runs line (drag runs are ETs)
+// — nothing on-device depends on it.
 ///////////////////////////////////////////
 
 #include <stddef.h>
@@ -42,7 +43,7 @@ constexpr size_t kCourseLen    = 32;
 constexpr size_t kShortNameLen = 16;
 constexpr size_t kLapStrLen    = 16;  // "N/A" or numeric lap time as text
 constexpr size_t kDeviceLen    = 32;
-constexpr size_t kRaceModeLen  = 8;   // "CIRCUIT"/"SPRINT" + NUL
+constexpr size_t kRaceModeLen  = 8;   // "CIRCUIT"/"SPRINT"/"DRAG" + NUL
 
 // Input to format(). All const char* fields must be non-null and
 // well-formed; format() does NOT escape commas inside them.

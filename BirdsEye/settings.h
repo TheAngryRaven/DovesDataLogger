@@ -32,11 +32,12 @@
 // document returns NoMemory at 22 pairs regardless of how much was read).
 //
 // Adding settings keys is not free — see the measureJson() guard in
-// setSettingInner(), and subsystem 8 in CLAUDE.md. As of plan 0013 the
-// default file measures 570 bytes on a stock build (23 keys) and 592 on
-// a SensorEgg one (24), rising to 599/621 with the longest values every
-// key accepts, against a 1023-byte read cap. That is roughly sixteen
-// average keys of headroom. Each key costs len(key) + len(value) + 6.
+// setSettingInner(), and subsystem 8 in CLAUDE.md. As of plan 0017 the
+// default file measures 570 bytes on a stock build (23 keys) and 611 on
+// a SensorEgg one (25 — sensoregg_mac added), rising to 599/657 with the
+// longest values every key accepts, against a 1023-byte read cap. That
+// is roughly fifteen average keys of headroom. Each key costs
+// len(key) + len(value) + 6.
 ///////////////////////////////////////////
 #define SETTINGS_JSON_CAPACITY 1024
 

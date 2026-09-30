@@ -44,7 +44,7 @@ struct Inputs {
   bool  speedRuleSession = false;   // cause is MANUAL or SPEED (after promotion)
   bool  cameraRecording = false;    // camera FSM in kRecording
   bool  gpsLockHoldActive = false;  // session still waiting for its GPS time lock
-  bool  sprintEngineRunning = false;  // sprint mode AND tach reads > 0
+  bool  sprintEngineRunning = false;  // sprint OR drag mode AND tach reads > 0
   float speedMph = 0.0f;
 };
 
@@ -58,5 +58,36 @@ struct Decision {
 // Evaluate one iteration's policy. Exactly one of yieldToCamera /
 // resetTimer / "let the timer run toward holdMs" applies.
 Decision evaluate(const Inputs& in);
+
+// ---- The idle clock: grace window + idle timer (review fix D3) ----
+//
+// Grace: no auto-idle in the first kSessionGraceMs of a session (after an
+// RPM wake the car is often stationary while GPS reacquires), and the
+// grace RE-ARMS on activity that proves the session is alive: a
+// completed sprint/drag run, a fresh drag STAGED latch.
+//
+// The two halves live in ONE struct because they must move together.
+// The sketch used to re-arm by rewriting raceSessionStartedAt alone,
+// while the grace check returned early without touching an idle timer
+// that had already started. A creep under the idle speed that started
+// the timer, then a re-stage, left the stale timer running under the
+// new grace — so the session ended the instant the new grace expired
+// instead of a full hold later. rearmGrace() is now the only way to
+// restart the grace, and it always clears the timer with it.
+constexpr uint32_t kSessionGraceMs = 180000;  // 3 min
+
+struct Clock {
+  uint32_t graceStartMs = 0;
+  bool     idleRunning = false;
+  uint32_t idleStartMs = 0;
+};
+
+// Session start, or activity that proves the session alive: restart the
+// grace window AND clear any idle timer already running.
+void rearmGrace(Clock& c, uint32_t nowMs);
+
+// Advance the clock one iteration against evaluate()'s decision. Returns
+// true exactly when the session should end now. Wrap-safe uint32 millis.
+bool advance(Clock& c, const Decision& d, uint32_t nowMs);
 
 }  // namespace idle_policy

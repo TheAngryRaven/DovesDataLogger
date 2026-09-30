@@ -46,6 +46,39 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # The OTA manifest's version comes from the TAG, but the device reports
+      # FIRMWARE_VERSION from project.h over BLE (DIS). If they disagree —
+      # tag v4.2.0 on a tree still saying "4.1.0" — the published image can
+      # never satisfy the manifest and the companion offers the update
+      # forever. Refuse the tag before anything is built or published (the
+      # release + pages jobs need `build`, so a failure here stops both).
+      # Also require a CHANGELOG heading for the version: the release notes
+      # link there. Manual runs have no tag to check and skip this.
+      - name: Verify tag matches FIRMWARE_VERSION and CHANGELOG
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          # The literal in the non-override branch — the only
+          # `#define FIRMWARE_VERSION "..."` form in project.h (the override
+          # branch stringizes a token and never has a quoted literal).
+          matches="$(grep -cE '^[[:space:]]*#define[[:space:]]+FIRMWARE_VERSION[[:space:]]+"' BirdsEye/project.h || true)"
+          if [ "$matches" != "1" ]; then
+            echo "::error file=BirdsEye/project.h::Expected exactly one quoted FIRMWARE_VERSION literal, found ${matches}"
+            exit 1
+          fi
+          fw_version="$(sed -nE 's/^[[:space:]]*#define[[:space:]]+FIRMWARE_VERSION[[:space:]]+"([^"]*)".*/\1/p' BirdsEye/project.h)"
+          echo "Tag: ${GITHUB_REF_NAME} -> ${tag_version}; project.h FIRMWARE_VERSION: ${fw_version}"
+          if [ "$fw_version" != "$tag_version" ]; then
+            echo "::error file=BirdsEye/project.h::FIRMWARE_VERSION is \"${fw_version}\" but the tag is ${GITHUB_REF_NAME} — bump project.h (or re-tag) so the image reports the version the OTA manifest will advertise"
+            exit 1
+          fi
+          if ! awk -v h="## [${tag_version}]" 'index($0, h) == 1 { found = 1 } END { exit !found }' CHANGELOG.md; then
+            echo "::error file=CHANGELOG.md::No '## [${tag_version}]' heading — date the release section before tagging"
+            exit 1
+          fi
+          echo "Version check passed."
+
       - name: Set up arduino-cli
         uses: arduino/setup-arduino-cli@v2
 

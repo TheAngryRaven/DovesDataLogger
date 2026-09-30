@@ -196,3 +196,18 @@ TEST_CASE("u64ToDecimalString - zero-size buffer returns 0 without writing") {
     CHECK(u64ToDecimalString(42, &sentinel, 0) == 0u);
     CHECK(sentinel == 'Z');  // untouched
 }
+
+TEST_CASE("epochNowMs - extrapolates the last PVT epoch by host time since arrival") {
+    const uint64_t e = 1785077000000ull;
+    CHECK(epochNowMs(e, 5000, 5000) == e);
+    CHECK(epochNowMs(e, 5000, 5037) == e + 37);
+}
+
+TEST_CASE("epochNowMs - millis wrap between arrival and now") {
+    const uint64_t e = 1785077000000ull;
+    CHECK(epochNowMs(e, 0xFFFFFFF0u, 0x10u) == e + 0x20);
+}
+
+TEST_CASE("epochNowMs - no PVT epoch yet stays 0") {
+    CHECK(epochNowMs(0, 5000, 9000) == 0u);
+}

@@ -1,6 +1,8 @@
 #include "doctest.h"
 #include "wake_cause.h"
 
+#include <string>
+
 using namespace wake_cause;
 
 // XIAO nRF52840-ish masks: tach on P0.02, buttons on P0.03/P0.28/P0.29.
@@ -100,4 +102,32 @@ TEST_CASE("tachIdleIsHigh - ties and empty bursts default to idle-high") {
     // idle-high preserves the historical SENSE-LOW arm.
     CHECK(tachIdleIsHigh(5, 10));
     CHECK(tachIdleIsHigh(0, 0));
+}
+
+// ---------------------------------------------------------------------------
+// shortName — the boot-page / debug-line tag
+// ---------------------------------------------------------------------------
+
+TEST_CASE("shortName - every cause has a distinct, short, non-empty tag") {
+    const Cause all[] = {Cause::kColdBoot,   Cause::kTachWake,  Cause::kButtonWake,
+                         Cause::kUsbWake,    Cause::kWatchdog,  Cause::kSoftReset,
+                         Cause::kOffWakeUnknown};
+    for (Cause a : all) {
+        const char* tag = shortName(a);
+        REQUIRE(tag != nullptr);
+        CHECK(tag[0] != '\0');
+        // The SD format page fits the tag on its last line next to an
+        // SdFat error code, so keep it to four characters.
+        CHECK(std::string(tag).size() <= 4);
+        for (Cause b : all) {
+            if (a != b) CHECK(std::string(shortName(a)) != std::string(shortName(b)));
+        }
+    }
+}
+
+TEST_CASE("shortName - the two reset-type tags the field diagnosis keys on") {
+    // A WDT boot landing on the SD format page means the watchdog fired
+    // mid-boot (it survives a soft reset) — not a blank card.
+    CHECK(std::string(shortName(Cause::kWatchdog)) == "WDT");
+    CHECK(std::string(shortName(Cause::kSoftReset)) == "SRST");
 }

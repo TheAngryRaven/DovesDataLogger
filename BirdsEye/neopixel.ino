@@ -387,13 +387,31 @@ void NEOPIXEL_LOOP() {
       led_frame::Rgb stripPx[led_frame::kStripCount];
       bool stripOff = raceEngineStopped();
       if (!stripOff) {
-        if (!gpsData.fix || !gpsData.timeValid) {
+        if (!gpsFixAndTimeLocked()) {
+          // Wins over the staging tree too: physics can't stage without
+          // a fix (the tree sits in kWaitStop) and the familiar green
+          // pip is the correct "GPS searching" signal; the pinned
+          // staging screen's WAITING FOR GPS line agrees.
           led_modes::renderSearchPip(now, stripPx);
+        } else if (dragTreeStripActive()) {
+          // Manual drag staging tree (plan 0016): white pip -> yellows
+          // -> green, plus the foul red flash. Strip-only, so the two
+          // status LEDs stay live and boot/overrev/purple keep their
+          // priority above this whole branch. Inactive during the run
+          // itself (stripActive is false for kRunning), so the normal
+          // RPM/speed arms below take over for the pass.
+          drag_tree::renderStrip(dragTreeStage(), now, stripPx);
         } else {
-          const bool paceValid =
-              activeTimerRaceStarted() && activeTimerLaps() >= 1 &&
-              !(sprintModeIsActive() && !activeTimerRunActive());
-          if (paceValid) {
+          led_modes::PaceGate pg;
+          pg.raceStarted = activeTimerRaceStarted();
+          pg.laps = activeTimerLaps();
+          pg.runMode = sprintModeIsActive() || dragModeIsActive();
+          pg.runActive = activeTimerRunActive();
+          // Drag has no reference to pace against (the pace accessor is
+          // hard-wired 0.0) — automatic AND manual, so every run gets
+          // the RPM/speed scale instead of a lone centerline (review D6).
+          pg.hasPaceReference = !dragModeIsActive();
+          if (led_modes::paceValid(pg)) {
             led_modes::renderPace(activeTimerPaceDifference(), stripPx);
           } else if (raceEntryCause == RACE_ENTRY_TACH) {
             const led_modes::ScaleSpec rpmSpec = {

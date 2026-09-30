@@ -118,6 +118,10 @@ class SdFat {
   bool volumeBegin() { return true; }
   SimSdCard* card() { return &card_; }
   void cacheClear() {}
+  // SdFat's last card-level error (SdBase::sdErrorCode/sdErrorData). The
+  // VFS never fails at the card layer, so both read as "no error".
+  uint8_t sdErrorCode() const { return 0; }
+  uint32_t sdErrorData() const { return 0; }
 
   bool exists(const char* path);
   bool mkdir(const char* path);

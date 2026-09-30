@@ -1,0 +1,395 @@
+#include "doctest.h"
+
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+
+#include "sensoregg_gatt.h"
+
+using namespace sensoregg_gatt;
+
+// ---------------------------------------------------------------------------
+// Golden fixtures — BYTE-IDENTICAL to the DovesSensorEgg repo's
+// pw_gatt_encode golden tests (its encoder produces these exact buffers).
+// If either side changes a layout, both repos' vectors change with it —
+// deliberately. Same cross-repo discipline as sensoregg_protocol <->
+// pw_adv_encode for the beacon.
+// ---------------------------------------------------------------------------
+
+// The EGT pod's 104-byte Descriptor: schema 1, device type 0x01, fw 1.1,
+// 4 channels x 24-byte records (EGT/CJ @250ms scale 0.1, IAT @1000ms
+// scale 0.1, BATT @30000ms scale 1.0).
+static const uint8_t kGoldenDescriptor[104] = {
+    // header
+    0x01, 0x01, 0x01, 0x01, 0x04, 0x18, 0x00, 0x00,
+    // ch0 EGT
+    0x00, 0x01, 0xFA, 0x00, 0xCD, 0xCC, 0xCC, 0x3D, 0x00, 0x00, 0x00, 0x00,
+    0x45, 0x47, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // ch1 CJ
+    0x01, 0x01, 0xFA, 0x00, 0xCD, 0xCC, 0xCC, 0x3D, 0x00, 0x00, 0x00, 0x00,
+    0x43, 0x4A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // ch2 IAT
+    0x02, 0x01, 0xE8, 0x03, 0xCD, 0xCC, 0xCC, 0x3D, 0x00, 0x00, 0x00, 0x00,
+    0x49, 0x41, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // ch3 BATT
+    0x03, 0x08, 0x30, 0x75, 0x00, 0x00, 0x80, 0x3F, 0x00, 0x00, 0x00, 0x00,
+    0x42, 0x41, 0x54, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+// buildClock(0xA5, 0x01234567) from the egg side.
+static const uint8_t kGoldenClock[6] = {0xA5, 0x00, 0x67, 0x45, 0x23, 0x01};
+
+// buildSampleFrame(ch 0, boot 0xA5, seq 0x2A, base 0xDEADBEEF, interval
+// 250, samples {1234, -40, sentinel}).
+static const uint8_t kGoldenFrame[16] = {0x00, 0xA5, 0x2A, 0xEF, 0xBE, 0xAD,
+                                         0xDE, 0xFA, 0x00, 0x03, 0xD2, 0x04,
+                                         0xD8, 0xFF, 0x00, 0x80};
+
+TEST_CASE("sensoregg_gatt - golden descriptor parses field-for-field") {
+    PodDescriptor pd;
+    REQUIRE(parseDescriptor(kGoldenDescriptor, sizeof(kGoldenDescriptor), pd));
+    CHECK(pd.schemaVersion == 1);
+    CHECK(pd.deviceType == 0x01);
+    CHECK(pd.fwMajor == 1);
+    CHECK(pd.fwMinor == 1);
+    CHECK(pd.channelCount == 4);
+    CHECK(pd.recordLen == 24);
+    CHECK(pd.ch[0].id == 0);
+    CHECK(pd.ch[0].quantity == 0x01);
+    CHECK(pd.ch[0].periodMs == 250);
+    CHECK(pd.ch[0].scale == doctest::Approx(0.1f));
+    CHECK(pd.ch[0].offset == doctest::Approx(0.0f));
+    CHECK(strcmp(pd.ch[0].name, "EGT") == 0);
+    CHECK(strcmp(pd.ch[1].name, "CJ") == 0);
+    CHECK(pd.ch[2].periodMs == 1000);
+    CHECK(strcmp(pd.ch[2].name, "IAT") == 0);
+    CHECK(pd.ch[3].quantity == 0x08);
+    CHECK(pd.ch[3].periodMs == 30000);
+    CHECK(pd.ch[3].scale == doctest::Approx(1.0f));
+    CHECK(strcmp(pd.ch[3].name, "BATT") == 0);
+}
+
+TEST_CASE("sensoregg_gatt - descriptor rejects malformed values") {
+    PodDescriptor pd;
+    CHECK(!parseDescriptor(nullptr, 104, pd));
+    CHECK(!parseDescriptor(kGoldenDescriptor, 7, pd));    // short header
+    CHECK(!parseDescriptor(kGoldenDescriptor, 103, pd));  // truncated records
+    uint8_t bad[104];
+    memcpy(bad, kGoldenDescriptor, sizeof(bad));
+    bad[0] = 2;  // unknown schema version
+    CHECK(!parseDescriptor(bad, sizeof(bad), pd));
+    memcpy(bad, kGoldenDescriptor, sizeof(bad));
+    bad[5] = 23;  // record_len below the schema-v1 minimum
+    CHECK(!parseDescriptor(bad, sizeof(bad), pd));
+    memcpy(bad, kGoldenDescriptor, sizeof(bad));
+    bad[4] = 0;  // no channels
+    CHECK(!parseDescriptor(bad, sizeof(bad), pd));
+    memcpy(bad, kGoldenDescriptor, sizeof(bad));
+    bad[4] = 22;  // over the 21-channel / 512-byte ceiling
+    CHECK(!parseDescriptor(bad, sizeof(bad), pd));
+}
+
+TEST_CASE("sensoregg_gatt - descriptor strides by a larger declared record_len") {
+    // A future schema may append record fields: same header shape,
+    // record_len 28, one channel; the first 24 bytes keep their layout
+    // and the tail must be skipped.
+    uint8_t d[8 + 28] = {0};
+    d[0] = 1;   // schema
+    d[1] = 1;   // device type
+    d[4] = 1;   // one channel
+    d[5] = 28;  // fatter record
+    memcpy(&d[8], &kGoldenDescriptor[8], 24);  // EGT record + 4 junk bytes
+    d[8 + 24] = 0xEE;  // the appended bytes a v1 parser must ignore
+    PodDescriptor pd;
+    REQUIRE(parseDescriptor(d, sizeof(d), pd));
+    CHECK(pd.channelCount == 1);
+    CHECK(pd.recordLen == 28);
+    CHECK(strcmp(pd.ch[0].name, "EGT") == 0);
+    CHECK(pd.ch[0].periodMs == 250);
+}
+
+TEST_CASE("sensoregg_gatt - golden sample frame parses field-for-field") {
+    SampleFrame f;
+    REQUIRE(parseSampleFrame(kGoldenFrame, sizeof(kGoldenFrame), f));
+    CHECK(f.channelId == 0);
+    CHECK(f.bootId == 0xA5);
+    CHECK(f.seq == 0x2A);
+    CHECK(f.baseMs == 0xDEADBEEFUL);
+    CHECK(f.intervalMs == 250);
+    CHECK(f.n == 3);
+    CHECK(f.raw[0] == 1234);
+    CHECK(f.raw[1] == -40);
+    CHECK(f.raw[2] == INT16_MIN);
+}
+
+TEST_CASE("sensoregg_gatt - sample frame rejects length mismatches") {
+    SampleFrame f;
+    CHECK(!parseSampleFrame(nullptr, 16, f));
+    CHECK(!parseSampleFrame(kGoldenFrame, 15, f));  // truncated sample
+    CHECK(!parseSampleFrame(kGoldenFrame, 11, f));  // header + half a sample
+    uint8_t bad[16];
+    memcpy(bad, kGoldenFrame, sizeof(bad));
+    bad[9] = 0;  // n = 0
+    CHECK(!parseSampleFrame(bad, sizeof(bad), f));
+    bad[9] = 2;  // n disagrees with len
+    CHECK(!parseSampleFrame(bad, sizeof(bad), f));
+}
+
+TEST_CASE("sensoregg_gatt - clock parses and tolerates a longer value") {
+    uint8_t bootId = 0;
+    uint32_t podMs = 0;
+    REQUIRE(parseClock(kGoldenClock, sizeof(kGoldenClock), bootId, podMs));
+    CHECK(bootId == 0xA5);
+    CHECK(podMs == 0x01234567UL);
+    CHECK(!parseClock(kGoldenClock, 5, bootId, podMs));
+    uint8_t longer[8] = {0};
+    memcpy(longer, kGoldenClock, 6);  // future revision appends bytes
+    REQUIRE(parseClock(longer, sizeof(longer), bootId, podMs));
+    CHECK(bootId == 0xA5);
+}
+
+TEST_CASE("sensoregg_gatt - sampleToReal applies scale after the sentinel") {
+    ChannelInfo c;
+    c.scale = 0.1f;
+    c.offset = 0.0f;
+    CHECK(sampleToReal(1234, c) == doctest::Approx(123.4f));
+    CHECK(sampleToReal(-40, c) == doctest::Approx(-4.0f));
+    CHECK(std::isnan(sampleToReal(INT16_MIN, c)));  // host code: isnan OK
+    c.scale = 1.0f;
+    c.offset = 10.0f;
+    CHECK(sampleToReal(87, c) == doctest::Approx(97.0f));
+}
+
+TEST_CASE("sensoregg_gatt - role mapping is descriptor-driven") {
+    PodDescriptor pd;
+    REQUIRE(parseDescriptor(kGoldenDescriptor, sizeof(kGoldenDescriptor), pd));
+    int8_t idx[ROLE_COUNT];
+    mapChannels(pd, idx);
+    CHECK(idx[ROLE_EGT] == 0);
+    CHECK(idx[ROLE_CJ] == 1);
+    CHECK(idx[ROLE_AUX] == 2);
+    CHECK(idx[ROLE_BATT] == 3);
+    CHECK(fastestChannel(pd) == 0);  // 250 ms EGT is the heartbeat
+
+    // A pod with no battery and no IAT still maps what it has.
+    PodDescriptor small = pd;
+    small.channelCount = 2;
+    mapChannels(small, idx);
+    CHECK(idx[ROLE_EGT] == 0);
+    CHECK(idx[ROLE_CJ] == 1);
+    CHECK(idx[ROLE_AUX] == -1);
+    CHECK(idx[ROLE_BATT] == -1);
+}
+
+TEST_CASE("sensoregg_gatt - clock fit anchors on the round-trip midpoint") {
+    ClockFit f;
+    CHECK(!f.valid);
+    // Request at logger 10000, response at 10060, pod said 555000.
+    clockFitAnchor(f, 0xA5, 555000UL, 10000UL, 10060UL);
+    CHECK(f.valid);
+    CHECK(f.loggerMs0 == 10030UL);
+    CHECK(f.halfRttMs == 30UL);
+    CHECK(clockFitSameEpoch(f, 0xA5));
+    CHECK(!clockFitSameEpoch(f, 0xA6));  // pod rebooted
+    // Forward and backward mapping around the anchor.
+    CHECK(clockFitPodToLogger(f, 555000UL) == 10030UL);
+    CHECK(clockFitPodToLogger(f, 556000UL) == 11030UL);
+    CHECK(clockFitPodToLogger(f, 554000UL) == 9030UL);
+}
+
+TEST_CASE("sensoregg_gatt - clock fit survives the u32 millis wrap") {
+    ClockFit f;
+    // Pod anchored just before its millis wrap; a frame lands just after.
+    clockFitAnchor(f, 1, 0xFFFFFF00UL, 500000UL, 500020UL);
+    const uint32_t mapped = clockFitPodToLogger(f, 0x00000100UL);
+    // Pod advanced 0x200 = 512 ms across the wrap.
+    CHECK(mapped == 500010UL + 512UL);
+    // And a frame slightly BEFORE the anchor maps backward, not 4 Gms off.
+    CHECK(clockFitPodToLogger(f, 0xFFFFFE00UL) == 500010UL - 256UL);
+}
+
+// ---------------------------------------------------------------------------
+// Link state machine (review fixes 2026-09)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("sensoregg_gatt - STREAMING commits only onto the live bring-up") {
+    CHECK(linkMayCommitStreaming(LINK_BRINGUP, true));
+    // E1: the disconnect callback beat the loop's commit — it already
+    // wrote BACKOFF and dropped the handle. The commit must not
+    // resurrect a dead link as STREAMING.
+    CHECK(!linkMayCommitStreaming(LINK_BACKOFF, false));
+    CHECK(!linkMayCommitStreaming(LINK_BRINGUP, false));
+    // A stale ready flag consumed after sleep (IDLE) never commits.
+    CHECK(!linkMayCommitStreaming(LINK_IDLE, false));
+    CHECK(!linkMayCommitStreaming(LINK_IDLE, true));
+    CHECK(!linkMayCommitStreaming(LINK_STREAMING, true));
+    CHECK(!linkMayCommitStreaming(LINK_CONNECTING, true));
+}
+
+TEST_CASE("sensoregg_gatt - an orphaned connected state falls back to BACKOFF") {
+    CHECK(linkReconcileOrphan(LINK_STREAMING, false) == LINK_BACKOFF);
+    CHECK(linkReconcileOrphan(LINK_BRINGUP, false) == LINK_BACKOFF);
+    // Live links are untouched.
+    CHECK(linkReconcileOrphan(LINK_STREAMING, true) == LINK_STREAMING);
+    CHECK(linkReconcileOrphan(LINK_BRINGUP, true) == LINK_BRINGUP);
+    // States that legitimately hold no handle are untouched.
+    CHECK(linkReconcileOrphan(LINK_IDLE, false) == LINK_IDLE);
+    CHECK(linkReconcileOrphan(LINK_WAIT_ADV, false) == LINK_WAIT_ADV);
+    CHECK(linkReconcileOrphan(LINK_BACKOFF, false) == LINK_BACKOFF);
+    CHECK(linkReconcileOrphan(LINK_CONNECTING, false) == LINK_CONNECTING);
+}
+
+TEST_CASE("sensoregg_gatt - the connect callback keeps only a wanted connect") {
+    CHECK(linkAcceptCentralConnect(LINK_CONNECTING, false, true));
+    // E2: SENSOREGG_SLEEP() ran while the SoftDevice was establishing
+    // the link (state already IDLE, sleep gate up).
+    CHECK(!linkAcceptCentralConnect(LINK_IDLE, true, false));
+    CHECK(!linkAcceptCentralConnect(LINK_CONNECTING, true, true));
+    // Gate dropped (race over / unpaired) while connecting.
+    CHECK(!linkAcceptCentralConnect(LINK_CONNECTING, false, false));
+    // The connect timeout already gave up and moved to BACKOFF.
+    CHECK(!linkAcceptCentralConnect(LINK_BACKOFF, false, true));
+    CHECK(!linkAcceptCentralConnect(LINK_WAIT_ADV, false, true));
+}
+
+// ---------------------------------------------------------------------------
+// Stream surface rules (review fixes 2026-09)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("sensoregg_gatt - committing a stream clears every beacon-only field") {
+    sensoregg_protocol::Reading r;
+    r.egtC = 650.0f;
+    r.junctionC = 30.0f;
+    r.auxC = 40.0f;  // an IAT-less pod would otherwise hold this forever
+    r.flags = 0x03;
+    r.pairingActive = true;
+    r.tcFault = true;  // would otherwise read *TC FAULT* all session
+    r.status = 0x10;
+    r.battery = 87;
+    r.sequence = 1234;
+    r.protoVersion = 2;
+    readingResetForStream(r);
+    CHECK(std::isnan(r.egtC));
+    CHECK(std::isnan(r.junctionC));
+    CHECK(std::isnan(r.auxC));
+    CHECK(r.flags == 0);
+    CHECK(!r.pairingActive);
+    CHECK(!r.tcFault);
+    CHECK(r.status == 0);
+    CHECK(r.battery == 0xFF);
+    CHECK(r.sequence == 0);
+    CHECK(r.protoVersion == 2);  // kept: names the beacon firmware
+}
+
+TEST_CASE("sensoregg_gatt - role staleness follows the channel's own cadence") {
+    // Fast channel (EGT, one 250 ms sample per frame): exactly the
+    // beacon's 1 s rule.
+    CHECK(roleStaleAfterMs(1, 250) == sensoregg_protocol::kStalenessMs);
+    // Batched fast channel: 4 x 250 ms = 1 s per frame -> 2 s.
+    CHECK(roleStaleAfterMs(4, 250) == 2000UL);
+    // IAT at 1 s: 2 s, not a 1 s rule that would flap every frame.
+    CHECK(roleStaleAfterMs(1, 1000) == 2000UL);
+    // Battery at 30 s: 60 s (the cap).
+    CHECK(roleStaleAfterMs(1, 30000) == kRoleStaleMaxMs);
+    // Corrupt / extreme interval: capped, never minutes.
+    CHECK(roleStaleAfterMs(117, 65535) == kRoleStaleMaxMs);
+    // Aperiodic / zero: the floor.
+    CHECK(roleStaleAfterMs(1, 0) == sensoregg_protocol::kStalenessMs);
+}
+
+TEST_CASE("sensoregg_gatt - each role goes stale on its own channel") {
+    RoleFreshness f;
+    // Never stamped (a pod without that channel) -> never fresh.
+    CHECK(!roleFresh(f, ROLE_AUX, 0));
+    CHECK(!roleFresh(f, ROLE_EGT, 100));
+
+    roleFreshnessStamp(f, ROLE_EGT, 1000, 1, 250);
+    roleFreshnessStamp(f, ROLE_CJ, 1000, 1, 250);
+    CHECK(roleFresh(f, ROLE_EGT, 1999));
+    // EGT's frames stop; CJ's keep coming. EGT must go NaN on its own.
+    roleFreshnessStamp(f, ROLE_CJ, 1900, 1, 250);
+    CHECK(!roleFresh(f, ROLE_EGT, 2000));
+    CHECK(roleFresh(f, ROLE_CJ, 2000));
+    CHECK(!roleFresh(f, ROLE_AUX, 2000));
+
+    // Wrap-safe across the u32 millis wrap.
+    roleFreshnessStamp(f, ROLE_BATT, 0xFFFFFF00UL, 1, 30000);
+    CHECK(roleFresh(f, ROLE_BATT, 0x00000100UL));
+
+    // Out-of-range role is ignored, never fresh.
+    roleFreshnessStamp(f, ROLE_COUNT, 0, 1, 250);
+    CHECK(!roleFresh(f, ROLE_COUNT, 0));
+
+    roleFreshnessReset(f);
+    CHECK(!roleFresh(f, ROLE_CJ, 2000));
+}
+
+TEST_CASE("sensoregg_gatt - a refused connect request backs off at once") {
+    CHECK(linkAfterConnectRequest(true) == LINK_CONNECTING);
+    // E4: no connect callback will follow a refusal — don't sit out the
+    // 10 s connect timeout with the scanner paused.
+    CHECK(linkAfterConnectRequest(false) == LINK_BACKOFF);
+}
+
+// ---------------------------------------------------------------------------
+// Frame ring sizing + sustained-drop rule (review fixes 2026-09)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("sensoregg_gatt - the largest legal frame fits the receive slot") {
+    CHECK(kMaxFrameLen == 244);          // ATT_MTU 247 - 3
+    CHECK(kMaxFrameLen == 247 - 3);
+    // And a full-size frame parses.
+    uint8_t buf[kMaxFrameLen] = {0};
+    buf[9] = kMaxSamplesPerFrame;
+    SampleFrame f;
+    CHECK(parseSampleFrame(buf, sizeof(buf), f));
+    CHECK(f.n == kMaxSamplesPerFrame);
+}
+
+TEST_CASE("sensoregg_gatt - one stall's burst of drops never drops the link") {
+    DropMonitor m;
+    CHECK(!dropMonitorUpdate(m, 0, 0));      // first call arms
+    // A 2 s SD stall: the loop comes back once, 10 frames lost.
+    CHECK(!dropMonitorUpdate(m, 10, 2000));
+    // Healthy afterwards: the bad streak resets.
+    CHECK(!dropMonitorUpdate(m, 10, 3000));
+    CHECK(!dropMonitorUpdate(m, 12, 4000));  // one more bad window
+    CHECK(!dropMonitorUpdate(m, 12, 5000));  // clean again
+    CHECK(!dropMonitorUpdate(m, 12, 5999));  // mid-window: no verdict
+}
+
+TEST_CASE("sensoregg_gatt - drops in consecutive windows drop the link once") {
+    DropMonitor m;
+    dropMonitorReset(m, 100, 0);
+    CHECK(!dropMonitorUpdate(m, 101, 1000));  // bad 1
+    CHECK(!dropMonitorUpdate(m, 101, 1500));  // mid-window
+    CHECK(!dropMonitorUpdate(m, 105, 2000));  // bad 2
+    CHECK(dropMonitorUpdate(m, 106, 3000));   // bad 3 -> fail
+    // Re-armed: it takes another full streak to fire again.
+    CHECK(!dropMonitorUpdate(m, 107, 4000));
+    CHECK(!dropMonitorUpdate(m, 108, 5000));
+    CHECK(dropMonitorUpdate(m, 109, 6000));
+    // Wrap-safe window timing across the millis wrap.
+    dropMonitorReset(m, 0, 0xFFFFFF00UL);
+    CHECK(!dropMonitorUpdate(m, 1, 0x00000100UL));  // only 512 ms elapsed
+    CHECK(!dropMonitorUpdate(m, 1, 0x00000400UL));  // window closes, bad 1
+}
+
+TEST_CASE("sensoregg_gatt - battery percent honours the descriptor scaling") {
+    ChannelInfo c;
+    c.scale = 1.0f;
+    c.offset = 0.0f;
+    CHECK(batteryPercent(sampleToReal(87, c)) == 87);
+    CHECK(batteryPercent(sampleToReal(INT16_MIN, c)) == 0xFF);  // sentinel
+    // E6: a pod declaring deci-percent must not read 870 -> "unknown".
+    c.scale = 0.1f;
+    CHECK(batteryPercent(sampleToReal(870, c)) == 87);
+    CHECK(batteryPercent(sampleToReal(875, c)) == 88);  // rounds
+    // An offset applies too.
+    c.scale = 1.0f;
+    c.offset = -10.0f;
+    CHECK(batteryPercent(sampleToReal(60, c)) == 50);
+    // Out of range clamps rather than wrapping a uint8_t.
+    c.offset = 0.0f;
+    CHECK(batteryPercent(sampleToReal(250, c)) == 100);
+    CHECK(batteryPercent(sampleToReal(-5, c)) == 0);
+}

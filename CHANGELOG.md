@@ -12,6 +12,223 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Fixed
+- **Drag mode review fixes** (plans 0015/0016):
+  - A GPS fix lost mid-pass and never regained no longer wedges manual
+    drag mode. The run stayed "live" forever — the staging screen stuck
+    on a ticking ET with every button ignored. A staged or in-flight run
+    with no fix for 2 s is now abandoned (RUN ABORTED on the manual
+    screen, from which Select-hold exits), and a returning fix starts
+    fresh instead of resuming the stale run.
+  - Drag mode waits for the GPS time lock, not just a position fix,
+    before staging, running the christmas tree or timing a run. Before
+    the lock the receiver's placeholder date made the drag clock jump
+    when the lock landed — silently killing a run or producing a bogus
+    reaction time. The staging screen, the LED search pip and the timer
+    now share one "fix + time lock" check.
+  - A drag re-stage or completed run (and a completed sprint run) now
+    gives the session a full idle allowance again. Re-arming the 3-minute
+    grace did not stop an idle timer that had already started, so slow
+    queue creep followed by a re-stage could end the session the moment
+    the new grace ran out.
+  - Manual drag reaction time no longer reads 0–40 ms high. The green
+    light was stamped with the last GPS fix's time instead of "now", so
+    RT carried up to a whole GPS update period of error, varying run to
+    run.
+  - Leaving manual drag mode with the Select hold now stops a paired
+    Insta360 recording, the same as Stop Logging does. It used to keep
+    recording after the session ended.
+  - Automatic drag runs after the first show the RPM/speed LED bar again
+    instead of a single dim centre pixel (a pace display with nothing to
+    pace against).
+  - Automatic drag mode no longer records the drive back down the return
+    road as a slow run. A finished "run" is discarded only when it both
+    heads the opposite way to the last recorded run and was driven at a
+    cruise rather than a full-effort acceleration, so real passes —
+    including slow ones — still count.
+  - Creeping forward slowly after staging no longer produces a short
+    drag ET. Rolling past the start point below launch speed now
+    re-stages the car; before, the clock started late and counted the
+    crept distance toward the run.
+- **A soft reboot no longer runs the next boot under a watchdog it can't
+  see.** The nRF52 hardware WDT survives `NVIC_SystemReset()` — only a
+  pin, brown-out, power-on or System OFF reset clears it — so every
+  firmware-initiated reboot (BLE/USB transfer exit, OTA, the SD format
+  page, the reboot combo) handed the next boot a ~4 s deadline it never
+  fed until the end of `setup()`. A healthy boot fit; a slow SD init
+  (SdFat's 2 s ACMD41 timeout, three attempts) did not, and the WDT reset
+  the device mid-SD-transaction, leaving a card that firmware cannot reset
+  (CS grounded, no power switch) reading as "no FAT volume" on every
+  following soft boot. Field signature: a freshly formatted, perfectly
+  good card offered for formatting again on every reboot until a power
+  cycle. `setup()` now detects a carried-over WDT first thing
+  (`wdtBootCheck()`), feeds it between every slow boot step, and
+  `wdtSetup()` no longer tries to reconfigure a running (register-locked)
+  WDT.
+- **The SD format page verifies the mount and says what failed.** After
+  `SD.format()` the fresh volume must actually mount before "Format OK"
+  and the reboot; a card that formatted but won't mount now stays on the
+  page as `Formatted: no mount / Power-cycle the unit` instead of
+  rebooting into an identical "Card is not formatted" loop. The confirm
+  page's last line now carries the boot cause and SdFat's last card error
+  (`boot:WDT err:20`), and the SD FAULT page carries the same, so a
+  watchdog-induced loop is visible on the device.
+- **The boot SD probe needs consecutive evidence before offering an
+  erase.** `SD_SETUP()` re-probes the volume once after a 250 ms settle
+  and only declares the card unformatted when the card layer answered
+  both times and the volume mounted neither time (host-tested `sd_probe`
+  rules); a card that stops answering between probes is treated as dead
+  (FAULT, no erase offer), and a volume that mounts on the retry boots
+  normally. The recovered-on-probe path also now records the active SPI
+  clock it had been leaving at 0.
+- **The long SD walks feed the watchdog.** Building the track list opens
+  and JSON-parses every file under `/TRACKS` and `/TRACKS/SPRINT` (up to
+  200, 8 KB each, at the 2 MHz SPI clock) in one call; it ran unfed, so
+  a large track set or a slow card on a soft-reset boot — or right after
+  a BLE track upload/delete — could outlast the ~4 s WDT and reset the
+  device mid-SD-read, the same wedge the carried-over-WDT fix above
+  closes. The track scan now feeds it per file, as do the boot settings
+  default check (one file round trip per key), the replay file browser's
+  root walk, and the OTA staged-image CRC read-back.
+- **`HAS_DEBUG` builds no longer boot-loop without a serial terminal
+  after a soft reset.** The `while (!Serial)` wait at the top of
+  `setup()` never fed the carried-over watchdog, so with nothing
+  attached to the USB port it reset the device every ~4 s. It now feeds
+  the WDT while it waits. Developer builds only — shipped images don't
+  define `HAS_DEBUG`.
+- **SensorEgg GATT link can no longer wedge "streaming" with no link**
+  (plan 0018 review). If the egg dropped in the instant between the
+  bring-up finishing and the main loop committing it, the disconnect was
+  overwritten and the logger sat in STREAMING with no connection — the
+  scanner held off (a link counted as engaged) and EGT read `---` until
+  shutdown or a transfer. The commit now happens only while the staged
+  bring-up is still the live one (checked and set atomically), a
+  "connected" state with no connection handle is reconciled back to the
+  retry path, and a ready flag left over from an earlier bring-up can't
+  be consumed by a later one.
+- **Shutdown and BLE transfer mode can no longer leave a SensorEgg link
+  up** (plan 0018 review). If the egg connection was completing inside
+  the radio at the moment the logger went to sleep or entered transfer
+  mode, the pending-connect cancel was a no-op and the link finished
+  coming up afterwards — occupying the radio for the whole transfer
+  session or charging park. The logger now drops such a late connection
+  the moment it arrives, and ignores the disconnect of a connection it
+  never adopted.
+- **SensorEgg GATT stream no longer holds stale values** (plan 0018
+  review). Fields only the beacon carries were kept from the last beacon
+  while the stream's frames kept the link "fresh": a thermocouple fault
+  seen once could read `*TC FAULT*` for the whole session, and a pod
+  without an intake-air channel logged a flat line into `Temp2`. And
+  since frames from any channel kept the link alive, an EGT channel that
+  stopped while cold-junction frames continued left EGT frozen. Starting
+  the stream now clears those fields, and every value goes `nan`/`---`
+  as soon as its own channel stops arriving (the 1 s rule for EGT/CJ; a
+  slow channel gets one frame of slack at its own rate, e.g. 2 s for a
+  1 s intake-air channel).
+- **A refused SensorEgg connect no longer costs 15 s of silence** (plan
+  0018 review). When the radio refused the connection request outright,
+  the logger still waited out the full 10 s connect timeout and 5 s
+  backoff with the scanner paused, so neither the GATT stream nor the
+  beacon fed the EGT readout. It now backs off immediately and resumes
+  the scanner.
+- **SensorEgg GATT frames of any legal size are received, and lost frames
+  are visible** (plan 0018 review). The logger's receive slots held only
+  32 bytes, so an egg batching more than 11 samples per frame (the spec
+  allows 117) had every such frame silently discarded while the link
+  looked healthy. Slots now take the largest frame the link can carry
+  (244 bytes), the running count of dropped frames shows on EGG TEST as
+  `D<n>`, and drops in three consecutive seconds drop the link so the
+  beacon takes over instead of streaming into the floor.
+- **SensorEgg battery over GATT honours the pod's declared scaling**
+  (plan 0018 review). The battery channel's raw value was used as a
+  percent directly, ignoring the scale/offset the pod's channel table
+  declares, so a pod reporting in tenths of a percent would have read as
+  "unknown". It now converts like every other channel and clamps to
+  0–100.
+- **A failing SD card is no longer hammered during egg pairing** (plan
+  0017 review). When saving a newly captured egg failed, the logger
+  retried the settings write on every matching beacon — about ten full
+  read-modify-writes of `SETTINGS.json` a second for up to two minutes.
+  Retries are now paced at about once a second.
+
+### Added
+- **SensorEgg GATT link** (plan 0018): a paired egg is no longer just
+  overheard — during races and on the Egg/Camera test pages the logger
+  now **connects** as BLE central and consumes the egg's PerchWerks
+  Sensor Service: it reads the pod's self-describing channel table
+  (nothing egg-specific is hardcoded — a future pod with different
+  channels parses with zero logger changes), anchors a clock fit on a
+  timed Clock read with a `boot_id` epoch (an egg reboot is detected,
+  logged and re-anchored, never silently interleaved), and streams
+  acquisition-stamped per-channel sample frames into the exact same
+  data surface the beacon feeds — DOVEX columns, race pages and the LED
+  behave identically on either transport. The beacon remains the
+  unclaimed/disconnected fallback and the pairing transport; while
+  streaming, the 44 % scan duty isn't paid at all. EGG TEST shows
+  `rf:GATT` and the live MTU. SensorEgg builds run
+  `Bluefruit.begin(1, 1)` with deliberately skinny central parameters —
+  the camera link still wins every tradeoff, and `SENSOREGG_SLEEP()`
+  drops the pod link for transfers and shutdown.
+- **SensorEgg pairing menu + live-data test page** (plan 0017): a new
+  **Egg** row on the main menu (SensorEgg builds only). Pairing is
+  window-gated: open the logger's 2-minute capture window, long-press
+  the egg's button, and the first egg heard advertising its own pairing
+  window is stored — to the new `sensoregg_mac` setting, applied live,
+  with the paired page offering Back / Test / Unpair (persist-first,
+  exactly like the camera). Unpaired = accept-any, as before. The new
+  **EGG TEST** page latches the race-gated scanner on at the desk and
+  shows the full live picture: rf link tri-state, protocol version,
+  EGT/CJ/AUX/battery, sequence + measured packet rate, PAIR/FAULT
+  flags, and the active MAC filter. The camera test page's egg soak
+  line works on a desk again (it had silently died when plan 0012
+  race-gated the scanner) — entering it latches the egg bench mode too.
+  The MAC parse/format/byte-order helpers live in the host-tested
+  `sensoregg_protocol` unit.
+- **Manual drag mode — the christmas tree** (plan 0016): Drag now asks
+  **Automatic or Manual** after the distance. Manual stages like a strip:
+  stop, and the LED bar lights a white staging pip, then three yellows at
+  the sportsman-tree 500 ms cadence, then green — mirrored on the screen
+  as STOP TO STAGE, a big 3…2…1 countdown, and a flashing GO. Moving
+  during the yellows is a RED LIGHT foul; sitting still 5 s after green
+  is FAILED TO LAUNCH; both flash red and wait for a button, and every
+  run ends on a results screen (ET, trap, 0-60, and a new **reaction
+  time**) that re-arms on any button. The screen stays pinned to staging
+  info for the whole manual session; hold Select 2 s to end it.
+  Automatic mode is unchanged.
+- **Drag mode** (plan 0015): main menu → **Drag** → pick a distance
+  (1/8 Mile, 1000 ft, 1/4 Mile, 1/2 Mile, 1 Mile) and the session starts
+  — no track file, no detection. The device stages at a standstill,
+  starts the clock rollout-style (11.25 in past the staged position),
+  and ends the run at the target distance, reporting ET, trap speed,
+  and a 0-60 mph split; it re-arms automatically for the next pass. All
+  runs land in one DOVEX session with `race_mode=DRAG` (the laps line is
+  the run ETs — same backwards-compatible trailing-column scheme as
+  SPRINT). The run state machine is the host-tested `drag_timer` unit.
+
+### Changed
+- **CI: stale DovesLapTimer-pin notes corrected.** `compile-sketch.yml`
+  claimed the release pin could not compile BETA source (no tag carrying
+  `CrossingEngine`/`SprintTimer`), and CLAUDE.md said the sim pins the
+  library's `BETA` branch. Neither is true any more: `v4.3.0`'s `src/` is
+  identical to the library's `BETA`, and the sim defaults to `v4.3.0`,
+  overridden to `BETA` only for BETA-targeted builds. Comments and docs
+  only — no build behavior changes.
+- **CI: the release PR now compiles the release configuration.** The
+  flags-off `compile-stock-arm` job builds both boards (it was Sense
+  only), and on the BETA → master PR it links the release library pin
+  (`v4.3.0`) instead of the library's `BETA` — so that PR compiles
+  exactly what `release.yml` will build (release library, no feature
+  flags, both boards). Before, BETA source met the pinned library and the
+  flags-off non-Sense image for the first time on the tag push.
+- **CI: a release tag must match the firmware's own version.** The OTA
+  manifest's version is taken from the git tag, but devices report
+  `FIRMWARE_VERSION` from `project.h` — tagging `v4.2.0` on a tree still
+  saying `4.1.0` published a manifest no updated device could ever
+  satisfy, so the companion app would offer the update forever.
+  `release.yml` now fails the tag build before anything is built or
+  published unless the tag equals `FIRMWARE_VERSION` and `CHANGELOG.md`
+  has a `## [x.y.z]` heading for it.
+
 ## [4.1.0] - 2026-08-24
 
 MINOR — new settings and device behaviour, backwards compatible with the
