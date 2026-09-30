@@ -35,7 +35,7 @@ include(FetchContent)
 # validates different code than ships — and can fail to link outright when the
 # branch gains sources this file doesn't list. That is exactly what happened
 # when the library's BETA gained CrossingEngine.cpp while master's sim was
-# hardcoded to BETA: master's firmware pins v4.2.0, its sim tracked BETA.
+# hardcoded to BETA: master's firmware then pinned v4.2.0, its sim tracked BETA.
 #
 # So: default to the stable tag (master/release policy) and let CI override
 # per channel, mirroring LAPTIMER_REF in compile-sketch.yml. sim-build.yml

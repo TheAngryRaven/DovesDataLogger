@@ -22,13 +22,13 @@ jobs:
       #                        it compiled BETA code against master's pins and
       #                        failed on the sprint headers forever.
       #   ref_name == BETA  -> push / workflow_dispatch on BETA itself
-      # Anything else is master/release. NOTE: merging BETA into master is
-      # what promotes the channel — at that point the fallbacks below must be
-      # bumped deliberately (a DovesLapTimer release tag carrying
-      # CrossingEngine/SprintTimer, plus a decision on the SensorEgg flag),
-      # here and in sim-build.yml / release.yml. (The condition is repeated
-      # rather than hoisted into its own env var because a job-level `env:`
-      # entry cannot reference its siblings.)
+      # Anything else is master/release. The release pin (v4.3.0) already
+      # carries CrossingEngine/SprintTimer, so BETA source builds against it
+      # too; bump it deliberately — here and in sim-build.yml / release.yml /
+      # BirdsEye/sim/CMakeLists.txt — only when the firmware starts needing
+      # library code newer than the tag. (The condition is repeated rather
+      # than hoisted into its own env var because a job-level `env:` entry
+      # cannot reference its siblings.)
       # DovesLapTimer ref: the beta channel tracks the library's own BETA
       # branch so the two move together; everything else pins the known-good
       # release tag.
@@ -209,17 +209,38 @@ jobs:
   # several (the DOVEX row/header shapes and the settings defaults now
   # differ by channel). This job closes that hole from the BETA side.
   #
-  # One board is enough: the two arms here differ only in feature flags,
-  # and the sense/non-sense split is already covered above.
-  # LAPTIMER_REF deliberately stays BETA so the flags are the ONLY
-  # variable — pinning the release tag as well would fail on BETA-era
-  # library APIs and tell us nothing about the flags.
+  # Both boards: this arm is also the RELEASE configuration (project.h
+  # defaults, no feature flags), and release.yml ships both images — the
+  # non-Sense board has its own `#if` paths (no IMU) that must compile
+  # with the flags off too.
+  #
+  # Library ref:
+  #   head_ref == BETA (the BETA -> master release PR): the release pin,
+  #     so this job compiles exactly what release.yml will build — release
+  #     library + no flags, both boards. Without it the release PR never
+  #     compiled BETA source against the pinned library at all, and a
+  #     library dependency newer than the tag first failed on the tag push.
+  #   otherwise (feature PRs into BETA, pushes to BETA): BETA, so the flags
+  #     are the ONLY variable between this job and the flags-on build above.
+  # Keep the pin in sync with LAPTIMER_REF above and with release.yml.
   compile-stock-arm:
-    name: xiao-nrf52840-sense (flags off)
+    name: ${{ matrix.board.name }} (flags off)
     if: >-
       github.base_ref == 'BETA' || github.head_ref == 'BETA' ||
       github.ref_name == 'BETA'
     runs-on: ubuntu-latest
+    env:
+      STOCK_LAPTIMER_REF: ${{ github.head_ref == 'BETA' && 'v4.3.0' || 'BETA' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        board:
+          - name: xiao-nrf52840-sense
+            fqbn: Seeeduino:nrf52:xiaonRF52840Sense
+            define: BIRDSEYE_BOARD_SENSE
+          - name: xiao-nrf52840
+            fqbn: Seeeduino:nrf52:xiaonRF52840
+            define: BIRDSEYE_BOARD_NONSENSE
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -227,10 +248,13 @@ jobs:
       - name: Install adafruit-nrfutil
         run: pip install --user adafruit-nrfutil
 
+      - name: Report configuration
+        run: echo "Flags off, DovesLapTimer ref ${STOCK_LAPTIMER_REF}, board ${{ matrix.board.fqbn }}"
+
       - name: Compile sketch with the feature flags off
         uses: arduino/compile-sketches@v1
         with:
-          fqbn: Seeeduino:nrf52:xiaonRF52840Sense
+          fqbn: ${{ matrix.board.fqbn }}
           platforms: |
             - name: Seeeduino:nrf52
               source-url: https://files.seeedstudio.com/arduino/package_seeeduino_boards_index.json
@@ -245,9 +269,10 @@ jobs:
             - name: ArxTypeTraits
             - name: Adafruit NeoPixel
             - source-url: https://github.com/TheAngryRaven/DovesLapTimer.git
-              version: BETA
+              version: ${{ env.STOCK_LAPTIMER_REF }}
           sketch-paths: |
             - BirdsEye
+          # Exactly release.yml's extra_flags — nothing else.
           cli-compile-flags: |
             - --build-property
-            - compiler.cpp.extra_flags=-DBIRDSEYE_BOARD_SENSE -DSERIAL_BUFFER_SIZE=256 -DDOVES_DISABLE_DEBUG
+            - compiler.cpp.extra_flags=-D${{ matrix.board.define }} -DSERIAL_BUFFER_SIZE=256 -DDOVES_DISABLE_DEBUG

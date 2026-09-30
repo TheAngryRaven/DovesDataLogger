@@ -44,6 +44,21 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   (FAULT, no erase offer), and a volume that mounts on the retry boots
   normally. The recovered-on-probe path also now records the active SPI
   clock it had been leaving at 0.
+- **The long SD walks feed the watchdog.** Building the track list opens
+  and JSON-parses every file under `/TRACKS` and `/TRACKS/SPRINT` (up to
+  200, 8 KB each, at the 2 MHz SPI clock) in one call; it ran unfed, so
+  a large track set or a slow card on a soft-reset boot — or right after
+  a BLE track upload/delete — could outlast the ~4 s WDT and reset the
+  device mid-SD-read, the same wedge the carried-over-WDT fix above
+  closes. The track scan now feeds it per file, as do the boot settings
+  default check (one file round trip per key), the replay file browser's
+  root walk, and the OTA staged-image CRC read-back.
+- **`HAS_DEBUG` builds no longer boot-loop without a serial terminal
+  after a soft reset.** The `while (!Serial)` wait at the top of
+  `setup()` never fed the carried-over watchdog, so with nothing
+  attached to the USB port it reset the device every ~4 s. It now feeds
+  the WDT while it waits. Developer builds only — shipped images don't
+  define `HAS_DEBUG`.
 - **SensorEgg GATT link can no longer wedge "streaming" with no link**
   (plan 0018 review). If the egg dropped in the instant between the
   bring-up finishing and the main loop committing it, the disconnect was
@@ -152,6 +167,30 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   runs land in one DOVEX session with `race_mode=DRAG` (the laps line is
   the run ETs — same backwards-compatible trailing-column scheme as
   SPRINT). The run state machine is the host-tested `drag_timer` unit.
+
+### Changed
+- **CI: stale DovesLapTimer-pin notes corrected.** `compile-sketch.yml`
+  claimed the release pin could not compile BETA source (no tag carrying
+  `CrossingEngine`/`SprintTimer`), and CLAUDE.md said the sim pins the
+  library's `BETA` branch. Neither is true any more: `v4.3.0`'s `src/` is
+  identical to the library's `BETA`, and the sim defaults to `v4.3.0`,
+  overridden to `BETA` only for BETA-targeted builds. Comments and docs
+  only — no build behavior changes.
+- **CI: the release PR now compiles the release configuration.** The
+  flags-off `compile-stock-arm` job builds both boards (it was Sense
+  only), and on the BETA → master PR it links the release library pin
+  (`v4.3.0`) instead of the library's `BETA` — so that PR compiles
+  exactly what `release.yml` will build (release library, no feature
+  flags, both boards). Before, BETA source met the pinned library and the
+  flags-off non-Sense image for the first time on the tag push.
+- **CI: a release tag must match the firmware's own version.** The OTA
+  manifest's version is taken from the git tag, but devices report
+  `FIRMWARE_VERSION` from `project.h` — tagging `v4.2.0` on a tree still
+  saying `4.1.0` published a manifest no updated device could ever
+  satisfy, so the companion app would offer the update forever.
+  `release.yml` now fails the tag build before anything is built or
+  published unless the tag equals `FIRMWARE_VERSION` and `CHANGELOG.md`
+  has a `## [x.y.z]` heading for it.
 
 ## [4.1.0] - 2026-08-24
 

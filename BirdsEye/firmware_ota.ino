@@ -404,6 +404,9 @@ static bool fwCrcOfStageFile(uint32_t& outCrc) {
   uint32_t state = crc32::kInit;
   uint8_t buf[512];
   while (true) {
+    // Up to a 408 KiB image read back in 512 B blocks inside one loop()
+    // iteration — seconds at SD speeds, so feed the ~4 s WDT per block.
+    wdtPet();
     int r = f.read(buf, sizeof(buf));
     if (r < 0) { f.close(); return false; }
     if (r == 0) break;

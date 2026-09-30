@@ -75,6 +75,9 @@ bool buildReplayFileList() {
 
   int filesScanned = 0;
   while (numReplayFiles < MAX_REPLAY_FILES) {
+    // The walk is capped by .dovex files FOUND, not entries scanned, so a
+    // root full of other files is unbounded — feed the WDT per entry.
+    wdtPet();
     File32 entry = root.openNextFile();
     if (!entry) {
       debug(F("Replay: openNextFile returned null after "));
