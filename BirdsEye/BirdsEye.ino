@@ -97,6 +97,7 @@
 #include "dovex_header.h"
 #include "drag_timer.h"
 #include "drag_tree.h"
+#include "gps_time.h"  // epochNowMs — the green-light stamp (drag tree RT)
 #include "gps_functions.h"
 #include "gps_status_page.h"
 #include "haversine.h"
@@ -176,6 +177,11 @@ drag_timer::DragTimer* dragTimer = nullptr;
 int dragLastRunCount = 0;    // run-complete edge for lap history capture
 int dragDistanceIdx = -1;    // index into drag_timer's distance table
 bool dragWasStaged = false;  // ARMED->STAGED edge for the idle-grace re-arm
+// millis() of the last fix fed to dragTimer->onFix() — the fix-loss
+// watchdog's reference (review D1). Every physics rule edges on a fix,
+// so without a wall-clock check a fix lost mid-pass left the run live
+// forever (and the manual tree's pinned screen with no exit).
+uint32_t dragLastFixMillis = 0;
 
 // Manual drag mode (plan 0016): the christmas-tree staging sequence.
 // dragManualMode is latched by startDragSession and cleared ONLY by
@@ -187,10 +193,11 @@ unsigned long dragLastRtMs = 0;   // reaction time of the last manual run
 uint64_t dragGreenEpochMs = 0;    // green-light instant, Unix epoch ms
 int dragPendingDistanceIdx = 0;   // carried from the distance picker to
                                   // the mode page
-unsigned long idleStartTime = 0;
-bool idleTimerRunning = false;
 bool raceActive = false;
-unsigned long raceSessionStartedAt = 0;  // For auto-idle grace period after RPM wake
+// Auto-idle grace window + idle timer as ONE struct (idle_policy::Clock,
+// review D3): re-arming the grace must also clear a running idle timer,
+// so idle_policy::rearmGrace() is the only way to restart it.
+idle_policy::Clock idleClock;
 // How the active session started (RACE_ENTRY_NONE between sessions). Decides
 // the session-end rule and the camera driver: manual/speed sessions have no
 // engine signal, so they record from session start and end on the 5 min
@@ -467,6 +474,10 @@ volatile bool gpsDataFresh = false;  // Set by PVT callback, cleared by GPS_LOOP
 // Compare this against a remembered value instead. (gpsFrameCounter is no
 // help: it zeroes every second for the frame-rate maths.)
 volatile uint32_t gpsPvtSequence = 0;
+// millis() when the last PVT arrived — with that PVT's epoch it gives
+// "now" on the epoch clock between fixes (gps_time::epochNowMs). Used to
+// stamp the drag tree's green light (review D4).
+volatile uint32_t gpsPvtArrivalMillis = 0;
 
 // GPS nav-rate target: the rate GPS_RECONFIGURE() (and every wake/recovery
 // path that calls it) re-asserts. Boot starts in status mode (5 Hz +
@@ -529,16 +540,21 @@ void checkForNewLapData() {
   // re-stages every couple of minutes, so an active queue never idles
   // out, while a genuinely parked car still ends after the grace.
   if (dragTimer != nullptr) {
+    // Fix-loss watchdog first, so the staged/run edges below and the
+    // manual tree (stepped later this loop) all see the abort.
+    if (dragTimer->checkFixLoss((uint32_t)millis(), dragLastFixMillis)) {
+      debugln(F("Drag: fix lost — staged/in-flight run abandoned"));
+    }
     const bool stagedNow = dragTimer->staged();
     if (stagedNow && !dragWasStaged) {
-      raceSessionStartedAt = millis();
+      idle_policy::rearmGrace(idleClock, (uint32_t)millis());
     }
     dragWasStaged = stagedNow;
 
     int runs = dragTimer->runs();
     if (runs > dragLastRunCount) {
       dragLastRunCount = runs;
-      raceSessionStartedAt = millis();
+      idle_policy::rearmGrace(idleClock, (uint32_t)millis());
       if (lapHistoryCount < lapHistoryMaxLaps) {
         lastLap = dragTimer->lastEtMs();
         lapHistory[lapHistoryCount] = lastLap;
@@ -558,7 +574,7 @@ void checkForNewLapData() {
     int runs = sprintTimer->getRuns();
     if (runs > sprintLastRunCount) {
       sprintLastRunCount = runs;
-      raceSessionStartedAt = millis();
+      idle_policy::rearmGrace(idleClock, (uint32_t)millis());
       if (lapHistoryCount < lapHistoryMaxLaps) {
         lastLap = sprintTimer->getLastRunTime();
         lapHistory[lapHistoryCount] = lastLap;
@@ -1437,6 +1453,22 @@ bool dragModeIsActive() {
   return dragTimer != nullptr;
 }
 
+/**
+ * @brief THE "GPS is usable for drag timing" predicate: a position fix
+ * AND the receiver's full UTC time lock (validDate + validTime +
+ * fullyResolved — the log-file-creation gate). Before the lock the
+ * receiver reports a placeholder date, and drag timing runs on Unix
+ * EPOCH ms, so a placeholder-dated fix would timestamp the staged
+ * anchor, the green light and the ET start on a clock that jumps by
+ * years the moment the lock lands (review D2: a silently aborted run,
+ * or a garbage reaction time). The physics feed, the manual tree's
+ * input, the staging screen's WAITING FOR GPS line and the LED search
+ * pip all read this one function so they can never disagree.
+ */
+bool gpsFixAndTimeLocked() {
+  return gpsData.fix && gpsData.timeValid;
+}
+
 // Drag-mode display accessors (null-safe): the trap/0-60 stats have no
 // lap-timer analog, so they don't ride the activeTimer*() surface —
 // display_pages reads these directly, like the sprint pages read
@@ -1772,6 +1804,7 @@ void startDragSession(int distanceIdx, bool manualStaging) {
   dragDistanceIdx = dragTimer->targetIdx();  // clamped by the unit
   dragLastRunCount = 0;
   dragWasStaged = false;
+  dragLastFixMillis = (uint32_t)millis();
   dragManualMode = manualStaging;
   dragLastRtMs = 0;
   dragGreenEpochMs = 0;
@@ -1800,7 +1833,7 @@ void dragStagingLoop() {
 
   drag_tree::Inputs in;
   in.nowMs = millis();
-  in.fix = gpsData.fix;
+  in.fix = gpsFixAndTimeLocked();  // same gate as the physics feed
   in.speedMph = gps_speed_mph;
   in.timerStaged = dragTimer->staged();
   in.runActive = dragTimer->runActive();
@@ -1816,20 +1849,26 @@ void dragStagingLoop() {
 
   if (fx.greenEdge) {
     // EPOCH ms, the same clock as runStartEpochMs() — RT is the
-    // difference of the two, so they must never mix time bases.
-    dragGreenEpochMs = getGpsUnixTimestampMillis();
+    // difference of the two, so they must never mix time bases. And
+    // "now" on that clock, not the last fix's time: the green lands up
+    // to a nav period after the last PVT, and stamping it with the
+    // fix's time read every RT 0-40 ms high with jitter (review D4).
+    dragGreenEpochMs = gps_time::epochNowMs(getGpsUnixTimestampMillis(),
+                                            gpsPvtArrivalMillis,
+                                            (uint32_t)millis());
     dragLastRtMs = 0;
   }
   if (fx.runStartEdge) {
-    const uint64_t s = dragTimer->runStartEpochMs();
-    dragLastRtMs =
-        (s > dragGreenEpochMs) ? (unsigned long)(s - dragGreenEpochMs) : 0;
+    dragLastRtMs = drag_tree::reactionTimeMs(dragTimer->runStartEpochMs(),
+                                             dragGreenEpochMs);
   }
   if (fx.consumedButton) {
     resetButtons();  // the press must not also drive displayLoop()
   }
   if (fx.exitSession) {
-    endRaceSession();  // clears dragManualMode -> releases the pin
+    // User-initiated: stops a paired camera too, exactly like the
+    // LOGGING STOP confirm. Clears dragManualMode -> releases the pin.
+    endRaceSessionByUser();
     switchToDisplayPage(PAGE_MAIN_MENU);
     resetButtons();
   }
@@ -1998,23 +2037,36 @@ void trackDetectionLoop() {
 void startRaceSession(RaceEntryCause cause) {
   raceActive = true;
   enableLogging = true;
-  raceSessionStartedAt = millis();
+  idle_policy::rearmGrace(idleClock, (uint32_t)millis());
   raceEntryCause = cause;
   // Create a minimal CourseManager if none exists yet (no track detected)
   createLapAnythingCourseManager();
 }
 
 /**
+ * @brief The user's explicit "I'm done": stop the camera recording
+ * immediately (bypassing its stationary+engine-off hold), then end the
+ * session. The ONE path for every user-initiated ender — the LOGGING
+ * STOP confirm and the manual drag Select-hold exit. Two hand-written
+ * copies drifted once: the drag exit called endRaceSession() alone and
+ * left a paired camera recording in the staging lane (review D5).
+ */
+void endRaceSessionByUser() {
+  CAMERA_NOTIFY_SESSION_END();
+  endRaceSession();
+}
+
+/**
  * @brief End the current race session: write DOVEX header, close file,
- * clean up CourseManager, reset state. Used by both checkAutoIdle()
- * and LOGGING_STOP_CONFIRM in display_ui.ino.
+ * clean up CourseManager, reset state. Used by checkAutoIdle() and, via
+ * endRaceSessionByUser(), by the user-initiated enders.
  */
 void endRaceSession() {
   // Deliberately NO camera notification here: for TACH sessions the
   // camera must keep recording through a stationary grid idle — its own
   // stationary-AND-engine-off rule decides the recording stop. The
-  // camera is stopped explicitly where the ender owns it: the manual
-  // stop confirm (display_ui.ino), the manual/speed-session idle timer
+  // camera is stopped explicitly where the ender owns it: the user's
+  // own enders (endRaceSessionByUser()), the manual/speed-session idle timer
   // (checkAutoIdle() calls CAMERA_NOTIFY_SESSION_END() itself before
   // this), and shutdown entry (CAMERA_SLEEP() in enterShutdown()).
 
@@ -2062,8 +2114,7 @@ void endRaceSession() {
   detectedTrackIndex = -1;
   raceActive = false;
   raceEntryCause = RACE_ENTRY_NONE;
-  idleTimerRunning = false;
-  idleStartTime = 0;
+  idleClock = idle_policy::Clock{};
 
   // Reset lap history
   lapHistoryCount = 0;
@@ -2133,29 +2184,10 @@ void checkAutoIdle() {
   const idle_policy::Decision d = idle_policy::evaluate(pin);
 
   // Camera owns the end of a tach session while recording (see idle_policy
-  // for the rule and the GPS-lock-hold exception).
-  if (d.yieldToCamera) return;
-
-  // Grace period: don't auto-idle within first 3 minutes of a session.
-  // After RPM wake the car is often stationary (warming up, waiting for
-  // track session) and GPS needs time to reacquire. Without this, the
-  // idle timer kills the session before the driver even moves. (Sprint
-  // runs re-arm it via checkForNewLapData().)
-  if (millis() - raceSessionStartedAt < 180000UL) return;
-
-  if (d.resetTimer) {
-    idleTimerRunning = false;
-    idleStartTime = 0;
-    return;
-  }
-
-  if (!idleTimerRunning) {
-    idleTimerRunning = true;
-    idleStartTime = millis();
-    return;
-  }
-
-  if (millis() - idleStartTime >= d.holdMs) {
+  // for the rule and the GPS-lock-hold exception); the 3 min grace (re-
+  // armed by sprint/drag runs and drag stage latches, together with the
+  // idle timer) and the hold itself are idle_policy::advance().
+  if (idle_policy::advance(idleClock, d, (uint32_t)millis())) {
     if (d.stopCameraOnEnd) {
       debugln(F("Auto-idle: 5min at <5mph — ending session + camera"));
       // This ender owns the camera for manual/speed sessions: sessionDemand

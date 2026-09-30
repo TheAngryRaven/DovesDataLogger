@@ -77,4 +77,10 @@ size_t u64ToDecimalString(uint64_t val, char* buf, size_t buf_size) {
   return digits;
 }
 
+uint64_t epochNowMs(uint64_t lastPvtEpochMs, uint32_t pvtArrivalMillis,
+                    uint32_t nowMillis) {
+  if (lastPvtEpochMs == 0) return 0;
+  return lastPvtEpochMs + (uint32_t)(nowMillis - pvtArrivalMillis);
+}
+
 }  // namespace gps_time

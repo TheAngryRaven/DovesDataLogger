@@ -128,9 +128,9 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | File | Purpose |
 |---|---|
 | `haversine.{h,cpp}` | Great-circle distance in miles (track proximity) |
-| `idle_policy.{h,cpp}` | Auto-idle session-end decision table (tach 60 s/2 mph vs manual/speed 5 min/5 mph, camera-yield + GPS-lock-hold exception, sprint engine-aware reset) + the promotion of SPEED/MANUAL sessions to TACH rules once the engine fires |
+| `idle_policy.{h,cpp}` | Auto-idle session-end decision table (tach 60 s/2 mph vs manual/speed 5 min/5 mph, camera-yield + GPS-lock-hold exception, sprint engine-aware reset) + the promotion of SPEED/MANUAL sessions to TACH rules once the engine fires + the idle `Clock` (3 min grace + idle timer as one struct; `rearmGrace()` — session start, sprint/drag runs, drag stage latches — always clears a running timer too) |
 | `gps_stats.{h,cpp}` | GPS pipeline drop accounting: expected-vs-received PVT window math (exact fractional carry, 1-frame jitter slack, capped credit, rate-switch suppression) feeding the debug-page `Drops` counter |
-| `gps_time.{h,cpp}` | Leap-year/Unix-epoch math, `u64ToDecimalString` |
+| `gps_time.{h,cpp}` | Leap-year/Unix-epoch math, `u64ToDecimalString`, `epochNowMs` (epoch "now" between fixes = last PVT epoch + millis since its arrival) |
 | `gps_validation.{h,cpp}` | PVT sample sanity gate + dtostrf-output check |
 | `dovex_header.{h,cpp}` | DOVEX 1 KB header `format()` / `parse()` |
 | `filename_validator.{h,cpp}` | FAT-safe / traversal-proof check for BLE filenames |
@@ -142,7 +142,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `loop_profile.{h,cpp}` | Main-loop CPU accounting: per-section tick accumulation, saturating (never wrapping — a uint32 of DWT ticks is only ~67 s), and the once-a-second rollup into shares of wall time, loop rate, mean and worst iteration, plus measured idle (`SLP`). **Two clocks on purpose**: durations in TICKS with `ticksPerUs` supplied at rollup (so a sub-microsecond section is not quantised to zero), but the WINDOW closed on `millis()` — DWT counts cycles and stops when the core halts, and using it as a wall clock inflated the very first hardware reading. Board-portable by construction — the nRF5340 comparison needs the same instrument |
 | `local_time.{h,cpp}` | UTC + a fixed signed minute offset → local wall clock (4-digit year, correct month/year/leap rollover both ways) + the `isNight()` window test. **No DST, and NOTHING logged goes through it** — saved data stays UTC (subsystem 17) |
 | `led_frame.{h,cpp}` | NeoPixel pixel layout (11 px: 2 status + 9-px strip), `Rgb`/`Frame` PODs, and **`applyCap()` — the single global-brightness choke point** (post-condition: no channel exceeds the cap) |
-| `led_modes.{h,cpp}` | Strip modes + status actions: pace pip math (ms/m, slower = left/red), generic `ScaleSpec` left-fill (RPM red past halfway, speed with no red band at all), the `StatusAction` threshold/hysteresis/flash table, and `flashOn()` — the ONE definition of flash phase, shared with `led_status` |
+| `led_modes.{h,cpp}` | Strip modes + status actions: pace pip math (ms/m, slower = left/red) + `paceValid()` (when the pip shows at all), generic `ScaleSpec` left-fill (RPM red past halfway, speed with no red band at all), the `StatusAction` threshold/hysteresis/flash table, and `flashOn()` — the ONE definition of flash phase, shared with `led_status` |
 | `led_status.{h,cpp}` | The eight assignable status-LED modes (subsystem 16): the mode enum + strict name parser that the `led_status_left`/`led_status_right` settings store, the GPS and camera readiness ladders, and `evalMode()` — which delegates every threshold mode to `led_modes::evalStatus` rather than re-implementing hysteresis. `Inputs.eggSupported` is why an `egt` LED is dark on a stock build instead of a permanent solid blue |
 | `led_animations.{h,cpp}` | Boot + purple-sector animations as pure functions of `(tMs, seed)` — hash-based sparkles, no rand()/millis(), golden-testable |
 | `sector_purple.{h,cpp}` | The lap/sector CLOSE-EDGE monitor (the name predates half its job): open-time best snapshots + a derived S3 defeat the library's lap-line `updateBestSectors()` race, and the same trick one level up defeats it for `getBestLapTime()`. Emits which sector or lap just closed, its verdict **against the last recorded one** (not the best — that only ever answers purple or red), and the two purple flags. No purple on lap 1 |
@@ -857,7 +857,9 @@ loop()  ~250 Hz
   never yields to the camera — it is the only ender. **Sprint mode is
   engine-aware**: idle counts only while the tach reads 0 too (between-run
   queue waits keep the engine running), and every completed run re-arms
-  the 3-minute grace period.
+  the 3-minute grace period (`idle_policy::rearmGrace`, which clears any
+  idle timer already running — re-arming the grace alone left a stale
+  timer that ended the session as the new grace expired).
 - **Sprint mode (plan 0002)**: tracks under `/TRACKS/SPRINT/` make the
   session point-to-point. `trackDetectionLoop()` finds the nearest
   manifest entry PER KIND; with both kinds in range the `race_mode`
@@ -889,22 +891,35 @@ loop()  ~250 Hz
   stage at a standstill (≤1 mph held 1 s; the anchor is a **re-latching
   running mean** of standstill fixes so GPS drift in a staging lane can't
   fake a launch), launch rollout-style (11.25 in displacement + ≥2 mph,
-  ET start interpolated between the straddling 25 Hz fixes), accumulate
+  ET start interpolated between the straddling 25 Hz fixes; creeping
+  through the rollout below 2 mph re-stages instead, so the clock can
+  never start with the rollout already behind the car), accumulate
   chord distance to the target, finish with interpolated ET + trap speed
-  and a 0-60 split (0 if never reached). Mid-run standstill (3 s) or a
-  ≥2 s fix gap abandons the run **silently** — which is also how a
+  and a 0-60 split (0 if never reached). Mid-run standstill (3 s), a
+  ≥2 s fix gap, or 2 s of wall clock with no fix at all (the
+  `checkFixLoss` watchdog the glue calls every loop with `millis()` —
+  every other rule edges on a fix, so a fix lost for good would
+  otherwise leave the run live forever) abandons the run **silently** — which is also how a
   queue-creep phantom launch self-cancels — then the timer re-arms on the
   next standstill, so a whole day of passes is one DOVEX session
   (`race_mode=DRAG`, course `DRAG 1/4 MILE` etc., laps line = run ETs;
+  the timer is fed only while `gpsFixAndTimeLocked()` — fix AND UTC
+  lock, the one predicate the tree, staging screen and LED search pip
+  share, because drag time is epoch ms and the pre-lock date jumps;
   trap/0-60 deliberately NOT in the header — the 25 Hz rows carry speed).
-  Run capture rides `checkForNewLapData()`'s run-count edge; each
+  A finished run is discarded as a **return-road drive** only when it
+  heads >90° from the last recorded run AND traps below
+  `kCruiseTrapRatio` (1.2) × its average speed (a cruise, not a pass) —
+  both, so a real pass is never lost on one signal (`rejectedRuns()`
+  counts them). Run capture rides `checkForNewLapData()`'s run-count edge; each
   completed run AND each fresh STAGED latch re-arms the auto-idle grace
   (an active staging queue never idles out; manual 5 min/5 mph rules
   otherwise apply, with the usual tach promotion). Display: no new
   rotation pages — the Current Lap page shows live ET / last ET +
   `trap`/`0-60` subtext / `*staged*`; the Pace page becomes the live 0-60
   readout; the Best Lap page adds the best run's trap/0-60; the LED pace
-  pip is suppressed between runs like sprint.
+  pip never shows in drag (no pace reference — every run, automatic or
+  manual, gets the RPM/speed scale; `led_modes::paceValid`).
 - **Manual drag mode (plan 0016)**: the Manual row runs the same physics
   behind a **christmas tree**. The host-tested `drag_tree` unit is the
   ONE sequencer driving both outputs: LED strip `----w----` (staged
@@ -918,12 +933,17 @@ loop()  ~250 Hz
   FAILED TO LAUNCH; a mid-run physics abort surfaces as RUN ABORTED —
   all three flash the strip red and wait for a button. **RT** = the
   interpolated rollout crossing (`runStartEpochMs()`) minus the green
-  epoch, both Unix epoch ms — display-only (results screen), not in the
+  epoch (`drag_tree::reactionTimeMs`), both Unix epoch ms — the green
+  stamped as "now" via `gps_time::epochNowMs` (last PVT epoch + millis
+  since that PVT arrived, `gpsPvtArrivalMillis`), never the last fix's
+  time, which read RT up to a nav period high — display-only (results screen), not in the
   DOVEX header. The display is **pinned** to `PAGE_DRAG_STAGING` for
   the whole manual session (gpsLockHold construction); presses are
   consumed by `dragStagingLoop()` (the `gpsStatusPageLoop()` slot:
   after `readButtons()`, `resetButtons()` on consumption). Exit = hold
-  Select 2 s in any non-running state (`kExitHoldMs`; a held side
+  Select 2 s in any non-running state — through `endRaceSessionByUser()`,
+  the one user-initiated ender shared with the LOGGING STOP confirm
+  (camera notify, then end) (`kExitHoldMs`; a held side
   button disarms it so the reboot combo wins; the pin's only gate is
   `dragManualMode`, cleared in `endRaceSession()`, so every session
   ender releases it). The LED tree renders strip-only via a new arm in
@@ -1596,8 +1616,10 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   2. **No GPS lock** (`!(gpsData.fix && gpsData.timeValid)` — the
      log-file-creation gate) → green **search pip** bouncing end-to-end
      (`renderSearchPip`, 1.6 s round-trip triangle wave).
-  3. **Pace valid** (`activeTimerRaceStarted() && laps >= 1 && !(sprint
-     && between-runs)`, mirroring the OLED pace page) → the **pace
+  3. **Pace valid** (`led_modes::paceValid`, host-tested:
+     `activeTimerRaceStarted() && laps >= 1 && !(sprint/drag &&
+     between-runs)` and never in drag, which has no pace reference;
+     mirroring the OLED pace page) → the **pace
      pip**: `activeTimerPaceDifference()` is **ms per meter**, positive
      = slower; full deflection ±1.0 ms/m (`kPaceFullScaleMsPerM`,
      0.25/pixel), ±0.125 deadband = dim-white centerline only. Slower =
@@ -2067,8 +2089,9 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | Drag tree cadence / pre-stage hold | 500 ms per yellow / staged +2 s before the tree starts | `drag_tree.h` |
 | Drag tree failed-launch / exit hold | green +5 s still → failed / Select held 2 s → end session | `drag_tree.h` |
 | Drag tree flash half-period | 500 ms (3 Hz OLED aliases anything faster) | `drag_tree.h` |
-| Drag stage / launch / abort | ≤1 mph held 1 s / ≥2 mph + rollout / ≤2 mph held 3 s or ≥2 s fix gap (silent) | `drag_timer.h` |
+| Drag stage / launch / abort | ≤1 mph held 1 s / ≥2 mph + rollout / ≤2 mph held 3 s, ≥2 s fix gap, or 2 s wall-clock with no fix (`checkFixLoss`) (silent) | `drag_timer.h` |
 | Drag prove-out | launch must reach 15 mph within 5 s of ET start, else silently abandoned | `drag_timer.h` |
+| Drag return-road gate | discard a finished run heading >90° from the last recorded one AND trapping < 1.2 × its average speed (`kCruiseTrapRatio`) | `drag_timer.h` |
 | Drag time base | Unix epoch ms (`getGpsUnixTimestampMillis()`) — never time-of-day ms (wraps at UTC midnight) | `gps_functions.ino` |
 | Drag distances | 660 / 1000 / 1320 / 2640 / 5280 ft (picker order) | `drag_timer.cpp` |
 | Track JSON coordinate precision | 8 decimals (~1.1 mm) | `track_json.h` |

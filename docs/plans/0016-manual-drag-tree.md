@@ -119,7 +119,9 @@ their priority above the whole branch. During the run (`kRunning`) the
 arm goes inactive and the normal RPM/speed scale takes over;
 `paceValid` gains `!dragManualActive()` so manual runs 2+ get the scale
 instead of a meaningless centered 0.0-pace pip (constant false for every
-other mode — auto unchanged).
+other mode — auto unchanged). *Superseded by review fix D6 (plan 0015):
+automatic drag had the same problem, so the exclusion is now all of drag
+mode, in the host-tested `led_modes::paceValid`.*
 
 ## Menu
 
@@ -136,3 +138,61 @@ on GPS_SPEED exactly as before.
 - No jump-start detection during PRE-STAGE (movement there just
   re-stages silently — the foul window is the yellows, like a real tree
   between pre-stage and green).
+
+## Review fixes (2026-09)
+
+Findings from the pre-release review of plans 0015 + 0016, one commit
+each, each with a regression test in the pure unit that owns the rule.
+
+- **D1 — fix lost mid-pass wedged the pinned screen.** `kRunning` skips
+  the Select-hold exit (so a pass can't be ended by a stray thumb), and
+  every physics abort edges on a fix passed to `onFix()` — which the glue
+  only calls with a fix. A fix that dropped at speed and never came back
+  left `runActive` true forever: tree stuck in `kRunning`, pinned page
+  eating every button, live ET still ticking. The root cause is the
+  physics having no notion of wall time, so the fix is there, not in the
+  tree: `DragTimer::checkFixLoss(nowMs, lastFixMs)` — the glue passes
+  `millis()` and the `millis()` of the last fix it fed, and a staged or
+  launched timer with no fix for `kFixLossAbortMs` (= the in-stream
+  `kFixGapAbortMs`, 2 s, same reasoning) drops to ARMED **and forgets its
+  previous fix**, so a returning fix starts a fresh stream instead of
+  resuming a stale run. The tree's existing "`runActive` fell without a
+  run" rule then surfaces RUN ABORTED, whose screen accepts the exit
+  hold. Keying on the last fix *fed* (not `gpsData.fix`) also covers a
+  receiver that stops streaming with its fix flag latched true. Applies
+  to automatic mode too (a live ET frozen on a dead fix).
+- **D2 — the tree counted down before the GPS time lock.** The tree's
+  `in.fix` was bare `gpsData.fix`, while the LED search pip and the
+  staging screen's WAITING FOR GPS line used `fix && timeValid`, and the
+  physics was fed on a bare fix too. Before the lock the receiver
+  reports a placeholder date, and drag timing is Unix **epoch** ms — so
+  the anchor, the green-light stamp and the ET start sat on a clock that
+  jumps by years the moment the lock lands (a backwards step silently
+  aborts the run; a forwards one is a garbage RT). One predicate,
+  `gpsFixAndTimeLocked()`, now gates the physics feed (automatic mode
+  too), the tree input, the staging screen and the LED search pip. No
+  pure-unit test: the predicate is the one-line conjunction, and the
+  point of the fix is that four call sites share it; the sim always
+  injects a resolved time, so its goldens are unchanged.
+- **D4 — reaction time read high with jitter.** The green edge was
+  stamped `getGpsUnixTimestampMillis()`, which is the *last fix's* time:
+  the green lands anywhere up to a nav period (40 ms at 25 Hz) after it,
+  so every RT read 0–40 ms high with sampling-phase jitter, while the run
+  start it is subtracted from is interpolated to fix-time accuracy. The
+  PVT callback now records `millis()` at arrival
+  (`gpsPvtArrivalMillis`), the green is stamped
+  `gps_time::epochNowMs(lastEpoch, arrivalMillis, millis())`, and the
+  subtraction is `drag_tree::reactionTimeMs()` — both pure and
+  host-tested. Residual, stated rather than hidden: the receiver's own
+  output latency (fix time → callback) is a small constant the firmware
+  cannot see without a PPS line, so RT still trails by that. The sim's
+  `drag_staging_results` golden moved (RT 0.68 → 0.66 on the same
+  scripted pass) and was regenerated.
+- **D5 — the Select-hold exit left a paired camera recording.** The
+  tree's exit effect called `endRaceSession()` alone, which deliberately
+  never touches the camera (a tach session's camera outlives a grid
+  idle); the LOGGING STOP confirm — the other user-initiated ender —
+  notifies the camera first. Both now go through one
+  `endRaceSessionByUser()` (camera notify, then end), so the two can't
+  drift again. Sketch glue with no decision in it, so no pure test; the
+  sim builds and walks the exit path (its camera surface is a stub).

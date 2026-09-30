@@ -61,7 +61,8 @@ as a timestamp gap.
   re-latching anchor the only false-launch source left is real motion
   (queue creep), and that self-cancels through the abort rule without
   recording anything. Launch = displacement from anchor ≥ rollout **AND**
-  speed ≥ 2 mph (jitter or dead-slow creep never launches); the ET start is
+  speed ≥ 2 mph (jitter or dead-slow creep never launches; creep that
+  passes the rollout below 2 mph re-stages — review D8); the ET start is
   linearly interpolated on the displacement curve between the two straddling
   fixes, and the run's distance is seeded with the overshoot past rollout.
 - **LAUNCHED**: per fix, add the chord distance (drag runs are straight —
@@ -72,7 +73,8 @@ as a timestamp gap.
   speed; 0 if never reached (short cars on the 1/8). Finish: cumulative
   distance crosses the target → ET and trap both interpolated between the
   straddling fixes; run recorded (count, last/best ET, best-run trap and
-  0–60 snapshot); back to ARMED. There is no FINISHED phase — "re-arm"
+  0–60 snapshot) unless the return-road gate (review D7, below) discards
+  it; back to ARMED. There is no FINISHED phase — "re-arm"
   IS "wait for standstill", which is ARMED. Two aborts, both silent:
   ≤ 2 mph held 3 s before the target (this also self-cancels queue-creep
   phantom launches), and the **prove-out gate** — a launch that fails to
@@ -161,7 +163,8 @@ still ends ~8 min after its last movement. The engine-aware sprint reset in
   `*waiting*` between runs; the Best Lap page adds a best-run
   `trap / 0-60` subtext; the Pace page shows the live 0–60 status during a
   run instead of a meaningless +0.00 pace. The LED pace pip is suppressed
-  between runs exactly like sprint.
+  between runs exactly like sprint (and, since review fix D6, during runs
+  too — drag has no pace reference).
 - No settings persistence for the distance choice — the picker is two
   presses, and a stale remembered distance is worse than none.
 
@@ -172,3 +175,65 @@ still ends ~8 min after its last movement. The engine-aware sprint reset in
 - No trap-zone speed averaging (see Accuracy).
 - No per-distance best history across sessions — the DOVEX files are the
   record; the webapp is the place to compare days.
+
+## Review fixes (2026-09)
+
+Findings from the pre-release review of plans 0015 + 0016, one commit
+each, each with a regression test in the pure unit that owns the rule.
+
+- **D3 — re-arming the idle grace left a running idle clock behind.**
+  The drag stage latch, the drag run and the sprint run all re-armed the
+  auto-idle grace by rewriting `raceSessionStartedAt`, but
+  `checkAutoIdle()` returned early during the grace without touching an
+  idle timer that had *already started*. Creep below the idle speed long
+  enough to start the timer, then re-stage: the stale timer kept its old
+  start, so the session ended the instant the new grace expired instead
+  of a full hold later. The grace and the timer now live together in
+  `idle_policy::Clock`; `rearmGrace()` is the only way to restart the
+  grace and always clears the timer, and `advance()` holds the whole
+  grace/reset/hold sequence the sketch used to inline — host-tested,
+  including the creep→re-stage regression and millis wrap.
+- **D6 — automatic runs 2+ showed only the dim centerline.** The strip's
+  `paceValid` turned true once a run existed and a new one was live,
+  and drag's pace accessor is hard-wired 0.0 — so from the second run on
+  the pass got the pace pip parked in its deadband (one dim pixel)
+  instead of the RPM/speed scale. Plan 0016 had excluded manual drag
+  only. The gate is now `led_modes::paceValid(PaceGate)`, pure and
+  host-tested, with `hasPaceReference = !dragModeIsActive()`.
+- **D7 — return-road drives recorded as runs.** A car stopped in the
+  shutdown area stages; driving the return road back at 20–30 mph then
+  clears the rollout, the 15 mph prove-out and the target distance, and
+  lands a slow bogus run in the lap history and the DOVEX laps line.
+  Chosen gate: a completed run is discarded (counted in `rejectedRuns()`,
+  never recorded) only when **both** (a) its launch→finish chord points
+  more than 90° from the last *recorded* run's — all passes on a strip
+  run one way, the return road the other — **and** (b) its trap speed
+  is below `kCruiseTrapRatio` (1.2) × its average speed. (b) is the
+  physics of a pass: from a standstill at full effort trap/average is
+  2.0 at constant acceleration and 1.5 at constant power, and stays
+  above ~1.3 even for a car that tops out early on the distance it
+  picked; a drive that settles into a cruise within a few seconds sits
+  near 1.0–1.15. Rejected alternatives: a trap-speed floor (a 206 kart
+  traps ~50 mph and a return road can be driven at 30 — no floor
+  separates them), an ET ceiling per distance (same overlap), and either
+  signal alone (heading alone kills two-way top-speed passes; the ratio
+  alone kills a slow-topping vehicle cruising out the back half of a
+  long distance). Deliberately conservative: the first run of a session
+  (no heading to compare) and every same-direction run are always kept.
+- **D8 — a slow creep before launch started the clock late.** Staged,
+  a car creeping at 1–2 mph (above the 1 mph staging threshold, below
+  the 2 mph launch speed) could cover the whole 11.25 in rollout without
+  launching; the moment it then passed 2 mph the launch edge found the
+  rollout already behind it (`dPrev ≥ kRolloutFt`), the interpolation
+  clamped to the previous fix, and the run was timed from late with the
+  crept ground credited to its distance. Now a STAGED car moving above
+  the staging threshold that passes the rollout without launch speed
+  **re-stages** (drops to ARMED). If it stops, it is staged again at the
+  new spot a second later and the next launch times exactly; if it rolls
+  straight into a launch it had no standing start and records nothing —
+  the strip equivalent of rolling through the beams. Gated on Doppler
+  speed, so standstill position jitter past the rollout radius still
+  cannot un-stage a parked car (the 10 ft `kRestageFt` drift rule is
+  unchanged). Tests: creep→launch records nothing; creep→stop→launch
+  times to the analytic ET (the old code missed it by the anchor mean's
+  lag).

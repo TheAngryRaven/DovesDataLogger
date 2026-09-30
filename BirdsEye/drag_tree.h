@@ -84,7 +84,7 @@ enum class Stage : uint8_t {
 // Snapshot built fresh by the sketch each loop iteration.
 struct Inputs {
   uint32_t nowMs = 0;          // millis()
-  bool  fix = false;           // gpsData.fix
+  bool  fix = false;           // gpsFixAndTimeLocked(): fix AND UTC lock
   float speedMph = 0.0f;       // gps_speed_mph (meaningful only with fix)
   bool  timerStaged = false;   // dragTimer->staged()
   bool  runActive = false;     // dragTimer->runActive()
@@ -135,6 +135,15 @@ char countdownDigit(Stage st);
 // screen and the LEDs blink in lockstep instead of drifting at the
 // display's 3 Hz refresh.
 bool flashPhase(uint32_t nowMs);
+
+// Reaction time from two Unix-epoch-ms instants: the physics'
+// interpolated rollout crossing (DragTimer::runStartEpochMs) minus the
+// green-light stamp. 0 when either is missing or the run started before
+// green (cannot happen with the launch gate closed, but a clamp beats
+// an unsigned wrap to ~49 days on the results screen). The green stamp
+// must be taken with gps_time::epochNowMs — "now", not the last fix's
+// time — or RT reads high by up to a nav period (review D4).
+unsigned long reactionTimeMs(uint64_t runStartEpochMs, uint64_t greenEpochMs);
 
 // False only for kRunning: the strip returns to the normal race compose
 // (RPM/speed scale) while the pass is being driven.

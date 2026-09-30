@@ -116,3 +116,102 @@ TEST_CASE("idle_policy - sprint with engine off falls through to the speed rule"
     in.speedMph = 0.5f;
     CHECK(evaluate(in).resetTimer == false);  // timer runs toward the end
 }
+
+// ---------------------------------------------------------------------------
+// The idle clock: grace + timer (review D3)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Drive the clock at 100 ms ticks with a fixed decision; returns the ms
+// offset (from `from`) at which advance() first said "end", or 0.
+uint32_t runUntilEnd(Clock& c, const Decision& d, uint32_t from,
+                     uint32_t forMs) {
+    for (uint32_t t = 0; t <= forMs; t += 100) {
+        if (advance(c, d, from + t)) return t;
+    }
+    return 0;
+}
+
+}  // namespace
+
+TEST_CASE("idle_policy - clock: no idle end inside the grace window") {
+    Clock c;
+    rearmGrace(c, 1000);
+    const Decision d = evaluate(base());  // tach, stopped: idle
+    CHECK(runUntilEnd(c, d, 1000, kSessionGraceMs - 100) == 0);
+    CHECK_FALSE(c.idleRunning);
+}
+
+TEST_CASE("idle_policy - clock: idle holds the full hold after the grace") {
+    Clock c;
+    rearmGrace(c, 0);
+    const Decision d = evaluate(base());
+    const uint32_t end = runUntilEnd(c, d, 0, kSessionGraceMs + 2 * kTachIdleHoldMs);
+    // First post-grace tick starts the timer; the end is one hold later.
+    CHECK(end == kSessionGraceMs + kTachIdleHoldMs);
+}
+
+TEST_CASE("idle_policy - clock: activity resets a running timer") {
+    Clock c;
+    rearmGrace(c, 0);
+    Inputs in = base();
+    const Decision idle = evaluate(in);
+    in.speedMph = 30.0f;
+    const Decision moving = evaluate(in);
+    uint32_t t = kSessionGraceMs;
+    CHECK_FALSE(advance(c, idle, t));
+    REQUIRE(c.idleRunning);
+    CHECK_FALSE(advance(c, moving, t + 1000));
+    CHECK_FALSE(c.idleRunning);
+}
+
+TEST_CASE("idle_policy - clock: re-arming the grace clears an idle timer already running") {
+    // Regression (review D3): drag queue creep under the idle speed
+    // starts the timer after the grace; the car then re-stages, which
+    // re-arms the grace. The stale timer used to keep running under the
+    // new grace, so the session ended the moment the NEW grace expired.
+    // It must instead get a full grace AND a full hold.
+    Inputs in = base();
+    in.speedRuleSession = true;  // manual drag session: 5 min / 5 mph
+    const Decision idle = evaluate(in);
+
+    Clock c;
+    rearmGrace(c, 0);
+    uint32_t t = kSessionGraceMs;
+    CHECK_FALSE(advance(c, idle, t));  // idle timer starts
+    REQUIRE(c.idleRunning);
+
+    t += kSpeedIdleHoldMs - 10000;     // 10 s short of ending...
+    CHECK_FALSE(advance(c, idle, t));
+    rearmGrace(c, t);                  // ...a fresh stage latch
+    CHECK_FALSE(c.idleRunning);
+
+    const uint32_t end = runUntilEnd(c, idle, t, kSessionGraceMs + 2 * kSpeedIdleHoldMs);
+    CHECK(end == kSessionGraceMs + kSpeedIdleHoldMs);
+}
+
+TEST_CASE("idle_policy - clock: camera yield leaves the timer untouched") {
+    Clock c;
+    rearmGrace(c, 0);
+    const Decision idle = evaluate(base());
+    uint32_t t = kSessionGraceMs;
+    CHECK_FALSE(advance(c, idle, t));
+    REQUIRE(c.idleRunning);
+    Inputs in = base();
+    in.cameraRecording = true;
+    const Decision yield = evaluate(in);
+    REQUIRE(yield.yieldToCamera);
+    CHECK_FALSE(advance(c, yield, t + kTachIdleHoldMs * 2));
+    CHECK(c.idleRunning);
+    CHECK(c.idleStartMs == t);
+}
+
+TEST_CASE("idle_policy - clock: millis wrap inside the grace and the hold") {
+    Clock c;
+    const uint32_t start = 0xFFFFFFFFu - 1000u;
+    rearmGrace(c, start);
+    const Decision d = evaluate(base());
+    CHECK(runUntilEnd(c, d, start, kSessionGraceMs + 2 * kTachIdleHoldMs) ==
+          kSessionGraceMs + kTachIdleHoldMs);
+}

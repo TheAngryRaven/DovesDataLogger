@@ -89,13 +89,45 @@ constexpr uint32_t kProveOutMs  = 5000;
 // (speed stayed under kLaunchMinMph) has moved to a new spot — drop
 // back to ARMED and re-stage there. Deliberately much larger than the
 // rollout so standstill jitter can never un-stage a car that is about
-// to launch; only a real slow reposition trips it.
+// to launch. A car CREEPING (speed above kStagedMaxMph) re-stages much
+// sooner — the moment it passes the rollout (review D8) — because a
+// launch from there would start the clock late.
 constexpr float kRestageFt = 10.0f;
+
+// Return-road rejection (review fix D7). A car stopped in the shutdown
+// area stages, then drives back down the return road at 20-30 mph: it
+// clears the rollout, the prove-out and the target distance, so without
+// this gate it records a slow bogus "run". Two properties separate that
+// drive from any pass, and a completed run is discarded only when BOTH
+// hold — so a real pass is never lost on one signal alone:
+//  1. It heads BACK: its launch->finish chord points more than 90 deg
+//     away from the last recorded run's (all passes on a strip run the
+//     same way; the return road parallels it the other way).
+//  2. It is a CRUISE, not an acceleration: trap speed below
+//     kCruiseTrapRatio x the run's average speed. Any pass from a
+//     standstill at full effort has trap >= ~1.3x average even when
+//     the car tops out early (constant acceleration gives 2.0, constant
+//     power 1.5); a drive that settles at a cruising speed in the first
+//     few seconds sits near 1.0-1.15.
+// Conservative by construction: the first run of a session (no heading
+// to compare against), every run in the strip's direction, and any
+// genuine acceleration in either direction are all kept.
+constexpr float kCruiseTrapRatio = 1.2f;
 
 // Anchor running-mean window (fix count). Averaging shrinks the anchor
 // noise well below a single fix's jitter; the cap keeps it responsive
 // to the re-latch (the mean follows the parked car's drifting fix).
 constexpr int kAnchorMeanWindow = 32;
+
+// Wall-clock fix-loss watchdog (review fix D1). Every rule above edges
+// on a fix passed to onFix(), so a fix that drops mid-pass and never
+// comes back left the run LAUNCHED forever — and on the manual tree's
+// pinned screen that was a wedge with no exit. The glue therefore
+// reports host time + the time of the last fix it fed, and a staged or
+// launched timer with no fix for this long is abandoned exactly like
+// the in-stream fix-gap abort (same threshold, same reasoning: nothing
+// measured across the gap is trustworthy).
+constexpr uint32_t kFixLossAbortMs = kFixGapAbortMs;
 
 enum class Phase : uint8_t {
   kArmed,     // waiting for a standstill (also post-run / post-abort)
@@ -133,7 +165,19 @@ class DragTimer {
   // reaction time is this minus the green-light epoch.
   uint64_t runStartEpochMs() const { return (uint64_t)(runStartMs_ + 0.5); }
 
+  // Fix-loss watchdog, called every loop by the glue with host
+  // millis() and the millis() of the last fix it fed to onFix(). Once
+  // kFixLossAbortMs pass without a fix, a STAGED or LAUNCHED timer
+  // drops back to ARMED and forgets its previous fix, so a returning
+  // fix starts a fresh stream instead of resuming a stale run. Returns
+  // true when it aborted. Both args are wrap-safe uint32 millis; the
+  // unit still never reads a clock itself.
+  bool checkFixLoss(uint32_t nowMs, uint32_t lastFixMs);
+
   int runs() const { return runs_; }
+
+  // Completed runs discarded by the return-road gate (diagnostic).
+  int rejectedRuns() const { return rejectedRuns_; }
 
   // Live ET while a run is on, 0 otherwise. nowGpsMs lets the display
   // tick between fixes.
@@ -192,7 +236,16 @@ class DragTimer {
   bool     slowTracking_ = false;
   uint64_t slowSinceMs_ = 0;
 
+  // Launch point of the live run (the anchor at launch) and the
+  // launch->finish direction of the last RECORDED run, for the
+  // return-road gate. Local flat-earth north/east components; only the
+  // sign of their dot product is used.
+  double   launchLat_ = 0.0, launchLng_ = 0.0;
+  bool     haveRunDir_ = false;
+  double   runDirN_ = 0.0, runDirE_ = 0.0;
+
   // Records.
+  int           rejectedRuns_ = 0;
   int           runs_ = 0;
   unsigned long lastEtMs_ = 0;
   float         lastTrapMph_ = 0.0f;

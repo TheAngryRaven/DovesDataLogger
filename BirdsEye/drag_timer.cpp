@@ -2,6 +2,8 @@
 
 #include "haversine.h"
 
+#include <math.h>
+
 namespace drag_timer {
 
 namespace {
@@ -24,6 +26,9 @@ const char* const kDovexNames[kDistanceCount] = {
 };
 
 double lerp(double a, double b, double f) { return a + (b - a) * f; }
+
+constexpr double kPi = 3.14159265358979323846;
+constexpr double kMphPerFtPerSec = 3600.0 / 5280.0;
 }  // namespace
 
 float targetFeet(int idx) {
@@ -52,6 +57,8 @@ void DragTimer::setTarget(int idx) {
   targetIdx_ = idx;
   targetFt_ = kTargetsFt[idx];
   havePrev_ = false;
+  haveRunDir_ = false;
+  rejectedRuns_ = 0;
   runs_ = 0;
   lastEtMs_ = 0;
   lastTrapMph_ = 0.0f;
@@ -162,14 +169,30 @@ bool DragTimer::onFix(double lat, double lng, float speedMph,
           runStartMs_ = (double)gpsTimeMs;
         }
         phase_ = Phase::kLaunched;
+        launchLat_ = anchorLat_;
+        launchLng_ = anchorLng_;
         runDistFt_ = (float)(d - kRolloutFt);  // overshoot past rollout
         provenOut_ = speedMph >= kProveOutMph;
         sixtyCrossed_ = false;
         run0to60Ms_ = 0;
         slowTracking_ = false;
+      } else if (d >= kRolloutFt && speedMph > kStagedMaxMph) {
+        // Creep through the rollout below launch speed (review D8). The
+        // car has left its staged spot without launching, so there is
+        // no standstill left to time from: letting it carry on meant a
+        // later push past 2 mph "launched" with the rollout ALREADY
+        // behind it — the interpolation clamped to the previous fix, so
+        // the clock started late and the timed distance included ground
+        // crept before it. Re-stage instead: a car that stops is staged
+        // again at its new spot a second later; one that rolls straight
+        // into a launch has no standing start and records nothing. Real
+        // speed (Doppler, > the staging threshold) is required, so
+        // standstill position jitter past the rollout radius still
+        // cannot un-stage a parked car.
+        resetToArmed();
       } else if (d >= kRestageFt) {
-        // Moved to a new spot without ever reaching launch speed — a
-        // slow reposition (staging-lane creep). Re-stage from scratch.
+        // Drifted far from the anchor with no speed behind it — a
+        // reposition the speed test above missed. Re-stage from scratch.
         resetToArmed();
       }
       break;
@@ -223,9 +246,28 @@ bool DragTimer::onFix(double lat, double lng, float speedMph,
         const double f = (targetFt_ - distBefore) / stepFt;
         const double tFin = lerp((double)prevTimeMs_, (double)gpsTimeMs, f);
         const float trap = (float)lerp(prevSpeedMph_, speedMph, f);
+        const double etMs = tFin - runStartMs_;
+
+        // Return-road gate (D7): heading back AND cruising -> not a pass.
+        const double cosLat = cos(launchLat_ * kPi / 180.0);
+        const double dirN = lat - launchLat_;
+        const double dirE = (lng - launchLng_) * cosLat;
+        const bool headingBack =
+            haveRunDir_ && (dirN * runDirN_ + dirE * runDirE_) < 0.0;
+        const double avgMph =
+            etMs > 0.0 ? targetFt_ / (etMs / 1000.0) * kMphPerFtPerSec : 0.0;
+        const bool cruising = trap < kCruiseTrapRatio * avgMph;
+        if (headingBack && cruising) {
+          rejectedRuns_++;
+          resetToArmed();
+          break;
+        }
+        haveRunDir_ = true;
+        runDirN_ = dirN;
+        runDirE_ = dirE;
 
         runs_++;
-        lastEtMs_ = (unsigned long)(tFin - runStartMs_ + 0.5);
+        lastEtMs_ = (unsigned long)(etMs + 0.5);
         lastTrapMph_ = trap;
         last0to60Ms_ = run0to60Ms_;
         if (bestEtMs_ == 0 || lastEtMs_ < bestEtMs_) {
@@ -262,6 +304,14 @@ bool DragTimer::onFix(double lat, double lng, float speedMph,
   prevSpeedMph_ = speedMph;
   prevTimeMs_ = gpsTimeMs;
   return completed;
+}
+
+bool DragTimer::checkFixLoss(uint32_t nowMs, uint32_t lastFixMs) {
+  if (phase_ == Phase::kArmed) return false;
+  if ((uint32_t)(nowMs - lastFixMs) < kFixLossAbortMs) return false;
+  resetToArmed();
+  havePrev_ = false;  // the next fix is the first of a fresh stream
+  return true;
 }
 
 unsigned long DragTimer::currentEtMs(uint64_t nowGpsMs) const {

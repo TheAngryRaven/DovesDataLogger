@@ -43,4 +43,29 @@ Decision evaluate(const Inputs& in) {
   return d;
 }
 
+void rearmGrace(Clock& c, uint32_t nowMs) {
+  c.graceStartMs = nowMs;
+  c.idleRunning = false;
+  c.idleStartMs = 0;
+}
+
+bool advance(Clock& c, const Decision& d, uint32_t nowMs) {
+  // Camera owns the end: leave the timer exactly as it is.
+  if (d.yieldToCamera) return false;
+
+  if ((uint32_t)(nowMs - c.graceStartMs) < kSessionGraceMs) return false;
+
+  if (d.resetTimer) {
+    c.idleRunning = false;
+    c.idleStartMs = 0;
+    return false;
+  }
+  if (!c.idleRunning) {
+    c.idleRunning = true;
+    c.idleStartMs = nowMs;
+    return false;
+  }
+  return (uint32_t)(nowMs - c.idleStartMs) >= d.holdMs;
+}
+
 }  // namespace idle_policy

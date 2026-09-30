@@ -604,8 +604,7 @@ void handleMenuPageSelection() {
       // recording immediately too (bypasses its stationary+engine-off
       // hold). Auto-idle deliberately does NOT do this — see the comment
       // in endRaceSession().
-      CAMERA_NOTIFY_SESSION_END();
-      endRaceSession();
+      endRaceSessionByUser();
       switchToDisplayPage(PAGE_MAIN_MENU);
     }
     debug(F("Stop Logging?: "));

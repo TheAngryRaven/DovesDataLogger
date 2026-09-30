@@ -13,6 +13,43 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Fixed
+- **Drag mode review fixes** (plans 0015/0016):
+  - A GPS fix lost mid-pass and never regained no longer wedges manual
+    drag mode. The run stayed "live" forever — the staging screen stuck
+    on a ticking ET with every button ignored. A staged or in-flight run
+    with no fix for 2 s is now abandoned (RUN ABORTED on the manual
+    screen, from which Select-hold exits), and a returning fix starts
+    fresh instead of resuming the stale run.
+  - Drag mode waits for the GPS time lock, not just a position fix,
+    before staging, running the christmas tree or timing a run. Before
+    the lock the receiver's placeholder date made the drag clock jump
+    when the lock landed — silently killing a run or producing a bogus
+    reaction time. The staging screen, the LED search pip and the timer
+    now share one "fix + time lock" check.
+  - A drag re-stage or completed run (and a completed sprint run) now
+    gives the session a full idle allowance again. Re-arming the 3-minute
+    grace did not stop an idle timer that had already started, so slow
+    queue creep followed by a re-stage could end the session the moment
+    the new grace ran out.
+  - Manual drag reaction time no longer reads 0–40 ms high. The green
+    light was stamped with the last GPS fix's time instead of "now", so
+    RT carried up to a whole GPS update period of error, varying run to
+    run.
+  - Leaving manual drag mode with the Select hold now stops a paired
+    Insta360 recording, the same as Stop Logging does. It used to keep
+    recording after the session ended.
+  - Automatic drag runs after the first show the RPM/speed LED bar again
+    instead of a single dim centre pixel (a pace display with nothing to
+    pace against).
+  - Automatic drag mode no longer records the drive back down the return
+    road as a slow run. A finished "run" is discarded only when it both
+    heads the opposite way to the last recorded run and was driven at a
+    cruise rather than a full-effort acceleration, so real passes —
+    including slow ones — still count.
+  - Creeping forward slowly after staging no longer produces a short
+    drag ET. Rolling past the start point below launch speed now
+    re-stages the car; before, the clock started late and counted the
+    crept distance toward the run.
 - **A soft reboot no longer runs the next boot under a watchdog it can't
   see.** The nRF52 hardware WDT survives `NVIC_SystemReset()` — only a
   pin, brown-out, power-on or System OFF reset clears it — so every
