@@ -784,11 +784,18 @@ void displayPage_egg_test() {
   }
   display.println();
 
-  // Row 4: live flags from the latest frame.
+  // Row 4: live flags from the latest frame, plus the GATT notify
+  // frames the logger has had to drop since boot (D<n>, only once
+  // nonzero; clamped so the worst case "FLG PAIR FAULT D9999" is 20).
   display.print(F("FLG"));
   if (sensoreggPairingFlag()) display.print(F(" PAIR"));
   if (sensoreggTcFault()) display.print(F(" FAULT"));
   if (!sensoreggPairingFlag() && !sensoreggTcFault()) display.print(F(" -"));
+  const uint32_t eggDrops = sensoreggFrameDrops();
+  if (eggDrops != 0) {
+    display.print(F(" D"));
+    display.print(eggDrops > 9999UL ? 9999UL : eggDrops);
+  }
   display.println();
 
   // Row 5: which egg the filter accepts.

@@ -44,6 +44,60 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   (FAULT, no erase offer), and a volume that mounts on the retry boots
   normally. The recovered-on-probe path also now records the active SPI
   clock it had been leaving at 0.
+- **SensorEgg GATT link can no longer wedge "streaming" with no link**
+  (plan 0018 review). If the egg dropped in the instant between the
+  bring-up finishing and the main loop committing it, the disconnect was
+  overwritten and the logger sat in STREAMING with no connection — the
+  scanner held off (a link counted as engaged) and EGT read `---` until
+  shutdown or a transfer. The commit now happens only while the staged
+  bring-up is still the live one (checked and set atomically), a
+  "connected" state with no connection handle is reconciled back to the
+  retry path, and a ready flag left over from an earlier bring-up can't
+  be consumed by a later one.
+- **Shutdown and BLE transfer mode can no longer leave a SensorEgg link
+  up** (plan 0018 review). If the egg connection was completing inside
+  the radio at the moment the logger went to sleep or entered transfer
+  mode, the pending-connect cancel was a no-op and the link finished
+  coming up afterwards — occupying the radio for the whole transfer
+  session or charging park. The logger now drops such a late connection
+  the moment it arrives, and ignores the disconnect of a connection it
+  never adopted.
+- **SensorEgg GATT stream no longer holds stale values** (plan 0018
+  review). Fields only the beacon carries were kept from the last beacon
+  while the stream's frames kept the link "fresh": a thermocouple fault
+  seen once could read `*TC FAULT*` for the whole session, and a pod
+  without an intake-air channel logged a flat line into `Temp2`. And
+  since frames from any channel kept the link alive, an EGT channel that
+  stopped while cold-junction frames continued left EGT frozen. Starting
+  the stream now clears those fields, and every value goes `nan`/`---`
+  as soon as its own channel stops arriving (the 1 s rule for EGT/CJ; a
+  slow channel gets one frame of slack at its own rate, e.g. 2 s for a
+  1 s intake-air channel).
+- **A refused SensorEgg connect no longer costs 15 s of silence** (plan
+  0018 review). When the radio refused the connection request outright,
+  the logger still waited out the full 10 s connect timeout and 5 s
+  backoff with the scanner paused, so neither the GATT stream nor the
+  beacon fed the EGT readout. It now backs off immediately and resumes
+  the scanner.
+- **SensorEgg GATT frames of any legal size are received, and lost frames
+  are visible** (plan 0018 review). The logger's receive slots held only
+  32 bytes, so an egg batching more than 11 samples per frame (the spec
+  allows 117) had every such frame silently discarded while the link
+  looked healthy. Slots now take the largest frame the link can carry
+  (244 bytes), the running count of dropped frames shows on EGG TEST as
+  `D<n>`, and drops in three consecutive seconds drop the link so the
+  beacon takes over instead of streaming into the floor.
+- **SensorEgg battery over GATT honours the pod's declared scaling**
+  (plan 0018 review). The battery channel's raw value was used as a
+  percent directly, ignoring the scale/offset the pod's channel table
+  declares, so a pod reporting in tenths of a percent would have read as
+  "unknown". It now converts like every other channel and clamps to
+  0–100.
+- **A failing SD card is no longer hammered during egg pairing** (plan
+  0017 review). When saving a newly captured egg failed, the logger
+  retried the settings write on every matching beacon — about ten full
+  read-modify-writes of `SETTINGS.json` a second for up to two minutes.
+  Retries are now paced at about once a second.
 
 ### Added
 - **SensorEgg GATT link** (plan 0018): a paired egg is no longer just

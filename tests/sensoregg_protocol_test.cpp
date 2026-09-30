@@ -397,3 +397,18 @@ TEST_CASE("sensoregg_protocol - macAccepts pins the LSB-first convention") {
     // exact bug class the reversal exists to prevent.
     CHECK(!macAccepts(filterHuman, filterHuman));
 }
+
+TEST_CASE("sensoregg_protocol - pairing persist retries are throttled to ~1 Hz") {
+    using namespace sensoregg_protocol;
+    // The window's first capture attempt is immediate.
+    CHECK(pairPersistDue(false, 0, 0));
+    CHECK(pairPersistDue(false, 5000, 5000));
+    // After a failed write, beacons at ~10 Hz must not re-run the SD
+    // read-modify-write each time.
+    CHECK(!pairPersistDue(true, 5000, 5100));
+    CHECK(!pairPersistDue(true, 5000, 5999));
+    CHECK(pairPersistDue(true, 5000, 6000));
+    // Wrap-safe.
+    CHECK(!pairPersistDue(true, 0xFFFFFF00UL, 0x00000100UL));  // 512 ms
+    CHECK(pairPersistDue(true, 0xFFFFFF00UL, 0x00000300UL));   // 1024 ms
+}
