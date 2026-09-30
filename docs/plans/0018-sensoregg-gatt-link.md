@@ -133,6 +133,80 @@ dropping the link for transfers and shutdown.
 
 - Status: shipped with this plan's PR into BETA.
 - Follow-ups: per-sample DOVEX row timestamping using the clock fit
-  (its anchor + epoch machinery ships here, unused by rows yet);
+  (its anchor + epoch machinery ships here; only the epoch check is
+  consumed — `clockFitPodToLogger()` is reserved for this);
   LESC bonding when the egg's phase 4 lands; multi-pod (the state
   machine is single-link by design today).
+
+## Review fixes (2026-09)
+
+Findings from the post-merge review, one commit each. The link-state
+rules that race the Bluefruit callback task moved into
+`sensoregg_gatt` (`LinkState` + decision helpers) so they are
+host-tested; the sketch keeps only the critical sections and radio calls.
+
+- **E1 — STREAMING with no link.** The disconnect callback (a
+  higher-priority task) could run between the bring-up's ready flag and
+  the main loop's commit; the unconditional `STREAMING` write then
+  resurrected a dead link and held the scanner off. Now:
+  `linkMayCommitStreaming()` (state still BRINGUP + handle held) is
+  evaluated and applied inside one `taskENTER_CRITICAL()` section;
+  `linkReconcileOrphan()` sends BRINGUP/STREAMING-without-a-handle to
+  BACKOFF every loop; the connect callback clears any stale
+  ready/failed flag before touching the staging buffers, and
+  `SENSOREGG_SLEEP()` clears them too.
+- **E2 — a link completing across `SENSOREGG_SLEEP()`.** With the
+  SoftDevice's CONNECTED raised but the deferred connect callback not
+  yet run, sleep saw no handle and `sd_ble_gap_connect_cancel()` was a
+  no-op; the callback then brought the link up inside a transfer
+  session or the charging park. The connect callback now asks
+  `linkAcceptCentralConnect()` (state CONNECTING, not sleeping, still
+  wanted) and disconnects the handle otherwise — which also covers a
+  connect that lands after the 10 s timeout gave up. The disconnect
+  callback ignores handles other than `eggConnHandle`, so refusing a
+  connection cannot knock the machine into BACKOFF.
+- **E3 — beacon-only fields held under GATT traffic.** `tcFault`, the
+  aux temperature and the battery kept their last beacon values while
+  every frame refreshed the shared `eggRxMs`: a stuck `*TC FAULT*`, and
+  an IAT-less pod logging a flat line into `Temp2` (the never-hold rule,
+  broken). And because zombie detection watches only the fastest
+  channel, an EGT channel that stopped while CJ carried on held EGT.
+  Now `readingResetForStream()` clears the surface on commit (temps NaN,
+  battery 0xFF, flags/status/tcFault/pairing false, seq 0; protoVersion
+  kept) and the zombie monitor restarts; `RoleFreshness` stamps each
+  mapped role on its own frames, and every value accessor also requires
+  its role fresh while the stream was the last writer. *Judgement
+  call:* the per-role window is the channel's own frame cadence with one
+  frame of slack (`2 × n × interval_ms`), **floored at the 1 s
+  `kStalenessMs` rule** and capped at 60 s — a flat 1 s rule would flap
+  the pod's 1 s IAT channel and permanently blank its 30 s battery, while
+  the EGT/CJ channels (250 ms) keep exactly the beacon's 1 s rule.
+  This supersedes the "graceful degradations" bullet above: nothing but
+  `protoVersion` holds a beacon value any more.
+- **E4 — `Central.connect()` result ignored.** A refused request never
+  yields a connect callback, so the machine sat in CONNECTING for the
+  10 s timeout (+5 s backoff) with the scanner paused on the triggering
+  report. Now `linkAfterConnectRequest(false)` → BACKOFF, stamped, and
+  the callback resumes the scanner (when the scan is wanted) so the
+  beacon keeps feeding the surface.
+- **E5 — oversize frames dropped silently.** 32-byte ring slots took
+  only ≤11-sample frames; the spec allows 117 per frame. Slots are now
+  `kMaxFrameLen` = 244 (ATT_MTU 247 − 3: every legal frame at any MTU the
+  logger negotiates), 8 deep = ~1.9 KB (was 256 B; depth kept so a ~1 s
+  main-loop stall at the ~7 Hz frame rate loses only superseded values).
+  `eggFrameDrops` is surfaced (`sensoreggFrameDrops()`, EGG TEST row 4
+  `D<n>`), and `DropMonitor` drops the link after drops in 3 consecutive
+  1 s windows — one SD-stall burst is judged as a single window and
+  never fires it.
+- **E6 — battery ignored scale/offset.** Now `sampleToReal()` then
+  `batteryPercent()` (NaN → 0xFF, clamp 0–100, rounded; NaN tested by
+  bit pattern for `-Ofast`). Out-of-range values now clamp instead of
+  reading "unknown".
+- **E8 — clock-fit API with no firmware consumer.** Stated plainly
+  rather than deleted: the sketch anchors `eggClockFit` on every
+  bring-up and consumes only `clockFitSameEpoch()` (pod-reboot
+  detection). `clockFitPodToLogger()` and `halfRttMs` are anchored but
+  **not yet consumed** — reserved, tested, for the per-sample row
+  timestamping follow-up below. Documented in `sensoregg_gatt.h`,
+  `sensoregg.h` and at the sketch's `eggClockFit`. No sketch state was
+  truly dead (the fit itself carries the epoch).

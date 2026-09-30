@@ -147,6 +147,7 @@ float sensoreggPacketHz() { return 0.0f; }
 void sensoreggGattClientInit() {}
 uint8_t sensoreggLinkMode() { return 0; }
 uint16_t sensoreggGattMtu() { return 0; }
+uint32_t sensoreggFrameDrops() { return 0; }
 
 // ---- neopixel.ino surface ----
 

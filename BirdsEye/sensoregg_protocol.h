@@ -169,6 +169,19 @@ bool seqMonitorLive(const SeqMonitor& m, uint32_t nowMs);
 // before giving up. Matches the camera's pairing timeout.
 constexpr uint32_t kPairingTimeoutMs = 120000;
 
+// Capture persist retry throttle. A capture persists FIRST (an SD
+// read-modify-write of /SETTINGS.json); when that write fails the
+// window stays open so a later frame retries. Unthrottled, every
+// matching beacon (~10 Hz) re-ran the whole SD read-modify-write for up
+// to the 2-minute window against a card that is already failing.
+// ~1 Hz is plenty for a human-scale pairing gesture.
+constexpr uint32_t kPairPersistRetryMs = 1000;
+
+// May a capture persist be attempted now? Always for the window's first
+// attempt (attempted == false); afterwards only once kPairPersistRetryMs
+// has passed since the last attempt (wrap-safe).
+bool pairPersistDue(bool attempted, uint32_t lastAttemptMs, uint32_t nowMs);
+
 // "AA:BB:CC:DD:EE:FF" + NUL.
 constexpr size_t kMacStrLen = 18;
 

@@ -115,3 +115,14 @@ read BLE task), same care as `eggSleeping`.
 - Status: shipped with this plan's PR into BETA.
 - Deferred: manual MAC entry page (B1 reserved); DOVEX egg-battery
   column; sim egg-frame injection + flag-1 golden variant.
+
+## Review fixes (2026-09)
+
+- **E7 — capture persist retried at the beacon rate.** Persist-first
+  keeps the window open when `setSetting()` fails, but the retry fired
+  on every matching beacon (~10 Hz): a full SD read-modify-write of
+  `/SETTINGS.json` per frame for up to the 2-minute window, against a
+  card that is already failing. Retries now go through
+  `sensoregg_protocol::pairPersistDue()` (first attempt of a window
+  immediate, then ≥ `kPairPersistRetryMs` = 1 s apart; host-tested);
+  `sensoreggRequestPair()` re-arms the immediate first attempt.

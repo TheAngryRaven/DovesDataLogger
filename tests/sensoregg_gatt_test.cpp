@@ -206,3 +206,190 @@ TEST_CASE("sensoregg_gatt - clock fit survives the u32 millis wrap") {
     // And a frame slightly BEFORE the anchor maps backward, not 4 Gms off.
     CHECK(clockFitPodToLogger(f, 0xFFFFFE00UL) == 500010UL - 256UL);
 }
+
+// ---------------------------------------------------------------------------
+// Link state machine (review fixes 2026-09)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("sensoregg_gatt - STREAMING commits only onto the live bring-up") {
+    CHECK(linkMayCommitStreaming(LINK_BRINGUP, true));
+    // E1: the disconnect callback beat the loop's commit — it already
+    // wrote BACKOFF and dropped the handle. The commit must not
+    // resurrect a dead link as STREAMING.
+    CHECK(!linkMayCommitStreaming(LINK_BACKOFF, false));
+    CHECK(!linkMayCommitStreaming(LINK_BRINGUP, false));
+    // A stale ready flag consumed after sleep (IDLE) never commits.
+    CHECK(!linkMayCommitStreaming(LINK_IDLE, false));
+    CHECK(!linkMayCommitStreaming(LINK_IDLE, true));
+    CHECK(!linkMayCommitStreaming(LINK_STREAMING, true));
+    CHECK(!linkMayCommitStreaming(LINK_CONNECTING, true));
+}
+
+TEST_CASE("sensoregg_gatt - an orphaned connected state falls back to BACKOFF") {
+    CHECK(linkReconcileOrphan(LINK_STREAMING, false) == LINK_BACKOFF);
+    CHECK(linkReconcileOrphan(LINK_BRINGUP, false) == LINK_BACKOFF);
+    // Live links are untouched.
+    CHECK(linkReconcileOrphan(LINK_STREAMING, true) == LINK_STREAMING);
+    CHECK(linkReconcileOrphan(LINK_BRINGUP, true) == LINK_BRINGUP);
+    // States that legitimately hold no handle are untouched.
+    CHECK(linkReconcileOrphan(LINK_IDLE, false) == LINK_IDLE);
+    CHECK(linkReconcileOrphan(LINK_WAIT_ADV, false) == LINK_WAIT_ADV);
+    CHECK(linkReconcileOrphan(LINK_BACKOFF, false) == LINK_BACKOFF);
+    CHECK(linkReconcileOrphan(LINK_CONNECTING, false) == LINK_CONNECTING);
+}
+
+TEST_CASE("sensoregg_gatt - the connect callback keeps only a wanted connect") {
+    CHECK(linkAcceptCentralConnect(LINK_CONNECTING, false, true));
+    // E2: SENSOREGG_SLEEP() ran while the SoftDevice was establishing
+    // the link (state already IDLE, sleep gate up).
+    CHECK(!linkAcceptCentralConnect(LINK_IDLE, true, false));
+    CHECK(!linkAcceptCentralConnect(LINK_CONNECTING, true, true));
+    // Gate dropped (race over / unpaired) while connecting.
+    CHECK(!linkAcceptCentralConnect(LINK_CONNECTING, false, false));
+    // The connect timeout already gave up and moved to BACKOFF.
+    CHECK(!linkAcceptCentralConnect(LINK_BACKOFF, false, true));
+    CHECK(!linkAcceptCentralConnect(LINK_WAIT_ADV, false, true));
+}
+
+// ---------------------------------------------------------------------------
+// Stream surface rules (review fixes 2026-09)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("sensoregg_gatt - committing a stream clears every beacon-only field") {
+    sensoregg_protocol::Reading r;
+    r.egtC = 650.0f;
+    r.junctionC = 30.0f;
+    r.auxC = 40.0f;  // an IAT-less pod would otherwise hold this forever
+    r.flags = 0x03;
+    r.pairingActive = true;
+    r.tcFault = true;  // would otherwise read *TC FAULT* all session
+    r.status = 0x10;
+    r.battery = 87;
+    r.sequence = 1234;
+    r.protoVersion = 2;
+    readingResetForStream(r);
+    CHECK(std::isnan(r.egtC));
+    CHECK(std::isnan(r.junctionC));
+    CHECK(std::isnan(r.auxC));
+    CHECK(r.flags == 0);
+    CHECK(!r.pairingActive);
+    CHECK(!r.tcFault);
+    CHECK(r.status == 0);
+    CHECK(r.battery == 0xFF);
+    CHECK(r.sequence == 0);
+    CHECK(r.protoVersion == 2);  // kept: names the beacon firmware
+}
+
+TEST_CASE("sensoregg_gatt - role staleness follows the channel's own cadence") {
+    // Fast channel (EGT, one 250 ms sample per frame): exactly the
+    // beacon's 1 s rule.
+    CHECK(roleStaleAfterMs(1, 250) == sensoregg_protocol::kStalenessMs);
+    // Batched fast channel: 4 x 250 ms = 1 s per frame -> 2 s.
+    CHECK(roleStaleAfterMs(4, 250) == 2000UL);
+    // IAT at 1 s: 2 s, not a 1 s rule that would flap every frame.
+    CHECK(roleStaleAfterMs(1, 1000) == 2000UL);
+    // Battery at 30 s: 60 s (the cap).
+    CHECK(roleStaleAfterMs(1, 30000) == kRoleStaleMaxMs);
+    // Corrupt / extreme interval: capped, never minutes.
+    CHECK(roleStaleAfterMs(117, 65535) == kRoleStaleMaxMs);
+    // Aperiodic / zero: the floor.
+    CHECK(roleStaleAfterMs(1, 0) == sensoregg_protocol::kStalenessMs);
+}
+
+TEST_CASE("sensoregg_gatt - each role goes stale on its own channel") {
+    RoleFreshness f;
+    // Never stamped (a pod without that channel) -> never fresh.
+    CHECK(!roleFresh(f, ROLE_AUX, 0));
+    CHECK(!roleFresh(f, ROLE_EGT, 100));
+
+    roleFreshnessStamp(f, ROLE_EGT, 1000, 1, 250);
+    roleFreshnessStamp(f, ROLE_CJ, 1000, 1, 250);
+    CHECK(roleFresh(f, ROLE_EGT, 1999));
+    // EGT's frames stop; CJ's keep coming. EGT must go NaN on its own.
+    roleFreshnessStamp(f, ROLE_CJ, 1900, 1, 250);
+    CHECK(!roleFresh(f, ROLE_EGT, 2000));
+    CHECK(roleFresh(f, ROLE_CJ, 2000));
+    CHECK(!roleFresh(f, ROLE_AUX, 2000));
+
+    // Wrap-safe across the u32 millis wrap.
+    roleFreshnessStamp(f, ROLE_BATT, 0xFFFFFF00UL, 1, 30000);
+    CHECK(roleFresh(f, ROLE_BATT, 0x00000100UL));
+
+    // Out-of-range role is ignored, never fresh.
+    roleFreshnessStamp(f, ROLE_COUNT, 0, 1, 250);
+    CHECK(!roleFresh(f, ROLE_COUNT, 0));
+
+    roleFreshnessReset(f);
+    CHECK(!roleFresh(f, ROLE_CJ, 2000));
+}
+
+TEST_CASE("sensoregg_gatt - a refused connect request backs off at once") {
+    CHECK(linkAfterConnectRequest(true) == LINK_CONNECTING);
+    // E4: no connect callback will follow a refusal — don't sit out the
+    // 10 s connect timeout with the scanner paused.
+    CHECK(linkAfterConnectRequest(false) == LINK_BACKOFF);
+}
+
+// ---------------------------------------------------------------------------
+// Frame ring sizing + sustained-drop rule (review fixes 2026-09)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("sensoregg_gatt - the largest legal frame fits the receive slot") {
+    CHECK(kMaxFrameLen == 244);          // ATT_MTU 247 - 3
+    CHECK(kMaxFrameLen == 247 - 3);
+    // And a full-size frame parses.
+    uint8_t buf[kMaxFrameLen] = {0};
+    buf[9] = kMaxSamplesPerFrame;
+    SampleFrame f;
+    CHECK(parseSampleFrame(buf, sizeof(buf), f));
+    CHECK(f.n == kMaxSamplesPerFrame);
+}
+
+TEST_CASE("sensoregg_gatt - one stall's burst of drops never drops the link") {
+    DropMonitor m;
+    CHECK(!dropMonitorUpdate(m, 0, 0));      // first call arms
+    // A 2 s SD stall: the loop comes back once, 10 frames lost.
+    CHECK(!dropMonitorUpdate(m, 10, 2000));
+    // Healthy afterwards: the bad streak resets.
+    CHECK(!dropMonitorUpdate(m, 10, 3000));
+    CHECK(!dropMonitorUpdate(m, 12, 4000));  // one more bad window
+    CHECK(!dropMonitorUpdate(m, 12, 5000));  // clean again
+    CHECK(!dropMonitorUpdate(m, 12, 5999));  // mid-window: no verdict
+}
+
+TEST_CASE("sensoregg_gatt - drops in consecutive windows drop the link once") {
+    DropMonitor m;
+    dropMonitorReset(m, 100, 0);
+    CHECK(!dropMonitorUpdate(m, 101, 1000));  // bad 1
+    CHECK(!dropMonitorUpdate(m, 101, 1500));  // mid-window
+    CHECK(!dropMonitorUpdate(m, 105, 2000));  // bad 2
+    CHECK(dropMonitorUpdate(m, 106, 3000));   // bad 3 -> fail
+    // Re-armed: it takes another full streak to fire again.
+    CHECK(!dropMonitorUpdate(m, 107, 4000));
+    CHECK(!dropMonitorUpdate(m, 108, 5000));
+    CHECK(dropMonitorUpdate(m, 109, 6000));
+    // Wrap-safe window timing across the millis wrap.
+    dropMonitorReset(m, 0, 0xFFFFFF00UL);
+    CHECK(!dropMonitorUpdate(m, 1, 0x00000100UL));  // only 512 ms elapsed
+    CHECK(!dropMonitorUpdate(m, 1, 0x00000400UL));  // window closes, bad 1
+}
+
+TEST_CASE("sensoregg_gatt - battery percent honours the descriptor scaling") {
+    ChannelInfo c;
+    c.scale = 1.0f;
+    c.offset = 0.0f;
+    CHECK(batteryPercent(sampleToReal(87, c)) == 87);
+    CHECK(batteryPercent(sampleToReal(INT16_MIN, c)) == 0xFF);  // sentinel
+    // E6: a pod declaring deci-percent must not read 870 -> "unknown".
+    c.scale = 0.1f;
+    CHECK(batteryPercent(sampleToReal(870, c)) == 87);
+    CHECK(batteryPercent(sampleToReal(875, c)) == 88);  // rounds
+    // An offset applies too.
+    c.scale = 1.0f;
+    c.offset = -10.0f;
+    CHECK(batteryPercent(sampleToReal(60, c)) == 50);
+    // Out of range clamps rather than wrapping a uint8_t.
+    c.offset = 0.0f;
+    CHECK(batteryPercent(sampleToReal(250, c)) == 100);
+    CHECK(batteryPercent(sampleToReal(-5, c)) == 0);
+}

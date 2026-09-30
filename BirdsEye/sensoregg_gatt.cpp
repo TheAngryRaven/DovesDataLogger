@@ -3,6 +3,8 @@
 #include <math.h>
 #include <string.h>
 
+#include "nan_bits.h"
+
 namespace sensoregg_gatt {
 
 namespace {
@@ -87,6 +89,13 @@ float sampleToReal(int16_t raw, const ChannelInfo& c) {
   return (float)raw * c.scale + c.offset;
 }
 
+uint8_t batteryPercent(float real) {
+  if (isNanF(real)) return 0xFF;
+  if (real <= 0.0f) return 0;
+  if (real >= 100.0f) return 100;
+  return (uint8_t)(real + 0.5f);
+}
+
 void mapChannels(const PodDescriptor& pd, int8_t outIdx[ROLE_COUNT]) {
   for (uint8_t r = 0; r < ROLE_COUNT; r++) outIdx[r] = -1;
   for (uint8_t i = 0; i < pd.channelCount; i++) {
@@ -138,6 +147,87 @@ uint32_t clockFitPodToLogger(const ClockFit& f, uint32_t podMs) {
   // wrap, for pod times within +/- ~24.8 days of the anchor.
   const int32_t delta = (int32_t)(podMs - f.podMs0);
   return f.loggerMs0 + (uint32_t)delta;
+}
+
+bool linkMayCommitStreaming(LinkState state, bool handleValid) {
+  return state == LINK_BRINGUP && handleValid;
+}
+
+LinkState linkReconcileOrphan(LinkState state, bool handleValid) {
+  if (!handleValid && (state == LINK_BRINGUP || state == LINK_STREAMING)) {
+    return LINK_BACKOFF;
+  }
+  return state;
+}
+
+bool linkAcceptCentralConnect(LinkState state, bool sleeping, bool wanted) {
+  return state == LINK_CONNECTING && !sleeping && wanted;
+}
+
+LinkState linkAfterConnectRequest(bool accepted) {
+  return accepted ? LINK_CONNECTING : LINK_BACKOFF;
+}
+
+void dropMonitorReset(DropMonitor& m, uint32_t totalDrops, uint32_t nowMs) {
+  m.started = true;
+  m.windowStartMs = nowMs;
+  m.dropsAtWindowStart = totalDrops;
+  m.badWindows = 0;
+}
+
+bool dropMonitorUpdate(DropMonitor& m, uint32_t totalDrops, uint32_t nowMs) {
+  if (!m.started) {
+    dropMonitorReset(m, totalDrops, nowMs);
+    return false;
+  }
+  if ((uint32_t)(nowMs - m.windowStartMs) < kDropWindowMs) return false;
+  const bool bad = totalDrops != m.dropsAtWindowStart;
+  m.badWindows = bad ? (uint8_t)(m.badWindows + 1) : (uint8_t)0;
+  m.windowStartMs = nowMs;
+  m.dropsAtWindowStart = totalDrops;
+  if (m.badWindows >= kDropWindowsToFail) {
+    m.badWindows = 0;
+    return true;
+  }
+  return false;
+}
+
+void readingResetForStream(sensoregg_protocol::Reading& r) {
+  r.egtC = NAN;
+  r.junctionC = NAN;
+  r.auxC = NAN;
+  r.flags = 0;
+  r.pairingActive = false;
+  r.tcFault = false;
+  r.status = 0;
+  r.battery = 0xFF;
+  r.sequence = 0;
+  // protoVersion deliberately kept (see header).
+}
+
+uint32_t roleStaleAfterMs(uint8_t n, uint16_t intervalMs) {
+  const uint32_t span = (uint32_t)n * (uint32_t)intervalMs;  // <= 117*65535
+  uint32_t stale = 2u * span;                                 // no overflow
+  if (stale < sensoregg_protocol::kStalenessMs) {
+    stale = sensoregg_protocol::kStalenessMs;
+  }
+  if (stale > kRoleStaleMaxMs) stale = kRoleStaleMaxMs;
+  return stale;
+}
+
+void roleFreshnessReset(RoleFreshness& f) { f = RoleFreshness(); }
+
+void roleFreshnessStamp(RoleFreshness& f, Role role, uint32_t atMs,
+                        uint8_t n, uint16_t intervalMs) {
+  if (role >= ROLE_COUNT) return;
+  f.have[role] = true;
+  f.atMs[role] = atMs;
+  f.staleAfterMs[role] = roleStaleAfterMs(n, intervalMs);
+}
+
+bool roleFresh(const RoleFreshness& f, Role role, uint32_t nowMs) {
+  if (role >= ROLE_COUNT || !f.have[role]) return false;
+  return (uint32_t)(nowMs - f.atMs[role]) < f.staleAfterMs[role];
 }
 
 }  // namespace sensoregg_gatt

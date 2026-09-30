@@ -21,7 +21,10 @@
 // SoftDevice. A PAIRED egg in range, while the egg radio is wanted,
 // gets a GATT connection and streams the PerchWerks Sensor Service
 // (self-describing channel table, per-channel batch frames stamped at
-// acquisition, a Clock/boot_id epoch — sensoregg_gatt.{h,cpp}).
+// acquisition, a Clock/boot_id epoch — sensoregg_gatt.{h,cpp}). The
+// clock fit is anchored on every bring-up but only its epoch (boot_id)
+// check is consumed; mapping pod time onto logger time is reserved for
+// a future per-sample resampling plan — values here are latest-sample.
 // Everything else — unpaired pods, the pre-connect window, backoff,
 // and the pairing capture itself — rides the passive PW-ADV observer
 // exactly as before (no SCAN_REQ; sensoregg_protocol.{h,cpp}). The two
@@ -33,11 +36,18 @@
 // the link for transfers and shutdown. While streaming, the scanner's
 // 44% duty is not paid at all.
 //
-// GATT DEGRADATIONS (documented, deliberate): Sample frames carry no
-// MCP STATUS, so sensoreggTcFault() reads false while streaming (an
-// open probe still shows as sentinel -> NaN -> '---', the same visible
-// outcome); sensoreggProtoVersion()/sensoreggPairingFlag() hold their
-// last beacon values.
+// WHAT THE STREAM REPORTS (plan 0018 review fixes): committing the
+// stream CLEARS every beacon-only field rather than holding it —
+// temperatures NaN and battery 0xFF until their own channel's first
+// frame, tcFault and the pairing flag false (Sample frames carry no MCP
+// STATUS and no pairing bit; an open probe still shows as sentinel ->
+// NaN -> '---', the same visible outcome). Each value is then live only
+// while ITS OWN channel keeps arriving (per-role stamps, staleness =
+// the channel's frame cadence with one frame of slack, floored at the
+// 1 s rule) — so an unmapped role (a pod with no IAT) stays NaN, and an
+// EGT channel that stops while CJ continues goes NaN. Only
+// sensoreggProtoVersion() keeps its last beacon value (it names the
+// egg's beacon firmware).
 //
 // PAIRING (plan 0017): runtime MAC filter, persisted as the
 // "sensoregg_mac" setting ("AA:BB:CC:DD:EE:FF"; empty = unpaired =
@@ -119,7 +129,8 @@ bool sensoreggLinkUp();
 bool sensoreggAppHung();
 
 // Latest EGT / cold junction in degC. NaN when the link is stale OR the
-// egg reported the invalid sentinel (open probe, sensor fault).
+// egg reported the invalid sentinel (open probe, sensor fault), or —
+// on the GATT stream — when that value's own channel has gone stale.
 float sensoreggEgtC();
 float sensoreggJunctionC();
 
@@ -133,7 +144,9 @@ float sensoreggAuxC();
 uint8_t sensoreggBatteryPct();
 
 // True while fresh AND the egg flags a thermocouple fault (open /
-// out-of-range probe, MCP9600 STATUS input-range bit).
+// out-of-range probe, MCP9600 STATUS input-range bit). Beacon-only:
+// always false while the GATT stream is the source (frames carry no
+// STATUS; the fault shows as a NaN EGT instead).
 bool sensoreggTcFault();
 
 // Free-running egg sequence counter from the latest payload (debug).
@@ -204,3 +217,8 @@ uint8_t sensoreggLinkMode();
 // Live ATT MTU of the egg link (0 when not connected). 247 after a
 // successful exchange; frames are sized to it on the egg side.
 uint16_t sensoreggGattMtu();
+
+// Cumulative notify frames the logger could not keep since boot (ring
+// full, or oversize). Shown on EGG TEST as D<n>; drops in 3 consecutive
+// 1 s windows drop the link so the beacon path takes over.
+uint32_t sensoreggFrameDrops();

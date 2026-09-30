@@ -148,4 +148,9 @@ bool macAccepts(const uint8_t filterHuman[6], const uint8_t peerLsbFirst[6]) {
   return true;
 }
 
+bool pairPersistDue(bool attempted, uint32_t lastAttemptMs, uint32_t nowMs) {
+  if (!attempted) return true;
+  return (uint32_t)(nowMs - lastAttemptMs) >= kPairPersistRetryMs;
+}
+
 }  // namespace sensoregg_protocol
