@@ -18,6 +18,7 @@ void displayPage_gps_status();
 void displayPage_main_menu();
 void displayPage_bluetooth();
 void displayPage_transfer_menu();
+void displayPage_transfer_pin();
 void displayPage_usb_storage();
 void displayPage_pair_camera();
 void displayPage_camera_test();

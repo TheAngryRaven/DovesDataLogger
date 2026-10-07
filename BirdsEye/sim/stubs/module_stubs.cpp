@@ -55,6 +55,11 @@ void bleShutdownQuiesce() {}
 
 void BLUETOOTH_LOOP() {}
 
+// No radio, so no menu standby advert and never a remote session.
+void BLE_STANDBY_LOOP() {}
+void bleRemoteSessionGuard() {}
+bool bleRemoteSessionActive() { return false; }
+
 // Transfer diagnostics the Bluetooth page prints. No radio in the sim, so
 // the page renders its idle "waiting" state and these are never meaningful —
 // they exist so display_pages.ino compiles unchanged.
@@ -79,6 +84,7 @@ bool cameraBleOwnsConnHandle(uint16_t) { return false; }
 
 bool cameraIsPaired() { return false; }
 camera_fsm::State cameraFsmState() { return camera_fsm::State::kUnpaired; }
+bool cameraTestModeActive() { return false; }
 bool cameraRemoteLinkUp() { return false; }
 bool cameraAdvertisingUp() { return false; }
 bool cameraCe82Subscribed() { return false; }

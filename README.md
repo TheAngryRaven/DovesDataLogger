@@ -217,7 +217,8 @@ Settings are stored in `/SETTINGS.json` on the SD card. The file is created auto
 | Setting | Description | Default |
 |---|---|---|
 | `bluetooth_name` | BLE device name visible during pairing | Random (e.g. `DovesDataLogger-042`) |
-| `bluetooth_pin` | PIN displayed on device for webapp pairing | Random 4-digit |
+| `bluetooth_pin` | PIN the app proves it knows before a remote transfer. See it on the device under Transfer → PIN (hold Select 3 s). Never sent over Bluetooth except to an app connected through a transfer started on the device | Random 4-digit |
+| `remote_transfer` | `on`: advertise from the main menu so the app can start a PIN-gated transfer remotely. `off`: only Transfer → Bluetooth on the device starts one | `on` |
 | `race_mode` | Circuit-vs-sprint tiebreak when both track kinds are within detection range (`sprint` always prefers the sprint track; `circuit` yields only on an event day) | `circuit` |
 | `driver_name` | Driver name logged in DOVEX session header | `Driver` |
 | `lap_detection_distance` | Crossing detection threshold in meters | `7` |
@@ -275,7 +276,7 @@ DovesDataLogger/                  # repo root
 │   ├── gps_config.h              # GPS configuration constants (baud, nav rate)
 │   ├── images.h                  # PROGMEM bitmap data (splash, animations)
 │   ├── accelerometer.{h,ino}     # LSM6DS3 IMU init and g-force reads
-│   ├── bluetooth.{h,ino}         # BLE service (file transfer, settings, track sync)
+│   ├── bluetooth.{h,ino}         # BLE service (file transfer, settings, track sync, remote transfer)
 │   ├── display_pages.{h,ino}     # All page rendering functions (displayPage_*())
 │   ├── display_ui.{h,ino}        # Display init, button handling, menu navigation
 │   ├── gps_functions.{h,ino}     # GPS init, PVT callback, time conversion, logging

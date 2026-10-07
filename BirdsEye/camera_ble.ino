@@ -961,6 +961,8 @@ void cameraTestExitMode() {
   debugln(F("CAM: bench-test mode exited"));
 }
 
+bool cameraTestModeActive() { return cameraTestActive; }
+
 bool cameraTestWake() {
   if (!cameraTestActive) return false;
   // Present the wake / remote-identity advert (only reaches an ARMED

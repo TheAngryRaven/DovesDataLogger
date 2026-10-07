@@ -52,4 +52,5 @@ jobs:
             BirdsEye/ble_stream.cpp \
             BirdsEye/loop_profile.cpp \
             BirdsEye/sha256.cpp \
-            BirdsEye/remote_auth.cpp
+            BirdsEye/remote_auth.cpp \
+            BirdsEye/pin_page.cpp

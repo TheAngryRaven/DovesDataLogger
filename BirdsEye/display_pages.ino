@@ -9,6 +9,7 @@
 #include "lap_format.h"
 #include "sat_bars.h"
 #include "sd_format_page.h"
+#include "pin_page.h"
 #include "sd_functions.h"
 #include "wake_cause.h"
 #include "nan_bits.h"
@@ -404,7 +405,13 @@ void displayPage_bluetooth() {
   resetDisplay();
 
   display.setTextSize(1);
-  display.println(F(" Bluetooth Connection"));
+  // A session the app started from the menu (plan 0019) says so, so a
+  // transfer page nobody here opened never looks like a malfunction.
+  if (bleRemoteSessionActive()) {
+    display.println(F("   Remote Transfer"));
+  } else {
+    display.println(F(" Bluetooth Connection"));
+  }
   display.println();
 
   display.setTextSize(2);
@@ -467,20 +474,72 @@ void displayPage_bluetooth() {
 void displayPage_transfer_menu() {
   resetDisplay();
 
-  display.setTextSize(1);
-  display.println(F("   Transfer Mode"));
-  display.println();
-  display.setTextSize(2);
-
-  display.print(menuSelectionIndex == 0 ? "->" : "  ");
-  display.println(F("Bluetooth"));
-  display.print(menuSelectionIndex == 1 ? "->" : "  ");
-  display.println(F("USB"));
+  // Four rows since plan 0019 added PIN, so this uses the drag-distance
+  // scrolling window (title 8 px + 3 size-2 rows + hint line).
+  //
   // Back matters more here than on most menus: both transfer modes leave by
   // rebooting, and this page is not the main menu so the idle-shutdown timer
   // never runs on it. Without this row, opening Transfer by mistake could
   // only be undone with the (unlabelled) reboot combo.
-  display.print(menuSelectionIndex == 2 ? "->" : "  ");
+  static const char* const kItems[] = {"Bluetooth", "USB", "PIN", "Back"};
+  const int itemCount = (int)(sizeof(kItems) / sizeof(kItems[0]));
+  const int visibleRows = 3;
+  int first = menuSelectionIndex - 1;
+  if (first < 0) first = 0;
+  if (first > itemCount - visibleRows) first = itemCount - visibleRows;
+
+  display.setTextSize(1);
+  display.println(F("   Transfer Mode"));
+  display.setTextSize(2);
+  for (int i = first; i < first + visibleRows; i++) {
+    display.print(menuSelectionIndex == i ? "->" : "  ");
+    display.println(kItems[i]);
+  }
+
+  display.setTextSize(1);
+  display.print(first > 0 ? F("^") : F(" "));
+  if (first + visibleRows < itemCount) display.print(F(" v more"));
+
+  safeDisplayUpdate();
+}
+
+// Transfer → PIN (plan 0019). Hidden until Select is held 3 s on Show; the
+// digits then stay up for 15 s. Never on the transfer page itself.
+void displayPage_transfer_pin() {
+  resetDisplay();
+  const uint32_t now = millis();
+
+  display.setTextSize(1);
+  display.println(F("    Transfer PIN"));
+  display.println();
+
+  display.setTextSize(2);
+  const bool shown = pin_page::isRevealed(transferPinState, now) &&
+                     transferPinDigits[0] != '\0';
+  display.print(F("   "));
+  display.println(shown ? transferPinDigits : "****");
+
+  display.setTextSize(1);
+  const uint32_t holdLeft = pin_page::holdSecondsLeft(transferPinState, now);
+  if (holdLeft > 0) {
+    display.print(F("keep holding "));
+    display.print(holdLeft);
+    display.println(F("s"));
+  } else if (shown) {
+    display.print(F("hides in "));
+    display.print(pin_page::revealSecondsLeft(transferPinState, now));
+    display.println(F("s"));
+  } else if (transferPinWriteFailed) {
+    display.println(F("PIN write failed"));
+  } else {
+    display.println(F("hold SELECT 3s"));
+  }
+
+  display.print(menuSelectionIndex == pin_page::kRowShow ? "->" : "  ");
+  display.println(F("Show PIN"));
+  display.print(menuSelectionIndex == pin_page::kRowNewPin ? "->" : "  ");
+  display.println(F("New PIN"));
+  display.print(menuSelectionIndex == pin_page::kRowBack ? "->" : "  ");
   display.println(F("Back"));
 
   safeDisplayUpdate();

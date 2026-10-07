@@ -516,10 +516,17 @@ void handleMenuPageSelection() {
     forceDisplayRefresh();
 #endif
   } else if (currentPage == PAGE_TRANSFER_MENU) {
-    if (menuSelectionIndex == 2) {
+    if (menuSelectionIndex == 3) {
       // Back — the only non-rebooting way off this page.
       debugln(F("Transfer: Back selected"));
       switchToDisplayPage(PAGE_MAIN_MENU);
+    } else if (menuSelectionIndex == 2) {
+      // PIN — the remote-transfer PIN, behind a hold (plan 0019).
+      debugln(F("Transfer: PIN selected"));
+      pin_page::begin(transferPinState);
+      transferPinWriteFailed = false;
+      memset(transferPinDigits, 0, sizeof(transferPinDigits));
+      switchToDisplayPage(PAGE_TRANSFER_PIN);
     } else if (menuSelectionIndex == 0) {
       // Bluetooth — same flow as before
       debugln(F("Transfer: Bluetooth selected"));
@@ -550,6 +557,15 @@ void handleMenuPageSelection() {
           switchToDisplayPage(PAGE_INTERNAL_WARNING);
         }
       }
+    }
+  } else if (currentPage == PAGE_TRANSFER_PIN) {
+    // Show / New PIN act on a 3 s HOLD (transferPinPageLoop); only Back
+    // acts on a press. Leaving hides the PIN and forgets the digits.
+    if (menuSelectionIndex == pin_page::kRowBack) {
+      debugln(F("Transfer PIN: Back"));
+      pin_page::begin(transferPinState);
+      memset(transferPinDigits, 0, sizeof(transferPinDigits));
+      switchToDisplayPage(PAGE_TRANSFER_MENU);
     }
   } else if (currentPage == PAGE_USB_STORAGE) {
     // Exit — reboot to drop the drive and remount a fresh filesystem
@@ -732,6 +748,8 @@ void displayLoop() {
       displayPage_bluetooth();
     } else if (currentPage == PAGE_TRANSFER_MENU) {
       displayPage_transfer_menu();
+    } else if (currentPage == PAGE_TRANSFER_PIN) {
+      displayPage_transfer_pin();
     } else if (currentPage == PAGE_USB_STORAGE) {
       displayPage_usb_storage();
     } else if (currentPage == PAGE_PAIR_CAMERA) {
@@ -840,6 +858,7 @@ void displayLoop() {
     currentPage == PAGE_DRAG_MODE ||
     currentPage == PAGE_BLUETOOTH ||
     currentPage == PAGE_TRANSFER_MENU ||
+    currentPage == PAGE_TRANSFER_PIN ||
     currentPage == PAGE_USB_STORAGE ||
     currentPage == LOGGING_STOP_CONFIRM ||
     currentPage == PAGE_COURSE_PRUNE ||
@@ -876,7 +895,9 @@ void displayLoop() {
     } else if (currentPage == PAGE_BLUETOOTH) {
       menuLimit = 1; // Only "Exit" option
     } else if (currentPage == PAGE_TRANSFER_MENU) {
-      menuLimit = 3; // Bluetooth, USB, Back
+      menuLimit = 4; // Bluetooth, USB, PIN, Back
+    } else if (currentPage == PAGE_TRANSFER_PIN) {
+      menuLimit = pin_page::kRowCount; // Show, New PIN, Back
     } else if (currentPage == PAGE_USB_STORAGE) {
       menuLimit = 1; // Only "Exit" option
     } else if (currentPage == PAGE_PAIR_CAMERA) {
@@ -941,6 +962,7 @@ void displayLoop() {
 #endif
                              currentPage == PAGE_COURSE_PRUNE ||
                              currentPage == PAGE_TRANSFER_MENU ||
+                             currentPage == PAGE_TRANSFER_PIN ||
                              courseCreatorActive());
 
     // BUTTON UP (or DOWN for reversed menus)

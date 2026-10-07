@@ -11,23 +11,23 @@ namespace {
 const uint8_t kNonceA[kNonceLen] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
                                     0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff};
 
-// The answer for kNonceA / "4821" / "DovesDataLogger-042". The SAME vector is
+// The answer for kNonceA / "4821". The SAME vector is
 // pinned in DovesDataViewer (src/lib/ble/auth.test.ts) and LapWing
 // (loggers/doveslogger/auth.rs) — change all three together or none.
-const char kGoldenAnswer[] = "2cc61d4ff111ba3236b50217443c3daa";
+const char kGoldenAnswer[] = "4936f5dad4502101eb0f65790cca77b4";
 
 void answerFor(const State& s, const char* pin, char* out) {
-  computeAnswer(pin, s.nonceHex, "DovesDataLogger-042", out);
+  computeAnswer(pin, s.nonceHex, out);
 }
 
 }  // namespace
 
 TEST_CASE("answer matches the cross-implementation golden vectors") {
   char out[kAnswerHexLen + 1];
-  computeAnswer("4821", "00112233445566778899aabbccddeeff", "DovesDataLogger-042", out);
+  computeAnswer("4821", "00112233445566778899aabbccddeeff", out);
   CHECK(std::strcmp(out, kGoldenAnswer) == 0);
-  computeAnswer("1000", "ffffffffffffffffffffffffffffffff", "BirdsEye", out);
-  CHECK(std::strcmp(out, "1918b8ddb0591dd12fd31eb2ef04ba33") == 0);
+  computeAnswer("1000", "ffffffffffffffffffffffffffffffff", out);
+  CHECK(std::strcmp(out, "3db7fac4dc48559fa85594079b59fce4") == 0);
 }
 
 TEST_CASE("PIN format") {
@@ -66,29 +66,29 @@ TEST_CASE("right answer authenticates and consumes the nonce") {
   State s;
   issueNonce(s, kNonceA);
   CHECK(std::strcmp(s.nonceHex, "00112233445566778899aabbccddeeff") == 0);
-  CHECK(checkAnswer(s, kGoldenAnswer, "4821", "DovesDataLogger-042", 0) == Verdict::kOk);
+  CHECK(checkAnswer(s, kGoldenAnswer, "4821", 0) == Verdict::kOk);
   CHECK(s.authed);
   // Replay of the same answer: the nonce is gone.
-  CHECK(checkAnswer(s, kGoldenAnswer, "4821", "DovesDataLogger-042", 0) == Verdict::kNoNonce);
+  CHECK(checkAnswer(s, kGoldenAnswer, "4821", 0) == Verdict::kNoNonce);
 }
 
 TEST_CASE("uppercase answer is accepted") {
   State s;
   issueNonce(s, kNonceA);
-  CHECK(checkAnswer(s, "2CC61D4FF111BA3236B50217443C3DAA", "4821", "DovesDataLogger-042", 0) ==
+  CHECK(checkAnswer(s, "4936F5DAD4502101EB0F65790CCA77B4", "4821", 0) ==
         Verdict::kOk);
 }
 
-TEST_CASE("answer is bound to the device name") {
+TEST_CASE("answer is bound to the PIN") {
   State s;
   issueNonce(s, kNonceA);
-  CHECK(checkAnswer(s, kGoldenAnswer, "4821", "SomeOtherLogger", 0) == Verdict::kFail);
+  CHECK(checkAnswer(s, kGoldenAnswer, "4822", 0) == Verdict::kFail);
 }
 
 TEST_CASE("wrong answer consumes the nonce and counts down") {
   State s;
   issueNonce(s, kNonceA);
-  CHECK(checkAnswer(s, "00000000000000000000000000000000", "4821", "x", 0) == Verdict::kFail);
+  CHECK(checkAnswer(s, "00000000000000000000000000000000", "4821", 0) == Verdict::kFail);
   CHECK(triesLeft(s) == kMaxFails - 1);
   CHECK_FALSE(s.nonceValid);
   CHECK_FALSE(s.authed);
@@ -97,9 +97,9 @@ TEST_CASE("wrong answer consumes the nonce and counts down") {
 TEST_CASE("malformed answers count as wrong") {
   State s;
   issueNonce(s, kNonceA);
-  CHECK(checkAnswer(s, "short", "4821", "x", 0) == Verdict::kFail);
+  CHECK(checkAnswer(s, "short", "4821", 0) == Verdict::kFail);
   issueNonce(s, kNonceA);
-  CHECK(checkAnswer(s, "zzc61d4ff111ba3236b50217443c3daa", "4821", "x", 0) == Verdict::kFail);
+  CHECK(checkAnswer(s, "zzc61d4ff111ba3236b50217443c3daa", "4821", 0) == Verdict::kFail);
   CHECK(triesLeft(s) == kMaxFails - 2);
 }
 
@@ -107,8 +107,8 @@ TEST_CASE("a stored PIN that is not 4 digits never authenticates") {
   State s;
   issueNonce(s, kNonceA);
   char ans[kAnswerHexLen + 1];
-  computeAnswer("", s.nonceHex, "x", ans);
-  CHECK(checkAnswer(s, ans, "", "x", 0) == Verdict::kFail);
+  computeAnswer("", s.nonceHex, ans);
+  CHECK(checkAnswer(s, ans, "", 0) == Verdict::kFail);
 }
 
 TEST_CASE("five wrong answers lock for 60 s, then doubling to 15 min") {
@@ -116,10 +116,10 @@ TEST_CASE("five wrong answers lock for 60 s, then doubling to 15 min") {
   uint32_t now = 1000;
   for (uint8_t i = 0; i + 1 < kMaxFails; ++i) {
     issueNonce(s, kNonceA);
-    CHECK(checkAnswer(s, "00000000000000000000000000000000", "4821", "x", now) == Verdict::kFail);
+    CHECK(checkAnswer(s, "00000000000000000000000000000000", "4821", now) == Verdict::kFail);
   }
   issueNonce(s, kNonceA);
-  CHECK(checkAnswer(s, "00000000000000000000000000000000", "4821", "x", now) == Verdict::kLocked);
+  CHECK(checkAnswer(s, "00000000000000000000000000000000", "4821", now) == Verdict::kLocked);
   CHECK(isLocked(s, now));
   CHECK(lockSecondsLeft(s, now) == 60);
   CHECK(lockSecondsLeft(s, now + 59001) == 1);
@@ -128,7 +128,7 @@ TEST_CASE("five wrong answers lock for 60 s, then doubling to 15 min") {
   issueNonce(s, kNonceA);
   char ans[kAnswerHexLen + 1];
   answerFor(s, "4821", ans);
-  CHECK(checkAnswer(s, ans, "4821", "DovesDataLogger-042", now + 1000) == Verdict::kLocked);
+  CHECK(checkAnswer(s, ans, "4821", now + 1000) == Verdict::kLocked);
   CHECK_FALSE(s.nonceValid);
 
   now += 60000;
@@ -147,7 +147,7 @@ TEST_CASE("lockout survives millis() wrap") {
   const uint32_t now = 0xffffffffu - 10000u;
   for (uint8_t i = 0; i < kMaxFails; ++i) {
     issueNonce(s, kNonceA);
-    checkAnswer(s, "00000000000000000000000000000000", "4821", "x", now);
+    checkAnswer(s, "00000000000000000000000000000000", "4821", now);
   }
   CHECK(isLocked(s, now + 30000u));  // wrapped past zero, still inside 60 s
   CHECK_FALSE(isLocked(s, now + 60000u));
@@ -156,14 +156,14 @@ TEST_CASE("lockout survives millis() wrap") {
 TEST_CASE("disconnect clears auth but not the lockout") {
   State s;
   issueNonce(s, kNonceA);
-  checkAnswer(s, kGoldenAnswer, "4821", "DovesDataLogger-042", 0);
+  checkAnswer(s, kGoldenAnswer, "4821", 0);
   onDisconnect(s);
   CHECK_FALSE(s.authed);
   CHECK_FALSE(s.nonceValid);
 
   for (uint8_t i = 0; i < kMaxFails; ++i) {
     issueNonce(s, kNonceA);
-    checkAnswer(s, "00000000000000000000000000000000", "4821", "x", 0);
+    checkAnswer(s, "00000000000000000000000000000000", "4821", 0);
   }
   onDisconnect(s);
   CHECK(isLocked(s, 1));
@@ -216,7 +216,7 @@ TEST_CASE("standby advert only on a free menu with the camera idle") {
   off.radioFree = false;
   CHECK_FALSE(standbyWanted(off));
   off = in;
-  off.cameraBusy = true;
+  off.cameraWantsRadio = true;
   CHECK_FALSE(standbyWanted(off));
   off = in;
   off.raceActive = true;
@@ -224,16 +224,32 @@ TEST_CASE("standby advert only on a free menu with the camera idle") {
 }
 
 TEST_CASE("the camera always wins") {
-  CHECK_FALSE(cameraBusy(true, false, false));
-  CHECK(cameraBusy(false, false, false));  // waking / recording / watching / pairing
-  CHECK(cameraBusy(true, true, false));    // bench page open
-  CHECK(cameraBusy(true, false, true));    // owns the radio
+  CameraInputs idle;
+  CHECK_FALSE(cameraWantsRadio(idle));
 
-  CHECK(cameraEndsRemoteSession(true, false, 0));
-  CHECK_FALSE(cameraEndsRemoteSession(false, true, kCameraWakeRpm));
-  CHECK(cameraEndsRemoteSession(false, true, kCameraWakeRpm + 1));
+  CameraInputs c = idle;
+  c.fsmIdleOrUnpaired = false;  // waking / recording / watching / pairing
+  CHECK(cameraWantsRadio(c));
+  c = idle;
+  c.testPageOpen = true;
+  CHECK(cameraWantsRadio(c));
+  c = idle;
+  c.ownsRadio = true;
+  CHECK(cameraWantsRadio(c));
+
+  // A paired camera's engine above the wake threshold claims the radio
+  // before the camera FSM's own debounce does.
+  c = idle;
+  c.paired = true;
+  c.rpm = kCameraWakeRpm;
+  CHECK_FALSE(cameraWantsRadio(c));
+  c.rpm = kCameraWakeRpm + 1;
+  CHECK(cameraWantsRadio(c));
+
   // No paired camera: the engine starting doesn't matter.
-  CHECK_FALSE(cameraEndsRemoteSession(false, false, 9000));
+  c = idle;
+  c.rpm = 9000;
+  CHECK_FALSE(cameraWantsRadio(c));
 }
 
 TEST_CASE("auth timeout is 20 s and wrap-safe") {

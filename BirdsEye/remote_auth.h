@@ -14,10 +14,12 @@
 // host-tested.
 //
 // THE ANSWER (shared byte-for-byte with DovesDataViewer and LapWing):
-//   mac    = HMAC-SHA256(key = PIN as ASCII,
-//                        msg = "BEAUTH1|" + nonceHex + "|" + bluetooth_name)
+//   mac    = HMAC-SHA256(key = PIN as ASCII, msg = "BEAUTH1|" + nonceHex)
 //   answer = lowercase hex of the first 16 bytes of mac (32 chars)
-// The nonce is 16 random bytes, sent as 32 lowercase hex chars.
+// The nonce is 16 random bytes, sent as 32 lowercase hex chars. It is not
+// bound to the device name: the nonce is already unique to this logger and
+// this attempt, and the advertised name can be truncated on air, so mixing
+// it in would only add a way for two correct implementations to disagree.
 //
 // What this does NOT protect against: the link is unencrypted Just Works,
 // so a sniffer that records one handshake can brute-force a 4-digit PIN
@@ -53,10 +55,9 @@ void pinFromRandom(uint32_t r, char* out);
 // Lowercase hex of `len` bytes into `out` (2*len + 1 bytes).
 void toHex(const uint8_t* bytes, size_t len, char* out);
 
-// The expected answer for (pin, nonceHex, deviceName) into `out`
-// (kAnswerHexLen + 1 bytes).
-void computeAnswer(const char* pin, const char* nonceHex, const char* deviceName,
-                   char* out);
+// The expected answer for (pin, nonceHex) into `out` (kAnswerHexLen + 1
+// bytes).
+void computeAnswer(const char* pin, const char* nonceHex, char* out);
 
 // Case-insensitive compare of two hex strings of exactly `n` chars, in time
 // independent of where they differ. False if either is shorter than `n` or
@@ -105,8 +106,7 @@ enum class Verdict : uint8_t {
 // Check `answerHex` against the expected answer for the current nonce. The
 // nonce is consumed on every verdict except kLocked-before-checking and
 // kNoNonce. A malformed answer counts as a wrong one.
-Verdict checkAnswer(State& s, const char* answerHex, const char* pin,
-                    const char* deviceName, uint32_t nowMs);
+Verdict checkAnswer(State& s, const char* answerHex, const char* pin, uint32_t nowMs);
 
 // Reset per-connection state (authed flag, nonce). The lockout survives.
 void onDisconnect(State& s);
@@ -124,23 +124,31 @@ bool commandAllowed(Mode mode, bool authed, const char* cmd);
 // Settings that SLIST must omit and SGET must refuse (SERR:PROTECTED).
 bool isProtectedSettingKey(const char* key);
 
+// What the camera is doing, as far as the radio is concerned.
+struct CameraInputs {
+  bool fsmIdleOrUnpaired = true;  // camera_fsm state is kUnpaired or kIdle
+  bool testPageOpen = false;      // camera bench page holds the radio
+  bool ownsRadio = false;         // bleOwner == CAMERA
+  bool paired = false;
+  uint16_t rpm = 0;
+};
+
+// The camera has, or is about to have, a use for the radio: its state
+// machine is anywhere but UNPAIRED/IDLE, the bench page is open, it owns
+// the radio — or a paired camera's engine is above the wake threshold.
+// That last one fires before the camera FSM's own 2 s wake debounce, so
+// remote transfer has always let go of the radio before the camera asks.
+bool cameraWantsRadio(const CameraInputs& in);
+
 // When the menu standby advert should be up.
 struct StandbyInputs {
   bool onMainMenu = false;
-  bool radioFree = false;     // bleOwner == NONE
-  bool cameraBusy = false;    // see cameraBusy()
+  bool radioFree = false;        // bleOwner == NONE, or already ours for standby
+  bool cameraWantsRadio = false;
   bool raceActive = false;
-  bool settingEnabled = false;  // remote_transfer setting
+  bool settingEnabled = false;   // remote_transfer setting
 };
 bool standbyWanted(const StandbyInputs& in);
-
-// The camera "has a use for the radio": its state machine is anywhere but
-// UNPAIRED/IDLE, the camera bench page is open, or it owns the radio.
-bool cameraBusy(bool fsmIdleOrUnpaired, bool testPageOpen, bool ownsRadio);
-
-// A REMOTE transfer session must hand the radio back now: the camera is
-// busy, or a paired camera's engine just passed the wake threshold.
-bool cameraEndsRemoteSession(bool cameraBusyNow, bool cameraPaired, uint16_t rpm);
 
 // The 20 s squatting limit, wrap-safe.
 inline bool authTimedOut(uint32_t connectedAtMs, uint32_t nowMs) {

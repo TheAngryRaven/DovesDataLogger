@@ -12,6 +12,38 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Added
+- **Remote transfer with a PIN** (plan 0019). While the logger sits on its
+  main menu it now advertises the transfer service, so the app can start a
+  download without anyone pressing Transfer → Bluetooth — once it proves it
+  knows the logger's PIN. The PIN never crosses the air: the logger sends a
+  one-time challenge and the app answers with an HMAC of it. Five wrong
+  answers lock remote transfer for a minute (doubling up to 15 minutes), and
+  a peer that never answers is dropped after 20 seconds. Leaving the menu
+  stops the advert, and the `remote_transfer` setting (`on` by default)
+  turns it off entirely. The transfer page says **Remote Transfer** when a
+  session started this way.
+- **The camera always wins the radio.** Remote standby never advertises
+  while a paired Insta360 is doing anything, the camera bench page is open,
+  or a paired camera's engine is running; and a remote transfer ends the
+  moment the engine starts with a camera paired, so auto-record is never
+  held up. Starting Transfer → Bluetooth on the device still bumps the
+  camera, as before.
+- **Transfer → PIN page.** Hold Select for 3 seconds on *Show PIN* to see
+  the PIN for 15 seconds, or on *New PIN* to replace it. With the SD card
+  soldered in, this (plus the USB drive and the app re-reading it on a local
+  Bluetooth start) is how a lost PIN is recovered. The Transfer menu now
+  scrolls to fit its fourth row.
+- BLE commands `AUTH?`, `AUTH:<answer>` and `PINGET` (local start only).
+
+### Changed
+- **The PIN is no longer readable over Bluetooth by whoever is connected.**
+  `SLIST` leaves `bluetooth_pin` out and `SGET:bluetooth_pin` answers
+  `SERR:PROTECTED`; the app reads it with `PINGET` on a local start
+  instead. `SSET:bluetooth_pin` only accepts exactly four digits.
+- New PINs come from the hardware random number generator instead of
+  `random()` seeded with the boot time.
+
 ### Fixed
 - **Drag mode review fixes** (plans 0015/0016):
   - A GPS fix lost mid-pass and never regained no longer wedges manual

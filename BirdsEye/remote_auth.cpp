@@ -48,13 +48,10 @@ void toHex(const uint8_t* bytes, size_t len, char* out) {
   out[len * 2] = '\0';
 }
 
-void computeAnswer(const char* pin, const char* nonceHex, const char* deviceName,
-                   char* out) {
-  // "BEAUTH1|" + 32 + "|" + name. Names are capped well below this by the
-  // settings and advert limits; truncating would only produce a mismatch.
-  char msg[8 + kNonceHexLen + 1 + 64 + 1];
+void computeAnswer(const char* pin, const char* nonceHex, char* out) {
+  char msg[8 + kNonceHexLen + 1];
   size_t n = 0;
-  const char* parts[] = {"BEAUTH1|", nonceHex, "|", deviceName};
+  const char* parts[] = {"BEAUTH1|", nonceHex};
   for (const char* part : parts) {
     for (size_t i = 0; part[i] != '\0' && n < sizeof(msg) - 1; ++i) msg[n++] = part[i];
   }
@@ -102,8 +99,7 @@ void issueNonce(State& s, const uint8_t* bytes) {
   s.nonceValid = true;
 }
 
-Verdict checkAnswer(State& s, const char* answerHex, const char* pin,
-                    const char* deviceName, uint32_t nowMs) {
+Verdict checkAnswer(State& s, const char* answerHex, const char* pin, uint32_t nowMs) {
   if (isLocked(s, nowMs)) {
     s.nonceValid = false;
     return Verdict::kLocked;
@@ -119,7 +115,7 @@ Verdict checkAnswer(State& s, const char* answerHex, const char* pin,
     for (size_t i = 0; i < kAnswerHexLen; ++i) wellFormed = wellFormed && isHex(answerHex[i]);
     if (wellFormed) {
       char expected[kAnswerHexLen + 1];
-      computeAnswer(pin, s.nonceHex, deviceName, expected);
+      computeAnswer(pin, s.nonceHex, expected);
       ok = hexEqualConstTime(answerHex, expected, kAnswerHexLen);
     }
   }
@@ -161,17 +157,14 @@ bool isProtectedSettingKey(const char* key) {
   return key != nullptr && strcmp(key, "bluetooth_pin") == 0;
 }
 
+bool cameraWantsRadio(const CameraInputs& in) {
+  return !in.fsmIdleOrUnpaired || in.testPageOpen || in.ownsRadio ||
+         (in.paired && in.rpm > kCameraWakeRpm);
+}
+
 bool standbyWanted(const StandbyInputs& in) {
-  return in.settingEnabled && in.onMainMenu && in.radioFree && !in.cameraBusy &&
+  return in.settingEnabled && in.onMainMenu && in.radioFree && !in.cameraWantsRadio &&
          !in.raceActive;
-}
-
-bool cameraBusy(bool fsmIdleOrUnpaired, bool testPageOpen, bool ownsRadio) {
-  return !fsmIdleOrUnpaired || testPageOpen || ownsRadio;
-}
-
-bool cameraEndsRemoteSession(bool cameraBusyNow, bool cameraPaired, uint16_t rpm) {
-  return cameraBusyNow || (cameraPaired && rpm > kCameraWakeRpm);
 }
 
 }  // namespace remote_auth

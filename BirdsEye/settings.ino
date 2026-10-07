@@ -5,6 +5,7 @@
 ///////////////////////////////////////////
 
 #include "settings.h"
+#include "remote_auth.h"
 
 static const char SETTINGS_FILE_PATH[] = "/SETTINGS.json";
 // Quarantine target for a corrupt (non-empty, unparseable) settings file —
@@ -49,6 +50,59 @@ static void generateDeviceName(char* buf, size_t bufSize) {
   snprintf(buf, bufSize, "%s%s", kDeviceNameWords[i], kDeviceNameWords[j]);
 }
 
+bool hwRandomBytes(uint8_t* out, size_t n) {
+#ifdef SIM
+  // The sim has no RNG peripheral and must stay deterministic anyway.
+  for (size_t i = 0; i < n; i++) out[i] = (uint8_t)random(0, 256);
+  return true;
+#else
+  uint8_t sdEnabled = 0;
+  (void)sd_softdevice_is_enabled(&sdEnabled);
+  if (sdEnabled) {
+    // The SoftDevice owns the RNG peripheral once it is up; its pool refills
+    // in tens of microseconds per byte, so 50 ms is a generous bound.
+    const uint32_t start = millis();
+    size_t got = 0;
+    while (got < n) {
+      uint8_t avail = 0;
+      (void)sd_rand_application_bytes_available_get(&avail);
+      if (avail > 0) {
+        uint8_t take = (uint8_t)((n - got) < avail ? (n - got) : avail);
+        if (sd_rand_application_vector_get(out + got, take) == NRF_SUCCESS) got += take;
+      } else if (millis() - start > 50) {
+        return false;
+      }
+    }
+    return true;
+  }
+  // No SoftDevice yet (first boot on a stock build): drive the peripheral
+  // directly, with bias correction on.
+  NRF_RNG->CONFIG = RNG_CONFIG_DERCEN_Msk;
+  NRF_RNG->EVENTS_VALRDY = 0;
+  NRF_RNG->TASKS_START = 1;
+  for (size_t i = 0; i < n; i++) {
+    while (NRF_RNG->EVENTS_VALRDY == 0) {
+    }
+    out[i] = (uint8_t)NRF_RNG->VALUE;
+    NRF_RNG->EVENTS_VALRDY = 0;
+  }
+  NRF_RNG->TASKS_STOP = 1;
+  return true;
+#endif
+}
+
+void generateBlePin(char* out) {
+  uint8_t r[4] = {0};
+  if (!hwRandomBytes(r, sizeof(r))) {
+    // Only reachable with the SoftDevice up and its pool wedged; a PIN is
+    // still required, so fall back rather than leave the key missing.
+    for (size_t i = 0; i < sizeof(r); i++) r[i] = (uint8_t)random(0, 256);
+  }
+  remote_auth::pinFromRandom(((uint32_t)r[0] << 24) | ((uint32_t)r[1] << 16) |
+                                 ((uint32_t)r[2] << 8) | r[3],
+                             out);
+}
+
 /**
  * @brief Generate default settings file on first boot
  * @return true if file created successfully
@@ -70,9 +124,10 @@ bool createDefaultSettings() {
   snprintf(defaultName, sizeof(defaultName), "DovesDataLogger-%s", nameSuffix);
   settingsJson["bluetooth_name"] = defaultName;
 
-  // Generate random 4-digit PIN
-  char defaultPin[5];
-  snprintf(defaultPin, sizeof(defaultPin), "%04d", (int)random(1000, 10000));
+  // Random 4-digit PIN from the hardware RNG (plan 0019): it gates remote
+  // transfer now, so random() seeded from micros() is not good enough.
+  char defaultPin[remote_auth::kPinLen + 1];
+  generateBlePin(defaultPin);
   settingsJson["bluetooth_pin"] = defaultPin;
 
   // Random racing-themed device name so multi-device log dumps stay sorted
@@ -212,6 +267,10 @@ static void ensureDefaultSettings() {
     { "led_brightness_night", "16" },
     { "led_day_start_hour", "7" },
     { "led_night_start_hour", "19" },
+    // Plan 0019: advertise the transfer service from the main menu so the
+    // app can start a PIN-gated transfer remotely. "off" disables it;
+    // anything else means on.
+    { "remote_transfer", "on" },
   };
 
   char buf[48];
@@ -239,8 +298,8 @@ static void ensureDefaultSettings() {
     setSetting("bluetooth_name", name);
   }
   if (!getSetting("bluetooth_pin", buf, sizeof(buf))) {
-    char pin[5];
-    snprintf(pin, sizeof(pin), "%04d", (int)random(1000, 10000));
+    char pin[remote_auth::kPinLen + 1];
+    generateBlePin(pin);
     setSetting("bluetooth_pin", pin);
   }
 }

@@ -65,7 +65,9 @@ Core capabilities:
 - Accelerometer logging (g-force X/Y/Z) via onboard LSM6DS3 IMU
 - DOVEX data logging with reserved 1 KB header (crash-safe GPS data)
 - 8+ display pages on a 128x64 OLED (3 Hz refresh)
-- Bluetooth LE file download to companion apps / LapWingData.com
+- Bluetooth LE file download to companion apps / LapWingData.com —
+  started on the device, or **remotely from the main menu behind a PIN
+  challenge-response** (plan 0019; the camera always wins the radio)
 - On-device session replay: instant DOVEX header replay
 - **Insta360 X4 camera auto-record**: emulates the Insta360 GPS Remote as a
   pure BLE peripheral — wakes the camera on engine start, records via a ce82
@@ -162,6 +164,9 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `gps_status_page.{h,cpp}` | GPS status boot page state machine: hold, 3 s auto-close after fix+timeValid, button skip, exit destination (menu vs race), idle → shutdown; `timeSyncState()` names which time milestone is outstanding (date/time vs the slow `fullyResolved`) |
 | `sd_format_page.{h,cpp}` | SD format-confirm boot page state machine: Select held 3 s continuously → format (release restarts the full window; other buttons never confirm), 5 min idle → shutdown |
 | `sd_probe.{h,cpp}` | Boot SD probe verdict (mounted / retry / unformatted / dead): the format offer needs the card layer to answer on **two consecutive** probes across a 250 ms settle with the volume mounting on neither — one no-volume look is what a card wedged mid-command by a WDT-interrupted boot produces — and a card-layer failure at any point is "dead" (FAULT), never "blank" |
+| `sha256.{h,cpp}` | SHA-256 + HMAC-SHA256 for the remote-transfer handshake (plan 0019), pinned to FIPS 180-4 and RFC 4231 vectors — the viewer (WebCrypto) and LapWing (hmac/sha2) must agree byte-for-byte |
+| `remote_auth.{h,cpp}` | Remote transfer rules (plan 0019): the challenge answer (`HMAC(PIN, "BEAUTH1|"+nonce)`, first 16 bytes as hex — golden vector shared with both apps), single-use nonce, 5-try lockout doubling 60 s → 15 min (wrap-safe), 20 s squat limit, locked-mode command gating (`AUTH?`/`AUTH:`/`BATT` only; `PINGET` open-mode only), protected setting keys + PIN format, the standby predicate and `cameraWantsRadio()` |
+| `pin_page.{h,cpp}` | Transfer → PIN page state machine (plan 0019): hold Select 3 s on Show (reveal 15 s) or New PIN; release / row change / side button cancels; the entry press never counts |
 | `sat_bars.{h,cpp}` | Status-page satellite signal bars: NAV-SAT CNO selection (used-in-nav first, strongest first) + bar x/w/h layout math for the 128×~30 px bottom half |
 
 ### Simulator (`BirdsEye/sim/`)
@@ -243,6 +248,7 @@ loop()  ~250 Hz
  ├─ TACH_LOOP()             re-enable ISR after debounce, apply EMA filter
  ├─ ACCEL_LOOP()            read LSM6DS3 accelerometer X/Y/Z (g-force)
  ├─ BLUETOOTH_LOOP()        stream file chunks if transfer active
+ ├─ BLE_STANDBY_LOOP()      menu remote-transfer advert + PIN handshake (plan 0019)
  ├─ SENSOREGG_LOOP()        drain SensorEgg scan buffer → Temp1/Junction1
  ├─ trackDetectionLoop()    haversine scan → create CourseManager on match
  ├─ checkForNewLapData()    reads from active timer (CourseManager or lapTimer)
@@ -557,8 +563,10 @@ loop()  ~250 Hz
     row — see `replayItemCount()` in `replay.h`, the single source of that
     layout for the renderer, the menu limit and the select handler),
     `PAGE_REPLAY_RESULTS` (-8), `PAGE_REPLAY_EXIT` (-9).
-  - Transfer: `PAGE_TRANSFER_MENU` (-4) Bluetooth/USB/Back submenu,
-    `PAGE_USB_STORAGE` (-5) USB drive active.
+  - Transfer: `PAGE_TRANSFER_MENU` (-4) Bluetooth/USB/PIN/Back submenu
+    (scrolling 3-row window), `PAGE_USB_STORAGE` (-5) USB drive active,
+    `PAGE_TRANSFER_PIN` (-22) hold-to-reveal / hold-to-replace the BLE PIN
+    (`transferPinPageLoop()` + the `pin_page` unit; plan 0019).
   - **Every menu page carries a Back/Cancel row.** Both transfer modes and
     the replay browser leave by rebooting or by walking forward, and the
     idle-shutdown timer only runs on the main menu (and the fault page), so
@@ -734,6 +742,29 @@ loop()  ~250 Hz
   - Upload/delete state machines: BLE callback sets flags, `BLUETOOTH_LOOP()`
     calls `processTrackUpload()` / `processTrackDelete()` for thread-safe SD
     access. Both call `buildTrackList()` after success.
+- **Remote transfer + PIN (plan 0019)**. `BLE_STANDBY_LOOP()` advertises
+  the transfer service while on `PAGE_MAIN_MENU` with the radio free, no
+  race, `remote_transfer` not `off`, and `!cameraWantsRadio()`. Standby
+  holds `bleOwner = TRANSFER` with `bleActive` FALSE, so nothing parks and a
+  standby peer's disconnect never reboots. The session mode
+  (`bleSessionMode`) is **locked**: the callback answers anything but
+  `AUTH?` / `AUTH:<hex32>` / `BATT` with `AUTH:REQUIRED`. `AUTH?` →
+  `AUTH:NONCE:<hex32>` (16 bytes, `hwRandomBytes()`); `AUTH:<answer>` →
+  `AUTH:OK` (promote: transfer page, `bleRemoteSession`, labelled *Remote
+  Transfer*) / `AUTH:FAIL:<n>` / `AUTH:LOCKED:<s>` / `AUTH:NO_NONCE` /
+  `AUTH:BUSY`. Unauthenticated after 20 s → `AUTH:TIMEOUT` + drop. A local
+  `BLE_SETUP()` is **open**: `AUTH?` → `AUTH:OPEN`, and `PINGET` →
+  `PIN:<digits>` is how an app pairs. `SLIST` omits `bluetooth_pin`,
+  `SGET:bluetooth_pin` → `SERR:PROTECTED`, `SSET:bluetooth_pin` needs four
+  digits (`SERR:BAD_VALUE`). **Camera first**: standby stops (an unauthed
+  peer gets `AUTH:CAMERA`) when the camera FSM leaves IDLE/UNPAIRED, the
+  bench page opens, the camera owns the radio, or a paired camera's engine
+  passes 500 rpm — ahead of the FSM's 2 s wake debounce, which is why the
+  standby step runs before `CAMERA_LOOP()`. The parked branch runs
+  `bleRemoteSessionGuard()` (with `TACH_LOOP()`) so a remote session ends
+  the same way. Remote start never calls `CAMERA_FORCE_RELEASE()`. The PIN
+  only blocks other people in the pits — the link is unencrypted, so a
+  sniffer can brute-force a captured handshake offline (see the plan).
 - **Firmware OTA commands** (`FW*`, handled by `firmware_ota.ino` — see
   subsystem 11): `FWBEGIN`/`FWPUT`/`FWDONE`/`FWAPPLY`/`FWABORT`/`FWDFU`. The BLE
   callback dispatches them via `fwIsCommand()`/`fwHandleCommand()` and routes
@@ -2001,14 +2032,16 @@ the one loaded). Sector lines stay optional — zero, one, or two.
   "utc_offset_min": "0",
   "led_brightness_night": "16",
   "led_day_start_hour": "7",
-  "led_night_start_hour": "19"
+  "led_night_start_hour": "19",
+  "remote_transfer": "on"
 }
 ```
 
 | Key | Type | Default | Purpose |
 |-----|------|---------|---------|
 | `bluetooth_name` | string | Random | BLE device name |
-| `bluetooth_pin` | string | Random 4-digit | BLE pairing PIN |
+| `bluetooth_pin` | string | Random 4-digit (hardware RNG) | Remote-transfer PIN (plan 0019). **Never readable over BLE except `PINGET` on a locally started session**; shown on-device under Transfer → PIN; `SSET` accepts exactly 4 digits |
+| `remote_transfer` | string | `"on"` | Menu standby advert for PIN-gated remote transfer (plan 0019). Only an explicit `off` disables it. Read once per boot |
 | `camera_serial` | string | `""` (empty = unpaired) | Paired Insta360 X4's 6-char serial (auto-captured on pairing, or entered manually) |
 | `device_name` | string | Random racing words | Identifies the logging device (DOVEX header) |
 | `driver_name` | string | `"Driver"` | Logged in DOVEX header |
@@ -2070,6 +2103,9 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | Onboard charging (HICHG hold + USB charge UX) | `BIRDSEYE_ENABLE_ONBOARD_CHARGING`, default 0 (all channels) | `project.h` |
 | SensorEgg wireless EGT POC | `BIRDSEYE_ENABLE_SENSOREGG`, default 0; 1 on the beta channel | `project.h` |
 | Charging screen timeout | 10 s (`CHARGE_DISPLAY_TIMEOUT_MS`) | `project.h` |
+| Remote auth lockout | 5 wrong answers → 60 s, doubling per lockout to 15 min; RAM only | `remote_auth.h` |
+| Remote auth squat limit | 20 s connected without `AUTH:OK` → dropped | `remote_auth.h` |
+| Transfer PIN page | hold Select 3 s; reveal lasts 15 s | `pin_page.h` |
 | Sat bars display cap / CNO ceiling | 16 bars / 50 dB-Hz | `sat_bars.h` |
 | Crossing threshold | 7.0 m | `BirdsEye.ino` |
 | Max laps/session | 1 000 | `BirdsEye.ino` |

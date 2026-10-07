@@ -439,6 +439,29 @@ moving the dates) and tzdata is ~100 KB shipped to a sealed device.
 `DateTime` carries a 4-digit year even though the sketch's `gpsData.year`
 is 2-digit.
 
+### Remote transfer is PIN-gated, and the camera always wins
+
+From the main menu the logger advertises the transfer service in a
+**locked** mode (plan 0019): a connected peer may run only the PIN
+handshake and `BATT` until it answers a one-time 16-byte challenge with the
+first half of `HMAC-SHA256(PIN, "BEAUTH1|" + nonce)`. A correct answer
+promotes the link into the ordinary transfer page; a local Transfer →
+Bluetooth start stays **open**, exactly as before, and is the only session
+that may read the PIN back (`PINGET`), which is how an app pairs. The
+lockout (5 tries, then 60 s doubling to 15 min) and the 20 s squatting limit
+keep the pits out; they do not stop a sniffer, because the link is
+unencrypted Just Works — a captured handshake brute-forces a 4-digit PIN
+offline. That is accepted and written down in the plan.
+
+There is one peripheral link, shared with the Insta360 remote, and the
+camera has priority at every stage. Standby only advertises while the
+camera has no use for the radio, and it lets go when a paired camera's
+engine passes 500 rpm — before the camera's own 2 s wake debounce, so the
+camera never finds the radio taken. Remote standby therefore never calls
+`CAMERA_FORCE_RELEASE()`; only a person at the logger can bump the camera.
+All of these rules are the `remote_auth` pure unit, and the 3 s hold that
+reveals or replaces the PIN on the device is `pin_page`.
+
 ### The settings file has a hard size ceiling
 
 Every settings read path caps at `sizeof(settingsFileBuffer) - 1`. A file
