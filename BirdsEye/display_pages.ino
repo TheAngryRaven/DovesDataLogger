@@ -409,6 +409,12 @@ void displayPage_bluetooth() {
   // transfer page nobody here opened never looks like a malfunction.
   if (bleRemoteSessionActive()) {
     display.println(F("   Remote Transfer"));
+  } else if (blePinSentThisSession()) {
+    // A local session hands the PIN to whoever asks (PINGET), and the first
+    // app in range is not necessarily the owner's. The title says so for
+    // the rest of the session — it is the one line a transfer never
+    // repurposes — so the person who opened it can see it happened.
+    display.println(F("  PIN sent to app!"));
   } else {
     display.println(F(" Bluetooth Connection"));
   }

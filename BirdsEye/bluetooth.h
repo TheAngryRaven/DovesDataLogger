@@ -102,12 +102,20 @@ void BLUETOOTH_LOOP();
 void BLE_STANDBY_LOOP();
 
 // Called from the parked transfer branch. On a REMOTE session only, keeps
-// the tachometer running and ends the session (AUTH:CAMERA, then the usual
-// reboot) the moment a paired camera wants the radio back.
+// the tachometer running and ends the session — an AUTH: notice, then the
+// usual reboot — when the engine starts (AUTH:ENGINE, camera paired or
+// not), when the camera wants the radio back (AUTH:CAMERA), or after 10
+// minutes without a request (AUTH:IDLE). Nobody at the logger started a
+// remote session, so it must never be able to park the logger for good.
 void bleRemoteSessionGuard();
 
 // True while the transfer page is serving a session that started remotely.
 bool bleRemoteSessionActive();
+
+// True once this (local) transfer session has handed out the PIN over
+// PINGET — the transfer page shows it, so whoever is standing at the
+// logger knows the connected app can now start remote transfers.
+bool blePinSentThisSession();
 
 // --- Transfer diagnostics (read by the Bluetooth page) ---------------------
 // These exist so a download-speed regression is visible on the device instead

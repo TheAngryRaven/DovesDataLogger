@@ -41,9 +41,26 @@ constexpr uint32_t kLockoutMaxMs = 15UL * 60UL * 1000UL;
 // A locked-mode peer that hasn't authenticated by now is dropped, so a
 // stranger can't squat on the only peripheral connection slot.
 constexpr uint32_t kAuthTimeoutMs = 20000;
-// Camera wake threshold (camera_fsm kRpmOnThreshold). A remote transfer
-// ends above it when a camera is paired, so the camera can wake.
+// Camera wake threshold (camera_fsm kRpmOnThreshold). A paired camera
+// claims the radio above it, and keeps the claim until the engine falls
+// below kCameraReleaseRpm (camera_fsm kRpmOffThreshold) — without that
+// hysteresis a pull-start cranking through 500 thrashes the standby advert
+// on and off, an SD read and an advert rebuild each time.
 constexpr uint16_t kCameraWakeRpm = 500;
+constexpr uint16_t kCameraReleaseRpm = 300;
+// An engine above this ends a remote session whatever the camera is doing:
+// the driver is about to need logging, auto-race and the race pages, and
+// the parked transfer loop runs none of them. Same number as the camera
+// wake and auto-race thresholds.
+constexpr uint16_t kEngineRunningRpm = 500;
+// A remote session with no request traffic for this long ends. Nobody at
+// the logger started it, so nobody there would think to end it, and the
+// parked loop has no idle shutdown of its own.
+constexpr uint32_t kRemoteIdleMs = 10UL * 60UL * 1000UL;
+// After dropping a peer that never authenticated, the menu advert stays
+// down this long. One slot means a squatter (or a bonded camera chasing
+// our address) could otherwise hold it in a tight 20 s loop forever.
+constexpr uint32_t kSquatBackoffMs = 5000;
 
 // Exactly kPinLen ASCII digits, nothing else.
 bool isValidPin(const char* pin);
@@ -101,11 +118,15 @@ enum class Verdict : uint8_t {
   kFail,     // AUTH:FAIL:<triesLeft>
   kLocked,   // AUTH:LOCKED:<lockSecondsLeft> (already locked, or this fail locked it)
   kNoNonce,  // AUTH:NO_NONCE — no AUTH? since the last answer
+  kPinUnavailable,  // AUTH:BUSY — the stored PIN is unreadable or not 4 digits
 };
 
 // Check `answerHex` against the expected answer for the current nonce. The
-// nonce is consumed on every verdict except kLocked-before-checking and
-// kNoNonce. A malformed answer counts as a wrong one.
+// nonce is consumed on kOk, kFail and kLocked. kNoNonce has none to consume,
+// and kPinUnavailable leaves it intact and counts nothing: an SD refusal or
+// a hand-edited PIN is the logger's fault, not a wrong guess, so it must
+// not burn the app's attempt or walk it toward a lockout. A malformed
+// answer counts as a wrong one.
 Verdict checkAnswer(State& s, const char* answerHex, const char* pin, uint32_t nowMs);
 
 // Reset per-connection state (authed flag, nonce). The lockout survives.
@@ -116,7 +137,8 @@ void onDisconnect(State& s);
 enum class Mode : uint8_t { kOpen, kLocked };
 
 // May this command run? `cmd` is the trimmed text written to the request
-// characteristic. Open: everything. Locked before AUTH:OK: only AUTH?,
+// characteristic, compared exactly — a leading space or anything after an
+// embedded NUL makes it a different (unknown) command, never an allowed one. Open: everything. Locked before AUTH:OK: only AUTH?,
 // AUTH:<…> and BATT. PINGET is open-mode only — it is how an app learns the
 // PIN, so it is never available to a peer that started remotely.
 bool commandAllowed(Mode mode, bool authed, const char* cmd);
@@ -135,10 +157,12 @@ struct CameraInputs {
 
 // The camera has, or is about to have, a use for the radio: its state
 // machine is anywhere but UNPAIRED/IDLE, the bench page is open, it owns
-// the radio — or a paired camera's engine is above the wake threshold.
+// the radio — or a paired camera's engine has passed the wake threshold.
 // That last one fires before the camera FSM's own 2 s wake debounce, so
 // remote transfer has always let go of the radio before the camera asks.
-bool cameraWantsRadio(const CameraInputs& in);
+// `engineLatch` is the caller's state for the engine half: set above
+// kCameraWakeRpm, cleared below kCameraReleaseRpm (or when unpaired).
+bool cameraWantsRadio(const CameraInputs& in, bool& engineLatch);
 
 // When the menu standby advert should be up.
 struct StandbyInputs {
@@ -147,6 +171,7 @@ struct StandbyInputs {
   bool cameraWantsRadio = false;
   bool raceActive = false;
   bool settingEnabled = false;   // remote_transfer setting
+  bool squatBackoff = false;     // squatBackoffActive()
 };
 bool standbyWanted(const StandbyInputs& in);
 
@@ -154,5 +179,37 @@ bool standbyWanted(const StandbyInputs& in);
 inline bool authTimedOut(uint32_t connectedAtMs, uint32_t nowMs) {
   return uint32_t(nowMs - connectedAtMs) >= kAuthTimeoutMs;
 }
+
+// The post-squat quiet period, wrap-safe. `armed` is false until the first
+// squat drop.
+inline bool squatBackoffActive(bool armed, uint32_t droppedAtMs, uint32_t nowMs) {
+  return armed && uint32_t(nowMs - droppedAtMs) < kSquatBackoffMs;
+}
+
+// Why a remote (menu-started, authenticated) session must end now.
+enum class RemoteEnd : uint8_t {
+  kNone,
+  kEngine,  // AUTH:ENGINE — engine above kEngineRunningRpm
+  kCamera,  // AUTH:CAMERA — the camera wants the radio back
+  kIdle,    // AUTH:IDLE — kRemoteIdleMs without a request
+};
+
+struct RemoteSessionInputs {
+  bool otaApplyPending = false;   // FWAPPLY accepted: the flasher owns the exit
+  uint16_t rpm = 0;
+  bool cameraWantsRadio = false;
+  bool busy = false;              // a download / upload / OTA stream in flight
+  uint32_t lastRequestMs = 0;     // last write to the request characteristic
+  uint32_t nowMs = 0;
+};
+
+// Engine first (it also covers a paired camera's own engine wake), then the
+// camera, then idleness. An in-flight transfer is activity — a long
+// download is one command — but never outranks the engine or the camera.
+// An accepted OTA apply is never interrupted: it reboots on its own.
+RemoteEnd remoteSessionEnd(const RemoteSessionInputs& in);
+
+// The unsolicited notice sent before the drop; nullptr for kNone.
+const char* remoteEndToken(RemoteEnd e);
 
 }  // namespace remote_auth

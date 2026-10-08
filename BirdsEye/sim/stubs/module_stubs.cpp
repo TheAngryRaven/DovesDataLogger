@@ -59,6 +59,7 @@ void BLUETOOTH_LOOP() {}
 void BLE_STANDBY_LOOP() {}
 void bleRemoteSessionGuard() {}
 bool bleRemoteSessionActive() { return false; }
+bool blePinSentThisSession() { return false; }
 
 // Transfer diagnostics the Bluetooth page prints. No radio in the sim, so
 // the page renders its idle "waiting" state and these are never meaningful —

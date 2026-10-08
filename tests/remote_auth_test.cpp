@@ -103,12 +103,38 @@ TEST_CASE("malformed answers count as wrong") {
   CHECK(triesLeft(s) == kMaxFails - 2);
 }
 
-TEST_CASE("a stored PIN that is not 4 digits never authenticates") {
+TEST_CASE("an unreadable or invalid stored PIN never authenticates") {
   State s;
   issueNonce(s, kNonceA);
   char ans[kAnswerHexLen + 1];
   computeAnswer("", s.nonceHex, ans);
-  CHECK(checkAnswer(s, ans, "", 0) == Verdict::kFail);
+  CHECK(checkAnswer(s, ans, "", 0) == Verdict::kPinUnavailable);
+  CHECK_FALSE(s.authed);
+  computeAnswer("12345", s.nonceHex, ans);
+  CHECK(checkAnswer(s, ans, "12345", 0) == Verdict::kPinUnavailable);
+  CHECK(checkAnswer(s, ans, "12a4", 0) == Verdict::kPinUnavailable);
+  CHECK_FALSE(s.authed);
+}
+
+TEST_CASE("PIN unreadable leaves the nonce intact and counts nothing") {
+  State s;
+  issueNonce(s, kNonceA);
+  // Every try with the PIN unreadable: no failure, no lockout, nonce kept.
+  for (uint8_t i = 0; i < kMaxFails + 2; ++i) {
+    CHECK(checkAnswer(s, "00000000000000000000000000000000", "", 0) ==
+          Verdict::kPinUnavailable);
+  }
+  CHECK(s.nonceValid);
+  CHECK(triesLeft(s) == kMaxFails);
+  CHECK_FALSE(isLocked(s, 0));
+  // Once the card answers again, the SAME nonce still authenticates.
+  CHECK(checkAnswer(s, kGoldenAnswer, "4821", 0) == Verdict::kOk);
+  CHECK_FALSE(s.nonceValid);
+}
+
+TEST_CASE("no nonce outranks an unreadable PIN") {
+  State s;
+  CHECK(checkAnswer(s, kGoldenAnswer, "", 0) == Verdict::kNoNonce);
 }
 
 TEST_CASE("five wrong answers lock for 60 s, then doubling to 15 min") {
@@ -185,6 +211,19 @@ TEST_CASE("command gating") {
   CHECK_FALSE(commandAllowed(Mode::kLocked, false, "AUTHX"));
   CHECK_FALSE(commandAllowed(Mode::kLocked, false, "PINGET"));
   CHECK_FALSE(commandAllowed(Mode::kLocked, false, nullptr));
+  // Exact match only: a leading space is a different (unknown) command.
+  CHECK_FALSE(commandAllowed(Mode::kLocked, false, " LIST"));
+  CHECK_FALSE(commandAllowed(Mode::kLocked, false, " AUTH?"));
+  CHECK_FALSE(commandAllowed(Mode::kLocked, false, " BATT"));
+  CHECK_FALSE(commandAllowed(Mode::kLocked, false, "BATT "));
+  // An embedded NUL ends the command: what follows can't ride along.
+  const char authThenList[] = "AUTH?\0LIST";
+  CHECK(commandAllowed(Mode::kLocked, false, authThenList));
+  CHECK(std::strcmp(authThenList, "AUTH?") == 0);
+  const char listAfterNul[] = "\0LIST";
+  CHECK_FALSE(commandAllowed(Mode::kLocked, false, listAfterNul));
+  const char pinGetNul[] = "PINGET\0x";
+  CHECK_FALSE(commandAllowed(Mode::kLocked, true, pinGetNul));
 
   // Locked after auth: everything but PINGET.
   CHECK(commandAllowed(Mode::kLocked, true, "LIST"));
@@ -221,35 +260,132 @@ TEST_CASE("standby advert only on a free menu with the camera idle") {
   off = in;
   off.raceActive = true;
   CHECK_FALSE(standbyWanted(off));
+  off = in;
+  off.squatBackoff = true;
+  CHECK_FALSE(standbyWanted(off));
+}
+
+TEST_CASE("squat back-off is 5 s, only once armed, and wrap-safe") {
+  CHECK_FALSE(squatBackoffActive(false, 1000, 1000));
+  CHECK(squatBackoffActive(true, 1000, 1000));
+  CHECK(squatBackoffActive(true, 1000, 1000 + kSquatBackoffMs - 1));
+  CHECK_FALSE(squatBackoffActive(true, 1000, 1000 + kSquatBackoffMs));
+  CHECK(squatBackoffActive(true, 0xfffffff0u, 100));
+  CHECK_FALSE(squatBackoffActive(true, 0xfffffff0u, 0xfffffff0u + kSquatBackoffMs));
 }
 
 TEST_CASE("the camera always wins") {
+  bool latch = false;
   CameraInputs idle;
-  CHECK_FALSE(cameraWantsRadio(idle));
+  CHECK_FALSE(cameraWantsRadio(idle, latch));
 
   CameraInputs c = idle;
   c.fsmIdleOrUnpaired = false;  // waking / recording / watching / pairing
-  CHECK(cameraWantsRadio(c));
+  CHECK(cameraWantsRadio(c, latch));
   c = idle;
   c.testPageOpen = true;
-  CHECK(cameraWantsRadio(c));
+  CHECK(cameraWantsRadio(c, latch));
   c = idle;
   c.ownsRadio = true;
-  CHECK(cameraWantsRadio(c));
+  CHECK(cameraWantsRadio(c, latch));
 
   // A paired camera's engine above the wake threshold claims the radio
   // before the camera FSM's own debounce does.
   c = idle;
   c.paired = true;
   c.rpm = kCameraWakeRpm;
-  CHECK_FALSE(cameraWantsRadio(c));
+  CHECK_FALSE(cameraWantsRadio(c, latch));
   c.rpm = kCameraWakeRpm + 1;
-  CHECK(cameraWantsRadio(c));
+  CHECK(cameraWantsRadio(c, latch));
+  CHECK(latch);
 
   // No paired camera: the engine starting doesn't matter.
+  latch = false;
   c = idle;
   c.rpm = 9000;
-  CHECK_FALSE(cameraWantsRadio(c));
+  CHECK_FALSE(cameraWantsRadio(c, latch));
+  CHECK_FALSE(latch);
+}
+
+TEST_CASE("the engine claim holds until the engine is really off") {
+  bool latch = false;
+  CameraInputs c;
+  c.paired = true;
+  // A pull-start: cranking blips over 500 and sags back between pulls.
+  c.rpm = 450;
+  CHECK_FALSE(cameraWantsRadio(c, latch));
+  c.rpm = 620;
+  CHECK(cameraWantsRadio(c, latch));
+  const uint16_t band[] = {480, 350, 300, 499, 450};
+  for (uint16_t rpm : band) {
+    c.rpm = rpm;
+    CHECK(cameraWantsRadio(c, latch));  // no flapping between 300 and 500
+  }
+  c.rpm = kCameraReleaseRpm - 1;
+  CHECK_FALSE(cameraWantsRadio(c, latch));
+  CHECK_FALSE(latch);
+  c.rpm = 450;  // back in the band, but not latched: stays released
+  CHECK_FALSE(cameraWantsRadio(c, latch));
+
+  // Unpairing releases a latched claim at once.
+  c.rpm = 900;
+  CHECK(cameraWantsRadio(c, latch));
+  c.paired = false;
+  c.rpm = 450;
+  CHECK_FALSE(cameraWantsRadio(c, latch));
+  CHECK_FALSE(latch);
+}
+
+TEST_CASE("a remote session ends on the engine, the camera, or idleness") {
+  RemoteSessionInputs in;
+  in.lastRequestMs = 1000;
+  in.nowMs = 2000;
+  CHECK(remoteSessionEnd(in) == RemoteEnd::kNone);
+
+  // Engine, with or without a camera — and ahead of it.
+  RemoteSessionInputs e = in;
+  e.rpm = kEngineRunningRpm;
+  CHECK(remoteSessionEnd(e) == RemoteEnd::kNone);
+  e.rpm = kEngineRunningRpm + 1;
+  CHECK(remoteSessionEnd(e) == RemoteEnd::kEngine);
+  e.cameraWantsRadio = true;
+  CHECK(remoteSessionEnd(e) == RemoteEnd::kEngine);
+  e.busy = true;  // a download in flight doesn't hold off the engine
+  CHECK(remoteSessionEnd(e) == RemoteEnd::kEngine);
+
+  RemoteSessionInputs c = in;
+  c.cameraWantsRadio = true;
+  c.busy = true;
+  CHECK(remoteSessionEnd(c) == RemoteEnd::kCamera);
+
+  // Idle: 10 minutes with no request, unless something is streaming.
+  RemoteSessionInputs i = in;
+  i.nowMs = in.lastRequestMs + kRemoteIdleMs - 1;
+  CHECK(remoteSessionEnd(i) == RemoteEnd::kNone);
+  i.nowMs = in.lastRequestMs + kRemoteIdleMs;
+  CHECK(remoteSessionEnd(i) == RemoteEnd::kIdle);
+  i.busy = true;
+  CHECK(remoteSessionEnd(i) == RemoteEnd::kNone);
+  // Wrap-safe.
+  i.busy = false;
+  i.lastRequestMs = 0xffffff00u;
+  i.nowMs = 0xffffff00u + kRemoteIdleMs;
+  CHECK(remoteSessionEnd(i) == RemoteEnd::kIdle);
+  i.nowMs = 100;
+  CHECK(remoteSessionEnd(i) == RemoteEnd::kNone);
+
+  // An accepted OTA apply owns the exit, whatever else is going on.
+  RemoteSessionInputs o = e;
+  o.otaApplyPending = true;
+  o.nowMs = o.lastRequestMs + kRemoteIdleMs;
+  CHECK(remoteSessionEnd(o) == RemoteEnd::kNone);
+}
+
+TEST_CASE("remote end tokens") {
+  CHECK(remoteEndToken(RemoteEnd::kNone) == nullptr);
+  CHECK(std::strcmp(remoteEndToken(RemoteEnd::kEngine), "AUTH:ENGINE") == 0);
+  CHECK(std::strcmp(remoteEndToken(RemoteEnd::kCamera), "AUTH:CAMERA") == 0);
+  CHECK(std::strcmp(remoteEndToken(RemoteEnd::kIdle), "AUTH:IDLE") == 0);
 }
 
 TEST_CASE("auth timeout is 20 s and wrap-safe") {

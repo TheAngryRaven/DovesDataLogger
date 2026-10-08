@@ -105,12 +105,14 @@ Verdict checkAnswer(State& s, const char* answerHex, const char* pin, uint32_t n
     return Verdict::kLocked;
   }
   if (!s.nonceValid) return Verdict::kNoNonce;
+  // Before the nonce is spent: the logger can't check anything right now.
+  if (!isValidPin(pin)) return Verdict::kPinUnavailable;
 
   // Single use, right or wrong.
   s.nonceValid = false;
 
   bool ok = false;
-  if (isValidPin(pin) && answerHex != nullptr && strlen(answerHex) == kAnswerHexLen) {
+  if (answerHex != nullptr && strlen(answerHex) == kAnswerHexLen) {
     bool wellFormed = true;
     for (size_t i = 0; i < kAnswerHexLen; ++i) wellFormed = wellFormed && isHex(answerHex[i]);
     if (wellFormed) {
@@ -157,14 +159,40 @@ bool isProtectedSettingKey(const char* key) {
   return key != nullptr && strcmp(key, "bluetooth_pin") == 0;
 }
 
-bool cameraWantsRadio(const CameraInputs& in) {
-  return !in.fsmIdleOrUnpaired || in.testPageOpen || in.ownsRadio ||
-         (in.paired && in.rpm > kCameraWakeRpm);
+bool cameraWantsRadio(const CameraInputs& in, bool& engineLatch) {
+  if (!in.paired || in.rpm < kCameraReleaseRpm) {
+    engineLatch = false;
+  } else if (in.rpm > kCameraWakeRpm) {
+    engineLatch = true;
+  }
+  return !in.fsmIdleOrUnpaired || in.testPageOpen || in.ownsRadio || engineLatch;
 }
 
 bool standbyWanted(const StandbyInputs& in) {
   return in.settingEnabled && in.onMainMenu && in.radioFree && !in.cameraWantsRadio &&
-         !in.raceActive;
+         !in.raceActive && !in.squatBackoff;
+}
+
+RemoteEnd remoteSessionEnd(const RemoteSessionInputs& in) {
+  if (in.otaApplyPending) return RemoteEnd::kNone;
+  if (in.rpm > kEngineRunningRpm) return RemoteEnd::kEngine;
+  if (in.cameraWantsRadio) return RemoteEnd::kCamera;
+  if (!in.busy && uint32_t(in.nowMs - in.lastRequestMs) >= kRemoteIdleMs) return RemoteEnd::kIdle;
+  return RemoteEnd::kNone;
+}
+
+const char* remoteEndToken(RemoteEnd e) {
+  switch (e) {
+    case RemoteEnd::kEngine:
+      return "AUTH:ENGINE";
+    case RemoteEnd::kCamera:
+      return "AUTH:CAMERA";
+    case RemoteEnd::kIdle:
+      return "AUTH:IDLE";
+    case RemoteEnd::kNone:
+      break;
+  }
+  return nullptr;
 }
 
 }  // namespace remote_auth

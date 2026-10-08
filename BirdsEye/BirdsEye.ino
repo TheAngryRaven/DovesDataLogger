@@ -3029,8 +3029,9 @@ void loop() {
   // When BLE is active, skip GPS/tach/lap processing for better throughput
   if (bleActive) {
     PROFILE_SECTION(loop_profile::kBle, BLUETOOTH_LOOP());
-    // A remotely started session hands the radio back the moment a paired
-    // camera wants it (plan 0019). Runs the tach itself; no-op otherwise.
+    // A remotely started session ends when the engine starts, the camera
+    // wants the radio, or it sits idle 10 min (plan 0019). Runs the tach
+    // itself; no-op on a local session.
     PROFILE_SECTION(loop_profile::kTach, bleRemoteSessionGuard());
 
     // Keep battery voltage fresh for BLE BATT command and display

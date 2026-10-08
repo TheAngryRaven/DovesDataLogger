@@ -24,6 +24,24 @@ TEST_CASE("the press that opened the page never counts") {
   CHECK(holdSecondsLeft(s, 5000) == 0);
 }
 
+TEST_CASE("the entry press on the Transfer menu's PIN row never counts") {
+  // Transfer -> PIN is opened from the Transfer menu's third row, so for a
+  // frame or two the shared menu index still reads 2 (this page's Back)
+  // before the page resets it to Show — all while the opening Select is
+  // still down. Neither row may arm a hold off that press.
+  State s;
+  begin(s);
+  CHECK(press(s, kRowBack, 0) == Action::kNone);
+  for (uint32_t t = 100; t <= 5000; t += 100) {
+    CHECK(press(s, kRowShow, t) == Action::kNone);
+    CHECK(holdSecondsLeft(s, t) == 0);
+  }
+  // Released once, a fresh hold then works as normal.
+  press(s, kRowShow, 5100, false);
+  press(s, kRowShow, 5200);
+  CHECK(press(s, kRowShow, 5200 + kHoldMs) == Action::kReveal);
+}
+
 TEST_CASE("hold Select 3 s on Show reveals, once per hold") {
   State s;
   begin(s);
