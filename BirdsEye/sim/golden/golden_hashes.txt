@@ -6,7 +6,10 @@ drag_staging_await_arm -19 54f95c26
 drag_staging_wait_gps -19 41e9989b
 main_menu_after_drag_exit -1 14716beb
 main_menu_transfer -1 40da09f8
-transfer_menu -4 ae15b2a8
+transfer_menu -4 58ad68c6
+transfer_menu_pin -4 b51888cd
+transfer_pin_hidden -22 195ab8b5
+transfer_pin_revealed -22 612cd8e4
 bluetooth_waiting -2 c0f9211b
 warning_no_dovex 100 f800764b
 warning_create_needs_gps 100 45982329

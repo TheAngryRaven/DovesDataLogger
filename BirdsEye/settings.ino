@@ -5,6 +5,7 @@
 ///////////////////////////////////////////
 
 #include "settings.h"
+#include "remote_auth.h"
 
 static const char SETTINGS_FILE_PATH[] = "/SETTINGS.json";
 // Quarantine target for a corrupt (non-empty, unparseable) settings file —
@@ -49,11 +50,66 @@ static void generateDeviceName(char* buf, size_t bufSize) {
   snprintf(buf, bufSize, "%s%s", kDeviceNameWords[i], kDeviceNameWords[j]);
 }
 
+bool hwRandomBytes(uint8_t* out, size_t n) {
+#ifdef SIM
+  // The sim has no RNG peripheral and must stay deterministic anyway.
+  for (size_t i = 0; i < n; i++) out[i] = (uint8_t)random(0, 256);
+  return true;
+#else
+  uint8_t sdEnabled = 0;
+  (void)sd_softdevice_is_enabled(&sdEnabled);
+  if (sdEnabled) {
+    // The SoftDevice owns the RNG peripheral once it is up; its pool refills
+    // in tens of microseconds per byte, so 50 ms is a generous bound.
+    const uint32_t start = millis();
+    size_t got = 0;
+    while (got < n) {
+      uint8_t avail = 0;
+      (void)sd_rand_application_bytes_available_get(&avail);
+      if (avail > 0) {
+        uint8_t take = (uint8_t)((n - got) < avail ? (n - got) : avail);
+        if (sd_rand_application_vector_get(out + got, take) == NRF_SUCCESS) got += take;
+      } else if (millis() - start > 50) {
+        return false;
+      }
+    }
+    return true;
+  }
+  // No SoftDevice yet (first boot on a stock build): drive the peripheral
+  // directly, with bias correction on.
+  NRF_RNG->CONFIG = RNG_CONFIG_DERCEN_Msk;
+  NRF_RNG->EVENTS_VALRDY = 0;
+  NRF_RNG->TASKS_START = 1;
+  for (size_t i = 0; i < n; i++) {
+    while (NRF_RNG->EVENTS_VALRDY == 0) {
+    }
+    out[i] = (uint8_t)NRF_RNG->VALUE;
+    NRF_RNG->EVENTS_VALRDY = 0;
+  }
+  NRF_RNG->TASKS_STOP = 1;
+  return true;
+#endif
+}
+
+void generateBlePin(char* out) {
+  uint8_t r[4] = {0};
+  if (!hwRandomBytes(r, sizeof(r))) {
+    // Only reachable with the SoftDevice up and its pool wedged; a PIN is
+    // still required, so fall back rather than leave the key missing.
+    for (size_t i = 0; i < sizeof(r); i++) r[i] = (uint8_t)random(0, 256);
+  }
+  remote_auth::pinFromRandom(((uint32_t)r[0] << 24) | ((uint32_t)r[1] << 16) |
+                                 ((uint32_t)r[2] << 8) | r[3],
+                             out);
+}
+
 /**
- * @brief Generate default settings file on first boot
+ * @brief Write a fresh default settings file.
+ * @param keepPin A valid PIN to carry over (resetSettings()), or nullptr to
+ *        roll a new one.
  * @return true if file created successfully
  */
-bool createDefaultSettings() {
+static bool writeDefaultSettings(const char* keepPin) {
   if (!acquireSDAccess(SD_ACCESS_TRACK_PARSE)) {
     debugln(F("Settings: Cannot acquire SD access for defaults"));
     return false;
@@ -70,9 +126,15 @@ bool createDefaultSettings() {
   snprintf(defaultName, sizeof(defaultName), "DovesDataLogger-%s", nameSuffix);
   settingsJson["bluetooth_name"] = defaultName;
 
-  // Generate random 4-digit PIN
-  char defaultPin[5];
-  snprintf(defaultPin, sizeof(defaultPin), "%04d", (int)random(1000, 10000));
+  // Random 4-digit PIN from the hardware RNG (plan 0019): it gates remote
+  // transfer now, so random() seeded from micros() is not good enough.
+  char defaultPin[remote_auth::kPinLen + 1];
+  if (keepPin != nullptr && remote_auth::isValidPin(keepPin)) {
+    strncpy(defaultPin, keepPin, sizeof(defaultPin));
+    defaultPin[sizeof(defaultPin) - 1] = '\0';
+  } else {
+    generateBlePin(defaultPin);
+  }
   settingsJson["bluetooth_pin"] = defaultPin;
 
   // Random racing-themed device name so multi-device log dumps stay sorted
@@ -101,12 +163,20 @@ bool createDefaultSettings() {
   settingsFile.close();
   releaseSDAccess(SD_ACCESS_TRACK_PARSE);
 
+  // The PIN is a secret (plan 0019) — never on the debug serial.
+  memset(defaultPin, 0, sizeof(defaultPin));
   debug(F("Settings: Created defaults - name: "));
-  debug(defaultName);
-  debug(F(", pin: "));
-  debugln(defaultPin);
+  debugln(defaultName);
 
   return true;
+}
+
+/**
+ * @brief Generate default settings file on first boot
+ * @return true if file created successfully
+ */
+bool createDefaultSettings() {
+  return writeDefaultSettings(nullptr);
 }
 
 /**
@@ -212,6 +282,10 @@ static void ensureDefaultSettings() {
     { "led_brightness_night", "16" },
     { "led_day_start_hour", "7" },
     { "led_night_start_hour", "19" },
+    // Plan 0019: advertise the transfer service from the main menu so the
+    // app can start a PIN-gated transfer remotely. "off" disables it;
+    // anything else means on.
+    { "remote_transfer", "on" },
   };
 
   char buf[48];
@@ -238,11 +312,17 @@ static void ensureDefaultSettings() {
     snprintf(name, sizeof(name), "DovesDataLogger-%03d", (int)random(0, 1000));
     setSetting("bluetooth_name", name);
   }
-  if (!getSetting("bluetooth_pin", buf, sizeof(buf))) {
-    char pin[5];
-    snprintf(pin, sizeof(pin), "%04d", (int)random(1000, 10000));
+  // A PIN the handshake can never accept (a hand-edited "12345", a number
+  // instead of a string — which getSetting() can't read either) would lock
+  // remote transfer out for good, so it is replaced like a missing one.
+  // The new one is on the device's Transfer -> PIN page.
+  if (!getSetting("bluetooth_pin", buf, sizeof(buf)) || !remote_auth::isValidPin(buf)) {
+    char pin[remote_auth::kPinLen + 1];
+    generateBlePin(pin);
     setSetting("bluetooth_pin", pin);
+    memset(pin, 0, sizeof(pin));
   }
+  memset(buf, 0, sizeof(buf));
 }
 
 /**
@@ -393,11 +473,22 @@ bool getSetting(const char* key, char* buf, size_t bufSize) {
  * @return true on success, false on failure
  */
 /**
- * @brief Delete settings file and recreate with fresh defaults (new random BLE name/PIN).
+ * @brief Delete settings file and recreate with fresh defaults (new random
+ *        BLE name). The remote-transfer PIN is KEPT when it is valid (plan
+ *        0019): SRESET can come from a remote session, and an app that has
+ *        just reset the logger must still be able to reach it — it has no
+ *        way to learn a new PIN without the device in hand. A new PIN is
+ *        what the device's Transfer -> PIN page is for.
  * @return true on success
  */
 bool resetSettings() {
   if (!sdSetupSuccess) return false;
+
+  char keepPin[16];
+  if (!getSetting("bluetooth_pin", keepPin, sizeof(keepPin)) ||
+      !remote_auth::isValidPin(keepPin)) {
+    keepPin[0] = '\0';
+  }
 
   if (!acquireSDAccess(SD_ACCESS_TRACK_PARSE)) {
     debugln(F("Settings: Cannot acquire SD for reset"));
@@ -410,7 +501,9 @@ bool resetSettings() {
   releaseSDAccess(SD_ACCESS_TRACK_PARSE);
 
   debugln(F("Settings: Deleted, recreating defaults"));
-  return createDefaultSettings();
+  const bool ok = writeDefaultSettings(keepPin[0] != '\0' ? keepPin : nullptr);
+  memset(keepPin, 0, sizeof(keepPin));
+  return ok;
 }
 
 static bool setSettingInner(const char* key, const char* value, bool healCorrupt) {
@@ -486,8 +579,13 @@ static bool setSettingInner(const char* key, const char* value, bool healCorrupt
 
   debug(F("Settings: Saved "));
   debug(key);
-  debug(F(" = "));
-  debugln(value);
+  // The PIN never reaches the debug serial (plan 0019).
+  if (remote_auth::isProtectedSettingKey(key)) {
+    debugln(F(" = <hidden>"));
+  } else {
+    debug(F(" = "));
+    debugln(value);
+  }
 
   return true;
 }

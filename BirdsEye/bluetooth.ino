@@ -8,6 +8,7 @@
 #include "camera_ble.h"
 #include "filename_validator.h"
 #include "firmware_ota.h"
+#include "remote_auth.h"
 // For SENSOREGG_SLEEP() — BLE_SETUP() quiesces the egg scanner so the
 // transfer link never shares the radio with a scan window (plan 0012).
 #include "sensoregg.h"
@@ -102,6 +103,48 @@ static bool deferFileCommand(const char* cmd) {
   return true;
 }
 
+// ---- Remote transfer (plan 0019) ----
+// Lockout + nonce + per-connection auth. RAM only, so a reboot clears a
+// lockout — which takes the device in hand anyway.
+static remote_auth::State bleAuth;
+// Open = transfer started on the device (everything allowed, PINGET too);
+// locked = the menu standby advert (handshake first). Read by the callback.
+static volatile remote_auth::Mode bleSessionMode = remote_auth::Mode::kOpen;
+// The menu standby advert is up (bleOwner == TRANSFER, bleActive false).
+static bool bleStandbyActive = false;
+// The transfer page is serving a session promoted from standby.
+static bool bleRemoteSession = false;
+// When the current peripheral peer connected, for the 20 s auth limit.
+static volatile uint32_t bleConnectAtMs = 0;
+// Our own peripheral link. Bluefruit.connHandle() is the LAST connection of
+// any role, which on a SensorEgg build can be the egg's central link.
+static volatile uint16_t bleTransferConnHandle = BLE_CONN_HANDLE_INVALID;
+// remote_transfer setting, read once (it only changes over BLE, and every
+// BLE session ends in a reboot): -1 unread, 0 off, 1 on.
+static int8_t bleRemoteTransferSetting = -1;
+// Deferred handshake command (needs the RNG and the PIN off the card, so it
+// runs on the main loop like every other SD-touching command).
+static volatile bool authCmdPending = false;
+static char authCmdBuffer[65];
+// A link we are in the middle of dropping. Writes from it are ignored (so a
+// peer on its way out can never act in whatever mode comes next), and its
+// disconnect event is routed to the transfer path by this handle even if it
+// lands after the owner has moved on.
+static volatile uint16_t bleDroppingConnHandle = BLE_CONN_HANDLE_INVALID;
+// Bounded wait for a local disconnect to be confirmed (WDT-fed). A local
+// terminate normally lands in a few connection intervals.
+static const uint32_t BLE_DROP_SETTLE_MS = 1000;
+// Last write to the request characteristic — the remote-session idle clock.
+static volatile uint32_t bleLastRequestMs = 0;
+// Hysteresis state for a paired camera's engine claim (remote_auth).
+static bool bleCameraEngineLatch = false;
+// Post-squat quiet period for the menu advert (remote_auth::kSquatBackoffMs).
+static bool bleSquatBackoffArmed = false;
+static uint32_t bleSquatDroppedAtMs = 0;
+// PINGET was served this session — the transfer page says so, so a person
+// at the logger sees that whoever is connected now holds the PIN.
+static volatile bool blePinServed = false;
+
 // Set by the disconnect callback; BLUETOOTH_LOOP() performs the SD teardown
 // (close transfer/staging file, release SD, abort OTA) and the auto-reboot
 // on the main loop, so SdFat is only ever touched by one task.
@@ -128,6 +171,9 @@ void bleConnectCallback(uint16_t conn_handle) {
   debugln(F("BLE: Device connected!"));
   bleConnected = true;
   bleTransferEngaged = false;  // this peer hasn't used the service yet
+  bleTransferConnHandle = conn_handle;
+  bleConnectAtMs = millis();
+  remote_auth::onDisconnect(bleAuth);  // a new peer starts unauthenticated
 
   BLEConnection* connection = Bluefruit.Connection(conn_handle);
 
@@ -238,13 +284,32 @@ void bleDisconnectCallback(uint16_t conn_handle, uint8_t reason) {
   // already moved to NONE/TRANSFER (e.g. CAMERA_FORCE_RELEASE()
   // immediately followed by BLE_SETUP() on the transfer page) — owner
   // routing alone would misdeliver it here and reboot the device.
-  if (cameraBleOwnsConnHandle(conn_handle) || bleOwner == BLE_OWNER_CAMERA) {
+  //
+  // Our own transfer/standby link is matched by handle FIRST, for the
+  // mirror-image reason: the menu standby can hand the radio to the camera
+  // while its peer's disconnect is still in flight, and owner routing would
+  // then deliver that peer to the camera module, leaving bleConnected and
+  // the stale handle behind.
+  const bool transferLink = conn_handle == bleTransferConnHandle ||
+                            conn_handle == bleDroppingConnHandle;
+  if (!transferLink &&
+      (cameraBleOwnsConnHandle(conn_handle) || bleOwner == BLE_OWNER_CAMERA)) {
     cameraBleOnDisconnect(conn_handle, reason);
     return;
   }
 
   debugln(F("BLE: Disconnected!"));
+  if (conn_handle == bleDroppingConnHandle) bleDroppingConnHandle = BLE_CONN_HANDLE_INVALID;
+  // A link we had already let go of, while a different peer is current:
+  // nothing below belongs to it.
+  if (bleTransferConnHandle != BLE_CONN_HANDLE_INVALID && conn_handle != bleTransferConnHandle) {
+    return;
+  }
   bleConnected = false;
+  bleTransferConnHandle = BLE_CONN_HANDLE_INVALID;
+  // The next peer must authenticate from scratch. The lockout survives.
+  remote_auth::onDisconnect(bleAuth);
+  authCmdPending = false;
   bleNegotiatedMtu = 23; // Reset to default
   bleLinkTuneStage = 0;  // abandon any pending link tuning for this peer
   bleLinkDataLen = 27;   // pre-DLE default
@@ -576,6 +641,9 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
   // peer that connects during camera mode must not queue deferred SD work —
   // BLUETOOTH_LOOP() is gated on bleActive and would never drain it.
   if (bleOwner != BLE_OWNER_TRANSFER) return;
+  // A link being dropped gets nothing more (plan 0019).
+  if (conn_hdl == bleDroppingConnHandle) return;
+  bleLastRequestMs = millis();
 
   // A write to the request characteristic means this is a genuine transfer
   // peer (the phone app), not a bonded camera vetting our GATT — arm the
@@ -638,6 +706,30 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
   debug(buffer);
   debugln(F("]"));
 
+  // Plan 0019: a remotely started (locked) session may only run the PIN
+  // handshake and BATT until it has answered correctly.
+  if (!remote_auth::commandAllowed(bleSessionMode, bleAuth.authed, buffer)) {
+    fileStatusChar.notify((uint8_t*)"AUTH:REQUIRED", 13);
+    return;
+  }
+
+  if (strcmp(buffer, "AUTH?") == 0 || strncmp(buffer, "AUTH:", 5) == 0) {
+    // Nothing to prove on a local start, or after a correct answer.
+    if (bleSessionMode == remote_auth::Mode::kOpen) {
+      fileStatusChar.notify((uint8_t*)"AUTH:OPEN", 9);
+    } else if (bleAuth.authed) {
+      fileStatusChar.notify((uint8_t*)"AUTH:OK", 7);
+    } else if (authCmdPending) {
+      fileStatusChar.notify((uint8_t*)"AUTH:BUSY", 9);
+    } else {
+      // Needs the RNG and the PIN off the card: main loop.
+      strncpy(authCmdBuffer, buffer, sizeof(authCmdBuffer) - 1);
+      authCmdBuffer[sizeof(authCmdBuffer) - 1] = '\0';
+      authCmdPending = true;
+    }
+    return;
+  }
+
   // File commands (LIST/GET/DELETE/TLIST/TGET) all touch SD, so they are
   // DEFERRED to BLUETOOTH_LOOP() via deferFileCommand() — SdFat must never
   // run in this Bluefruit callback task. Filename validation is RAM-only
@@ -674,7 +766,8 @@ void bleFileRequestCallback(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* 
   } else if (strcmp(buffer, "SLIST") == 0 ||
              strncmp(buffer, "SGET:", 5) == 0 ||
              strncmp(buffer, "SSET:", 5) == 0 ||
-             strcmp(buffer, "SRESET") == 0) {
+             strcmp(buffer, "SRESET") == 0 ||
+             strcmp(buffer, "PINGET") == 0) {
     // Settings commands — defer to main loop for thread-safe SD access
     if (settingsCmdPending) {
       fileStatusChar.notify((uint8_t*)"SBUSY", 5);
@@ -857,6 +950,269 @@ void bleCoreEnsureInit() {
   // owner (transfer page or camera module) applies its own advert set.
 }
 
+///////////////////////////////////////////
+// REMOTE TRANSFER STANDBY (plan 0019)
+///////////////////////////////////////////
+
+static bool bleRemoteTransferEnabled() {
+  if (bleRemoteTransferSetting < 0) {
+    char v[8];
+    // No card means no PIN to check against, so nothing to offer.
+    bleRemoteTransferSetting =
+        (sdSetupSuccess &&
+         !(getSetting("remote_transfer", v, sizeof(v)) && strcmp(v, "off") == 0))
+            ? 1
+            : 0;
+  }
+  return bleRemoteTransferSetting == 1;
+}
+
+static bool bleCameraWantsRadio() {
+  remote_auth::CameraInputs cam;
+  const camera_fsm::State st = cameraFsmState();
+  cam.fsmIdleOrUnpaired =
+      st == camera_fsm::State::kUnpaired || st == camera_fsm::State::kIdle;
+  cam.testPageOpen = cameraTestModeActive();
+  cam.ownsRadio = bleOwner == BLE_OWNER_CAMERA;
+  cam.paired = cameraIsPaired();
+  cam.rpm = (uint16_t)(tachLastReported > 65535 ? 65535 : tachLastReported);
+  return remote_auth::cameraWantsRadio(cam, bleCameraEngineLatch);
+}
+
+// Send an unsolicited AUTH: notice and give it a moment to reach the app
+// before the link drops. nullptr = drop silently.
+static void bleNotifyDropReason(const char* token) {
+  if (token == nullptr) return;
+  fileStatusChar.notify((uint8_t*)token, strlen(token));
+  delay(50);
+}
+
+// Drop our transfer/standby link, if any, and wait (bounded, WDT-fed) for
+// the stack to confirm it. Main-loop only. While it is going, the link is
+// marked as dropping: its writes are ignored and its disconnect event is
+// routed here by handle, so neither can leak into whatever mode or owner
+// the caller sets next — even if the confirmation outlives the wait.
+static void bleDropTransferLink(const char* reason) {
+  const uint16_t handle = bleTransferConnHandle;
+  if (handle == BLE_CONN_HANDLE_INVALID) return;
+  BLEConnection* connection = Bluefruit.Connection(handle);
+  if (!connection || !connection->connected()) {
+    // Already gone (its event was handled elsewhere): just forget it.
+    bleTransferConnHandle = BLE_CONN_HANDLE_INVALID;
+    bleConnected = false;
+    return;
+  }
+  bleNotifyDropReason(reason);
+  bleDroppingConnHandle = handle;
+  Bluefruit.disconnect(handle);
+  const uint32_t t0 = millis();
+  while (bleTransferConnHandle == handle && (uint32_t)(millis() - t0) < BLE_DROP_SETTLE_MS) {
+    wdtPet();
+    delay(10);
+  }
+  if (bleTransferConnHandle == handle) debugln(F("BLE: drop not confirmed in time"));
+}
+
+// Every queued command and half-finished exchange from a previous peer or
+// session. Main-loop only; nothing here touches SD.
+static void bleClearPendingCommands() {
+  authCmdPending = false;
+  settingsCmdPending = false;
+  fileCmdPending = false;
+  trackDeletePending = false;
+  trackUploadActive = false;
+  trackUploadReady = false;
+  trackUploadComplete = false;
+  trackUploadError = false;
+  remote_auth::onDisconnect(bleAuth);
+}
+
+static void bleStandbyStart() {
+  bleCoreEnsureInit();
+  // Start from a clean slate: no peer from an earlier owner can still be
+  // counted as ours (a disconnect misrouted or not yet landed would leave
+  // bleConnected and the handle stale, and a stale handle can be reused).
+  bleDropTransferLink(nullptr);
+  bleConnected = false;
+  bleTransferConnHandle = BLE_CONN_HANDLE_INVALID;
+  bleSessionMode = remote_auth::Mode::kLocked;
+  bleRemoteSession = false;
+  bleClearPendingCommands();
+  bleOwner = BLE_OWNER_TRANSFER;
+  bleApplyTransferAdvertising();
+  // No blue LED for an idle menu advert — that LED means "transfer page".
+  bleConnLedOff();
+  bleStandbyActive = true;
+  debugln(F("BLE: remote standby advertising"));
+}
+
+// `reason` is the AUTH: notice a connected, unauthenticated peer gets
+// before it is dropped (nullptr = none).
+static void bleStandbyStop(const char* reason) {
+  bleStandbyActive = false;
+  // Owner FIRST. Once it is NONE the request callback ignores every write,
+  // so a command that preempts the rest of this teardown can never run —
+  // in particular not in the open mode set at the end.
+  bleOwner = BLE_OWNER_NONE;
+  // Disarm BEFORE the async disconnect, or Bluefruit restarts an ownerless
+  // advert behind us (see BLE_STOP()).
+  Bluefruit.Advertising.restartOnDisconnect(false);
+  Bluefruit.Advertising.stop();
+  // Wait the disconnect out before anyone else (the camera, in the same
+  // loop iteration) can take the radio, so its event can't be misrouted.
+  bleDropTransferLink(reason);
+  bleClearPendingCommands();
+  bleSessionMode = remote_auth::Mode::kOpen;
+  debugln(F("BLE: remote standby off"));
+}
+
+// AUTH:OK on the menu advert: become the transfer page, exactly as a local
+// start would, except the session stays locked-and-authenticated (so
+// PINGET stays off) and is labelled remote.
+static void bleStandbyPromote() {
+  if (!bleConnected) return;  // peer left between the answer and here
+  bleStandbyActive = false;
+  bleRemoteSession = true;
+  bleLastRequestMs = millis();  // the idle clock starts at the handshake
+  blePinServed = false;
+  sdSetTransferSpeed(true);
+  SENSOREGG_SLEEP();  // same guarantee BLE_SETUP() gives the transfer link
+  Bluefruit.autoConnLed(true);
+  Bluefruit.setConnLedInterval(250);
+  bleActive = true;
+  switchToDisplayPage(PAGE_BLUETOOTH);
+  debugln(F("BLE: remote transfer authenticated"));
+}
+
+// Handshake commands, deferred from the callback (main-loop context).
+static void bleProcessAuthCommand() {
+  if (!authCmdPending) return;
+  char cmd[sizeof(authCmdBuffer)];
+  strncpy(cmd, authCmdBuffer, sizeof(cmd));
+  cmd[sizeof(cmd) - 1] = '\0';
+  authCmdPending = false;
+
+  // Promoted already (or never locked): nothing to prove.
+  if (bleSessionMode != remote_auth::Mode::kLocked || bleAuth.authed) return;
+
+  const uint32_t now = millis();
+  char reply[48];
+  if (remote_auth::isLocked(bleAuth, now)) {
+    snprintf(reply, sizeof(reply), "AUTH:LOCKED:%lu",
+             (unsigned long)remote_auth::lockSecondsLeft(bleAuth, now));
+    fileStatusChar.notify((uint8_t*)reply, strlen(reply));
+    return;
+  }
+
+  if (strcmp(cmd, "AUTH?") == 0) {
+    uint8_t nonce[remote_auth::kNonceLen];
+    if (!hwRandomBytes(nonce, sizeof(nonce))) {
+      fileStatusChar.notify((uint8_t*)"AUTH:BUSY", 9);
+      return;
+    }
+    remote_auth::issueNonce(bleAuth, nonce);
+    snprintf(reply, sizeof(reply), "AUTH:NONCE:%s", bleAuth.nonceHex);
+    fileStatusChar.notify((uint8_t*)reply, strlen(reply));
+    return;
+  }
+
+  // AUTH:<answer>. An unreadable or malformed stored PIN (SD refused, a
+  // corrupt file, a hand-edited number) is kPinUnavailable: AUTH:BUSY, the
+  // nonce kept and no failure counted, so the app can simply retry.
+  char pin[16];
+  if (!getSetting("bluetooth_pin", pin, sizeof(pin))) pin[0] = '\0';
+  const remote_auth::Verdict v = remote_auth::checkAnswer(bleAuth, cmd + 5, pin, now);
+  memset(pin, 0, sizeof(pin));
+  switch (v) {
+    case remote_auth::Verdict::kOk:
+      fileStatusChar.notify((uint8_t*)"AUTH:OK", 7);
+      bleStandbyPromote();
+      break;
+    case remote_auth::Verdict::kFail:
+      snprintf(reply, sizeof(reply), "AUTH:FAIL:%u", (unsigned)remote_auth::triesLeft(bleAuth));
+      fileStatusChar.notify((uint8_t*)reply, strlen(reply));
+      break;
+    case remote_auth::Verdict::kLocked:
+      snprintf(reply, sizeof(reply), "AUTH:LOCKED:%lu",
+               (unsigned long)remote_auth::lockSecondsLeft(bleAuth, now));
+      fileStatusChar.notify((uint8_t*)reply, strlen(reply));
+      break;
+    case remote_auth::Verdict::kNoNonce:
+      fileStatusChar.notify((uint8_t*)"AUTH:NO_NONCE", 13);
+      break;
+    case remote_auth::Verdict::kPinUnavailable:
+      debugln(F("BLE: stored PIN unreadable or invalid"));
+      fileStatusChar.notify((uint8_t*)"AUTH:BUSY", 9);
+      break;
+  }
+}
+
+void BLE_STANDBY_LOOP() {
+  const bool onMenu = currentPage == PAGE_MAIN_MENU;
+  const bool cameraWants = bleCameraWantsRadio();
+  const uint32_t now = millis();
+
+  remote_auth::StandbyInputs in;
+  in.onMainMenu = onMenu;
+  in.radioFree = bleOwner == BLE_OWNER_NONE ||
+                 (bleStandbyActive && bleOwner == BLE_OWNER_TRANSFER);
+  in.cameraWantsRadio = cameraWants;
+  in.raceActive = raceActive;
+  in.squatBackoff = remote_auth::squatBackoffActive(bleSquatBackoffArmed, bleSquatDroppedAtMs, now);
+  // Only read the setting (an SD read, once) when it could matter.
+  in.settingEnabled = onMenu && bleRemoteTransferEnabled();
+
+  const bool wanted = remote_auth::standbyWanted(in);
+  if (!bleStandbyActive) {
+    if (wanted) bleStandbyStart();
+    return;
+  }
+  if (!wanted) {
+    bleStandbyStop(cameraWants ? "AUTH:CAMERA" : nullptr);
+    return;
+  }
+
+  bleProcessAuthCommand();
+  if (!bleStandbyActive) return;  // promoted
+
+  // Nobody gets to sit on the only peripheral slot without the PIN. The
+  // advert then stays down for a short back-off, or a squatter (or a
+  // bonded camera chasing our address) just reconnects and repeats.
+  if (bleTransferConnHandle != BLE_CONN_HANDLE_INVALID && !bleAuth.authed &&
+      remote_auth::authTimedOut(bleConnectAtMs, now)) {
+    debugln(F("BLE: remote peer never authenticated, dropping"));
+    bleStandbyStop("AUTH:TIMEOUT");
+    bleSquatBackoffArmed = true;
+    bleSquatDroppedAtMs = millis();
+  }
+}
+
+void bleRemoteSessionGuard() {
+  if (!bleRemoteSession) return;
+  // The parked branch skips the normal pipeline, tach included — and the
+  // engine starting is exactly what has to end this session.
+  TACH_LOOP();
+
+  remote_auth::RemoteSessionInputs in;
+  in.otaApplyPending = fwApplyRequested();
+  in.rpm = (uint16_t)(tachLastReported > 65535 ? 65535 : tachLastReported);
+  in.cameraWantsRadio = bleCameraWantsRadio();
+  in.busy = bleTransferInProgress || trackUploadActive || fwReceiving();
+  in.lastRequestMs = bleLastRequestMs;
+  in.nowMs = millis();
+  const remote_auth::RemoteEnd end = remote_auth::remoteSessionEnd(in);
+  if (end == remote_auth::RemoteEnd::kNone) return;
+
+  debug(F("BLE: ending remote transfer: "));
+  debugln(remote_auth::remoteEndToken(end));
+  bleNotifyDropReason(remote_auth::remoteEndToken(end));
+  bleExitTransferMode();
+}
+
+bool bleRemoteSessionActive() { return bleActive && bleRemoteSession; }
+
+bool blePinSentThisSession() { return bleActive && blePinServed; }
+
 void BLE_SETUP() {
   // Parked transfer — bump the SD clock for faster file transfers. Reverted
   // in BLE_STOP() (and by the auto-reboot on phone disconnect).
@@ -874,7 +1230,25 @@ void BLE_SETUP() {
 
   debugln(F("BLE: Starting transfer mode..."));
 
+  // A local start takes the radio over from the menu standby advert (the
+  // Transfer page is not the main menu, so standby has normally stopped
+  // already) and is OPEN: someone at the logger chose to start it.
+  if (bleStandbyActive) bleStandbyStop(nullptr);
+
   bleCoreEnsureInit();
+
+  // An OPEN session hands out the PIN (PINGET), so it must begin with
+  // nobody connected: a standby peer whose link outlived the menu would
+  // otherwise be promoted, unauthenticated, into full access. Then forget
+  // everything a previous peer or session left queued.
+  bleDropTransferLink(nullptr);
+  bleConnected = false;
+  bleTransferConnHandle = BLE_CONN_HANDLE_INVALID;
+  bleClearPendingCommands();
+  bleDisconnectCleanupPending = false;
+  blePinServed = false;
+  bleSessionMode = remote_auth::Mode::kOpen;
+  bleRemoteSession = false;
 
   // Take the radio for the transfer service (main-loop context — the camera
   // module released its links via CAMERA_FORCE_RELEASE() before this page
@@ -932,7 +1306,9 @@ void BLE_STOP() {
 
   // Disconnect any connected device
   if (Bluefruit.connected()) {
-    Bluefruit.disconnect(Bluefruit.connHandle());
+    Bluefruit.disconnect(bleTransferConnHandle != BLE_CONN_HANDLE_INVALID
+                             ? (uint16_t)bleTransferConnHandle
+                             : Bluefruit.connHandle());
     // BLE disconnect is async; no delay needed - stack handles it
   }
 
@@ -948,6 +1324,8 @@ void BLE_STOP() {
   // Release radio ownership. The camera module re-acquires it on its next
   // advertising action (in CAMERA_LOOP()) — nothing to hand off here.
   bleOwner = BLE_OWNER_NONE;
+  bleRemoteSession = false;
+  bleSessionMode = remote_auth::Mode::kOpen;
 
   // Restore the EMI-safe SD clock now that the transfer session is over.
   sdSetTransferSpeed(false);
@@ -1019,6 +1397,13 @@ void bleShutdownQuiesce() {
     }
   }
   bleConnLedOff();  // pre-begin() it only parks the pin (see its guard)
+  // The charging loop can soft-resume to the main menu without a reboot;
+  // standby must then start from scratch, not believe its advert is up.
+  if (bleStandbyActive) {
+    bleStandbyActive = false;
+    bleSessionMode = remote_auth::Mode::kOpen;
+    if (bleOwner == BLE_OWNER_TRANSFER) bleOwner = BLE_OWNER_NONE;
+  }
 }
 
 // Execute a deferred file command (main-loop context — the only place
@@ -1110,6 +1495,10 @@ void processSettingsCommand() {
 
     int count = 0;
     for (JsonPair kv : doc.as<JsonObject>()) {
+      // The PIN never leaves the logger through SLIST (plan 0019): anyone
+      // connected could otherwise read the secret that gates them. PINGET
+      // hands it out, on a local start only.
+      if (remote_auth::isProtectedSettingKey(kv.key().c_str())) continue;
       char entry[64];
       // A hand-edited SETTINGS.json can hold a non-string value, and
       // as<const char*>() returns NULL for those — %s on NULL streams
@@ -1135,6 +1524,11 @@ void processSettingsCommand() {
     debug(key);
     debugln(F("]"));
 
+    if (remote_auth::isProtectedSettingKey(key)) {
+      fileStatusChar.notify((uint8_t*)"SERR:PROTECTED", 14);
+      return;
+    }
+
     char valueBuf[48];
     if (getSetting(key, valueBuf, sizeof(valueBuf))) {
       char response[64];
@@ -1159,10 +1553,17 @@ void processSettingsCommand() {
     char* key = payload;
     char* value = eq + 1;
 
+    // The PIN is the one write with a format: the handshake only ever
+    // accepts exactly four digits, so anything else would lock remote
+    // transfer out for good.
+    if (remote_auth::isProtectedSettingKey(key) && !remote_auth::isValidPin(value)) {
+      debugln(F("BLE: SSET - rejected PIN format"));
+      fileStatusChar.notify((uint8_t*)"SERR:BAD_VALUE", 14);
+      return;
+    }
+
     debug(F("BLE: SSET - key: ["));
     debug(key);
-    debug(F("] value: ["));
-    debug(value);
     debugln(F("]"));
 
     if (setSetting(key, value)) {
@@ -1175,6 +1576,28 @@ void processSettingsCommand() {
       debugln(F("BLE: SSET - write failed"));
       fileStatusChar.notify((uint8_t*)"SERR:WRITE_FAIL", 15);
     }
+  } else if (strcmp(settingsCmdBuffer, "PINGET") == 0) {
+    // Local start only — the callback already refuses it on a locked
+    // session; checked again because this is the one command that hands
+    // out the secret.
+    if (bleSessionMode != remote_auth::Mode::kOpen) {
+      fileStatusChar.notify((uint8_t*)"AUTH:REQUIRED", 13);
+      return;
+    }
+    char pin[16];
+    if (getSetting("bluetooth_pin", pin, sizeof(pin)) && remote_auth::isValidPin(pin)) {
+      char response[24];
+      snprintf(response, sizeof(response), "PIN:%s", pin);
+      fileStatusChar.notify((uint8_t*)response, strlen(response));
+      memset(response, 0, sizeof(response));
+      // Whoever is connected now holds the PIN; the transfer page says so.
+      blePinServed = true;
+    } else {
+      // Unreadable, or a value the handshake could never accept — handing
+      // that out would only pair the app to a PIN that cannot work.
+      fileStatusChar.notify((uint8_t*)"SERR:NOT_FOUND", 14);
+    }
+    memset(pin, 0, sizeof(pin));
   } else if (strcmp(settingsCmdBuffer, "SRESET") == 0) {
     debugln(F("BLE: SRESET - resetting all settings to defaults"));
     if (resetSettings()) {

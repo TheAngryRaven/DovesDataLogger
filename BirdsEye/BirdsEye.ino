@@ -109,6 +109,8 @@
 #include "replay.h"
 #include "sat_bars.h"
 #include "sd_format_page.h"
+#include "pin_page.h"
+#include "remote_auth.h"
 #include "sd_functions.h"
 #include "sensoregg.h"
 #include "settings.h"
@@ -840,6 +842,21 @@ const int PAGE_DRAG_STAGING = -19;  // tree countdown / run / results
 // all gated).
 const int PAGE_PAIR_EGG = -20;  // egg pairing / paired-status screen
 const int PAGE_EGG_TEST = -21;  // egg bench/live-data page (never idle-sleeps)
+// Transfer → PIN (plan 0019): hold-to-reveal / hold-to-replace the remote
+// transfer PIN. Driven by transferPinPageLoop() between readButtons() and
+// displayLoop(); Back is an ordinary menu press.
+const int PAGE_TRANSFER_PIN = -22;
+pin_page::State transferPinState;
+// The digits, only while the page is showing them — cleared on hide.
+char transferPinDigits[remote_auth::kPinLen + 1] = "";
+// Why the last Show / New PIN produced no digits (shown on the page instead
+// of a blank). A stored PIN that isn't exactly four digits is reported as
+// such, never shown cut down to four.
+const uint8_t TRANSFER_PIN_NOTE_NONE = 0;
+const uint8_t TRANSFER_PIN_NOTE_WRITE_FAILED = 1;
+const uint8_t TRANSFER_PIN_NOTE_READ_FAILED = 2;
+const uint8_t TRANSFER_PIN_NOTE_INVALID = 3;
+uint8_t transferPinNote = TRANSFER_PIN_NOTE_NONE;
 
 // running menu (these must be in order)
 #if BIRDSEYE_ENABLE_PROFILING
@@ -2290,6 +2307,65 @@ void gpsStatusPageLoop() {
 }
 
 /**
+ * @brief Drive the Transfer → PIN page (plan 0019): the hold-to-reveal and
+ *        hold-to-replace state machine is the host-tested pin_page unit;
+ *        this owns the settings read/write and drops the digits from RAM
+ *        the moment the reveal window closes.
+ */
+void transferPinPageLoop() {
+  if (currentPage != PAGE_TRANSFER_PIN) return;
+
+  pin_page::Inputs in;
+  in.selectHeld = isButtonHeld(2, 0);
+  // A held side button is the Select+side reboot combo, never a confirm.
+  in.otherButtonHeld = isButtonHeld(1, 0) || isButtonHeld(3, 0);
+  in.row = menuSelectionIndex;
+  in.nowMs = millis();
+
+  switch (pin_page::step(transferPinState, in)) {
+    case pin_page::Action::kReveal: {
+      // Read wider than a PIN so a too-long value is caught, not truncated.
+      char stored[16];
+      if (!getSetting("bluetooth_pin", stored, sizeof(stored))) {
+        transferPinNote = TRANSFER_PIN_NOTE_READ_FAILED;
+      } else if (!remote_auth::isValidPin(stored)) {
+        transferPinNote = TRANSFER_PIN_NOTE_INVALID;
+      } else {
+        transferPinNote = TRANSFER_PIN_NOTE_NONE;
+        strncpy(transferPinDigits, stored, sizeof(transferPinDigits));
+        transferPinDigits[sizeof(transferPinDigits) - 1] = '\0';
+        pin_page::reveal(transferPinState, in.nowMs);
+      }
+      memset(stored, 0, sizeof(stored));
+      forceDisplayRefresh();
+      break;
+    }
+    case pin_page::Action::kNewPin: {
+      char pin[remote_auth::kPinLen + 1];
+      generateBlePin(pin);
+      // Persist-first: show the new PIN only once it is the stored one.
+      const bool written = setSetting("bluetooth_pin", pin);
+      transferPinNote = written ? TRANSFER_PIN_NOTE_NONE : TRANSFER_PIN_NOTE_WRITE_FAILED;
+      if (written) {
+        strncpy(transferPinDigits, pin, sizeof(transferPinDigits));
+        transferPinDigits[sizeof(transferPinDigits) - 1] = '\0';
+        pin_page::reveal(transferPinState, in.nowMs);
+      }
+      memset(pin, 0, sizeof(pin));
+      forceDisplayRefresh();
+      break;
+    }
+    case pin_page::Action::kNone:
+      break;
+  }
+
+  if (!pin_page::isRevealed(transferPinState, in.nowMs) && transferPinDigits[0] != '\0') {
+    memset(transferPinDigits, 0, sizeof(transferPinDigits));
+    forceDisplayRefresh();
+  }
+}
+
+/**
  * @brief Drive the SD format-confirm boot page: step the hold-to-confirm
  *        state machine (host-tested sd_format_page unit) and act on its
  *        exit verdict. Runs between readButtons() and displayLoop(), like
@@ -2971,6 +3047,10 @@ void loop() {
   // When BLE is active, skip GPS/tach/lap processing for better throughput
   if (bleActive) {
     PROFILE_SECTION(loop_profile::kBle, BLUETOOTH_LOOP());
+    // A remotely started session ends when the engine starts, the camera
+    // wants the radio, or it sits idle 10 min (plan 0019). Runs the tach
+    // itself; no-op on a local session.
+    PROFILE_SECTION(loop_profile::kTach, bleRemoteSessionGuard());
 
     // Keep battery voltage fresh for BLE BATT command and display
     if (millis() - lastBatteryCheck > batteryUpdateInterval) {
@@ -3040,7 +3120,10 @@ void loop() {
   PROFILE_SECTION(loop_profile::kGps, GPS_LOOP());
   PROFILE_SECTION(loop_profile::kTach, TACH_LOOP());
   PROFILE_SECTION(loop_profile::kAccel, ACCEL_LOOP());
-  PROFILE_SECTION(loop_profile::kBle, BLUETOOTH_LOOP());
+  // Menu standby advert for remote transfer (plan 0019). Before
+  // CAMERA_LOOP() on purpose: standby lets go of the radio the moment the
+  // camera wants it, so the camera never finds it taken.
+  PROFILE_SECTION(loop_profile::kBle, BLUETOOTH_LOOP(); BLE_STANDBY_LOOP());
   // drain SensorEgg scan buffer (Temp1 fresh for logging)
   PROFILE_SECTION(loop_profile::kEgg, SENSOREGG_LOOP());
 
@@ -3157,9 +3240,10 @@ void loop() {
   // slot the LOOP PROFILE page needed for SLP — see loop_profile.h.
   //   gpsStatusPageLoop: consume presses, hold/auto-close
   //   sdFormatPageLoop:  hold Select 3s to format
+  //   transferPinPageLoop: hold Select 3s to show / replace the BLE PIN
   //   courseCreatorLoop: feed GPS into an averaging hold
   PROFILE_SECTION(loop_profile::kDisplay, gpsStatusPageLoop();
-                  sdFormatPageLoop(); courseCreatorLoop();
+                  sdFormatPageLoop(); transferPinPageLoop(); courseCreatorLoop();
                   dragStagingLoop(); displayLoop());
   resetButtons();
 

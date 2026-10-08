@@ -160,9 +160,12 @@ set(SIM_CORE_SOURCES
   ${BIRDSEYE_DIR}/sat_bars.cpp
   ${BIRDSEYE_DIR}/sd_access_policy.cpp
   ${BIRDSEYE_DIR}/sd_format_page.cpp
+  ${BIRDSEYE_DIR}/pin_page.cpp
+  ${BIRDSEYE_DIR}/remote_auth.cpp
   ${BIRDSEYE_DIR}/sd_probe.cpp
   ${BIRDSEYE_DIR}/sector_purple.cpp
   ${BIRDSEYE_DIR}/sensoregg_protocol.cpp
+  ${BIRDSEYE_DIR}/sha256.cpp
   ${BIRDSEYE_DIR}/sprint_select.cpp
   ${BIRDSEYE_DIR}/tach_filter.cpp
   ${BIRDSEYE_DIR}/track_json.cpp

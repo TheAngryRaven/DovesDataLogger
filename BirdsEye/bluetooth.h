@@ -85,6 +85,38 @@ void bleShutdownQuiesce();
 // burst-send chunk pipeline for any active file transfer.
 void BLUETOOTH_LOOP();
 
+// --- Remote transfer (plan 0019) -------------------------------------------
+// While the logger idles on its main menu it advertises the transfer
+// service in LOCKED mode: a peer may only run the PIN handshake (AUTH?,
+// AUTH:<answer>) and BATT until it answers correctly, at which point the
+// session is promoted into the normal transfer page. A local Transfer →
+// Bluetooth start stays OPEN, as before. The camera always wins the radio:
+// standby never advertises while it wants it, and a remote session ends
+// when it starts to. All the rules live in the host-tested remote_auth unit.
+
+// Run the menu standby advert: start/stop it as the page, the camera, a
+// race and the remote_transfer setting allow; service the handshake; drop
+// a peer that hasn't authenticated within 20 s; promote on AUTH:OK. Called
+// every main-loop iteration, before CAMERA_LOOP() so the radio is already
+// free whenever the camera reaches for it.
+void BLE_STANDBY_LOOP();
+
+// Called from the parked transfer branch. On a REMOTE session only, keeps
+// the tachometer running and ends the session — an AUTH: notice, then the
+// usual reboot — when the engine starts (AUTH:ENGINE, camera paired or
+// not), when the camera wants the radio back (AUTH:CAMERA), or after 10
+// minutes without a request (AUTH:IDLE). Nobody at the logger started a
+// remote session, so it must never be able to park the logger for good.
+void bleRemoteSessionGuard();
+
+// True while the transfer page is serving a session that started remotely.
+bool bleRemoteSessionActive();
+
+// True once this (local) transfer session has handed out the PIN over
+// PINGET — the transfer page shows it, so whoever is standing at the
+// logger knows the connected app can now start remote transfers.
+bool blePinSentThisSession();
+
 // --- Transfer diagnostics (read by the Bluetooth page) ---------------------
 // These exist so a download-speed regression is visible on the device instead
 // of being inferred from a progress bar. See

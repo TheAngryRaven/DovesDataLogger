@@ -104,6 +104,10 @@ bool cameraIsPaired();
 // camera_fsm::stateName()).
 camera_fsm::State cameraFsmState();
 
+// True while the camera bench-test page is open. The bench page drives the
+// radio by hand, so remote transfer standby must stay off it (plan 0019).
+bool cameraTestModeActive();
+
 // True while the camera is connected to our remote service.
 bool cameraRemoteLinkUp();
 

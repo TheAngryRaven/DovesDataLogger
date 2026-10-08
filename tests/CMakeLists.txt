@@ -47,7 +47,13 @@ add_executable(birdseye_tests
   loop_profile_test.cpp
   drag_timer_test.cpp
   drag_tree_test.cpp
+  sha256_test.cpp
+  remote_auth_test.cpp
+  pin_page_test.cpp
   ${BIRDSEYE_DIR}/haversine.cpp
+  ${BIRDSEYE_DIR}/sha256.cpp
+  ${BIRDSEYE_DIR}/remote_auth.cpp
+  ${BIRDSEYE_DIR}/pin_page.cpp
   ${BIRDSEYE_DIR}/gps_stats.cpp
   ${BIRDSEYE_DIR}/gps_time.cpp
   ${BIRDSEYE_DIR}/gps_validation.cpp

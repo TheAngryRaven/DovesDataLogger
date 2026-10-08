@@ -79,6 +79,7 @@ constexpr int kPageDragMode = -18;
 constexpr int kPageDragStaging = -19;
 constexpr int kPageTransferMenu = -4;
 constexpr int kPageBluetooth = -2;
+constexpr int kPageTransferPin = -22;
 constexpr int kPagePairCamera = -6;
 constexpr int kPageCameraSerialEntry = -7;
 constexpr int kPageCourseTrack = -11;
@@ -209,9 +210,28 @@ void runScript() {
   press(2);
   capture("main_menu_transfer", kPageMainMenu);
 
-  // Select -> Transfer submenu (Bluetooth / USB).
+  // Select -> Transfer submenu (Bluetooth / USB / PIN / Back).
   press(1);
   capture("transfer_menu", kPageTransferMenu);
+
+  // Plan 0019: walk to PIN (the window scrolls) and open it. The PIN is
+  // hidden until Select is held 3 s on Show; then it stays up for 15 s.
+  press(2);
+  press(2);
+  capture("transfer_menu_pin", kPageTransferMenu);
+  press(1);
+  capture("transfer_pin_hidden", kPageTransferPin);
+  sim_button_down(1);
+  sim_step_millis(3300);
+  sim_button_up(1);
+  sim_step_millis(400);
+  capture("transfer_pin_revealed", kPageTransferPin);
+
+  // Back (third row) returns to the submenu with the selection on its
+  // first row, so the walk continues into Bluetooth as before.
+  press(2);
+  press(2);
+  press(1);
 
   // Select Bluetooth -> BLE page (stub radio: waiting-for-connection UI).
   press(1);
