@@ -16,24 +16,38 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - **Remote transfer with a PIN** (plan 0019). While the logger sits on its
   main menu it now advertises the transfer service, so the app can start a
   download without anyone pressing Transfer → Bluetooth — once it proves it
-  knows the logger's PIN. The PIN never crosses the air: the logger sends a
-  one-time challenge and the app answers with an HMAC of it. Five wrong
-  answers lock remote transfer for a minute (doubling up to 15 minutes), and
-  a peer that never answers is dropped after 20 seconds. Leaving the menu
+  knows the logger's PIN. A remote start never sends the PIN over the air:
+  the logger sends a one-time challenge and the app answers with an HMAC of
+  it. (It does travel, unencrypted, on one path: to the app connected to a
+  transfer started on the device, which is how the app learns it.) Five
+  wrong answers lock remote transfer for a minute (doubling up to 15
+  minutes), and a peer that never answers is dropped after 20 seconds, with
+  a 5-second pause before the logger advertises again. Leaving the menu
   stops the advert, and the `remote_transfer` setting (`on` by default)
   turns it off entirely. The transfer page says **Remote Transfer** when a
   session started this way.
+- **A remote transfer can't strand the logger.** It ends on its own — the
+  app is told why (`AUTH:ENGINE`, `AUTH:CAMERA`, `AUTH:IDLE`), then the
+  logger reboots as after any transfer — when the engine starts (camera
+  paired or not), when the camera needs the radio, or after 10 minutes
+  without a request. Before, an app left connected kept the logger parked
+  with no logging, no auto-race and no idle shutdown.
 - **The camera always wins the radio.** Remote standby never advertises
   while a paired Insta360 is doing anything, the camera bench page is open,
-  or a paired camera's engine is running; and a remote transfer ends the
-  moment the engine starts with a camera paired, so auto-record is never
-  held up. Starting Transfer → Bluetooth on the device still bumps the
-  camera, as before.
+  or a paired camera's engine is running (from 500 rpm until it drops below
+  300, so pull-starting doesn't flick the advert on and off); and a remote
+  transfer ends the moment the engine starts, so auto-record is never held
+  up. Starting Transfer → Bluetooth on the device still bumps the camera,
+  as before.
 - **Transfer → PIN page.** Hold Select for 3 seconds on *Show PIN* to see
   the PIN for 15 seconds, or on *New PIN* to replace it. With the SD card
   soldered in, this (plus the USB drive and the app re-reading it on a local
-  Bluetooth start) is how a lost PIN is recovered. The Transfer menu now
-  scrolls to fit its fourth row.
+  Bluetooth start) is how a lost PIN is recovered. If the stored PIN can't
+  be read, or isn't four digits, the page says so instead of going blank.
+  The Transfer menu now scrolls to fit its fourth row.
+- On a transfer started on the device, the page title changes to **PIN sent
+  to app!** once the connected app has read the PIN — the first app in
+  range isn't necessarily yours.
 - BLE commands `AUTH?`, `AUTH:<answer>` and `PINGET` (local start only).
 
 ### Changed
@@ -43,6 +57,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   instead. `SSET:bluetooth_pin` only accepts exactly four digits.
 - New PINs come from the hardware random number generator instead of
   `random()` seeded with the boot time.
+- A stored PIN that isn't exactly four digits is replaced at boot (see it
+  under Transfer → PIN), and a settings reset (`SRESET`) now keeps the PIN,
+  so an app that resets the logger remotely can still reach it.
+- The PIN is no longer printed on the debug serial port.
 
 ### Fixed
 - **Drag mode review fixes** (plans 0015/0016):

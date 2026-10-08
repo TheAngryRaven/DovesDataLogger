@@ -134,7 +134,8 @@ to the matching `*_LOOP()`.
   untouched. Readings older than 1 s go NaN — never held across a
   dropout. Gated on the `BIRDSEYE_ENABLE_SENSOREGG` build flag: on in
   the beta channel, off in master/release, where the scanner and temp
-  pages are compiled out, BLE returns to lazy init, and the DOVEX
+  pages are compiled out, BLE init moves from boot to the first
+  main-menu visit (remote-transfer standby), and the DOVEX
   `Temp1`/`Junction1`/`Temp2` columns are written as `nan` so the log
   format stays identical across channels.
 - **NeoPixel strip** (`neopixel` + the `led_frame` / `led_modes` /
@@ -375,8 +376,10 @@ an explicit `bleOwner` (NONE/TRANSFER/CAMERA); the owner model keeps a
 camera link from ever triggering the transfer path's
 auto-reboot-on-disconnect, and opening the transfer page force-releases
 the camera first. The link is Just-Works bonded (the genuine remote link
-is encrypted), and BLE comes up lazily on the first camera action, so an
-unpaired device pays nothing.
+is encrypted). The camera costs nothing until its first advertising action,
+but it no longer decides when BLE starts: the remote-transfer standby
+(below) brings the core up on the first main-menu visit, and SensorEgg
+builds start it at boot.
 
 The lifecycle is a **pure FSM** (`camera_fsm`), deliberately RPM-driven and
 simple: wake on engine start, connect+subscribe, record once RPM has held a
@@ -451,13 +454,25 @@ that may read the PIN back (`PINGET`), which is how an app pairs. The
 lockout (5 tries, then 60 s doubling to 15 min) and the 20 s squatting limit
 keep the pits out; they do not stop a sniffer, because the link is
 unencrypted Just Works — a captured handshake brute-forces a 4-digit PIN
-offline. That is accepted and written down in the plan.
+offline. That is accepted and written down in the plan, along with the
+other accepted gap: an open (local) session hands the PIN to whichever app
+connects first, which is why the transfer page then says "PIN sent to app!"
+and why a local start first drops any link left over from the menu advert.
+
+A remote session must never be able to strand the logger, because nobody
+at the logger started it: it ends (with an `AUTH:` notice, then the usual
+reboot) when the engine starts, when the camera wants the radio, or after
+10 minutes without a request.
 
 There is one peripheral link, shared with the Insta360 remote, and the
 camera has priority at every stage. Standby only advertises while the
 camera has no use for the radio, and it lets go when a paired camera's
-engine passes 500 rpm — before the camera's own 2 s wake debounce, so the
-camera never finds the radio taken. Remote standby therefore never calls
+engine passes 500 rpm (held until it drops below 300, so a pull-start
+can't flap the advert) — before the camera's own 2 s wake debounce, so the
+camera never finds the radio taken. Handing the radio over is synchronous:
+standby releases ownership, then waits out its peer's disconnect before the
+camera can claim the slot, and the disconnect callback matches the transfer
+link by handle before routing on owner. Remote standby therefore never calls
 `CAMERA_FORCE_RELEASE()`; only a person at the logger can bump the camera.
 All of these rules are the `remote_auth` pure unit, and the 3 s hold that
 reveals or replaces the PIN on the device is `pin_page`.

@@ -165,7 +165,7 @@ desktop toolchain. This is where logic worth unit-testing lives.
 | `sd_format_page.{h,cpp}` | SD format-confirm boot page state machine: Select held 3 s continuously → format (release restarts the full window; other buttons never confirm), 5 min idle → shutdown |
 | `sd_probe.{h,cpp}` | Boot SD probe verdict (mounted / retry / unformatted / dead): the format offer needs the card layer to answer on **two consecutive** probes across a 250 ms settle with the volume mounting on neither — one no-volume look is what a card wedged mid-command by a WDT-interrupted boot produces — and a card-layer failure at any point is "dead" (FAULT), never "blank" |
 | `sha256.{h,cpp}` | SHA-256 + HMAC-SHA256 for the remote-transfer handshake (plan 0019), pinned to FIPS 180-4 and RFC 4231 vectors — the viewer (WebCrypto) and LapWing (hmac/sha2) must agree byte-for-byte |
-| `remote_auth.{h,cpp}` | Remote transfer rules (plan 0019): the challenge answer (`HMAC(PIN, "BEAUTH1|"+nonce)`, first 16 bytes as hex — golden vector shared with both apps), single-use nonce, 5-try lockout doubling 60 s → 15 min (wrap-safe), 20 s squat limit, locked-mode command gating (`AUTH?`/`AUTH:`/`BATT` only; `PINGET` open-mode only), protected setting keys + PIN format, the standby predicate and `cameraWantsRadio()` |
+| `remote_auth.{h,cpp}` | Remote transfer rules (plan 0019): the challenge answer (`HMAC(PIN, "BEAUTH1|"+nonce)`, first 16 bytes as hex — golden vector shared with both apps), single-use nonce, 5-try lockout doubling 60 s → 15 min (wrap-safe), 20 s squat limit, locked-mode command gating (`AUTH?`/`AUTH:`/`BATT` only, exact match; `PINGET` open-mode only), protected setting keys + PIN format (an unreadable/invalid stored PIN is `kPinUnavailable` — nonce kept, nothing counted), the standby predicate + 5 s post-squat back-off, `cameraWantsRadio()` with its 500/300 rpm engine latch, and `remoteSessionEnd()` (engine > camera > 10 min idle; never during an accepted OTA apply) |
 | `pin_page.{h,cpp}` | Transfer → PIN page state machine (plan 0019): hold Select 3 s on Show (reveal 15 s) or New PIN; release / row change / side button cancels; the entry press never counts |
 | `sat_bars.{h,cpp}` | Status-page satellite signal bars: NAV-SAT CNO selection (used-in-nav first, strongest first) + bar x/w/h layout math for the 128×~30 px bottom half |
 
@@ -752,17 +752,38 @@ loop()  ~250 Hz
   `AUTH:NONCE:<hex32>` (16 bytes, `hwRandomBytes()`); `AUTH:<answer>` →
   `AUTH:OK` (promote: transfer page, `bleRemoteSession`, labelled *Remote
   Transfer*) / `AUTH:FAIL:<n>` / `AUTH:LOCKED:<s>` / `AUTH:NO_NONCE` /
-  `AUTH:BUSY`. Unauthenticated after 20 s → `AUTH:TIMEOUT` + drop. A local
+  `AUTH:BUSY` (also the answer when the stored PIN is unreadable or not
+  four digits — the nonce is kept and no failure counted). Unauthenticated
+  after 20 s → `AUTH:TIMEOUT` + drop, then the advert stays down 5 s so a
+  squatter can't hold the slot in a tight loop. A local
   `BLE_SETUP()` is **open**: `AUTH?` → `AUTH:OPEN`, and `PINGET` →
-  `PIN:<digits>` is how an app pairs. `SLIST` omits `bluetooth_pin`,
+  `PIN:<digits>` is how an app pairs — after which the transfer page's
+  title reads `PIN sent to app!`, since the first app in range need not be
+  the owner's. `BLE_SETUP()` drops any surviving link and clears every
+  pending flag first, so a standby peer can never be promoted into an open
+  session. `SLIST` omits `bluetooth_pin`,
   `SGET:bluetooth_pin` → `SERR:PROTECTED`, `SSET:bluetooth_pin` needs four
-  digits (`SERR:BAD_VALUE`). **Camera first**: standby stops (an unauthed
+  digits (`SERR:BAD_VALUE`), and `SRESET` keeps a valid PIN. **Camera
+  first**: standby stops (an unauthed
   peer gets `AUTH:CAMERA`) when the camera FSM leaves IDLE/UNPAIRED, the
   bench page opens, the camera owns the radio, or a paired camera's engine
-  passes 500 rpm — ahead of the FSM's 2 s wake debounce, which is why the
-  standby step runs before `CAMERA_LOOP()`. The parked branch runs
-  `bleRemoteSessionGuard()` (with `TACH_LOOP()`) so a remote session ends
-  the same way. Remote start never calls `CAMERA_FORCE_RELEASE()`. The PIN
+  passes 500 rpm (latched until it falls below 300, so a pull-start can't
+  flap the advert) — ahead of the FSM's 2 s wake debounce, which is why the
+  standby step runs before `CAMERA_LOOP()`. **Standby teardown order**:
+  owner → NONE first (writes ignored from then on), advert stopped, then
+  the peer dropped and the disconnect WAITED for (bounded, WDT-fed) before
+  the loop moves on — and the disconnect callback matches our own link by
+  handle before routing on owner, so the camera taking the radio in the
+  same iteration can never be handed the standby peer's disconnect. A link
+  being dropped is marked (`bleDroppingConnHandle`) and gets no further
+  commands. The parked branch runs `bleRemoteSessionGuard()` (with
+  `TACH_LOOP()`); a **remote** session ends — notice, then the usual
+  reboot — on engine > 500 rpm whether or not a camera is paired
+  (`AUTH:ENGINE`), on the camera wanting the radio (`AUTH:CAMERA`), or
+  after 10 min without a request (`AUTH:IDLE`; an in-flight transfer counts
+  as activity). Nobody at the logger started it, so without these it could
+  park the logger with no logging, auto-race or idle shutdown. Remote start
+  never calls `CAMERA_FORCE_RELEASE()`. The PIN
   only blocks other people in the pits — the link is unencrypted, so a
   sniffer can brute-force a captured handshake offline (see the plan).
 - **Firmware OTA commands** (`FW*`, handled by `firmware_ota.ino` — see
@@ -1018,7 +1039,8 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   never touched. The charging-loop soft resume
   (`softResumeFromCharging()`) restarts the egg scanner via
   `SENSOREGG_WAKE()` and re-raises the strip via `NEOPIXEL_WAKE()`;
-  BLE/camera stay lazy.
+  the camera stays lazy, and the remote-transfer standby advert (plan
+  0019) restarts by itself once the menu is up again.
 - **System OFF entry** (`shutdownSystemOff()`, no return): wait for the
   entry combo's buttons to release (a held button = SENSE satisfied =
   instant wake-reset), **sample the tach line's parked idle level**
@@ -1034,7 +1056,9 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   hardcoded). Then clear the GPIO LATCH registers
   (a set latch = pending DETECT = instant re-wake), clear pending FPU
   exceptions, then `sd_power_system_off()` when the SoftDevice is enabled
-  (BLE is lazy — check `sd_softdevice_is_enabled()`) else raw
+  (the SoftDevice may never have started — no SD card, `remote_transfer`
+  off, or a shutdown before the menu was reached — so check
+  `sd_softdevice_is_enabled()`) else raw
   `NRF_POWER->SYSTEMOFF`. **GPREGRET is untouched** — register 0 belongs
   to the OTA/bootloader handoff (subsystem 11). The WDT halts in System
   OFF (all clocks stop); `wdtSetup()` re-arms on the fresh boot.
@@ -1324,9 +1348,12 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   Shutdown entry runs `CAMERA_SLEEP()` (same, plus a power-off that is
   **streamed synchronously** before the disconnect — the chip powers off
   right after, so the non-blocking ce82 hold would otherwise never transmit
-  a frame and the camera would run all night). BLE
-  comes up **lazily** on the first camera action (first advertising
-  `Action`), so unpaired users pay zero RAM/power cost.
+  a frame and the camera would run all night). The
+  camera is no longer what brings BLE up: since plan 0019 the remote-transfer standby
+  starts the BLE core on the first main-menu visit (unless
+  `remote_transfer` is `off` or there is no SD card), and SensorEgg builds
+  start it at boot. The camera itself still costs nothing until its first
+  advertising `Action`, so an unpaired camera adds no radio time.
 - **Threading**: same deferred pattern as `firmware_ota` — Bluefruit
   callbacks (connect/disconnect/ce81 writes/ce82 CCCD writes) only copy
   into RAM and set volatile flags; `CAMERA_LOOP()` on the main loop
@@ -1386,7 +1413,8 @@ hardware needs no power switch. Wake = chip reset = fresh `setup()`.
   compiles `sensoregg.ino` down to no-op `SENSOREGG_SETUP/LOOP` and NaN
   accessors, drops the Temp1 and Temp2 race pages from the rotation
   (`display_pages.ino` + the page-constant block in `BirdsEye.ino`), and
-  returns BLE to lazy init. `1` (passed by `beta.yml`, and by
+  returns BLE init to the first main-menu visit (the plan-0019 remote
+  transfer standby) instead of boot. `1` (passed by `beta.yml`, and by
   `compile-sketch.yml` for PRs targeting `BETA`) is everything described
   below. **Plan 0013 closed the three leaks**: the DOVEX
   `Temp1`/`Junction1`/`Temp2` columns, the `temp1_alert_c` setting, and
@@ -2040,7 +2068,7 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | Key | Type | Default | Purpose |
 |-----|------|---------|---------|
 | `bluetooth_name` | string | Random | BLE device name |
-| `bluetooth_pin` | string | Random 4-digit (hardware RNG) | Remote-transfer PIN (plan 0019). **Never readable over BLE except `PINGET` on a locally started session**; shown on-device under Transfer → PIN; `SSET` accepts exactly 4 digits |
+| `bluetooth_pin` | string | Random 4-digit (hardware RNG) | Remote-transfer PIN (plan 0019). **Never readable over BLE except `PINGET` on a locally started session**; shown on-device under Transfer → PIN; `SSET` accepts exactly 4 digits; a stored value that isn't 4 digits is regenerated at boot; `SRESET` keeps it; never printed on debug serial |
 | `remote_transfer` | string | `"on"` | Menu standby advert for PIN-gated remote transfer (plan 0019). Only an explicit `off` disables it. Read once per boot |
 | `camera_serial` | string | `""` (empty = unpaired) | Paired Insta360 X4's 6-char serial (auto-captured on pairing, or entered manually) |
 | `device_name` | string | Random racing words | Identifies the logging device (DOVEX header) |
@@ -2104,7 +2132,10 @@ the one loaded). Sector lines stay optional — zero, one, or two.
 | SensorEgg wireless EGT POC | `BIRDSEYE_ENABLE_SENSOREGG`, default 0; 1 on the beta channel | `project.h` |
 | Charging screen timeout | 10 s (`CHARGE_DISPLAY_TIMEOUT_MS`) | `project.h` |
 | Remote auth lockout | 5 wrong answers → 60 s, doubling per lockout to 15 min; RAM only | `remote_auth.h` |
-| Remote auth squat limit | 20 s connected without `AUTH:OK` → dropped | `remote_auth.h` |
+| Remote auth squat limit | 20 s connected without `AUTH:OK` → dropped, then 5 s with no advert | `remote_auth.h` |
+| Remote session end | engine > 500 rpm (`AUTH:ENGINE`) / camera wants radio (`AUTH:CAMERA`) / 10 min without a request (`AUTH:IDLE`) | `remote_auth.h` |
+| Remote standby camera engine latch | claim > 500 rpm, release < 300 rpm (paired camera only) | `remote_auth.h` |
+| BLE local-drop settle | ≤ 1 s, WDT-fed (`BLE_DROP_SETTLE_MS`) | `bluetooth.ino` |
 | Transfer PIN page | hold Select 3 s; reveal lasts 15 s | `pin_page.h` |
 | Sat bars display cap / CNO ceiling | 16 bars / 50 dB-Hz | `sat_bars.h` |
 | Crossing threshold | 7.0 m | `BirdsEye.ino` |
