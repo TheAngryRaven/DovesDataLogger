@@ -849,8 +849,14 @@ const int PAGE_TRANSFER_PIN = -22;
 pin_page::State transferPinState;
 // The digits, only while the page is showing them — cleared on hide.
 char transferPinDigits[remote_auth::kPinLen + 1] = "";
-// Last New PIN attempt could not be written (shown on the page).
-bool transferPinWriteFailed = false;
+// Why the last Show / New PIN produced no digits (shown on the page instead
+// of a blank). A stored PIN that isn't exactly four digits is reported as
+// such, never shown cut down to four.
+const uint8_t TRANSFER_PIN_NOTE_NONE = 0;
+const uint8_t TRANSFER_PIN_NOTE_WRITE_FAILED = 1;
+const uint8_t TRANSFER_PIN_NOTE_READ_FAILED = 2;
+const uint8_t TRANSFER_PIN_NOTE_INVALID = 3;
+uint8_t transferPinNote = TRANSFER_PIN_NOTE_NONE;
 
 // running menu (these must be in order)
 #if BIRDSEYE_ENABLE_PROFILING
@@ -2317,23 +2323,35 @@ void transferPinPageLoop() {
   in.nowMs = millis();
 
   switch (pin_page::step(transferPinState, in)) {
-    case pin_page::Action::kReveal:
-      transferPinWriteFailed = false;
-      if (getSetting("bluetooth_pin", transferPinDigits, sizeof(transferPinDigits))) {
+    case pin_page::Action::kReveal: {
+      // Read wider than a PIN so a too-long value is caught, not truncated.
+      char stored[16];
+      if (!getSetting("bluetooth_pin", stored, sizeof(stored))) {
+        transferPinNote = TRANSFER_PIN_NOTE_READ_FAILED;
+      } else if (!remote_auth::isValidPin(stored)) {
+        transferPinNote = TRANSFER_PIN_NOTE_INVALID;
+      } else {
+        transferPinNote = TRANSFER_PIN_NOTE_NONE;
+        strncpy(transferPinDigits, stored, sizeof(transferPinDigits));
+        transferPinDigits[sizeof(transferPinDigits) - 1] = '\0';
         pin_page::reveal(transferPinState, in.nowMs);
       }
+      memset(stored, 0, sizeof(stored));
       forceDisplayRefresh();
       break;
+    }
     case pin_page::Action::kNewPin: {
       char pin[remote_auth::kPinLen + 1];
       generateBlePin(pin);
       // Persist-first: show the new PIN only once it is the stored one.
-      transferPinWriteFailed = !setSetting("bluetooth_pin", pin);
-      if (!transferPinWriteFailed) {
+      const bool written = setSetting("bluetooth_pin", pin);
+      transferPinNote = written ? TRANSFER_PIN_NOTE_NONE : TRANSFER_PIN_NOTE_WRITE_FAILED;
+      if (written) {
         strncpy(transferPinDigits, pin, sizeof(transferPinDigits));
         transferPinDigits[sizeof(transferPinDigits) - 1] = '\0';
         pin_page::reveal(transferPinState, in.nowMs);
       }
+      memset(pin, 0, sizeof(pin));
       forceDisplayRefresh();
       break;
     }

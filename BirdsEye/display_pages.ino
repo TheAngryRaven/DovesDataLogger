@@ -535,8 +535,12 @@ void displayPage_transfer_pin() {
     display.print(F("hides in "));
     display.print(pin_page::revealSecondsLeft(transferPinState, now));
     display.println(F("s"));
-  } else if (transferPinWriteFailed) {
+  } else if (transferPinNote == TRANSFER_PIN_NOTE_WRITE_FAILED) {
     display.println(F("PIN write failed"));
+  } else if (transferPinNote == TRANSFER_PIN_NOTE_READ_FAILED) {
+    display.println(F("PIN read failed"));
+  } else if (transferPinNote == TRANSFER_PIN_NOTE_INVALID) {
+    display.println(F("PIN invalid: New PIN"));
   } else {
     display.println(F("hold SELECT 3s"));
   }

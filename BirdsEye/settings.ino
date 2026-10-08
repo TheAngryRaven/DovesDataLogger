@@ -104,10 +104,12 @@ void generateBlePin(char* out) {
 }
 
 /**
- * @brief Generate default settings file on first boot
+ * @brief Write a fresh default settings file.
+ * @param keepPin A valid PIN to carry over (resetSettings()), or nullptr to
+ *        roll a new one.
  * @return true if file created successfully
  */
-bool createDefaultSettings() {
+static bool writeDefaultSettings(const char* keepPin) {
   if (!acquireSDAccess(SD_ACCESS_TRACK_PARSE)) {
     debugln(F("Settings: Cannot acquire SD access for defaults"));
     return false;
@@ -127,7 +129,12 @@ bool createDefaultSettings() {
   // Random 4-digit PIN from the hardware RNG (plan 0019): it gates remote
   // transfer now, so random() seeded from micros() is not good enough.
   char defaultPin[remote_auth::kPinLen + 1];
-  generateBlePin(defaultPin);
+  if (keepPin != nullptr && remote_auth::isValidPin(keepPin)) {
+    strncpy(defaultPin, keepPin, sizeof(defaultPin));
+    defaultPin[sizeof(defaultPin) - 1] = '\0';
+  } else {
+    generateBlePin(defaultPin);
+  }
   settingsJson["bluetooth_pin"] = defaultPin;
 
   // Random racing-themed device name so multi-device log dumps stay sorted
@@ -156,12 +163,20 @@ bool createDefaultSettings() {
   settingsFile.close();
   releaseSDAccess(SD_ACCESS_TRACK_PARSE);
 
+  // The PIN is a secret (plan 0019) — never on the debug serial.
+  memset(defaultPin, 0, sizeof(defaultPin));
   debug(F("Settings: Created defaults - name: "));
-  debug(defaultName);
-  debug(F(", pin: "));
-  debugln(defaultPin);
+  debugln(defaultName);
 
   return true;
+}
+
+/**
+ * @brief Generate default settings file on first boot
+ * @return true if file created successfully
+ */
+bool createDefaultSettings() {
+  return writeDefaultSettings(nullptr);
 }
 
 /**
@@ -297,11 +312,17 @@ static void ensureDefaultSettings() {
     snprintf(name, sizeof(name), "DovesDataLogger-%03d", (int)random(0, 1000));
     setSetting("bluetooth_name", name);
   }
-  if (!getSetting("bluetooth_pin", buf, sizeof(buf))) {
+  // A PIN the handshake can never accept (a hand-edited "12345", a number
+  // instead of a string — which getSetting() can't read either) would lock
+  // remote transfer out for good, so it is replaced like a missing one.
+  // The new one is on the device's Transfer -> PIN page.
+  if (!getSetting("bluetooth_pin", buf, sizeof(buf)) || !remote_auth::isValidPin(buf)) {
     char pin[remote_auth::kPinLen + 1];
     generateBlePin(pin);
     setSetting("bluetooth_pin", pin);
+    memset(pin, 0, sizeof(pin));
   }
+  memset(buf, 0, sizeof(buf));
 }
 
 /**
@@ -452,11 +473,22 @@ bool getSetting(const char* key, char* buf, size_t bufSize) {
  * @return true on success, false on failure
  */
 /**
- * @brief Delete settings file and recreate with fresh defaults (new random BLE name/PIN).
+ * @brief Delete settings file and recreate with fresh defaults (new random
+ *        BLE name). The remote-transfer PIN is KEPT when it is valid (plan
+ *        0019): SRESET can come from a remote session, and an app that has
+ *        just reset the logger must still be able to reach it — it has no
+ *        way to learn a new PIN without the device in hand. A new PIN is
+ *        what the device's Transfer -> PIN page is for.
  * @return true on success
  */
 bool resetSettings() {
   if (!sdSetupSuccess) return false;
+
+  char keepPin[16];
+  if (!getSetting("bluetooth_pin", keepPin, sizeof(keepPin)) ||
+      !remote_auth::isValidPin(keepPin)) {
+    keepPin[0] = '\0';
+  }
 
   if (!acquireSDAccess(SD_ACCESS_TRACK_PARSE)) {
     debugln(F("Settings: Cannot acquire SD for reset"));
@@ -469,7 +501,9 @@ bool resetSettings() {
   releaseSDAccess(SD_ACCESS_TRACK_PARSE);
 
   debugln(F("Settings: Deleted, recreating defaults"));
-  return createDefaultSettings();
+  const bool ok = writeDefaultSettings(keepPin[0] != '\0' ? keepPin : nullptr);
+  memset(keepPin, 0, sizeof(keepPin));
+  return ok;
 }
 
 static bool setSettingInner(const char* key, const char* value, bool healCorrupt) {
@@ -545,8 +579,13 @@ static bool setSettingInner(const char* key, const char* value, bool healCorrupt
 
   debug(F("Settings: Saved "));
   debug(key);
-  debug(F(" = "));
-  debugln(value);
+  // The PIN never reaches the debug serial (plan 0019).
+  if (remote_auth::isProtectedSettingKey(key)) {
+    debugln(F(" = <hidden>"));
+  } else {
+    debug(F(" = "));
+    debugln(value);
+  }
 
   return true;
 }

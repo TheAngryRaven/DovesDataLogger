@@ -38,7 +38,7 @@
 // a SensorEgg one (25 — sensoregg_mac added), rising to 599/657 with the
 // longest values every key accepts, against a 1023-byte read cap. That
 // is roughly fifteen average keys of headroom. Each key costs
-// len(key) + len(value) + 6. Plan 0019's remote_transfer adds 26.
+// len(key) + len(value) + 6. Plan 0019's remote_transfer adds 23.
 ///////////////////////////////////////////
 #define SETTINGS_JSON_CAPACITY 1024
 
@@ -63,8 +63,10 @@ bool setSetting(const char* key, const char* value);
 // quarantining the user's whole settings file behind their back.
 bool removeSetting(const char* key);
 
-// Delete the settings file and re-create with fresh defaults
-// (rolls a new random BLE name and PIN).
+// Delete the settings file and re-create with fresh defaults (rolls a new
+// random BLE name). A valid bluetooth_pin is KEPT (plan 0019): SRESET can
+// come from a remote session, which could never learn a new PIN. Replacing
+// the PIN is the device's Transfer -> PIN page.
 bool resetSettings();
 
 // Fill `out` with `n` bytes from the nRF52840 hardware RNG — through the

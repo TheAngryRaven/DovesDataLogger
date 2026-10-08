@@ -524,8 +524,11 @@ void handleMenuPageSelection() {
       // PIN — the remote-transfer PIN, behind a hold (plan 0019).
       debugln(F("Transfer: PIN selected"));
       pin_page::begin(transferPinState);
-      transferPinWriteFailed = false;
+      transferPinNote = TRANSFER_PIN_NOTE_NONE;
       memset(transferPinDigits, 0, sizeof(transferPinDigits));
+      // Land on Show, not on this menu's row index (2 = the PIN page's Back)
+      // for the frames before the page's first render resets it.
+      menuSelectionIndex = 0;
       switchToDisplayPage(PAGE_TRANSFER_PIN);
     } else if (menuSelectionIndex == 0) {
       // Bluetooth — same flow as before
